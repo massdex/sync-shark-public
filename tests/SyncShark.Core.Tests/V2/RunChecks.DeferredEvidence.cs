@@ -164,8 +164,10 @@ internal static partial class RunChecks
             fx.Provider.AddInventory(fx.Pair.B, new DeferredInventory(fx.B));
             var run = fx.Run();
             var plan = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), deadline.Token);
-            await ExpectAsync<SyncRunRefusedException>(() => run.ApplyAsync(fx.Pair.PairId, plan,
-                new RecordingProgress(), deadline.Token, missing ? new HashSet<string>() : null));
+            await run.ApplyAsync(fx.Pair.PairId, plan,
+                new RecordingProgress(), deadline.Token, missing ? new HashSet<string>() : null);
+            Require(fx.Store.FirstSyncDone(fx.Pair.PairId) && fx.Store.SyncRetryAt(fx.Pair.PairId, "held.txt") is not null,
+                "missing held approval parks durable work while first sync completes");
             Require(fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0, "null or missing held approval authorizes no effect");
         }
         Console.WriteLine("PASS DeferredEvidence_MissingReviewRefused");

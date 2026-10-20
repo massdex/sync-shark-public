@@ -48,9 +48,8 @@ internal static class ConcurrentScanChecks
         var blocked = new BlockingInventory(fx.A);
         var failing = new FailingInventory(fx.B, new InvalidOperationException("side B read failed"));
         fx.Provider.AddInventory(fx.Pair.A, blocked).AddInventory(fx.Pair.B, failing);
-        var error = await ExpectAsync<InvalidOperationException>(() =>
-            fx.Run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None));
-        Require(error.Message == "side B read failed", "the real side error is reported, never the cancellation");
+        var plan = await fx.Run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        Require(plan.RunUnavailable == "side B read failed", "the real side error is reported cleanly, never the sibling cancellation");
         await blocked.Entered.WaitAsync(GateTimeout);
         await blocked.Cancelled.WaitAsync(GateTimeout);
         Console.WriteLine("PASS one failing side cancels the other and surfaces its own error");
@@ -64,9 +63,8 @@ internal static class ConcurrentScanChecks
         var blocked = new BlockingInventory(fx.A);
         var failing = new FailingInventory(fx.B, new TaskCanceledException("provider timeout"));
         fx.Provider.AddInventory(fx.Pair.A, blocked).AddInventory(fx.Pair.B, failing);
-        var error = await ExpectAsync<TaskCanceledException>(() =>
-            fx.Run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None));
-        Require(error.Message == "provider timeout",
+        var plan = await fx.Run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        Require(plan.RunUnavailable == "provider timeout",
             "a tokenless cancellation a side raised survives, not mistaken for the sibling cancellation");
         await blocked.Cancelled.WaitAsync(GateTimeout);
         Console.WriteLine("PASS a tokenless side cancellation survives");

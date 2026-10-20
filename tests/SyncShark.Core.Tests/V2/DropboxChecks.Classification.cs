@@ -119,12 +119,15 @@ internal static partial class DropboxChecks
             "one transient released metadata failure holds only that row and preserves unrelated cursor coverage");
         store.WriteDelta(delta); store.CompleteGeneration(deltaGen, delta.CursorAfter, true);
         h.Wire.MetadataFailurePath = null;
+        // The 100ms budget above bounds only the injected outage. Restore a realistic
+        // successful-read budget so scheduler/GC delays cannot masquerade as a second outage.
+        h.Client.ReadTransientBudget = TimeSpan.FromSeconds(5);
         h.Wire.SeedChangePage("transient-end", [], false, "transient-retried");
         var lists = h.Wire.ListRequests.Count;
         var retry = await inventory.ChangesSinceAsync("transient-end", deltaGen + 1, _ => true, CancellationToken.None, true);
         Require(!retry.CursorInvalid && h.Wire.ListRequests.Count == lists &&
             !retry.Changes.Single(change => change.Path == "held.txt").State!.Flags.HasFlag(ItemFlags.Unreadable),
-            "retry repairs the held row and clears unreadable state without a full listing");
+            $"retry repairs the held row and clears unreadable state without a full listing (invalid={retry.CursorInvalid}, lists={lists}->{h.Wire.ListRequests.Count}, rows={string.Join(';', retry.Changes.Select(change => change.Path + ':' + change.State?.Flags))})");
     }
 
     private static void CursorClassificationMigration()
