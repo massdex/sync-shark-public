@@ -251,7 +251,7 @@ internal sealed class ActionRunner
             return await direct.PutDownloadedAsync(action, remote, preservedAfterVerify, ct).ConfigureAwait(false);
         }
         var content = await source.OpenReadAsync(action.Source, ct).ConfigureAwait(false);
-        await using var owner = new SyncUploadSource(content);
+        await using var owner = new SyncUploadSource(content, () => _quota.CheckUploadStart(action));
         var previous = SyncUploadSource.Current.Value;
         SyncUploadSource.Current.Value = owner;
         try { return await target.PutAsync(action, content, ct).ConfigureAwait(false); }

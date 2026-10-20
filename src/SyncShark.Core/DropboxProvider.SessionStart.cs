@@ -53,6 +53,7 @@ public sealed partial class DropboxPilotClient
                     using var response = await SendResourceRequestAsync(request, HttpCompletionOption.ResponseHeadersRead,
                         cancellationToken, () =>
                         {
+                            SyncUploadSource.Current.Value?.BeforeUpload();
                             if (attempt > 0) V2.RunInstrumentation.Current?.RecordRetry();
                         }).ConfigureAwait(false);
                     // The pacing seam records throttles and shares the account cooldown, including Retry-After dates.
@@ -126,6 +127,7 @@ public sealed partial class DropboxPilotClient
 
     private static bool IsRetryableClosedSessionStartFailure(Exception error) => error switch
     {
+        V2.ProviderWriteBlockedException => false, // A newly active quota hold must not retry staging.
         HttpRequestException { StatusCode: { } status } => status is HttpStatusCode.RequestTimeout or
             HttpStatusCode.TooManyRequests || (int)status >= 500,
         HttpRequestException or IOException or InvalidDataException or JsonException or OperationCanceledException => true,
