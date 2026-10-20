@@ -107,6 +107,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - suite: composition
+            flag: --v2-composition-checks
+            takes-root: false
           - suite: nested-pair
             flag: --excluded-nested-pair-partition-checks
             takes-root: true
@@ -150,9 +153,6 @@ jobs:
           - suite: cli
             flag: --cli-checks
             takes-root: true
-          - suite: composition
-            flag: --v2-composition-checks
-            takes-root: false
           - suite: runcli
             flag: --v2-runcli-checks
             takes-root: false

@@ -78,15 +78,20 @@ public sealed partial class SyncRun : ISyncRun
     /// and it hands back the very resolution the plan is generated from, so the executed plan and the completion
     /// status (and the exclusions) can never describe different sets.
     /// </summary>
-    internal Task<(Plan Plan, RebuildableResolution Rebuildables)> PreviewFirstSyncApplyResolvedAsync(string pairId,
+    internal Task<ApplyPreview> PreviewFirstSyncApplyResolvedAsync(string pairId,
         IReadOnlyDictionary<string, Side?>? winners, IReadOnlyList<OneSidedChoice>? oneSided,
         IReadOnlyList<RebuildableFolder>? rebuildables, IReadOnlyDictionary<string, PrepareMatch>? matchedAtPrepare,
         IProgress<RunProgress> progress, CancellationToken ct,
         IReadOnlyDictionary<string, string>? inventoryCursors = null,
         IReadOnlyList<string>? narrowedIgnoreRules = null) =>
-        RunExclusiveAsync(progress,
-            (sink, token) => PreviewCoreAsync(pairId, winners, oneSided, null, rebuildables, matchedAtPrepare, sink,
-                token, inventoryCursors, captureMatchedBothSides: false, narrowedIgnoreRules: narrowedIgnoreRules), ct);
+        RunExclusiveAsync(progress, async (sink, token) =>
+        {
+            var preview = await PreviewCoreAsync(pairId, winners, oneSided, null, rebuildables, matchedAtPrepare, sink,
+                token, inventoryCursors, captureMatchedBothSides: false, narrowedIgnoreRules: narrowedIgnoreRules);
+            var continuation = preview.Plan.RunUnavailable is null && _store.Pair(pairId) is { } pair
+                ? _endpoints.CaptureContinuation(pair) : null;
+            return new ApplyPreview(preview.Plan, preview.Rebuildables, continuation);
+        }, ct);
 
     private Task<Plan> PlanOfAsync(string pairId, IReadOnlyDictionary<string, Side?>? winners,
         IReadOnlyList<OneSidedChoice>? oneSided, IReadOnlyList<RebuildableChoice>? rebuildableTypes,
@@ -151,11 +156,10 @@ public sealed partial class SyncRun : ISyncRun
     /// is used exactly as given — the apply never revalidates it again.
     /// </summary>
     internal Task<RunReport> ApplyAsync(string pairId, Plan approved, IProgress<RunProgress> progress,
-        CancellationToken ct, IReadOnlySet<string>? reviewedDeletes, RebuildableResolution? rebuildables) =>
-        // The run began at the apply's own preview (PreviewFirstSyncApplyResolvedAsync); this apply continues it.
+        CancellationToken ct, IReadOnlySet<string>? reviewedDeletes, RebuildableResolution? rebuildables,
+        EndpointContinuation? continuation = null) =>
         RunExclusiveAsync(progress,
-            (sink, token) => ApplyCoreAsync(pairId, approved, sink, reviewedDeletes, rebuildables, token), ct, pairId,
-            continuesRun: true);
+            (sink, token) => ApplyCoreAsync(pairId, approved, sink, reviewedDeletes, rebuildables, token, continuation), ct, pairId);
 
     /// <inheritdoc />
     public Task<RunReport> IncrementalAsync(string pairId, IProgress<RunProgress> progress, CancellationToken ct) =>
@@ -192,13 +196,8 @@ public sealed partial class SyncRun : ISyncRun
     // The single gate every run passes through. It opens the run's live-progress pump around the caller's sink, so
     // the whole run gets the shared byte-progress seam's process messages and the quiet-run heartbeat, and hands the
     // body that pump's sink (a no-op when the caller passed none) rather than the raw sink.
-    /// <param name="continuesRun">
-    /// True for the apply itself, whose run began at its own revalidating preview: the endpoints it opens are part of
-    /// that same run and keep the classification the preview read. Every other entry point begins a new run.
-    /// </param>
     private async Task<T> RunExclusiveAsync<T>(IProgress<RunProgress>? progress,
-        Func<IProgress<RunProgress>, CancellationToken, Task<T>> body, CancellationToken ct, string? historyPairId = null,
-        bool continuesRun = false)
+        Func<IProgress<RunProgress>, CancellationToken, Task<T>> body, CancellationToken ct, string? historyPairId = null)
     {
         // The pump and the in-flight table open before the gate, so a run queued behind another is still visible
         // (the gate wait is itself a tracked operation) rather than silently blocked.
@@ -219,8 +218,6 @@ public sealed partial class SyncRun : ISyncRun
             _gate.Release();
             ct.ThrowIfCancellationRequested();
         }
-        // Under the gate no other run can interleave, so this generation stays current for this run's whole body.
-        if (!continuesRun) _endpoints.BeginRun();
         using var instrumentation = RunInstrumentation.Begin(_settings, _time);
         var startedAt = _time.GetUtcNow();
         var queued = startedAt - queuedAt;
@@ -509,7 +506,8 @@ public sealed partial class SyncRun : ISyncRun
     }
 
     private async Task<RunReport> ApplyBodyAsync(string pairId, Plan approved, IProgress<RunProgress> progress,
-        IReadOnlySet<string>? reviewedDeletes, RebuildableResolution? rebuildables, CancellationToken ct)
+        IReadOnlySet<string>? reviewedDeletes, RebuildableResolution? rebuildables, CancellationToken ct,
+        EndpointContinuation? continuation)
     {
         using var pause = PairPause.Begin(_store, pairId);
         PairPause.Check();
@@ -539,7 +537,7 @@ public sealed partial class SyncRun : ISyncRun
         var reviewed = approved.Actions.Count;
         approved = DropUnderNewLocalLinks(pair, approved, actionPredicates);
         var dropped = reviewed - approved.Actions.Count;
-        await _endpoints.PrepareAsync(pair, ct);
+        await _endpoints.PrepareAsync(pair, continuation, ct);
         var throttle = new ProgressThrottle(progress, _time, _settings.ProgressInterval);
         var reconcile = await ReconcileAsync(pair, throttle, ct, approved.NarrowedIgnoreRules);
         approved = ApplySafetyFilter(pair,

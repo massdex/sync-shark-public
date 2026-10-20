@@ -56,10 +56,9 @@ public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatc
     private readonly LocalGapWorker? _gapWorker;
 
     internal ValueTask StopGapWorkersAsync() => _gapWorker?.DisposeAsync() ?? ValueTask.CompletedTask;
-    // Each entry remembers the run that opened it, so a later run never adopts an earlier run's classification.
-    private readonly ConcurrentDictionary<string, (IInventorySource Inventory, IEndpointWriter Writer, long Generation)> _open =
+    // Only an explicit continuation may reuse a preview's classification. Ordinary opens always start fresh.
+    private readonly ConcurrentDictionary<string, (IInventorySource Inventory, IEndpointWriter Writer, EndpointContinuation? Preview)> _open =
         new(StringComparer.Ordinal);
-    private long _generation;
     private readonly ConcurrentDictionary<string, DropboxChangeWatchSource> _dropboxWatches =
         new(StringComparer.Ordinal);
 
@@ -103,17 +102,20 @@ public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatc
     /// installation identity, Recovery location, Dropbox connection and credential) is checked before any writer is
     /// opened, so a refusal leaves no control namespace or Recovery folder behind.
     /// </summary>
-    public async Task<PairEndpoints> OpenAsync(PairDef pair, CancellationToken ct)
+    public Task<PairEndpoints> OpenAsync(PairDef pair, CancellationToken ct) => OpenAsync(pair, null, ct);
+
+    private async Task<PairEndpoints> OpenAsync(PairDef pair, EndpointContinuation? continuation, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(pair);
         var a = await CheckSideAsync(pair.A, ct).ConfigureAwait(false);
         var b = await CheckSideAsync(pair.B, ct).ConfigureAwait(false);
-        // Both sides belong to the run that was current when this open began, even if another run starts meanwhile.
-        var generation = Interlocked.Read(ref _generation);
-        var openedA = await OpenSideAsync(pair, pair.A, Side.A, a, generation, ct).ConfigureAwait(false);
-        var openedB = await OpenSideAsync(pair, pair.B, Side.B, b, generation, ct).ConfigureAwait(false);
-        _open[pair.A.RootId] = (openedA.Inventory, openedA.Writer, generation);
-        _open[pair.B.RootId] = (openedB.Inventory, openedB.Writer, generation);
+        if (continuation is not null && (continuation.PairId != pair.PairId ||
+            continuation.RootA != pair.A.RootId || continuation.RootB != pair.B.RootId)) continuation = null;
+        var openedA = await OpenSideAsync(pair, pair.A, Side.A, a, continuation, ct).ConfigureAwait(false);
+        var openedB = await OpenSideAsync(pair, pair.B, Side.B, b, continuation, ct).ConfigureAwait(false);
+        // Consume the preview ownership: even a second apply carrying the old token must open fresh.
+        _open[pair.A.RootId] = (openedA.Inventory, openedA.Writer, null);
+        _open[pair.B.RootId] = (openedB.Inventory, openedB.Writer, null);
         return new PairEndpoints(openedA.Inventory, openedB.Inventory, openedA.Writer, openedB.Writer);
     }
 
@@ -130,14 +132,23 @@ public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatc
             .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
-    /// <summary>
-    /// Marks the start of a run. Endpoints the run opens may reuse a previous open's classification only within
-    /// this same run (the apply after its preview); a run that opens after this one never does.
-    /// </summary>
-    public void BeginRun() => Interlocked.Increment(ref _generation);
+    /// <inheritdoc />
+    public EndpointContinuation? CaptureContinuation(PairDef pair)
+    {
+        // Called under SyncRun's gate immediately after a successful preview, before another run can open roots.
+        if (!_open.TryGetValue(pair.A.RootId, out var a) || !_open.TryGetValue(pair.B.RootId, out var b)) return null;
+        var preview = new EndpointContinuation(pair.PairId, pair.A.RootId, pair.B.RootId, Guid.NewGuid());
+        _open[pair.A.RootId] = (a.Inventory, a.Writer, preview);
+        _open[pair.B.RootId] = (b.Inventory, b.Writer, preview);
+        return preview;
+    }
 
     /// <inheritdoc />
     public Task PrepareAsync(PairDef pair, CancellationToken ct) => OpenAsync(pair, ct);
+
+    /// <inheritdoc />
+    public Task PrepareAsync(PairDef pair, EndpointContinuation? continuation, CancellationToken ct) =>
+        OpenAsync(pair, continuation, ct);
 
     /// <inheritdoc />
     public IInventorySource Inventory(RootDef root) => Opened(root).Inventory;
@@ -224,15 +235,14 @@ public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatc
     }
 
     private async Task<(IInventorySource Inventory, IEndpointWriter Writer)> OpenSideAsync(PairDef pair, RootDef root,
-        Side side, CheckedSide checkedSide, long generation, CancellationToken ct)
+        Side side, CheckedSide checkedSide, EndpointContinuation? continuation, CancellationToken ct)
     {
         if (checkedSide.Client is { } client)
         {
             var dropbox = new DropboxInventory(root, side, client, _store, pair.PairId);
-            // A reopen within the same run (apply reopens after its preview) keeps the classification already read.
-            // An open left behind by an earlier run is stale and is never adopted, however long the process lives.
-            if (_open.TryGetValue(root.RootId, out var previous) && previous.Generation == generation &&
-                previous.Inventory is DropboxInventory earlier)
+            // Another run on this root replaces the slot and invalidates reuse. Unrelated roots do not.
+            if (continuation is not null && _open.TryGetValue(root.RootId, out var previous) &&
+                previous.Preview == continuation && previous.Inventory is DropboxInventory earlier)
                 dropbox.AdoptClassificationFrom(earlier);
             return (dropbox, new DropboxWriter(root, side, client, _paths.Spool, _settings, PairInclude.IgnoreRules(pair)));
         }
