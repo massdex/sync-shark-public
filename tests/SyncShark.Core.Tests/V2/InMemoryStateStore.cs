@@ -576,10 +576,13 @@ internal sealed class InMemoryStateStore : IStateStore
     private readonly List<RunSummary> _runHistory = [];
     private long _runSequence;
 
+    public Action<RunSummary>? BeforeRecordSummary { get; set; }
+
     public void RecordRunSummary(RunSummary summary)
     {
         lock (_gate)
         {
+            BeforeRecordSummary?.Invoke(summary);
             if (_runHistory.Any(row => row.RunId == summary.RunId)) return;
             _runHistory.Add(summary with { Seq = ++_runSequence });
         }

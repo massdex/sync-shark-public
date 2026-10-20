@@ -156,6 +156,18 @@ jobs:
           - suite: run-history
             flag: --v2-run-history-checks
             takes-root: true
+          - suite: autosync-phase3
+            flag: --v2-autosync-phase3-checks
+            takes-root: false
+          - suite: autosync-process
+            flag: --v2-autosync-process-checks
+            takes-root: false
+          - suite: sync-host
+            flag: --v2-host-checks
+            takes-root: false
+          - suite: review-deletes
+            flag: --v2-review-deletes-checks
+            takes-root: false
     steps:
       - name: Download test binaries
         uses: actions/download-artifact@v4

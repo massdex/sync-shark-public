@@ -48,6 +48,8 @@ public static class SyncCliRegistry
         new("capabilities", "capabilities", SyncCliRequestKind.Capabilities, "none",
             "prints the machine-readable capability inventory", "nothing", "state-free", None),
         new("autosync start", "autosync start", SyncCliRequestKind.State, "explicit", "start or attach to the shared background host", "installed executable", "background-host", None, Mutating: true),
+        new("autosync install-startup", "autosync install-startup", SyncCliRequestKind.State, "explicit", "register per-user logon startup with crash supervision", "installed executable", "background-host", None, Mutating: true),
+        new("autosync uninstall-startup", "autosync uninstall-startup", SyncCliRequestKind.State, "explicit", "remove per-user logon startup; running host unchanged", "installed executable", "background-host", None, Mutating: true),
         new("autosync stop", "autosync stop", SyncCliRequestKind.State, "explicit", "stop at a durable safe point", "running host", "background-host", None, Mutating: true),
         new("autosync status", "autosync status", SyncCliRequestKind.State, "none", "host identity and pair scheduler state; never launches", "nothing", "background-host", None),
         new("autosync enable", "autosync enable --pair <id>|--all", SyncCliRequestKind.State, "explicit", "enable a pair or automatic syncing globally", "running host", "background-host", "--pair,--all", Mutating: true),

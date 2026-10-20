@@ -15,6 +15,9 @@ internal sealed class SharedAutoSyncWindow : Window
     private readonly TextBox _output = new() { IsReadOnly = true, TextWrapping = TextWrapping.Wrap,
         VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
     private readonly TextBox _pair = new() { MinWidth = 220, Margin = new Thickness(4) };
+    private readonly TextBox _notice = new() { MinWidth = 200, Margin = new Thickness(4) };
+    private readonly TextBox _path = new() { MinWidth = 160, Margin = new Thickness(4) };
+    private readonly TextBox _account = new() { MinWidth = 200, Margin = new Thickness(4) };
     private readonly TextBox _interval = new() { Text = "15", Width = 50, Margin = new Thickness(4) };
 
     internal SharedAutoSyncWindow()
@@ -40,6 +43,19 @@ internal sealed class SharedAutoSyncWindow : Window
         Add(pairs, "Sync now", () => _client.RunNowAsync(_pair.Text));
         Add(pairs, "History", () => _client.HistoryAsync(_pair.Text));
         controls.Children.Add(pairs);
+        var notices = new WrapPanel();
+        Add(notices, "List notices", () => Cli("conflicts", "list", "--pair", _pair.Text, "--json"));
+        notices.Children.Add(new TextBlock { Text = "Notice key / path" });
+        notices.Children.Add(_notice); notices.Children.Add(_path);
+        Add(notices, "Show notice", () => Cli("conflicts", "show", "--pair", _pair.Text, "--path", _path.Text, "--json"));
+        Add(notices, "Retry", () => Resolve("retry-now"));
+        Add(notices, "Ignore", () => Resolve("ignore"));
+        controls.Children.Add(notices);
+        var accounts = new WrapPanel();
+        Add(accounts, "List accounts", () => Cli("accounts", "list", "--json"));
+        accounts.Children.Add(new TextBlock { Text = "Exact account ID" }); accounts.Children.Add(_account);
+        Add(accounts, "Reconnect Dropbox", () => Cli("accounts", "reauthorize", "--account", _account.Text, "--yes"));
+        controls.Children.Add(accounts);
         layout.Children.Add(controls); layout.Children.Add(_output); Content = layout;
         Loaded += async (_, _) =>
         {
@@ -47,6 +63,12 @@ internal sealed class SharedAutoSyncWindow : Window
             catch (Exception error) { _output.Text = error.Message + "\nClose any legacy GUI safely and reopen this window. No competing engine was created."; }
         };
     }
+
+    private Task<AutoSyncHostReply?> Cli(params string[] args) => BackgroundHostEntry.Client().TrySendAsync(
+        AutoSyncHostClient.Request("cli") with { CliArgs = new[] { "--cli" }.Concat(args).ToArray() }, TimeSpan.FromSeconds(2));
+
+    private Task<AutoSyncHostReply?> Resolve(string choice) => Cli("conflicts", "resolve", "--pair", _pair.Text,
+        "--path", _path.Text, "--key", _notice.Text, "--generation", "0", "--choice", choice, "--yes");
 
     private void Add(Panel panel, string label, Func<Task<AutoSyncHostReply?>> operation)
     {

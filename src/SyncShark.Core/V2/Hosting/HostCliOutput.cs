@@ -17,9 +17,18 @@ internal sealed class HostCliWriter(int maximumCharacters) : TextWriter
         if (value is null) return;
         lock (_gate)
         {
-            var available = maximumCharacters - _text.Length;
-            if (value.Length > available) Truncated = true;
-            if (available > 0) _text.Append(value.AsSpan(0, Math.Min(value.Length, available)));
+            if (value.Length >= maximumCharacters)
+            {
+                Truncated |= _text.Length > 0 || value.Length > maximumCharacters;
+                _text.Clear();
+                _text.Append(value.AsSpan(value.Length - maximumCharacters));
+            }
+            else
+            {
+                var overflow = _text.Length + value.Length - maximumCharacters;
+                if (overflow > 0) { Truncated = true; _text.Remove(0, overflow); }
+                _text.Append(value);
+            }
         }
     }
     public override void WriteLine(string? value) { Write(value); Write(NewLine); }

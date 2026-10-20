@@ -9,7 +9,7 @@ internal static partial class RunCliChecks
 {
     private const string EmptyChoices = "{}";
 
-    private static async Task RunReviewDeleteChecksAsync()
+    internal static async Task RunReviewDeleteChecksAsync()
     {
         await Cli_ReviewDeletes_PostPrepareDeletionPropagatesAsync();
         await Cli_ReviewDeletes_PrepareMatchedDeletionPropagatesAsync();
@@ -540,7 +540,7 @@ internal static partial class RunCliChecks
             var result = await runtime.ApplyFirstSyncAsync(fx.Pair.PairId, EmptyChoices, false, null, _ => { },
                 CancellationToken.None);
             Require(result.Failed == 0 && result.FirstSyncComplete && fx.WriterA.Deletes == 2 && fx.WriterA.Preserves == 0,
-                "the same equal-hash deletes apply cleanly without Recovery");
+                $"the same equal-hash deletes apply cleanly without Recovery (failed={result.Failed}, complete={result.FirstSyncComplete}, deletes={fx.WriterA.Deletes}, preserves={fx.WriterA.Preserves})");
             Require(await fx.A.ObserveAsync("d/one.txt", CancellationToken.None) is null &&
                 await fx.A.ObserveAsync("d/two.txt", CancellationToken.None) is null,
                 "the reviewed rule-19 deletes were carried out");

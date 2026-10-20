@@ -92,7 +92,23 @@ public sealed class AutoSync
         {
             if (_loops.ContainsKey(pair.PairId)) continue;
             var loop = new PairLoop(pair.PairId, _inputs);
-            _loops[pair.PairId] = (loop, Task.Run(() => loop.RunAsync(stop), CancellationToken.None));
+            _loops[pair.PairId] = (loop, Task.Run(() => SuperviseAsync(pair.PairId, loop, stop), CancellationToken.None));
+        }
+    }
+
+    private async Task SuperviseAsync(string pairId, PairLoop loop, CancellationToken stop)
+    {
+        while (!stop.IsCancellationRequested)
+        {
+            try
+            {
+                await loop.RunAsync(stop).ConfigureAwait(false);
+                if (stop.IsCancellationRequested || _inputs.Store.Pair(pairId) is null) return;
+            }
+            catch (OperationCanceledException) when (stop.IsCancellationRequested) { return; }
+            catch (Exception error) { RunOutput.Observe(error); }
+            try { await Task.Delay(_inputs.Settings.MinSafetyPoll, _inputs.Time, stop).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (stop.IsCancellationRequested) { return; }
         }
     }
 

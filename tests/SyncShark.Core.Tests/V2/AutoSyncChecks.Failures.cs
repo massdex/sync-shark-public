@@ -6,6 +6,7 @@ internal static partial class AutoSyncChecks
 {
     private static async Task FailureChecksAsync()
     {
+        await LoopExceptionAndNoticeRecoveryAsync();
         await ForeignCancellation_RetriesAsync();
         await AccessFault_HeldWithoutRearmAsync();
         await DyingWatches_BoundedRebuildsAsync();
@@ -13,6 +14,38 @@ internal static partial class AutoSyncChecks
         await RealRunGate_PausedQueuedNeverScansAsync();
         await ThrowingWatch_IsDeadWatchAsync();
         await ZeroSafetyPoll_UsesMinimumAsync();
+    }
+
+    internal static async Task LoopExceptionAndNoticeRecoveryAsync()
+    {
+        await using var rig = await Rig.StartedAsync();
+        rig.ThrowEligibility = true;
+        rig.Auto.Kick("p1");
+        await Until(() => !rig.ThrowEligibility && rig.Clock.ActiveTimers == 1, "unexpected loop fault backs off");
+        rig.Clock.Advance(Settings.MinSafetyPoll);
+        await rig.ParkedAsync(AutoStatus.Waiting);
+        rig.Clock.Advance(Settings.ChangeQuietWindow);
+        await rig.ParkedAsync(AutoStatus.Idle);
+        Require(rig.Run.Runs("p1") == 2, "pair loop survives an unexpected exception without a Kick");
+        for (var i = 0; i < 4; i++) rig.Run.Then(new IOException("test provider unavailable"));
+        rig.WatchA.Signal();
+        await rig.ParkedAsync(AutoStatus.Waiting);
+        rig.Clock.Advance(Settings.ChangeQuietWindow);
+        await Until(() => rig.State("p1").RetryAt is not null && rig.Clock.ActiveTimers == 1, "first failed run waits");
+        Require(rig._store.OpenNotices("p1").Count == 0, "one transient failure is silent");
+        for (var i = 1; i < 4; i++)
+        {
+            rig.Clock.Advance(SafetyPoll);
+            var expected = 3 + i;
+            await Until(() => rig.Run.Runs("p1") == expected && rig.State("p1").RetryAt is not null && rig.Clock.ActiveTimers == 1, "failed run retries");
+        }
+        var notices = rig._store.OpenNotices("p1");
+        Require(notices.Count == 1 && NoticeChoices.Options(notices[0]).Select(o => o.Choice).SequenceEqual(new[] { NoticeChoices.RetryNow, NoticeChoices.Ignore }),
+            "repeated failures dedupe with Retry and Ignore, never root exclusion");
+        rig.Clock.Advance(SafetyPoll);
+        await rig.ParkedAsync(AutoStatus.Idle);
+        Require(rig._store.OpenNotices("p1").Count == 0, "success automatically clears the outage notice");
+        Pass("LoopExceptionAndNoticeRecovery");
     }
 
     private static async Task ThrowingWatch_IsDeadWatchAsync()
@@ -90,13 +123,13 @@ internal static partial class AutoSyncChecks
         await Until(() => rig.Status("p1") == AutoStatus.Held, "a watch that lost access holds the pair");
         Require(rig.State("p1").Reason?.Key == AutoSyncReasons.AccountAccess.Key,
             "the access error survives unwrapping (not its inner provider error)");
-        rig.Clock.Advance(SafetyPoll * 3);
-        Require(rig.Watches.Created == 2 && rig.Run.Runs("p1") == 1, "no re-arm and no run until Kick");
-        rig.Auto.Kick("p1");
+        await Until(() => rig.Clock.ActiveTimers == 1, "auth hold has a safety timer");
+        rig.Clock.Advance(SafetyPoll);
+
         await rig.ParkedAsync(AutoStatus.Waiting);
         rig.Clock.Advance(Settings.ChangeQuietWindow);
         await rig.ParkedAsync(AutoStatus.Idle);
-        Require(rig.Run.Runs("p1") == 2, "Kick (reconnect) re-arms and runs once");
+        Require(rig.Run.Runs("p1") == 2, "auth hold automatically retries at the safety poll");
         Pass("AccessFault_HeldWithoutRearm");
     }
 

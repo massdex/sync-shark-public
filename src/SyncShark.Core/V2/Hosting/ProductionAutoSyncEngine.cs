@@ -91,7 +91,8 @@ public sealed class ProductionAutoSyncEngine : IAutoSyncHostEngine
             {
                 var invocation = SyncCliRegistry.Parse(request.CliArgs!);
                 if (invocation.Command is not ("status" or "pairs list" or "pairs show" or "accounts list" or
-                    "run" or "run pause" or "run resume" or "pause" or "resume" or "settings show" or "settings set"))
+                    "run" or "run pause" or "run resume" or "pause" or "resume" or "settings show" or "settings set" or
+                    "conflicts list" or "conflicts show" or "conflicts resolve" or "accounts show" or "accounts reauthorize" or "accounts pending"))
                     throw new SyncCliUsageException("This command is not yet available through the shared host. Stop AutoSync at its safe point, run the direct command, then restart AutoSync. Nothing was changed.");
                 // Dispatch into the SAME runtime; the transport owns admission and cancellation, not the client.
                 var writesPreferences = invocation.Command is "pause" or "resume" or "run pause" or "run resume" or "settings set";
@@ -103,15 +104,24 @@ public sealed class ProductionAutoSyncEngine : IAutoSyncHostEngine
                 finally
                 {
                     if (writesPreferences) _preferencesGate.Release();
-                    if (writesPreferences) _auto.Kick(null);
+                    try
+                    {
+                        if (invocation.Command == "accounts reauthorize")
+                        {
+                            foreach (var pair in _composition.Store.Pairs().Where(pair =>
+                                pair.A.AccountId == invocation.AccountId || pair.B.AccountId == invocation.AccountId))
+                                _auto.Kick(pair.PairId);
+                        }
+                        else if (writesPreferences || invocation.Command == "conflicts resolve")
+                            _auto.Kick(invocation.PairId);
+                    }
+                    catch (Exception wakeError) { RunOutput.Observe(wakeError); } // safety polling still retries
+
                 }
                 if (exitCode == 0 && invocation.Command == "pause" && invocation.AccountId is null)
                     await _composition.Run.StopAsync().ConfigureAwait(false);
-                if (output.Truncated)
-                    return new HostCliOutput((int)SyncCliExitCode.Failed, "",
-                        "The result exceeded the bounded IPC output. Inspect status/history; do not replay the mutation. Use a smaller read page.\n");
                 return new HostCliOutput(exitCode, output.ToString(), errors.ToString() +
-                    (errors.Truncated ? "\nFurther progress was omitted; inspect retained history.\n" : ""));
+                    (output.Truncated || errors.Truncated ? "\nEarlier output was truncated; showing the bounded tail. Exit status is unchanged. Inspect history.\n" : ""));
             }
             default: throw new InvalidDataException("Unknown host operation.");
         }

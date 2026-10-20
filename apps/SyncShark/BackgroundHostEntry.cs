@@ -45,14 +45,8 @@ internal static class BackgroundHostEntry
         var client = Client();
         if (await client.TrySendAsync(AutoSyncHostClient.Request("status"), TimeSpan.FromMilliseconds(300), ct) is { } existing)
             return existing;
-        var start = new ProcessStartInfo(Environment.ProcessPath ?? throw new IOException("Executable path unavailable."))
-        {
-            UseShellExecute = false, CreateNoWindow = true,
-            RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true,
-            WorkingDirectory = AppContext.BaseDirectory
-        };
-        start.ArgumentList.Add("--background-host");
-        using var process = Process.Start(start) ?? throw new IOException("The background process could not start.");
+        using var process = AutoSyncProcess.StartDetached(
+            Environment.ProcessPath ?? throw new IOException("Executable path unavailable."), supervisor: true);
         // Only observations are retried. Mutations are sent exactly once by their caller.
         for (var attempt = 0; attempt < 30; attempt++)
         {
@@ -82,6 +76,13 @@ internal static class BackgroundHostEntry
         if (auto)
         {
             var command = invocation.Command[9..];
+            if (command == "stop") ProcessEntry.StopSupervisor();
+            if (command is "install-startup" or "uninstall-startup")
+            {
+                AutoSyncProcess.RegisterStartup(Environment.ProcessPath ?? throw new IOException("Executable path unavailable."), command == "install-startup");
+                output.WriteLine(command == "install-startup" ? "Per-user AutoSync startup installed; starts at next logon with crash supervision." : "Per-user AutoSync startup removed; running host unchanged.");
+                return 0;
+            }
             var options = invocation.Options ?? new Dictionary<string, string?>();
             int? minutes = options.TryGetValue("--minutes", out var text) && int.TryParse(text, out var parsed) ? parsed : null;
             long cursor = options.TryGetValue("--after", out var after) && long.TryParse(after, out var value) ? value : 0;
@@ -92,7 +93,7 @@ internal static class BackgroundHostEntry
             if (reply is null)
             {
                 output.WriteLine(JsonSerializer.Serialize(new { running = false, detail = "Host is not running. Use autosync start; this command did not launch it." }));
-                return command is "status" or "history" or "logs" ? 0 : (int)SyncCliExitCode.Busy;
+                return command is "status" or "history" or "logs" or "stop" ? 0 : (int)SyncCliExitCode.Busy;
             }
             WriteReply(output, reply, invocation.Json);
             if (command == "logs" && options.ContainsKey("--follow"))

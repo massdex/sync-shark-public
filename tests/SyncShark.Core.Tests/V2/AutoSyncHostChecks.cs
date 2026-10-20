@@ -13,11 +13,20 @@ internal static class AutoSyncHostChecks
         await ReadsNeverLaunchAsync();
         await GuiAdapterSharesHostAsync();
         await ProductionWiringWithEmptyTempStoreAsync();
+        await ReadsBypassMutationSlotsAsync();
         await SafeStopAsync();
         await DisconnectDoesNotReplayAsync();
         await MalformedFrameDoesNotKillHostAsync();
         await FailedConstructionReleasesAuthorityAsync();
         ValidateRequests();
+        using (var writer = new HostCliWriter(10))
+        {
+            writer.Write("0123456789"); writer.Write("abcdefghijk");
+            Require(writer.Truncated && writer.ToString() == "bcdefghijk", "bounded output retains the tail");
+        }
+        Require(AutoSyncProcess.StartupCommand(Path.Combine(Path.GetTempPath(), "Product", "SyncShark.exe"))
+            .EndsWith("--core v2 --autosync-supervisor", StringComparison.Ordinal), "startup explicitly selects v2 and supervises crashes");
+        if (OperatingSystem.IsWindows()) await AutoSyncProcessChecks.RunAsync();
         Console.WriteLine("AutoSync host checks passed (fake transport peers and isolated empty temp composition only).");
     }
 
@@ -116,6 +125,23 @@ internal static class AutoSyncHostChecks
         Require(!lease.Disposed, "GUI client does not dispose the owner's lease");
         foreach (var command in new[] { "start", "stop", "status", "enable", "disable", "interval", "history", "now", "logs" })
             Require(SyncCliRegistry.Rows.Any(row => row.Command == "autosync " + command), "AutoSync command is registered: " + command);
+    }
+
+    private static async Task ReadsBypassMutationSlotsAsync()
+    {
+        var address = Address();
+        var engine = new FakeEngine { BlockCommand = true };
+        await using var host = Start(address, new Lease(), engine);
+        var requests = Enumerable.Range(0, 8).Select(_ => SendAsync(Client(address), "now", "pair-1")).ToArray();
+        try
+        {
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            while (Volatile.Read(ref engine.NowCalls) != 8) await Task.Delay(10, deadline.Token);
+            foreach (var command in new[] { "status", "history", "logs" })
+                Require((await SendAsync(Client(address), command, command == "history" ? "pair-1" : null)).Ok,
+                    command + " bypasses saturated mutation admission");
+        }
+        finally { engine.CommandRelease.TrySetResult(); await Task.WhenAll(requests); }
     }
 
     private static async Task SafeStopAsync()

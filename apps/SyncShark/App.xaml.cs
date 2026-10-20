@@ -31,13 +31,6 @@ public partial class App : System.Windows.Application
             base.OnStartup(e);
             return;
         }
-        if (e.Args.Length == 1 && e.Args[0] == "--background-host")
-        {
-            base.OnStartup(e);
-            ShutdownMode = ShutdownMode.OnExplicitShutdown;
-            RunBackgroundHost();
-            return;
-        }
         // The CLI is a whole-process mode: it must run headless, without a window or tray icon and
         // before every ordinary WPF or Explorer startup route. All other startup modes are unchanged.
         if (CliEntry.IsCliInvocation(e.Args))

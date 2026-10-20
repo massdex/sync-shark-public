@@ -59,12 +59,23 @@ public static class AutoSyncHostProtocol
     internal static bool TrustedPeer(PipeStream pipe, bool server)
     {
         if (!OperatingSystem.IsWindows()) return false;
+        if (server)
+        {
+            var computer = new StringBuilder(256);
+            if (!GetNamedPipeClientComputerName(pipe.SafePipeHandle, computer, (uint)computer.Capacity) ||
+                !string.Equals(computer.ToString().TrimStart('\\'), Environment.MachineName, StringComparison.OrdinalIgnoreCase))
+                return false;
+        }
         uint pid;
         var found = server
             ? GetNamedPipeClientProcessId(pipe.SafePipeHandle, out pid)
             : GetNamedPipeServerProcessId(pipe.SafePipeHandle, out pid);
         return found && SyncCliBridgeTransport.IsTrustedPeer(pid, out _);
     }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetNamedPipeClientComputerName(SafePipeHandle pipe, StringBuilder name, uint length);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

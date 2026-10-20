@@ -31,7 +31,11 @@ public static class NoticeChoices
     /// </summary>
     public const int DeletionReviewRestoreOnlyRule = 41;
 
-    public static bool IsRetryNotice(Notice notice) => notice.ReasonKey is "sync-retry" or "deletion-review" || IsRemovalAttention(notice);
+    public static bool IsPairRetryNotice(Notice notice) => notice.ReasonKey == "run-history-unavailable" || IsAutoSyncFailure(notice);
+
+    public static bool IsAutoSyncFailure(Notice notice) => notice.ReasonKey?.StartsWith("autosync-failed", StringComparison.Ordinal) == true;
+
+    public static bool IsRetryNotice(Notice notice) => IsPairRetryNotice(notice) || notice.ReasonKey is "sync-retry" or "deletion-review" || IsRemovalAttention(notice);
 
     public static bool IsRetryChoice(string choice) => choice is RetryNow or Exclude or Ignore or DeleteReviewed or KeepRestore or OpenFolderSettings or Dismiss;
 
@@ -50,6 +54,8 @@ public static class NoticeChoices
             : notice.Rule == 38 && notice.ReasonKey == PlanNotices.CloudFilesBindingNeedsReview.Key
             ? [new(ReviewRebind, "Review / rebind to verified new path"),
                new(PausePair, "Pause the pair"), new(LeaveAsIs, "Leave as is")]
+            : IsPairRetryNotice(notice)
+            ? [new(RetryNow, "Retry now"), new(Ignore, "Ignore this notice; keep syncing")]
             : IsRemovalAttention(notice)
             ? [new(OpenFolderSettings, "Open folder settings"), new(Dismiss, "Dismiss")]
             : notice.ReasonKey == "deletion-review" && notice.Rule == DeletionReviewRestoreOnlyRule

@@ -9,6 +9,7 @@ internal static partial class RunChecks
 {
     public static async Task RunAsync()
     {
+        await HistoryFailureDoesNotFailCompletedRunAsync();
         PairMissing_Refused();
         DisabledPair_Refused();
         FirstSyncNotDone_Refused();
@@ -169,6 +170,22 @@ internal static partial class RunChecks
         Console.WriteLine("PASS FirstSync_PreviewIsEffectFree");
     }
 
+    internal static async Task HistoryFailureDoesNotFailCompletedRunAsync()
+    {
+        using var store = new InMemoryStateStore { BeforeRecordSummary = _ => throw new IOException("history write unavailable") };
+        var fx = Build(suppliedStore: store);
+        fx.A.Seed("file.txt", "content");
+        var report = await FirstSyncAsync(fx.Run(), fx);
+        Require(report.Outcome == RunOutcomes.Complete && report.Done == 1, "history failure leaves the successful run outcome unchanged");
+        var notice = store.OpenNotices(fx.Pair.PairId).Single(n => n.ReasonKey == "run-history-unavailable");
+        Require(NoticeChoices.Options(notice).Any(o => o.Choice == NoticeChoices.RetryNow), "history failure offers a retry notice");
+        store.BeforeRecordSummary = null;
+        fx.A.Seed("another.txt", "more content");
+        await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        Require(store.OpenNotices(fx.Pair.PairId).All(n => n.ReasonKey != "run-history-unavailable"), "a later summary write clears the history notice");
+        Console.WriteLine("PASS HistoryFailureDoesNotFailCompletedRun");
+    }
+
     private static async Task FirstSync_ApplyThenIncrementalIsEmptyAsync()
     {
         var fx = Build();
@@ -183,10 +200,10 @@ internal static partial class RunChecks
         Require(again.Done == 0 && again.Outcome == RunOutcomes.Complete, "the next run finds nothing to do");
         // each finished run leaves exactly one bounded summary, newest first.
         var history = fx.Store.ReadRunHistory(null, 10);
-        Require(history.Count == 2 && history.All(row => row.PairId == fx.Pair.PairId &&
+        Require(history.Count == 1 && history.All(row => row.PairId == fx.Pair.PairId &&
                 row.Outcome == RunOutcomes.Complete && row.CompletedUtc >= row.StartedUtc),
-            "each finished run retains one summary for its pair");
-        Require(history[0].Seq > history[1].Seq, "run summaries are ordered by their unique sequence");
+            "meaningful runs retain a summary; empty successful safety polls do not flood history");
+        Require(history[0].Seq > 0, "retained summary has a unique sequence");
         Console.WriteLine("PASS FirstSync_ApplyThenIncrementalIsEmpty");
     }
 
@@ -490,6 +507,8 @@ internal static partial class RunChecks
         fx.Provider.AddInventory(fx.Pair.B, new ScriptedInventory(fx.B) { ChangesError = new EndpointAccessException("revoked") });
         await ExpectAsync<EndpointAccessException>(() =>
             run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None));
+        Require(fx.Store.ReadRunHistory(fx.Pair.PairId, 1).Single().Outcome == RunOutcomes.Failed,
+            "a failed run leaves a retained summary");
         Console.WriteLine("PASS AccessLost_ScanPropagates");
     }
 
@@ -967,6 +986,8 @@ internal static partial class RunChecks
         Require(report.Outcome == RunOutcomes.Stopped, "a stopped run reports stopped");
         Require(fx.Store.Cursor(fx.Pair.A.RootId) == before, "a stopped run does not advance the cursor");
         Require(fx.Store.Baselines(fx.Pair.PairId).Count > 0, "finished work is kept");
+        Require(fx.Store.ReadRunHistory(fx.Pair.PairId, 1).Single().Outcome == RunOutcomes.Stopped,
+            "a stopped run leaves a retained summary");
         Console.WriteLine("PASS Stop_KeepsFinishedWork");
     }
 

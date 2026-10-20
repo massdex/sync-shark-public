@@ -23,6 +23,8 @@ public sealed partial class V2CliRuntime
             {
                 await _run.ApplyRetryNoticeChoiceAsync(pairId, conflictId, choice, cancellationToken,
                     (previous, updated) => SaveNarrowerPair(previous, updated));
+                if (NoticeChoices.IsPairRetryNotice(notice))
+                    return new SyncCliRunData(pairId, pair.Name, 0, 0, 0, 0, 0, false);
                 if (choice is not (NoticeChoices.RetryNow or NoticeChoices.DeleteReviewed or NoticeChoices.KeepRestore) || !_store.FirstSyncDone(pairId))
                     return new SyncCliRunData(pairId, pair.Name, 0, 0, 0, 0, 0, false);
                 var retryReport = await _run.IncrementalAsync(pairId, new RunProgressForwarder(Console.Error.WriteLine), cancellationToken);

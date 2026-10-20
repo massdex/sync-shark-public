@@ -153,11 +153,11 @@ public sealed partial class SyncRun : ISyncRun
     internal Task<RunReport> ApplyAsync(string pairId, Plan approved, IProgress<RunProgress> progress,
         CancellationToken ct, IReadOnlySet<string>? reviewedDeletes, RebuildableResolution? rebuildables) =>
         RunExclusiveAsync(progress,
-            (sink, token) => ApplyCoreAsync(pairId, approved, sink, reviewedDeletes, rebuildables, token), ct);
+            (sink, token) => ApplyCoreAsync(pairId, approved, sink, reviewedDeletes, rebuildables, token), ct, pairId);
 
     /// <inheritdoc />
     public Task<RunReport> IncrementalAsync(string pairId, IProgress<RunProgress> progress, CancellationToken ct) =>
-        RunExclusiveAsync(progress, (sink, token) => IncrementalCoreAsync(pairId, null, null, sink, token), ct);
+        RunExclusiveAsync(progress, (sink, token) => IncrementalCoreAsync(pairId, null, null, sink, token), ct, pairId);
 
     /// <inheritdoc />
     public async Task StopAsync()
@@ -191,7 +191,7 @@ public sealed partial class SyncRun : ISyncRun
     // the whole run gets the shared byte-progress seam's process messages and the quiet-run heartbeat, and hands the
     // body that pump's sink (a no-op when the caller passed none) rather than the raw sink.
     private async Task<T> RunExclusiveAsync<T>(IProgress<RunProgress>? progress,
-        Func<IProgress<RunProgress>, CancellationToken, Task<T>> body, CancellationToken ct)
+        Func<IProgress<RunProgress>, CancellationToken, Task<T>> body, CancellationToken ct, string? historyPairId = null)
     {
         // The pump and the in-flight table open before the gate, so a run queued behind another is still visible
         // (the gate wait is itself a tracked operation) rather than silently blocked.
@@ -244,9 +244,16 @@ public sealed partial class SyncRun : ISyncRun
             };
             // the run owns its retained outcome. Only the bounded counts are stored; the live
             // report keeps its failure examples for the caller and nothing else is written.
-            _store.RecordRunSummary(RunSummary.Of(Guid.NewGuid().ToString("N"), completed, startedAt,
-                completed.CompletedUtc));
+            RecordSummarySafely(completed, startedAt);
             return (T)(object)completed;
+        }
+        catch (Exception error)
+        {
+            if (historyPairId is not null)
+                RecordSummarySafely(new RunReport(historyPairId,
+                    error is OperationCanceledException && linked.IsCancellationRequested ? RunOutcomes.Stopped : RunOutcomes.Failed,
+                    0, error is OperationCanceledException && linked.IsCancellationRequested ? 0 : 1, 0, 0, 0, 0, 0, 0, []), startedAt);
+            throw;
         }
         finally
         {
@@ -257,6 +264,30 @@ public sealed partial class SyncRun : ISyncRun
             }
             done.TrySetResult();
             _gate.Release();
+        }
+    }
+
+    private void RecordSummarySafely(RunReport report, DateTimeOffset startedAt)
+    {
+        // Empty successful safety polls do not evict meaningful history.
+        if (report.Outcome == RunOutcomes.Complete && report.Done == 0 && report.FailureCount == 0 &&
+            report.Held == 0 && report.Deferred == 0 && report.Skipped == 0) return;
+        try
+        {
+            _store.RecordRunSummary(RunSummary.Of(Guid.NewGuid().ToString("N"), report, startedAt, _time.GetUtcNow()));
+            foreach (var notice in _store.OpenNotices(report.PairId).Where(n => n.ReasonKey == "run-history-unavailable"))
+                if (notice.NoticeId is { } id) _store.CloseNotice(id, "resolved");
+        }
+        catch (Exception error)
+        {
+            RunOutput.Observe(error);
+            try
+            {
+                _store.AddNotices([new Notice(report.PairId, 0, NoticeKind.Info, string.Empty,
+                    "Run effects retain their original outcome, but history could not be saved: " + error.Message +
+                    ". Check disk space and store diagnostics. Retry on the next run, or Ignore this notice.", "run-history-unavailable")]);
+            }
+            catch (Exception noticeError) { RunOutput.Observe(noticeError); }
         }
     }
 

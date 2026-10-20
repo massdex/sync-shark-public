@@ -432,6 +432,11 @@ internal static partial class CliChecks
 
     internal static async Task RunAsync(string root, string? capabilitiesPath = null)
     {
+        foreach (var command in new[] { "install-startup", "uninstall-startup" })
+        {
+            var invocation = SyncCliRegistry.Parse(["--cli", "autosync", command]);
+            Require(invocation.Command == "autosync " + command, "startup capability parses without opening state or changing registration");
+        }
         Require(SyncCliRegistry.Rows.Single(row => row.Command == "queue list").Effect.Contains(
                     "current pairs", StringComparison.Ordinal) &&
                 SyncCliRegistry.Rows.Single(row => row.Command == "queue list").Effect.Contains(

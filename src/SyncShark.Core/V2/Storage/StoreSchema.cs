@@ -146,9 +146,15 @@ internal static class StoreSchema
         using var final = connection.BeginTransaction();
         Execute(connection, final, RehashDdl);
         Execute(connection, final, RetryDdl);
+        MigrateRunSummary(connection, final);
         Execute(connection, final, $"PRAGMA user_version={Version};");
         final.Commit();
     }
+
+    // Presence-guarded additive step, also run after the version chain on every compatible startup.
+    // At final26 integration this composes AFTER v12..v17/removal_review without changing their stamps.
+    private static void MigrateRunSummary(SqliteConnection connection, SqliteTransaction? transaction) =>
+        Execute(connection, transaction, RunSummaryDdl);
 
     private static void MigrateMappedDirectories(SqliteConnection connection)
     {
@@ -260,7 +266,7 @@ internal static class StoreSchema
         Execute(connection, transaction, Ddl);
         Execute(connection, transaction, RehashDdl);
         Execute(connection, transaction, RetryDdl);
-        Execute(connection, transaction, RunSummaryDdl);
+        MigrateRunSummary(connection, transaction);
         Execute(connection, transaction, FlaggedIndexDdl);
         Execute(connection, transaction, PrepareDdl);
         Execute(connection, transaction, ClassificationDdl);
@@ -289,7 +295,7 @@ internal static class StoreSchema
             throw new StateDamagedException($"v2 state schema version {version}, expected {Version}.");
         // Additive feature storage is presence-guarded on every compatible open, not gated by a version bump.
         Execute(connection, null, RetryDdl);
-        Execute(connection, null, RunSummaryDdl);
+        MigrateRunSummary(connection, null);
         var names = new HashSet<string>(StringComparer.Ordinal);
         using (var command = Command(connection, null,
             "SELECT name FROM sqlite_master WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%';"))

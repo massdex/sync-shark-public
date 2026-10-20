@@ -23,6 +23,7 @@ public sealed class AutoSyncBackgroundHost : IAsyncDisposable
     private readonly TaskCompletionSource _quiescent = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private Task? _shutdown;
     private int _active;
+    private int _mutations;
     private bool _engineClosed;
     private long _connectionId;
     private readonly Task _listener;
@@ -141,7 +142,8 @@ public sealed class AutoSyncBackgroundHost : IAsyncDisposable
                 }
                 else
                 {
-                    var admission = Admit();
+                    var readOnly = IsReadOnly(request);
+                    var admission = Admit(readOnly);
                     if (admission is not null)
                         reply = admission == "stopping" && request.Command == "status"
                             ? Reply(request, "stopping", new { running = true, acceptingWork = false })
@@ -154,7 +156,7 @@ public sealed class AutoSyncBackgroundHost : IAsyncDisposable
                             var result = await _engine.ExecuteAsync(request, _workStop.Token).ConfigureAwait(false);
                             reply = Reply(request, "running", result);
                         }
-                        finally { Release(); }
+                        finally { Release(readOnly); }
                     }
                 }
                 using var writeDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
@@ -184,22 +186,30 @@ public sealed class AutoSyncBackgroundHost : IAsyncDisposable
         }
     }
 
-    private string? Admit()
+    private static bool IsReadOnly(AutoSyncHostRequest request) =>
+        request.Command is "status" or "history" or "logs" ||
+        request.Command == "cli" && SyncCliRegistry.Parse(request.CliArgs!).Command is
+            "status" or "pairs list" or "pairs show" or "accounts list" or "accounts show" or
+            "accounts pending" or "conflicts list" or "conflicts show" or "settings show";
+
+    private string? Admit(bool readOnly)
     {
         lock (_gate)
         {
             if (_shutdown is not null) return "stopping";
-            if (_active >= MaximumOperations) return "busy";
+            if (!readOnly && _mutations >= MaximumOperations) return "busy";
+            if (!readOnly) _mutations++;
             _active++;
             return null;
         }
     }
 
-    private void Release()
+    private void Release(bool readOnly)
     {
         lock (_gate)
         {
             _active--;
+            if (!readOnly) _mutations--;
             if (_shutdown is not null && _active == 0) _quiescent.TrySetResult();
         }
     }

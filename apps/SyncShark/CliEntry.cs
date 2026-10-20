@@ -50,7 +50,12 @@ internal static class CliEntry
                 return (int)SyncCliExitCode.Usage;
             }
             args = selection.Args;
-            if (selection.UseV2 || args.Contains("autosync", StringComparer.Ordinal))
+            if (!selection.UseV2 && args.Contains("autosync", StringComparer.Ordinal))
+            {
+                TryWrite(standardError, "AutoSync uses core v2. Core v1 remains selected and nothing was started. To switch explicitly, repeat with --cli --core v2 autosync <command>.");
+                return (int)SyncCliExitCode.Usage;
+            }
+            if (selection.UseV2)
             {
                 var hosted = Task.Run(() => BackgroundHostEntry.TryCliAsync(args, standardOutput, standardError,
                     cancellation.Token)).GetAwaiter().GetResult();

@@ -15,6 +15,12 @@ public sealed partial class SyncRun
                 throw new SyncRunRefusedException("That retry notice or option is no longer available. Refresh notices.");
             var notice = saved.Value.Notice;
             var pair = _store.Pair(pairId) ?? throw new SyncRunRefusedException("The pair is no longer available.");
+            if (NoticeChoices.IsPairRetryNotice(notice))
+            {
+                if (choice == NoticeChoices.Ignore) _store.CloseNotice(noticeId, choice);
+                // A pair failure is not a path exclusion or item retry. The host wakes the pair.
+                return Task.FromResult(true);
+            }
             if (NoticeChoices.IsRemovalAttention(notice))
             {
                 if (choice == NoticeChoices.Dismiss) _store.CloseNotice(noticeId, choice);
