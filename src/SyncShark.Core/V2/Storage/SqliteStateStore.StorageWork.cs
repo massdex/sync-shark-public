@@ -3,6 +3,20 @@ using System.Text.Json;
 
 namespace Massdex.SyncShark.V2;
 
+/// <summary>Durable due markers for explicit per-entity storage retries.</summary>
+internal static class StorageDue
+{
+    // An explicit Retry of one entity. Negative so ordinary due<=$now admission includes it, and distinct
+    // from normal scheduling so only this exact row may bypass a pair-level root backoff.
+    internal const long UserRequested = -1;
+    // A claimed row parks here while one worker performs the effect. This is the crash-retry delay, not an
+    // exclusion guarantee: a concurrent Request may overwrite it.
+    internal const long ClaimLeaseMs = 60_000;
+}
+
+/// <summary>Outcome of one atomic claim; only <see cref="StorageClaim.None"/> means another worker owns the row.</summary>
+internal enum StorageClaim { None = 0, Requested = 1, Normal = 2 }
+
 public sealed partial class SqliteStateStore
 {
     internal const string HasStorageWorkSql = """
@@ -146,6 +160,46 @@ public sealed partial class SqliteStateStore
             ("$r", root), ("$o", item), ("$b", binding));
     });
 
+    // Persist one explicit Retry without running it. Only an existing queued row is marked, so a completed
+    // entity is never recreated; the negative due marker survives pause and is consumed by the claim below.
+    internal void RequestStorageSettlement(StorageSettlement job) => InStore(() =>
+    {
+        if (!_storageEnabled) return;
+        StoreSchema.Execute(_connection, null,
+            "UPDATE storage_settlement SET state='pending',due=$requested WHERE job_id=$id AND root_id=$r AND object_id=$o " +
+            "AND remote_binding=$b AND remote_json=$j;",
+            ("$requested", StorageDue.UserRequested), ("$id", job.JobId), ("$r", job.RootId), ("$o", job.ObjectId),
+            ("$b", job.RemoteBinding), ("$j", JsonSerializer.Serialize(job.Remote)));
+    });
+
+    internal bool IsStorageSettlementRequested(StorageSettlement job) => InStore(() => _storageEnabled &&
+        StoreSchema.Scalar(_connection, null,
+            "SELECT 1 FROM storage_settlement WHERE job_id=$id AND root_id=$r AND object_id=$o AND remote_binding=$b AND remote_json=$j AND due=$requested;",
+            ("$id", job.JobId), ("$r", job.RootId), ("$o", job.ObjectId), ("$b", job.RemoteBinding),
+            ("$j", JsonSerializer.Serialize(job.Remote)), ("$requested", StorageDue.UserRequested)) is not null);
+
+    // One atomic claim. The requested pass is exempt from root backoff; the normal pass is not. A claimed
+    // row parks at a future lease so a second claim attempt fails. A concurrent Request can overwrite that
+    // lease, so coalescing is guaranteed inside one store/entity gate; cross-process is best-effort only.
+    internal StorageClaim TryClaimStorageSettlement(StorageSettlement job) => InStore(() =>
+    {
+        if (!_storageEnabled) return StorageClaim.None;
+        var now = NowMs();
+        StoreSchema.Execute(_connection, null,
+            "UPDATE storage_settlement SET due=$lease WHERE job_id=$id AND root_id=$r AND object_id=$o AND remote_binding=$b " +
+            "AND remote_json=$j AND state='pending' AND due=$requested;",
+            ("$lease", now + StorageDue.ClaimLeaseMs), ("$requested", StorageDue.UserRequested), ("$id", job.JobId),
+            ("$r", job.RootId), ("$o", job.ObjectId), ("$b", job.RemoteBinding), ("$j", JsonSerializer.Serialize(job.Remote)));
+        if (StoreSchema.Changes(_connection, null) != 0) return StorageClaim.Requested;
+        StoreSchema.Execute(_connection, null,
+            "UPDATE storage_settlement SET due=$lease WHERE job_id=$id AND root_id=$r AND object_id=$o AND remote_binding=$b " +
+            "AND remote_json=$j AND state='pending' AND due<=$now " +
+            "AND NOT EXISTS(SELECT 1 FROM storage_root_backoff b WHERE b.root_id=$r AND b.due>$now);",
+            ("$lease", now + StorageDue.ClaimLeaseMs), ("$now", now), ("$id", job.JobId), ("$r", job.RootId),
+            ("$o", job.ObjectId), ("$b", job.RemoteBinding), ("$j", JsonSerializer.Serialize(job.Remote)));
+        return StoreSchema.Changes(_connection, null) != 0 ? StorageClaim.Normal : StorageClaim.None;
+    });
+
     public StorageSettlement? StoragePointerFor(string root, string item, string binding) => InStore(() =>
     {
         if (!_storageEnabled) return null;
@@ -162,17 +216,19 @@ public sealed partial class SqliteStateStore
     internal IReadOnlyList<StorageSettlement> ChangedStoragePointers(string after = "", int limit = 128, IReadOnlyCollection<string>? activeRoots = null) => InStore(() =>
     {
         if (!_storageEnabled) return (IReadOnlyList<StorageSettlement>)[];
-        var cursor = after.Length == 0 ? new[] { "-1", "", "", "" } : JsonSerializer.Deserialize<string[]>(after)!;
-        if (cursor.Length == 3) cursor = ["-1", .. cursor];
+        var start = StorageDue.UserRequested.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var cursor = after.Length == 0 ? new[] { start, "", "", "" } : JsonSerializer.Deserialize<string[]>(after)!;
+        if (cursor.Length == 3) cursor = [start, .. cursor];
         if (cursor.Length != 4) throw new ArgumentException("Invalid pointer cursor.", nameof(after));
         using var cmd = StoreSchema.Command(_connection, null,
             "SELECT q.job_id,s.root_id,s.object_id,s.remote_binding,s.remote_json,q.due FROM " + StorageRootsSql +
             " CROSS JOIN storage_refresh q ON q.job_id IN (SELECT rq.job_id FROM storage_refresh rq INDEXED BY storage_refresh_root " +
-            "WHERE rq.root_id=roots.value AND rq.due<=$now AND (rq.due,rq.root_id,rq.object_id,rq.remote_binding)>($after,$r,$o,$b) " +
-            "ORDER BY rq.due,rq.object_id,rq.remote_binding LIMIT $limit) " +
+            "WHERE rq.root_id=roots.value AND rq.due<=$now AND ((rq.due,rq.root_id,rq.object_id,rq.remote_binding)>($after,$r,$o,$b) OR rq.due=$requested) " +
+            "ORDER BY CASE WHEN rq.due=$requested THEN 0 ELSE 1 END,rq.due,rq.object_id,rq.remote_binding LIMIT $limit) " +
             "JOIN storage_item s ON s.root_id=q.root_id AND s.object_id=q.object_id AND s.remote_binding=q.remote_binding " +
-            StorageUnblockedSql + " AND q.due<=$now AND (q.due,q.root_id,q.object_id,q.remote_binding)>($after,$r,$o,$b) " +
-            "ORDER BY q.due,q.root_id,q.object_id,q.remote_binding LIMIT $limit;");
+            "WHERE (NOT EXISTS(SELECT 1 FROM storage_root_backoff b WHERE b.root_id=roots.value AND b.due>$now) OR q.due=$requested) " +
+            "AND q.due<=$now AND ((q.due,q.root_id,q.object_id,q.remote_binding)>($after,$r,$o,$b) OR q.due=$requested) " +
+            "ORDER BY CASE WHEN q.due=$requested THEN 0 ELSE 1 END,q.due,q.root_id,q.object_id,q.remote_binding LIMIT $limit;");
         StorageRootParameters(cmd, activeRoots);
         cmd.Parameters.AddWithValue("$after", long.Parse(cursor[0], System.Globalization.CultureInfo.InvariantCulture));
         cmd.Parameters.AddWithValue("$r", cursor[1]); cmd.Parameters.AddWithValue("$o", cursor[2]); cmd.Parameters.AddWithValue("$b", cursor[3]);

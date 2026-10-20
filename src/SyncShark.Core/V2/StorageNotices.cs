@@ -83,6 +83,21 @@ internal static class StorageNotices
     internal static void CompleteHydrationPair(SqliteStateStore store, PairDef pair) =>
         store.CloseStorageNoticeBatch(pair.PairId, [new(pair.A.RootId, "", pair.B.RootId, HydrationPairOperation)]);
 
+    /// <summary>A positive observation retires a recorded pair cause only when every open pair cause is
+    /// connectivity (network/auth/provider) and, for a normal lane completion, no pair cause was reported in
+    /// this same turn. A binding/registration/volume/backlog cause always survives an unrelated item success.
+    /// An explicit success is positive connectivity evidence even within that turn.</summary>
+    internal static void CompleteSuccess(SqliteStateStore store, PairDef pair, bool requested, bool pairCauseReportedThisTurn)
+    {
+        var pairNotices = store.OpenStoragePairCauses(pair.PairId, pair.A.RootId, pair.B.RootId);
+        if (pairNotices.Count == 0) return;
+        if (!pairNotices.All(notice => notice.Scope is "network" or "auth" or "provider")) return;
+        if (pairCauseReportedThisTurn && !requested) return;
+        store.ClearStorageRootBackoff(pair.A.RootId);
+        foreach (var operation in pairNotices.Select(notice => notice.Operation).Distinct())
+            CompletePair(store, pair, operation == HydrationPairOperation ? OfflineOperation : "availability");
+    }
+
     /// <summary>
     /// Positive-evidence classification shared by every storage lane (hydration, its durable offline lane, settlement
     /// and pointer refresh). A pair-level cause (network, account auth or a disconnected provider) fails every file,
@@ -227,6 +242,11 @@ internal static class StorageNotices
             }
             store.RetryStorageSettlement(item.RootId, item.ObjectId, item.RemoteBinding);
         }
+        // A paused/disabled pair keeps the item request queued. Update the existing notice row (same id and
+        // reason) with the explanation the service throws, without appending it again on repeated Retry.
+        var inactive = !pair.Enabled || store.PairPaused(pair.PairId) || (paused?.Invoke(pair) ?? false);
+        if (inactive && !notice.Detail.Contains(StorageSettlementService.RetryQueuedMessage, StringComparison.Ordinal))
+            store.RecordNoticeChoiceFailure(notice, StorageSettlementService.RetryQueuedMessage);
         // Targeted drain: "settlement", "remote-update" and the durable "offline" operation are all item jobs.
         await using var service = new StorageSettlementService(store, connections, target: item, paused: paused);
         await service.DrainAsync(ct).ConfigureAwait(false);

@@ -5,13 +5,15 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
     Func<PairDef, string, CancellationToken, Task<PilotRemoteEntry?>>? observeRemote = null,
     StorageNotice? target = null, Func<PairDef, bool>? paused = null,
     Func<PairDef, ItemState, Action, CancellationToken, Task<StorageObserved>>? hydrate = null,
-    Func<StorageSettlement, CancellationToken, Task<StorageObserved>>? convert = null) : IAsyncDisposable
+    Func<StorageSettlement, CancellationToken, Task<StorageObserved>>? convert = null,
+    Func<StorageSettlement, ItemState, CancellationToken, Task<PilotRemoteEntry?>>? refresh = null) : IAsyncDisposable
 {
     private readonly CancellationTokenSource _stop = new();
     private Task? _loop;
     private IReadOnlyList<PairDef> _pairs = [];
     private IReadOnlyCollection<string> _activeRoots = [];
     private static readonly TimeSpan RetryDelay = TimeSpan.FromMinutes(1);
+    internal const string RetryQueuedMessage = "Retry is queued; will retry when the pair resumes.";
 
     private void PrepareTurn()
     {
@@ -20,6 +22,7 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
             pair.B.Provider == SyncProviders.Dropbox && Active(pair)).Select(pair => pair.A.RootId).ToArray();
         _providers.Clear();
         _reportedPairs.Clear();
+        _claims.Clear();
         CloseObsoletePairNotices();
     }
 
@@ -33,6 +36,7 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
     private void Backoff(PairDef pair) => store.SetStorageRootBackoff(pair.A.RootId, RetryDelay);
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Lazy<WindowsCloudFilesProvider>> _providers = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _reportedPairs = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<long, StorageClaim> _claims = new();
     private WindowsCloudFilesProvider Provider(PairDef pair, CancellationToken ct) =>
         _providers.GetOrAdd(pair.PairId, _ => new Lazy<WindowsCloudFilesProvider>(() =>
         {
@@ -87,6 +91,18 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
             pair.A.Provider == SyncProviders.Local && pair.B.Provider == SyncProviders.Dropbox ? pair : null;
     }
     private bool Active(PairDef pair) => pair.Enabled && !store.PairPaused(pair.PairId) && !(paused?.Invoke(pair) ?? false);
+    private void RequireActiveForRetry(PairDef? pair)
+    {
+        // Explicit Retry never silently clears a paused/disabled request: the marker stays queued and the
+        // caller gets the same explanation the notice will carry when the pair resumes.
+        if (pair is not null && !Active(pair)) throw new IOException(RetryQueuedMessage);
+    }
+    private PairDef? HydrationPair(StorageHydrationJob job)
+    {
+        var known = _pairs.FirstOrDefault(pair => pair.A.RootId == job.RootId);
+        var pair = known is null ? null : store.Pair(known.PairId);
+        return pair?.A.RootId == job.RootId ? pair : null;
+    }
     private static bool Included(PairDef pair, string path) =>
         !pair.Excluded.Any(prefix => PairPath.IsSelfOrUnder(path, prefix)) &&
         !SyncIgnorePolicy.IsIgnored(path, false, PairInclude.IgnoreRules(pair));
@@ -94,9 +110,15 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
     private bool Eligible(StorageSettlement job)
     {
         var pair = Pair(job);
-        // Root admission precedes all item/policy queries; SQL also excludes paused/backed-off roots.
-        if (pair is not null && (!Active(pair) || _reportedPairs.ContainsKey(pair.PairId) ||
-            store.StorageRootBackedOff(pair.A.RootId))) return false;
+        // Root admission precedes all item/policy queries; the atomic claim is the only root-backoff gate
+        // (a requested row is exempt), so a pair pause is still honoured here.
+        if (pair is not null && !Active(pair)) return false;
+        // Skip work this turn already knows will fail with the same pair cause, unless the user explicitly
+        // requested this entity; claiming a normal row here would only delay it.
+        if (pair is not null && _reportedPairs.ContainsKey(pair.PairId) &&
+            !store.IsStorageSettlementRequested(job)) return false;
+        var claim = store.TryClaimStorageSettlement(job);
+        if (claim == StorageClaim.None) return false;
         var local = store.ByObject(job.RootId, job.ObjectId);
         if (pair is null || local is null || !Included(pair, local.Path) ||
             store.ResolveStoragePolicy(pair.A, local.Path) != "online-only")
@@ -104,24 +126,43 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
             if (store.RetireStorageSettlement(job) && pair is not null) Complete(job);
             return false;
         }
-        return Active(pair) && !_reportedPairs.ContainsKey(pair.PairId) &&
-            !store.StorageRootBackedOff(pair.A.RootId);
+        var proceed = Active(pair) && (claim == StorageClaim.Requested || !_reportedPairs.ContainsKey(pair.PairId));
+        if (proceed) _claims[job.JobId] = claim;
+        return proceed;
     }
 
     // Direct CLI runs do one bounded turn, not an unbounded drain of the database.
     internal async Task DrainAsync(CancellationToken ct)
     {
-        if (!store.HasStorageWork()) return;
+        // HasStorageWork() reports only currently due background work. An explicit Retry names one entity
+        // whose last failed attempt is still deferred, so the target branch must admit it; pause, binding,
+        // policy and current-entity checks stay in the target lane. Untargeted drains remain due-gated.
+        if (target is null && !store.HasStorageWork()) return;
         PrepareTurn();
         var worker = new FilesOnDemandSettlement(store, ConvertItemAsync, Report, Eligible, Complete);
         if (target is not null)
         {
+            // Persist the one explicit request before entering any entity gate. A paused/disabled pair keeps
+            // this marker until it resumes; a waiting worker never re-requests after the gate, so the atomic
+            // claim (future lease, or a completed row) decides which caller actually runs the effect.
             if (target.Operation == "settlement" && store.StorageSettlementFor(target.RootId, target.ObjectId, target.RemoteBinding) is { } job)
+            {
+                store.RequestStorageSettlement(job);
+                RequireActiveForRetry(Pair(job));
                 await worker.RunItemAsync(job, ct).ConfigureAwait(false);
+            }
             else if (target.Operation == "remote-update" && store.StoragePointerFor(target.RootId, target.ObjectId, target.RemoteBinding) is { } pointer)
+            {
+                store.RequestStoragePointer(pointer);
+                RequireActiveForRetry(Pair(pointer));
                 await UpdatePointerAsync(pointer, ct).ConfigureAwait(false);
+            }
             else if (target.Operation == "offline" && store.StorageHydrationFor(target.RootId, target.ObjectId) is { } hydration)
+            {
+                store.RequestStorageHydration(hydration);
+                RequireActiveForRetry(HydrationPair(hydration));
                 await HydrateAsync(hydration, ct).ConfigureAwait(false);
+            }
             return;
         }
         store.EnqueueStoragePolicyPage(activeRoots: _activeRoots);
@@ -215,12 +256,12 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
         }
         var result = await provider.ConvertVerifiedSyncedFileAsync(remote, ct, true,
             new PilotDirectoryIdentity(itemVolume, itemId), Revalidate).ConfigureAwait(false);
-        StorageNotices.CompletePair(store, pair, "settlement");
         return new(result.State.Availability.ToString(), false, result.State.IsInSync);
     }
 
     private void Report(StorageSettlement job, Exception error)
     {
+        _claims.TryRemove(job.JobId, out _);
         if (Pair(job) is not { } pair || !store.IsCurrentStorageSettlement(job)) return;
         // Schedule this item's next attempt before reporting, so a notice failure cannot turn a bounded retry
         // into a rehash on every pass.
@@ -243,7 +284,11 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
         new(job.RootId, job.ObjectId, job.RemoteBinding, operation, StorageNotices.ReceiptScope(job.Remote));
     private void Complete(StorageSettlement job)
     {
-        if (Pair(job) is { } pair) StorageNotices.Complete(store, pair.PairId, Metadata(job, "settlement"));
+        if (Pair(job) is not { } pair) return;
+        _claims.TryRemove(job.JobId, out var claim);
+        if (claim is StorageClaim.Requested or StorageClaim.Normal)
+            StorageNotices.CompleteSuccess(store, pair, claim == StorageClaim.Requested, _reportedPairs.ContainsKey(pair.PairId));
+        StorageNotices.Complete(store, pair.PairId, Metadata(job, "settlement"));
     }
 
     internal async Task<string> UpdatePointersPageAsync(string after, CancellationToken ct)
@@ -264,7 +309,11 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
         var pair = Pair(job);
         if (pair is null) { store.RetireStoragePointer(job); return; }
         if (!Active(pair)) return;
-        if (_reportedPairs.ContainsKey(pair.PairId) || store.StorageRootBackedOff(pair.A.RootId)) return;
+        // The claim is the admission decision (only a requested row bypasses a root backoff). A pair-level
+        // cause already reported this turn skips normal work, but never an explicit request.
+        if (_reportedPairs.ContainsKey(pair.PairId) && !store.IsStoragePointerRequested(job)) return;
+        var claim = store.TryClaimStoragePointer(job);
+        if (claim == StorageClaim.None) return;
         var item = Metadata(job, "remote-update");
         try
         {
@@ -276,14 +325,6 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
                 return;
             }
             if ((local.Flags & (ItemFlags.Ignored | ItemFlags.Quarantined | ItemFlags.Link | ItemFlags.Unreadable)) != 0) return;
-            var full = LocalItems.FullPath(pair.A.RootPath, local.Path);
-            if (!WindowsCloudFilesProvider.TryReadOwnedPlaceholder(full, out var current) || current is null ||
-                current.State.Availability != SyncCloudFileAvailability.OnlineOnly)
-            {
-                store.RetireStoragePointer(job, new(current?.State.Availability.ToString() ?? "Unknown", false, current?.State.IsInSync ?? false));
-                StorageNotices.Complete(store, pair.PairId, item);
-                return;
-            }
             // A remote rename may precede its metadata-only local Move. Keep the dirty entity until
             // those paths converge; observing the old path could incorrectly look like deletion.
             var indexedRemote = store.ByObject(pair.B.RootId, job.Remote.Id!);
@@ -292,8 +333,26 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
                 store.DeferStoragePointer(job, RetryDelay);
                 return;
             }
-            var observe = observeRemote ?? connections.ObserveRemote ?? throw new StoragePairException("provider", "Remote verification is unavailable. Reconnect the provider and Retry.");
-            var remote = await observe(pair, local.Path, token).ConfigureAwait(false);
+            // The optional refresh delegate is a test seam for the native read/update; production passes
+            // null and keeps the owned-placeholder verification below.
+            Func<PairDef, string, CancellationToken, Task<PilotRemoteEntry?>>? observe = null;
+            PilotRemoteEntry? remote;
+            if (refresh is not null)
+                remote = await refresh(job, local, token).ConfigureAwait(false);
+            else
+            {
+                var full = LocalItems.FullPath(pair.A.RootPath, local.Path);
+                if (!WindowsCloudFilesProvider.TryReadOwnedPlaceholder(full, out var current) || current is null ||
+                    current.State.Availability != SyncCloudFileAvailability.OnlineOnly)
+                {
+                    store.RetireStoragePointer(job, new(current?.State.Availability.ToString() ?? "Unknown", false, current?.State.IsInSync ?? false));
+                    StorageNotices.Complete(store, pair.PairId, item);
+                    return;
+                }
+                observe = observeRemote ?? connections.ObserveRemote ??
+                    throw new StoragePairException("provider", "Remote verification is unavailable. Reconnect the provider and Retry.");
+                remote = await observe(pair, local.Path, token).ConfigureAwait(false);
+            }
             if (remote is not null && !PairPath.Same(remote.RelativePath, local.Path))
             {
                 store.DeferStoragePointer(job, RetryDelay);
@@ -310,6 +369,7 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
             {
                 store.CompleteStoragePointerUpdate(job, remote);
                 StorageNotices.Complete(store, pair.PairId, item);
+                StorageNotices.CompleteSuccess(store, pair, claim == StorageClaim.Requested, _reportedPairs.ContainsKey(pair.PairId));
                 return;
             }
             remote = remote with { RelativePath = local.Path, ModifiedUtc = remote.ModifiedUtc ?? local.Mtime };
@@ -322,34 +382,38 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
             var remoteItem = updated with { ObjectId = remote.Id!, VersionId = remote.Revision, Flags = ItemFlags.None };
             var action = new SyncAction(ShortId.Make("ptr", pair.PairId, local.ObjectId, remote.Revision),
                 42, ActionKind.Adopt, Side.A, local.Path, null, remoteItem, local, false, baseline.ObjectKey);
-            var provider = Provider(pair, token);
-            var (volume, id) = LocalItems.ParseObjectId(job.ObjectId);
-            var (rootVolume, rootId) = LocalItems.ParseObjectId(pair.A.RootObjectId);
-            using var heldRoot = PilotDirectoryLease.Open(pair.A.RootPath, new(rootVolume, rootId));
-            provider.UpdateDehydratedPlaceholder(job.Remote with { RelativePath = local.Path }, remote, new(volume, id), () =>
+            if (refresh is null)
             {
-                token.ThrowIfCancellationRequested();
-                heldRoot.VerifyBinding();
-                var latest = Pair(job) ?? throw new IOException("The pair binding was removed.");
-                PairMapping.CloudFilesBinding(pair).RequireSame(PairMapping.CloudFilesBinding(latest));
-                if (!Active(latest) || store.ByObject(job.RootId, job.ObjectId)?.Path != local.Path)
-                    throw new IOException("The pair is paused or the item moved. Resume or resync before Retry.");
-                if (!SameRemote(remote, observe(latest, local.Path, token).ConfigureAwait(false).GetAwaiter().GetResult()))
-                    throw new IOException("The remote revision changed during pointer refresh. Resync before Retry.");
-                var finalPair = Pair(job);
-                if (finalPair is null || !Active(finalPair) ||
-                    store.ByObject(job.RootId, job.ObjectId)?.Path != local.Path)
-                    throw new IOException("The pair paused or changed during remote verification. Resume or resync before Retry.");
-                PairMapping.CloudFilesBinding(pair).RequireSame(PairMapping.CloudFilesBinding(finalPair));
-                // Persist only after validation, but before the native effect under the file lease.
-                store.RecordIntent(pair.PairId, action);
-            });
+                var verify = observe ?? throw new StoragePairException("provider", "Remote verification is unavailable. Reconnect the provider and Retry.");
+                var provider = Provider(pair, token);
+                var (volume, id) = LocalItems.ParseObjectId(job.ObjectId);
+                var (rootVolume, rootId) = LocalItems.ParseObjectId(pair.A.RootObjectId);
+                using var heldRoot = PilotDirectoryLease.Open(pair.A.RootPath, new(rootVolume, rootId));
+                provider.UpdateDehydratedPlaceholder(job.Remote with { RelativePath = local.Path }, remote, new(volume, id), () =>
+                {
+                    token.ThrowIfCancellationRequested();
+                    heldRoot.VerifyBinding();
+                    var latest = Pair(job) ?? throw new IOException("The pair binding was removed.");
+                    PairMapping.CloudFilesBinding(pair).RequireSame(PairMapping.CloudFilesBinding(latest));
+                    if (!Active(latest) || store.ByObject(job.RootId, job.ObjectId)?.Path != local.Path)
+                        throw new IOException("The pair is paused or the item moved. Resume or resync before Retry.");
+                    if (!SameRemote(remote, verify(latest, local.Path, token).ConfigureAwait(false).GetAwaiter().GetResult()))
+                        throw new IOException("The remote revision changed during pointer refresh. Resync before Retry.");
+                    var finalPair = Pair(job);
+                    if (finalPair is null || !Active(finalPair) ||
+                        store.ByObject(job.RootId, job.ObjectId)?.Path != local.Path)
+                        throw new IOException("The pair paused or changed during remote verification. Resume or resync before Retry.");
+                    PairMapping.CloudFilesBinding(pair).RequireSame(PairMapping.CloudFilesBinding(finalPair));
+                    // Persist only after validation, but before the native effect under the file lease.
+                    store.RecordIntent(pair.PairId, action);
+                });
+            }
             if (!store.CommitStoragePointerBaseline(pair, baseline, action,
                 new(action.ActionId, Outcome.Done, updated, remoteItem, null, null)))
                 throw new IOException("The baseline changed during pointer refresh. The recorded intent is retained for resync reconciliation.");
             store.CompleteStoragePointerUpdate(job, remote);
             StorageNotices.Complete(store, pair.PairId, item);
-            StorageNotices.CompletePair(store, pair, "remote-update");
+            StorageNotices.CompleteSuccess(store, pair, claim == StorageClaim.Requested, _reportedPairs.ContainsKey(pair.PairId));
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch (Exception error)
@@ -370,11 +434,14 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
     private Task HydrateAsync(StorageHydrationJob job, CancellationToken ct) =>
         FilesOnDemandSettlement.SerializeAsync(store, job.RootId, job.ObjectId, async () =>
     {
-        var known = _pairs.FirstOrDefault(pair => pair.A.RootId == job.RootId);
-        var pair = known is null ? null : store.Pair(known.PairId);
+        var pair = HydrationPair(job);
         if (pair is null) { store.CompleteStorageHydration(job); return; }
-        if (!Active(pair) || _reportedPairs.ContainsKey(pair.PairId) ||
-            (target is null && store.StorageRootBackedOff(job.RootId)) || !store.IsCurrentStorageHydration(job)) return;
+        if (!Active(pair) || !store.IsCurrentStorageHydration(job)) return;
+        // The claim enforces due and root admission (only a requested row bypasses a backoff); a pair-level
+        // cause reported this turn still skips normal work, never an explicit request.
+        if (_reportedPairs.ContainsKey(pair.PairId) && !store.IsStorageHydrationRequested(job)) return;
+        var claim = store.TryClaimStorageHydration(job);
+        if (claim == StorageClaim.None) return;
         var item = new StorageNotice(job.RootId, job.ObjectId, pair.B.RootId, "offline", "offline");
         try
         {
@@ -406,9 +473,10 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
             if (observed.Availability != nameof(SyncCloudFileAvailability.AvailableOffline) || !observed.Pinned)
                 throw new InvalidDataException("Offline hydration is not yet confirmed. Retry to finish downloading this item.");
             if (store.CompleteStorageHydration(job, observed))
+            {
                 StorageNotices.Complete(store, pair.PairId, item);
-            StorageNotices.CompletePair(store, pair, "offline");
-            store.ClearStorageRootBackoff(job.RootId);
+                StorageNotices.CompleteSuccess(store, pair, claim == StorageClaim.Requested, _reportedPairs.ContainsKey(pair.PairId));
+            }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception error)

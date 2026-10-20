@@ -201,8 +201,11 @@ public sealed partial class SqliteStateStore
         using var command = StoreSchema.Command(_connection, null,
             "SELECT w.job_id,w.root_id,w.object_id,w.remote_binding,w.remote_json FROM " + StorageRootsSql +
             " CROSS JOIN storage_settlement w ON w.job_id IN (SELECT sw.job_id FROM storage_settlement sw INDEXED BY storage_pending_root " +
-            "WHERE sw.root_id=roots.value AND sw.state='pending' AND sw.due<=$now AND sw.job_id>$after ORDER BY sw.job_id LIMIT $limit) " +
-            StorageUnblockedSql + " AND w.state='pending' AND w.due<=$now AND w.job_id>$after ORDER BY w.job_id LIMIT $limit;");
+            "WHERE sw.root_id=roots.value AND sw.state='pending' AND sw.due<=$now AND (sw.job_id>$after OR sw.due=$requested) " +
+            "ORDER BY CASE WHEN sw.due=$requested THEN 0 ELSE 1 END,sw.job_id LIMIT $limit) " +
+            "WHERE (NOT EXISTS(SELECT 1 FROM storage_root_backoff b WHERE b.root_id=roots.value AND b.due>$now) OR w.due=$requested) " +
+            "AND w.state='pending' AND w.due<=$now AND (w.job_id>$after OR w.due=$requested) " +
+            "ORDER BY CASE WHEN w.due=$requested THEN 0 ELSE 1 END,w.job_id LIMIT $limit;");
         StorageRootParameters(command, activeRoots);
         command.Parameters.AddWithValue("$after", afterJobId);
         command.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 512));

@@ -5,7 +5,8 @@ internal static class FilesOnDemandServiceChecks
 {
     internal static async Task RunAsync(string root)
     {
-        using var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System);
+        var clock = new OfflineClock();
+        using var store = SqliteStateStore.Open(root, V2Settings.Default, clock);
         var a = new RootDef("local", SyncProviders.Local, null, root, SyncLocalEndpointStore.ObjectId(1, 1));
         var b = new RootDef("remote", SyncProviders.Dropbox, "account", "/Remote", "remote-root");
         var pair = new PairDef("pair", "Pair A", a, b, [], [], true);
@@ -51,6 +52,12 @@ internal static class FilesOnDemandServiceChecks
             await failed.DrainAsync(CancellationToken.None);
         Require(store.StorageHydrationFor(a.RootId, files[0].ObjectId) is not null,
             "failed hydration retains durable intent");
+        Require(files.All(file => store.StorageHydrationFor(a.RootId, file.ObjectId) is not null),
+            "every failed hydration retains its durable intent");
+        Require(!store.HasStorageWork(),
+            "deferred offline jobs are not reported as due background work");
+        Require(store.StorageHydrationPage().Count == 0,
+            "deferred offline jobs never appear on an untargeted background page");
         Require(store.OpenNotices(pair.PairId).Count(n => n.Storage?.Operation == "offline") == files.Length,
             "one current failure notice per failed entity");
         var target = new StorageNotice(a.RootId, files[0].ObjectId, b.RootId, "offline", "offline");
@@ -58,6 +65,12 @@ internal static class FilesOnDemandServiceChecks
             await retry.DrainAsync(CancellationToken.None);
         Require(store.StorageHydrationFor(a.RootId, files[0].ObjectId) is null && calls == files.Length + 1,
             "explicit Retry targets exactly one deferred hydration entity");
+        Require(files.Skip(1).All(file => store.StorageHydrationFor(a.RootId, file.ObjectId) is not null),
+            "explicit Retry leaves every other deferred entity untouched");
+        Require(store.StorageHydrationPage().Count == 0,
+            "targeted Retry never makes the other deferred entities due");
+        Require(store.OpenNotices(pair.PairId).Count(n => n.Storage?.Operation == "offline") == files.Length - 1,
+            "targeted Retry closes only its own entity failure");
         Require(!store.OpenNotices(pair.PairId).Any(n => n.Storage?.ObjectId == files[0].ObjectId),
             "successful Retry closes the entity failure");
         await CheckOfflinePairRaceAsync(Path.Combine(root, "pair-race"));

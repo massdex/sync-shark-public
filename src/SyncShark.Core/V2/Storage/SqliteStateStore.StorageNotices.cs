@@ -12,6 +12,32 @@ public sealed partial class SqliteStateStore
                   OR reason_key GLOB 'storage:hydration-pair:*:auth:*') LIMIT 1;
             """, ("$p", RequirePair(pairId))) is not null);
 
+    /// <summary>Open pair-cause rows for exactly the two storage pair families; never item notices.</summary>
+    internal IReadOnlyList<StorageNotice> OpenStoragePairCauses(string pairId, string rootId, string remoteBinding) => InStore(() =>
+    {
+        var pair = RequirePair(pairId);
+        var prefixes = new[]
+        {
+            StorageNotices.Prefix(new StorageNotice(rootId, "", remoteBinding, "availability")),
+            StorageNotices.Prefix(new StorageNotice(rootId, "", remoteBinding, StorageNotices.HydrationPairOperation))
+        };
+        var result = new List<StorageNotice>(2);
+        foreach (var prefix in prefixes)
+        {
+            // Each statement pins pair_no and its own reason range so LIMIT 1 is a true index bound even
+            // when the pair has no pair-family row and the table holds a large item-notice population.
+            var detail = StoreSchema.Scalar(_connection, null, """
+                SELECT detail FROM notice INDEXED BY nt_pair_reason
+                  WHERE pair_no=$p AND reason_key>=$lo AND reason_key<$hi AND state='open'
+                    AND COALESCE(choice,'')<>'ignore' LIMIT 1;
+                """, ("$p", pair), ("$lo", prefix), ("$hi", prefix + "￿")) as string;
+            if (detail is not null &&
+                NoticeDetailCodec.Decode(new Notice(pairId, 0, NoticeKind.Info, "", detail, "")).Storage is { } storage)
+                result.Add(storage);
+        }
+        return (IReadOnlyList<StorageNotice>)result;
+    });
+
     /// <summary>Updates the one open item/operation notice in place; ignored causes remain immutable.</summary>
     internal string? ReportStorageNotice(string pairId, Notice notice, string familyPrefix) => InStore(() =>
     {

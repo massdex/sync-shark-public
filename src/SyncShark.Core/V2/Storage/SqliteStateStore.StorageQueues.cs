@@ -12,10 +12,15 @@ public sealed partial class SqliteStateStore
 
     private void StorageRootParameters(SqliteCommand command, IReadOnlyCollection<string>? activeRoots)
     {
-        var roots = activeRoots ?? Pairs().Where(p => p.Enabled && !PairPaused(p.PairId))
-            .SelectMany(p => new[] { p.A.RootId, p.B.RootId }).Distinct().ToArray();
-        command.Parameters.AddWithValue("$roots", JsonSerializer.Serialize(roots.Distinct()));
+        // Caller-supplied roots are an upper bound, never an override: intersect with the actual enabled,
+        // not-paused catalog so a stale caller cannot admit work for a suspended pair.
+        var roots = Pairs().Where(p => p.Enabled && !PairPaused(p.PairId))
+            .SelectMany(p => new[] { p.A.RootId, p.B.RootId })
+            .Where(root => activeRoots is null || activeRoots.Contains(root))
+            .Distinct().ToArray();
+        command.Parameters.AddWithValue("$roots", JsonSerializer.Serialize(roots));
         command.Parameters.AddWithValue("$now", NowMs());
+        command.Parameters.AddWithValue("$requested", StorageDue.UserRequested);
     }
 
     public void SetStorageRootBackoff(string rootId, TimeSpan delay) => InStore(() =>
@@ -57,8 +62,11 @@ public sealed partial class SqliteStateStore
         if (!_storageEnabled) return (IReadOnlyList<StorageHydrationJob>)[];
         using var cmd = StoreSchema.Command(_connection, null, "SELECT w.job_id,w.root_id,w.object_id FROM " + StorageRootsSql +
             " CROSS JOIN storage_hydration w ON w.job_id IN (SELECT h.job_id FROM storage_hydration h INDEXED BY storage_hydration_root " +
-            "WHERE h.root_id=roots.value AND h.due<=$now AND h.job_id>$after ORDER BY h.job_id LIMIT $limit) " +
-            StorageUnblockedSql + " ORDER BY w.job_id LIMIT $limit;");
+            "WHERE h.root_id=roots.value AND h.due<=$now AND (h.job_id>$after OR h.due=$requested) " +
+            "ORDER BY CASE WHEN h.due=$requested THEN 0 ELSE 1 END,h.job_id LIMIT $limit) " +
+            "WHERE (NOT EXISTS(SELECT 1 FROM storage_root_backoff b WHERE b.root_id=roots.value AND b.due>$now) OR w.due=$requested) " +
+            "AND w.due<=$now AND (w.job_id>$after OR w.due=$requested) " +
+            "ORDER BY CASE WHEN w.due=$requested THEN 0 ELSE 1 END,w.job_id LIMIT $limit;");
         StorageRootParameters(cmd, activeRoots); cmd.Parameters.AddWithValue("$after", afterJobId); cmd.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 512));
         var result = new List<StorageHydrationJob>(); using var reader = cmd.ExecuteReader();
         while (reader.Read()) result.Add(new(reader.GetInt64(0), reader.GetString(1), reader.GetString(2)));
@@ -112,5 +120,55 @@ public sealed partial class SqliteStateStore
         if (!_storageEnabled) return;
         StoreSchema.Execute(_connection, null, "UPDATE storage_settlement SET due=$due WHERE job_id=$id AND root_id=$r AND object_id=$o AND remote_binding=$b;",
             ("$due", NowMs() + Math.Max(0, (long)delay.TotalMilliseconds)), ("$id", job.JobId), ("$r", job.RootId), ("$o", job.ObjectId), ("$b", job.RemoteBinding));
+    });
+
+    internal bool IsStorageHydrationRequested(StorageHydrationJob job) => InStore(() => _storageEnabled &&
+        StoreSchema.Scalar(_connection, null, "SELECT 1 FROM storage_hydration WHERE job_id=$id AND root_id=$r AND object_id=$o AND due=$requested;",
+            ("$id", job.JobId), ("$r", job.RootId), ("$o", job.ObjectId), ("$requested", StorageDue.UserRequested)) is not null);
+
+    internal void RequestStorageHydration(StorageHydrationJob job) => InStore(() =>
+    {
+        if (!_storageEnabled) return;
+        StoreSchema.Execute(_connection, null, "UPDATE storage_hydration SET due=$requested WHERE job_id=$id AND root_id=$r AND object_id=$o;",
+            ("$requested", StorageDue.UserRequested), ("$id", job.JobId), ("$r", job.RootId), ("$o", job.ObjectId));
+    });
+
+    internal StorageClaim TryClaimStorageHydration(StorageHydrationJob job) => InStore(() =>
+    {
+        if (!_storageEnabled) return StorageClaim.None;
+        var now = NowMs();
+        StoreSchema.Execute(_connection, null, "UPDATE storage_hydration SET due=$lease WHERE job_id=$id AND root_id=$r AND object_id=$o AND due=$requested;",
+            ("$lease", now + StorageDue.ClaimLeaseMs), ("$requested", StorageDue.UserRequested),
+            ("$id", job.JobId), ("$r", job.RootId), ("$o", job.ObjectId));
+        if (StoreSchema.Changes(_connection, null) != 0) return StorageClaim.Requested;
+        StoreSchema.Execute(_connection, null, "UPDATE storage_hydration SET due=$lease WHERE job_id=$id AND root_id=$r AND object_id=$o AND due<=$now " +
+            "AND NOT EXISTS(SELECT 1 FROM storage_root_backoff b WHERE b.root_id=$r AND b.due>$now);",
+            ("$lease", now + StorageDue.ClaimLeaseMs), ("$now", now), ("$id", job.JobId), ("$r", job.RootId), ("$o", job.ObjectId));
+        return StoreSchema.Changes(_connection, null) != 0 ? StorageClaim.Normal : StorageClaim.None;
+    });
+
+    internal bool IsStoragePointerRequested(StorageSettlement job) => InStore(() => _storageEnabled &&
+        StoreSchema.Scalar(_connection, null, "SELECT 1 FROM storage_refresh WHERE job_id=$id AND root_id=$r AND object_id=$o AND remote_binding=$b AND due=$requested;",
+            ("$id", job.JobId), ("$r", job.RootId), ("$o", job.ObjectId), ("$b", job.RemoteBinding), ("$requested", StorageDue.UserRequested)) is not null);
+
+    internal void RequestStoragePointer(StorageSettlement job) => InStore(() =>
+    {
+        if (!_storageEnabled) return;
+        StoreSchema.Execute(_connection, null, "UPDATE storage_refresh SET due=$requested WHERE job_id=$id AND root_id=$r AND object_id=$o AND remote_binding=$b;",
+            ("$requested", StorageDue.UserRequested), ("$id", job.JobId), ("$r", job.RootId), ("$o", job.ObjectId), ("$b", job.RemoteBinding));
+    });
+
+    internal StorageClaim TryClaimStoragePointer(StorageSettlement job) => InStore(() =>
+    {
+        if (!_storageEnabled) return StorageClaim.None;
+        var now = NowMs();
+        StoreSchema.Execute(_connection, null, "UPDATE storage_refresh SET due=$lease WHERE job_id=$id AND root_id=$r AND object_id=$o AND remote_binding=$b AND due=$requested;",
+            ("$lease", now + StorageDue.ClaimLeaseMs), ("$requested", StorageDue.UserRequested),
+            ("$id", job.JobId), ("$r", job.RootId), ("$o", job.ObjectId), ("$b", job.RemoteBinding));
+        if (StoreSchema.Changes(_connection, null) != 0) return StorageClaim.Requested;
+        StoreSchema.Execute(_connection, null, "UPDATE storage_refresh SET due=$lease WHERE job_id=$id AND root_id=$r AND object_id=$o AND remote_binding=$b AND due<=$now " +
+            "AND NOT EXISTS(SELECT 1 FROM storage_root_backoff b WHERE b.root_id=$r AND b.due>$now);",
+            ("$lease", now + StorageDue.ClaimLeaseMs), ("$now", now), ("$id", job.JobId), ("$r", job.RootId), ("$o", job.ObjectId), ("$b", job.RemoteBinding));
+        return StoreSchema.Changes(_connection, null) != 0 ? StorageClaim.Normal : StorageClaim.None;
     });
 }

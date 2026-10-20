@@ -8,6 +8,7 @@ internal static class FilesOnDemandStorageChecks
         if (Directory.Exists(root)) throw new InvalidOperationException("Use a fresh disposable database directory.");
         FilesOnDemandCompatibilityChecks.Run(Path.Combine(root, "v20-fixture"));
         await FilesOnDemandServiceChecks.RunAsync(Path.Combine(root, "service"));
+        await StorageExplicitRetryChecks.RunAsync(Path.Combine(root, "explicit-retry"));
         CloudFilesOwnershipChecks.Run();
         await NewPointerDownloadChecks.RunAsync();
         await PointerUpdateCoordinationChecks.RunAsync(Path.Combine(root, "pointer-coordination"));
