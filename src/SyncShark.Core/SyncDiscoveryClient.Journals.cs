@@ -22,7 +22,10 @@ internal static partial class SyncDiscoveryClient
     internal static async Task<bool> TryGrowJournalAsync(SyncDiscoveryRoot root, long maximum)
     {
         if (!OperatingSystem.IsWindows() || !IsInstalled) return false;
+        // The analyzer does not carry the IsWindows guard above into the lambda.
+#pragma warning disable CA1416
         return await TryGrowJournalCoreAsync(ct => GrowJournalWindowsAsync(root, maximum, ct), TimeProvider.System).ConfigureAwait(false);
+#pragma warning restore CA1416
     }
 
     internal static async Task<bool> TryGrowJournalCoreAsync(Func<CancellationToken, Task<bool>> grow, TimeProvider clock)
