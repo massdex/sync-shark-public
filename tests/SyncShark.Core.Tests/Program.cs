@@ -1795,7 +1795,7 @@ static async Task<int> RunClonedStateJourney(string cloneRoot, bool allowEffects
         }
         return readResult;
     }
-    const string boundOperationId = "operation-f416415bc7b607062a3d567180a832b2";
+    const string boundOperationId = "operation-f00d0000000000000000000000000022";
     // Per-path accepted-effect observability from the product's OWN retained evidence: known-success effect
     // receipts for this pair. No JSON substring and no HTTP request counting.
     long ReadAcceptedReceiptCount(string databasePath, string pairId)
@@ -1842,19 +1842,19 @@ static async Task<int> RunClonedStateJourney(string cloneRoot, bool allowEffects
                 "(SELECT group_concat(m.role || '=' || coalesce(m.expected_path_key,'')) FROM operation_member m " +
                 " WHERE m.operation_id=o.operation_id) AS members " +
                 "FROM operation o WHERE o.pair_id=$pair AND o.status NOT IN ('completed','superseded') " +
-                "ORDER BY o.rowid;", ("$pair", "1fef83aa278d9b92ef27"));
+                "ORDER BY o.rowid;", ("$pair", "f00d000000000000001f"));
             var attempts = ReadRows(staleLookup,
                 "SELECT a.operation_id, a.attempt_id, a.status AS attempt_status, a.effect_kind, " +
                 "(SELECT count(*) FROM effect_receipt r WHERE r.attempt_id=a.attempt_id) AS receipts " +
                 "FROM operation_attempt a JOIN operation o ON o.operation_id=a.operation_id " +
                 "WHERE o.pair_id=$pair AND o.status NOT IN ('completed','superseded') ORDER BY a.rowid;",
-                ("$pair", "1fef83aa278d9b92ef27"));
+                ("$pair", "f00d000000000000001f"));
             var owners = ReadRows(staleLookup,
                 "SELECT DISTINCT json_extract(h.detail_json,'$.RunId') AS run_id, " +
                 "json_extract(h.detail_json,'$.OperationId') AS operation_id " +
                 "FROM history_event h JOIN operation o ON o.operation_id=json_extract(h.detail_json,'$.OperationId') " +
                 "WHERE h.event_kind='presentation' AND json_valid(h.detail_json) AND o.pair_id=$pair " +
-                "AND o.status NOT IN ('completed','superseded');", ("$pair", "1fef83aa278d9b92ef27"));
+                "AND o.status NOT IN ('completed','superseded');", ("$pair", "f00d000000000000001f"));
             Console.WriteLine(JsonSerializer.Serialize(new { schema = "r697-nonterminal-operations/1",
                 nonterminal_operations = nonterminal, attempts, owning_runs = owners },
                 new JsonSerializerOptions { WriteIndented = true }));
@@ -1886,7 +1886,7 @@ static async Task<int> RunClonedStateJourney(string cloneRoot, bool allowEffects
     {
         if (journeyPairs.Count != 1 && !(mixedOverlap && journeyPairs.Count == 2))
             throw new InvalidDataException("The journey rebinds exactly one retained published pair; found " + journeyPairs.Count);
-        var retainedPair = journeyPairs.Single(pair => pair.Id == "1fef83aa278d9b92ef27");
+        var retainedPair = journeyPairs.Single(pair => pair.Id == "f00d000000000000001f");
         var isolatedRoot = Path.Combine(full, "journey", "local");
         Directory.CreateDirectory(isolatedRoot);
         if ((File.GetAttributes(isolatedRoot) & FileAttributes.ReparsePoint) != 0)
@@ -1952,7 +1952,7 @@ static async Task<int> RunClonedStateJourney(string cloneRoot, bool allowEffects
                 bool IsRetainedJourneyPath(string path) =>
                     !path.Contains('/') && (path == "clash.txt" || path.StartsWith("journey-", StringComparison.Ordinal)) ||
                     mixedOverlap && (path is "Child/journey-mixed-download.txt" or "Child/journey-mixed-conflict.txt");
-                if (rebound.Id != "1fef83aa278d9b92ef27" ||
+                if (rebound.Id != "f00d000000000000001f" ||
                     !string.Equals(Path.GetFullPath(rebound.LocalRoot), isolatedRoot, StringComparison.OrdinalIgnoreCase))
                     throw new InvalidDataException("Retained retry proof requires the exact already-isolated fixture pair.");
                 var seeds = ReadRows(connection, """
@@ -2031,10 +2031,10 @@ static async Task<int> RunClonedStateJourney(string cloneRoot, bool allowEffects
                 {
                 var retainedRetries = new[]
                 {
-                    (Run: "command-d6f90d1a5e7f4682bff81709665884b4", Operation: "operation-779b9c6265b36c379a2a903a01ac43c3", Path: "journey-fail-1791571766.txt"),
-                    (Run: "command-bbbdd7abe8a149168352debdc71d38d4", Operation: "operation-a2f1a43265b527d058b6eef2c64e7f08", Path: "journey-fail-1791572666.txt"),
-                    (Run: "command-cc3fa59e4b264c238b903a3984210c96", Operation: "operation-fafee0702dc3beed42accd60aad1bb2a", Path: "journey-fail-1791573296.txt"),
-                    (Run: "command-9a42907b9c4a4079acc9ab09f6f6c096", Operation: "operation-b28a5f76a8c230014079d0c807158a01", Path: "journey-fail-1791576013.txt")
+                    (Run: "command-f00d000000000000000000000000000b", Operation: "operation-f00d0000000000000000000000000011", Path: "journey-fail-1791571766.txt"),
+                    (Run: "command-f00d0000000000000000000000000018", Operation: "operation-f00d0000000000000000000000000003", Path: "journey-fail-1791572666.txt"),
+                    (Run: "command-f00d0000000000000000000000000019", Operation: "operation-f00d000000000000000000000000000c", Path: "journey-fail-1791573296.txt"),
+                    (Run: "command-f00d0000000000000000000000000010", Operation: "operation-f00d0000000000000000000000000024", Path: "journey-fail-1791576013.txt")
                 };
                 foreach (var target in retainedRetries)
                 {
