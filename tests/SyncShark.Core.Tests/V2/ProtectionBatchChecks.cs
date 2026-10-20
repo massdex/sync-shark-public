@@ -16,6 +16,10 @@ internal static class ProtectionBatchChecks
         var gen = store.BeginGeneration(root, "fixture");
         store.WriteSnapshot(new Snapshot(root, Side.A, gen, "", items, []));
         store.CompleteGeneration(gen, "", true);
+        // Snapshot writes reconcile flags against durable entity debt; an incoming flag
+        // alone is deliberately cleared. Establish real holds before building the oracle.
+        foreach (var item in items.Where(i => (i.Flags & ItemFlags.NeedsRehash) != 0))
+            store.RequireRehash(root, item, "synthetic protection hold");
         using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
         { DataSource = SqliteStateStore.DatabasePath(folder), Pooling = false }.ToString());
         connection.Open();
@@ -40,8 +44,8 @@ internal static class ProtectionBatchChecks
             command.ExecuteNonQuery();
         }
         Check(items.Where(i => i.Flags != ItemFlags.None || i.ObjectId == items[6].ObjectId).Select(i => i.Path));
-        // Historical root containment is deliberately conservative even if a pending
-        // entity now has folder metadata; non-root coverage still requires kind=file.
+        // The executed 940b56be SQL requires kind=file for pending gap debt, including
+        // root containment. Its special root Replace never matched the raw-string indent.
         using (var command = connection.CreateCommand())
         {
             command.CommandText = "UPDATE file_state SET flags=0; UPDATE file_state SET kind=1 WHERE object_id=$pending;";
@@ -49,15 +53,18 @@ internal static class ProtectionBatchChecks
             command.ExecuteNonQuery();
         }
         var folderDebt = store.ProtectionBatch(root, ItemFlags.NeedsRehash, ["", "pending", "pending/leaf"]);
-        LocalChecks.Require(folderDebt.SequenceEqual(new[] { new ProtectionMatch(false, true), new ProtectionMatch(false, false), new ProtectionMatch(false, false) }),
-            "pending folder retains historical conservative root hold without file-only descendant hold");
+        LocalChecks.Require(folderDebt.SequenceEqual(new[] { new ProtectionMatch(false, false), new ProtectionMatch(false, false), new ProtectionMatch(false, false) }),
+            "pending folder alone has no file-only gap hold, including at root");
+        LocalChecks.Require(folderDebt.SequenceEqual(LegacyProtectionOracle.Read(connection, root,
+            ItemFlags.NeedsRehash, ["", "pending", "pending/leaf"])),
+            "pending folder root containment equals executed 940b56be SQL");
         // A newly opened batch sees committed writes, rather than caching the previous snapshot.
         using (var command = connection.CreateCommand())
         {
-            command.CommandText = "DELETE FROM local_gap_item; UPDATE file_state SET flags=256 WHERE object_id=$held;";
-            command.Parameters.AddWithValue("$held", items[1].ObjectId);
+            command.CommandText = "DELETE FROM local_gap_item;";
             command.ExecuteNonQuery();
         }
+        store.RequireRehash(root, items[1], "synthetic movable protection hold");
         Check(["Parent/clear"]);
         var snapshotCalls = 0;
         var moved = items[1] with { Path = "Moved/clear", Flags = ItemFlags.NeedsRehash };
@@ -143,9 +150,15 @@ internal static class ProtectionBatchChecks
         {
             var index = PathProtectionIndex.TryCreate(held)!;
             var actual = store.ProtectionBatch(root, ItemFlags.NeedsRehash, queries);
+            var legacy = LegacyProtectionOracle.Read(connection, root, ItemFlags.NeedsRehash, queries);
             for (var n = 0; n < queries.Length; n++)
-                LocalChecks.Require(actual[n] == new ProtectionMatch(index.Touches(queries[n], false), index.Touches(queries[n], true)),
-                    "batch equals old protected-path semantics for gap/non-gap, nested and case-folded paths");
+            {
+                LocalChecks.Require(actual[n] == legacy[n],
+                    $"batch equals 940b56be SQL at '{queries[n]}': batch={actual[n]}, legacy={legacy[n]}");
+                var expected = new ProtectionMatch(index.Touches(queries[n], false), index.Touches(queries[n], true));
+                LocalChecks.Require(actual[n] == expected,
+                    $"batch equals protected-path fixture at '{queries[n]}': batch={actual[n]}, expected={expected}");
+            }
         }
 
         void Plan(string sql, bool direct)
