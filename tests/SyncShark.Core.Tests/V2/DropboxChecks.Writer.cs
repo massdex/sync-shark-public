@@ -291,6 +291,49 @@ internal static partial class DropboxChecks
         }
     }
 
+    // b8c0df4a: only a structurally parsed path/not_found on HTTP 409 is the narrow missing-source proof that
+    // maps to Skipped. Restricted, locked, unknown, malformed, summary-only and 5xx refusals all stay failures.
+    private static async Task DownloadRefusalMappingChecksAsync()
+    {
+        static string Structured(string tag) =>
+            "{\"error\":{\".tag\":\"path\",\"path\":{\".tag\":\"" + tag + "\"}}}";
+        var cases = new (string Name, HttpStatusCode Status, string Body, bool Skipped)[]
+        {
+            ("parsed path/not_found", HttpStatusCode.Conflict, Structured("not_found"), true),
+            ("path/restricted_content", HttpStatusCode.Conflict, Structured("restricted_content"), false),
+            ("path/locked", HttpStatusCode.Conflict, Structured("locked"), false),
+            ("unknown tag", HttpStatusCode.Conflict, Structured("unrecognized"), false),
+            ("malformed body", HttpStatusCode.Conflict, "{\"error\":", false),
+            ("summary only", HttpStatusCode.Conflict, "{\"error_summary\":\"path/not_found/\"}", false),
+            ("server error", HttpStatusCode.InternalServerError, Structured("not_found"), false)
+        };
+        static async Task ExpectMappedAsync(string label, bool skipped, Func<Task> operation)
+        {
+            try { await operation(); }
+            catch (Exception error) when (skipped
+                ? error is ExpectedTargetMismatchException
+                : error is DropboxApiException)
+            { return; }
+            throw new InvalidOperationException(label + ": unexpected download refusal mapping.");
+        }
+
+        foreach (var (name, status, body, skipped) in cases)
+        {
+            using var h = new Harness();
+            // A 5xx read is retried against the transient budget; a tiny budget keeps the row immediate.
+            h.Client.ReadTransientBudget = TimeSpan.FromMilliseconds(50);
+            h.Client.ReadRetryDelay = (_, _) => Task.CompletedTask;
+            h.Wire.SeedFile("refused.txt", "x");
+            h.Wire.DownloadRefusalOverride = (status, body);
+            var current = (await h.Writer().ObserveAsync("refused.txt", CancellationToken.None))!;
+            await ExpectMappedAsync(name, skipped, () =>
+                h.Writer().OpenReadAsync(current, CancellationToken.None));
+            using var destination = new MemoryStream();
+            await ExpectMappedAsync(name, skipped, () =>
+                h.Writer().DownloadToAsync(current, destination, CancellationToken.None));
+        }
+    }
+
     private static async Task ObserveChecksAsync()
     {
         using var h = new Harness();
