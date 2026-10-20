@@ -13,7 +13,7 @@ internal static class FilesOnDemandNativeChecks
             return;
         }
         if (!string.Equals(Path.GetDirectoryName(root), @"C:\SyncSharkFodTest", StringComparison.OrdinalIgnoreCase) ||
-            !DateTime.TryParseExact(Path.GetFileName(root), "yyyyMMdd-HHmmss-fff",
+            !DateTime.TryParseExact(Path.GetFileName(root), ["yyyyMMdd-HHmmss", "yyyyMMdd-HHmmss-fff"],
                 System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _) ||
             Directory.Exists(root) || File.Exists(root))
             throw new InvalidOperationException("Native validation requires a fresh timestamp directory directly under C:\\SyncSharkFodTest.");
@@ -28,11 +28,28 @@ internal static class FilesOnDemandNativeChecks
             Console.WriteLine("SKIP Files On-Demand: disposable volume is not NTFS.");
             return;
         }
+        // Own the timestamp container so the staging sibling inherits a user-owned parent.
+        // The public argument remains the fresh timestamp directory, never an existing root.
+        Directory.CreateDirectory(root);
+        try { await RunInContainerAsync(Path.Combine(root, "root"), version); }
+        finally
+        {
+            // Non-recursive: never remove unexpected content or a failed registered fixture.
+            if (Directory.Exists(root) && !Directory.EnumerateFileSystemEntries(root).Any())
+                Directory.Delete(root);
+        }
+    }
+
+    private static async Task RunInContainerAsync(string root, string version)
+    {
+        if (FilesOnDemandNativeEdgeChecks.ControlNamespaceExists(root))
+            throw new IOException("Fixture control namespace already exists; nothing registered.");
         Directory.CreateDirectory(root);
         var content = System.Text.Encoding.UTF8.GetBytes("exact disposable hydration bytes");
         using var bytes = new MemoryStream(content);
         var hash = await SyncContentIdentity.ComputeAsync(SyncProviders.Dropbox, bytes, CancellationToken.None);
-        var remote = new PilotRemoteEntry("sample.txt", PilotEntryKind.File, "id:sample", "revision-1", content.Length, hash);
+        var remote = new PilotRemoteEntry("sample.txt", PilotEntryKind.File, "id:sample", "revision-1", content.Length, hash)
+            { ModifiedUtc = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero) };
         var source = new RangeSource(content, remote);
         PilotDirectoryIdentity local;
         using (var lease = PilotDirectoryLease.Open(root)) local = lease.Identity;
@@ -40,6 +57,7 @@ internal static class FilesOnDemandNativeChecks
             root, local.VolumeSerialNumber, local.FileId, "/Fixture", "id:fixture-root");
         var path = Path.Combine(root, remote.RelativePath);
         await File.WriteAllBytesAsync(path, content);
+        File.SetLastWriteTimeUtc(path, remote.ModifiedUtc.Value.UtcDateTime);
         using var initialProvider = new WindowsCloudFilesProvider(binding, source, root, SyncDirectoryStorage.CloudOnly);
         var provider = initialProvider;
         try { provider.RegisterAndConnect(); }
@@ -75,6 +93,7 @@ internal static class FilesOnDemandNativeChecks
             if (!rejectedEdit || !(await File.ReadAllBytesAsync(path)).SequenceEqual(new byte[content.Length]))
                 throw new IOException("An edit at conversion was not retained safely.");
             await File.WriteAllBytesAsync(path, content); // restore only this synthetic fixture
+            File.SetLastWriteTimeUtc(path, remote.ModifiedUtc.Value.UtcDateTime);
             PilotDirectoryIdentity uploadedIdentity;
             using (var file = SyncLocalFileAuthority.OpenExisting(path)) uploadedIdentity = file.ReadIdentity();
             var rejectedReplacement = false;
@@ -154,7 +173,19 @@ internal static class FilesOnDemandNativeChecks
                 new PlanOptions(TimeSpan.Zero, true, new LabelRule("{name}", "yyyyMMdd", TimeSpan.Zero, "A", "B"), 10));
             if (pointerPlan.Actions.Any(action => action.Source?.ObjectId == pointer.ObjectId || action.Kind == ActionKind.Delete))
                 throw new IOException("Planner used a pointer as an upload source or deletion evidence.");
-            await FilesOnDemandNativePointerChecks.VerifyRenameAsync(root, path, binding.PairId, pointer, () => source.Reads, provider, remote);
+            Exception? renameFailure = null;
+            try
+            {
+                using var renameStore = SqliteStateStore.Open(database, V2Settings.Default, TimeProvider.System);
+                await FilesOnDemandNativePointerChecks.VerifyRenameAsync(root, path, binding.PairId, pointer,
+                    () => source.Reads, provider, remote, renameStore, pair, registrationId);
+                Console.WriteLine("PASS native dehydrated rename, acknowledgment replay and metadata-only edit");
+            }
+            catch (Exception error)
+            {
+                renameFailure = error;
+                Console.WriteLine("FAIL native rename: " + error.Message);
+            }
             byte[] read;
             using (PairPause.Begin(null!, binding.PairId, () => true))
             {
@@ -167,8 +198,8 @@ internal static class FilesOnDemandNativeChecks
                 throw new IOException("Hydrate-on-open did not return exact callback bytes while sync was paused.");
             var hydrated = await ScanOwnedAsync(root, binding.PairId);
             if (hydrated.Flags.HasFlag(ItemFlags.OwnedPointer) || hydrated.ObjectId != pointer.ObjectId ||
-                hydrated.Hash != pointer.Hash || hydrated.Size != pointer.Size || hydrated.Mtime != pointer.Mtime)
-                throw new IOException("Hydration-only transition changed the content fingerprint.");
+                (hydrated.Hash is not null && hydrated.Hash != pointer.Hash) || hydrated.Size != pointer.Size || hydrated.Mtime != pointer.Mtime)
+                throw new IOException("Hydration-only transition changed the content fingerprint. Before: " + pointer + " After: " + hydrated);
             var readsBeforeCreate = source.Reads;
             NewPointerNativeChecks.CheckCreateOnly(provider, local, remote, path, () =>
             {
@@ -187,15 +218,23 @@ internal static class FilesOnDemandNativeChecks
             await provider.ConvertVerifiedSyncedFileAsync(remote, dehydrateOverride: true, expectedLocalIdentity: uploadedIdentity);
             var beforeUpdateReads = source.Reads;
             provider.Dispose();
-            source.Replace(nextBytes, next);
             using (var restarted = SqliteStateStore.Open(database, V2Settings.Default, TimeProvider.System))
             using (var lifetime = new CloudFilesLifetime((_, _, _) => provider = new WindowsCloudFilesProvider(
                 binding, source, root, SyncDirectoryStorage.CloudOnly), _ => true, restarted,
                 (_, _, _) => Task.FromResult<PilotRemoteEntry?>(source.Current)))
             {
+                // Direct native calls above do not publish store observations. Re-settle through
+                // the real service before testing the remote-cursor trigger against OnlineOnly state.
+                restarted.QueueStorageSettlement(localRoot.RootId, uploaded.ObjectId, remoteRoot.RootId, remote);
+                await using (var settlement = new StorageSettlementService(restarted, lifetime))
+                    await settlement.DrainAsync(CancellationToken.None);
+                source.Replace(nextBytes, next);
                 var generation = restarted.BeginGeneration(remoteRoot.RootId, "snapshot");
-                restarted.WriteSnapshot(new Snapshot(remoteRoot.RootId, Side.B, generation, "cursor-2",
-                    [uploaded with { ObjectId = next.Id!, VersionId = next.Revision, Hash = next.ContentHash, Size = next.Size }], []));
+                restarted.WriteDelta(new Delta(remoteRoot.RootId, Side.B, generation, "", "cursor-2",
+                    [new Change(ChangeKind.Upsert, next.Id!, next.RelativePath,
+                        uploaded with { ObjectId = next.Id!, VersionId = next.Revision, Hash = next.ContentHash, Size = next.Size }, null)], false, []));
+                if (restarted.ChangedStoragePointers().Count != 1)
+                    throw new IOException("The real remote delta did not queue exactly one pointer refresh.");
                 await using var service = new StorageSettlementService(restarted, lifetime);
                 await service.DrainAsync(CancellationToken.None);
                 if (restarted.ChangedStoragePointers().Count != 0)
@@ -214,7 +253,9 @@ internal static class FilesOnDemandNativeChecks
                 updatedPointer.State.Availability != SyncCloudFileAvailability.OnlineOnly ||
                 updatedPointer.Identity.DropboxRevision != next.Revision || updatedPointer.State.LogicalSize != next.Size ||
                 source.Reads != beforeUpdateReads)
-                throw new IOException("Remote revision update did not remain dehydrated without download.");
+                throw new IOException("Remote revision update did not remain dehydrated without download. Pointer: " + updatedPointer +
+                    " Reads before/after: " + beforeUpdateReads + "/" + source.Reads +
+                    " Notices: " + string.Join("; ", verifyStore.OpenNotices(pair.PairId).Select(n => n.Detail)));
             provider.UpdateDehydratedPlaceholder(remote, next, uploadedIdentity); // lost-response retry
             source.FailReads = true;
             var failedIo = false;
@@ -252,10 +293,42 @@ internal static class FilesOnDemandNativeChecks
                 ignoredPointer.Identity.DropboxRevision != next.Revision || source.Reads != readsBeforeIgnore)
                 throw new IOException("Hydration Ignore did not close the notice while retaining the unchanged pointer.");
             source.FailReads = false;
+            // Real callback outage burst: repeated failed opens share one pair cause and backoff.
+            source.NetworkOutage = true;
+            await Task.WhenAll(Enumerable.Range(0, 8).Select(async _ =>
+            {
+                try { await File.ReadAllBytesAsync(path); }
+                catch (IOException) { return; }
+                throw new IOException("Offline fixture unexpectedly hydrated.");
+            }));
+            await WaitForHydrationNoticeAsync(verifyStore, pair.PairId);
+            var pairNotices = verifyStore.OpenNotices(pair.PairId)
+                .Where(n => n.ReasonKey.StartsWith("storage:hydration-pair:", StringComparison.Ordinal)).ToArray();
+            if (pairNotices.Length != 1)
+                throw new IOException("Offline burst did not persist exactly one pair hydration notice: " +
+                    string.Join("; ", verifyStore.OpenNotices(pair.PairId).Select(n => n.ReasonKey)));
+            source.NetworkOutage = false;
+            if (!(await File.ReadAllBytesAsync(path)).SequenceEqual(nextBytes))
+                throw new IOException("Outage recovery returned wrong bytes.");
+            await WaitUntilHydrationNoticesClosedAsync(verifyStore, pair.PairId);
+            Console.WriteLine("PASS native offline callback burst: one pair notice, successful read closes it");
+            source.Replace(FilesOnDemandNativeEdgeChecks.LargeEdgeContent(), FilesOnDemandNativeEdgeChecks.LargeEdgeRemote());
+            var edge = await FilesOnDemandNativeEdgeChecks.CheckLargeFirstRangeReadAsync(root, provider, local,
+                () => source.Reads, binding.PairId);
+            Console.WriteLine($"Native first 4KiB read: PARTIALLY_ON_DISK={edge.NativePartiallyOnDiskBit}; " +
+                $"resident={edge.NativeAfter.OnDiskBytes}; availability={edge.AvailabilityAfter}; partial={edge.PartiallyHydrated}");
+            var recovery = Path.Combine(database, "edge-recovery");
+            await FilesOnDemandNativeEdgeChecks.CheckHydratedPointerMutationRefusedAsync(root, local, binding.PairId,
+                edge.PointerBefore, () => source.Reads, recovery);
+            Console.WriteLine("PASS native hydrated-pointer stale Move/Delete refuse without recall");
+            await FilesOnDemandNativeEdgeChecks.CheckFullyHydratedPointerReplacementAsync(root, local, binding.PairId,
+                () => source.Reads, recovery);
+            Console.WriteLine("PASS native ordinary LocalWriter replacement of a fully hydrated pointer");
             await provider.UnregisterAsync(CancellationToken.None);
             if (WindowsCloudFilesProvider.ReadRegisteredSyncRootFileId(root) is not null)
                 throw new IOException("Disposable registration was retained after successful hydration.");
             Console.WriteLine($"PASS Files On-Demand native register/reconnect-before-conversion/edit-race/verified-convert/dehydrate/reconnect-after-conversion/idempotent-retry/callback-hydrate/dehydrated-revision-update/hydration-Retry/hydration-Ignore/unregister; platform {version}");
+            if (renameFailure is not null) throw new IOException("Native rename acceptance failed; independent checks continued.", renameFailure);
         }
         catch (Exception error)
         {
@@ -267,6 +340,7 @@ internal static class FilesOnDemandNativeChecks
             try
             {
                 source.FailReads = false;
+                source.NetworkOutage = false;
                 // This fresh fixture owns only tiny synthetic bytes. Hydrate before removing its root.
                 // If hydration fails, preserve the pointer rather than deleting a registered root.
                 provider.Dispose();
@@ -280,6 +354,9 @@ internal static class FilesOnDemandNativeChecks
                 if (WindowsCloudFilesProvider.ReadRegisteredSyncRootFileId(root) is not null)
                     throw new IOException("Disposable registration remains; root retained.");
                 Directory.Delete(root, recursive: true);
+                FilesOnDemandNativeEdgeChecks.RemoveControlNamespace(root);
+                if (FilesOnDemandNativeEdgeChecks.ControlNamespaceExists(root))
+                    throw new IOException("Fixture control namespace remains after cleanup.");
             }
             catch (Exception cleanupError) when (originalFailure is not null)
             {
@@ -296,7 +373,7 @@ internal static class FilesOnDemandNativeChecks
         var deadline = Environment.TickCount64 + 10_000;
         while (true)
         {
-            if (store.OpenNotices(pairId).FirstOrDefault(notice => notice.Storage?.Operation == "hydration") is { } found)
+            if (store.OpenNotices(pairId).FirstOrDefault(notice => notice.Storage?.Operation is "hydration" or "hydration-pair") is { } found)
                 return found;
             if (Environment.TickCount64 >= deadline)
                 throw new IOException("The hydration notice was not persisted within the bounded wait.");
@@ -309,7 +386,7 @@ internal static class FilesOnDemandNativeChecks
         var deadline = Environment.TickCount64 + 10_000;
         while (true)
         {
-            if (!store.OpenNotices(pairId).Any(notice => notice.Storage?.Operation == "hydration")) return;
+            if (!store.OpenNotices(pairId).Any(notice => notice.Storage?.Operation is "hydration" or "hydration-pair")) return;
             if (Environment.TickCount64 >= deadline)
                 throw new IOException("The hydration notice did not close within the bounded wait.");
             await Task.Delay(25).ConfigureAwait(false);
@@ -321,11 +398,22 @@ internal static class FilesOnDemandNativeChecks
     {
         root = Path.GetFullPath(root);
         if (!string.Equals(Path.GetDirectoryName(root), @"C:\SyncSharkFodTest", StringComparison.OrdinalIgnoreCase) ||
-            !DateTime.TryParseExact(Path.GetFileName(root), "yyyyMMdd-HHmmss-fff",
+            !DateTime.TryParseExact(Path.GetFileName(root), ["yyyyMMdd-HHmmss", "yyyyMMdd-HHmmss-fff"],
                 System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _) ||
             (File.GetAttributes(root) & FileAttributes.ReparsePoint) != 0 ||
-            Directory.EnumerateFileSystemEntries(root).Any(path => Path.GetFileName(path) != "sample.txt"))
+            Directory.EnumerateFileSystemEntries(root).Any(path => Path.GetFileName(path) != "sample.txt" &&
+                Path.GetFileName(path) != "root" && !string.Equals(path,
+                    FilesOnDemandNativeEdgeChecks.ControlNamespacePath(Path.Combine(root, "root")),
+                    StringComparison.OrdinalIgnoreCase)))
             throw new IOException("Not an isolated known fixture; nothing removed.");
+        var container = root;
+        if (Directory.Exists(Path.Combine(root, "root")))
+        {
+            root = Path.Combine(root, "root");
+            if ((File.GetAttributes(root) & FileAttributes.ReparsePoint) != 0 ||
+                Directory.EnumerateFileSystemEntries(root).Any(entry => Path.GetFileName(entry) != "sample.txt"))
+                throw new IOException("Not an isolated known fixture; nothing removed.");
+        }
         var path = Path.Combine(root, "sample.txt");
         if (!WindowsCloudFilesProvider.TryReadOwnedPlaceholder(path, out var pointer) || pointer is null ||
             !pointer.Identity.IsBoundTo("disposable-pair", SyncProviders.Dropbox) || pointer.Identity.DropboxId != "id:sample")
@@ -348,12 +436,18 @@ internal static class FilesOnDemandNativeChecks
             root, identity.VolumeSerialNumber, identity.FileId, "/Fixture", "id:fixture-root");
         using (var provider = new WindowsCloudFilesProvider(binding, new RangeSource(bytes, remote), root, SyncDirectoryStorage.CloudOnly))
         {
+            provider.ExpectedRegistrationId = provider.RegistrationId ??
+                throw new IOException("The fixture has no v2 ownership GUID; nothing removed.");
             provider.RegisterAndConnect();
+            if (!(await File.ReadAllBytesAsync(path)).SequenceEqual(bytes))
+                throw new IOException("Changed fixture bytes retained.");
             await provider.UnregisterAsync(CancellationToken.None);
         }
         lease.Dispose();
         if (!(await File.ReadAllBytesAsync(path)).SequenceEqual(bytes)) throw new IOException("Changed fixture bytes retained.");
         Directory.Delete(root, true);
+        FilesOnDemandNativeEdgeChecks.RemoveControlNamespace(root);
+        if (container != root) Directory.Delete(container, recursive: false);
         Console.WriteLine("PASS interrupted native fixture hydrated, unregistered and removed");
     }
 
@@ -372,6 +466,7 @@ internal static class FilesOnDemandNativeChecks
         public int Reads;
         public int Uploads;
         public bool FailReads;
+        public bool NetworkOutage;
         public PilotRemoteEntry Current => entry;
         public async Task<PilotRemoteEntry> UploadAsync(Stream source)
         {
@@ -391,6 +486,7 @@ internal static class FilesOnDemandNativeChecks
         public async Task<SyncRangeDownloadResult> DownloadRangeAsync(PilotRemoteEntry expected, long offset, long length,
             Stream destination, CancellationToken cancellationToken = default)
         {
+            if (NetworkOutage) throw new System.Net.Http.HttpRequestException("Synthetic offline provider.");
             if (FailReads) throw new IOException("Synthetic unavailable remote revision; retry when available.");
             var selected = expected.Revision == entry.Revision ? (Bytes: bytes, Entry: entry) :
                 _previous.GetValueOrDefault(expected.Revision!);

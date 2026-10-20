@@ -11,6 +11,7 @@ internal static class FilesOnDemandStorageChecks
         await StorageExplicitRetryChecks.RunAsync(Path.Combine(root, "explicit-retry"));
         await StorageQueuePlanChecks.RunAsync(Path.Combine(root, "queue-plans"));
         CloudFilesOwnershipChecks.Run();
+        OwnedPointerProofChecks.Run();
         await NewPointerDownloadChecks.RunAsync();
         await PointerUpdateCoordinationChecks.RunAsync(Path.Combine(root, "pointer-coordination"));
         await SettlementInventoryChecks.RunAsync(Path.Combine(root, "settlement-inventory"));

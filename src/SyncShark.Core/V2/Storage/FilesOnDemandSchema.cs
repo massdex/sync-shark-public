@@ -23,6 +23,8 @@ internal static class FilesOnDemandSchema
         // Additive lazy migration: existing opted-in stores gain item-scoped retry scheduling without a schema version.
         if (StoreSchema.Scalar(connection, tx, "SELECT 1 FROM pragma_table_info('storage_settlement') WHERE name='due';") is null)
             StoreSchema.Execute(connection, tx, "ALTER TABLE storage_settlement ADD COLUMN due INTEGER NOT NULL DEFAULT 0;");
+        if (StoreSchema.Scalar(connection, tx, "SELECT 1 FROM pragma_table_info('storage_settlement') WHERE name='kind';") is null)
+            StoreSchema.Execute(connection, tx, "ALTER TABLE storage_settlement ADD COLUMN kind TEXT;");
         // Must follow the due-column migration for older opted-in stores.
         StoreSchema.Execute(connection, tx, RequestedIndexesDdl);
         if (legacyPeriodic) StoreSchema.Execute(connection, tx, "DELETE FROM storage_refresh WHERE due>0;");
@@ -120,7 +122,10 @@ internal static class FilesOnDemandSchema
         """;
 }
 
-public sealed record StorageSettlement(long JobId, string RootId, string ObjectId, string RemoteBinding, PilotRemoteEntry Remote, long RefreshDue = 0);
+public sealed record StorageSettlement(long JobId, string RootId, string ObjectId, string RemoteBinding, PilotRemoteEntry Remote, long RefreshDue = 0, string? Kind = null)
+{
+    public const string AcknowledgeMove = "acknowledge-move";
+}
 public sealed record StorageObserved(string Availability, bool Pinned, bool InSync);
 public sealed record StorageFolderSummary(string ObjectId, string Path, long Items, long Hydrated, long Dehydrated)
 {

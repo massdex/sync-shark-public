@@ -60,21 +60,32 @@ internal static class SettlementInventoryChecks
             using (var reopened = SqliteStateStore.Open(Path.Combine(root, "state"), settings, TimeProvider.System))
                 Require(reopened.HasOwnedPointers(pair.A.RootId) && reopened.StorageSettlementPage().Count == 0,
                     "ownership and acknowledgement survive reopening without registration");
+            // Model the durable/native registration handshake without registering a real root.
+            const string registrationId = "11111111-1111-4111-8111-111111111111";
+            store.RecordStorageRegistration(pair.A.RootId, localPath, registrationId);
             var probes = 0;
             var inventory = Inventory();
+            inventory.ReadRootRegistrationForTest = _ => new CloudFilesRootRegistration(
+                LocalItems.ParseObjectId(pair.A.RootObjectId).FileId,
+                WindowsCloudFileIdentity.Root(pair.PairId, pair.B.Provider) with { V2OwnershipToken = registrationId });
             inventory.OwnedPlaceholderProbeForTest = _ => probes++;
             inventory.ReadOwnedPlaceholderForTest = _ => new WindowsCloudPlaceholderInfo(
                 WindowsCloudFileIdentity.FromRemote(pair.PairId, job.Remote, pair.B.Provider),
                 new(local.Path, SyncCloudFileAvailability.OnlineOnly, false, true, local.Size, 0,
                     remote.ObjectId, remote.VersionId, remote.Hash),
                 LocalItems.ParseObjectId(local.ObjectId).FileId, LocalItems.ParseObjectId(pair.A.RootObjectId).FileId,
-                false, 0);
+                false, 0x31);
             var scanned = await inventory.FullAsync(2, _ => true, null!, CancellationToken.None);
             var pointer = scanned.Items.Single();
             Require(probes == 1 && pointer.Flags == ItemFlags.OwnedPointer && pointer.Hash == local.Hash &&
                 scanned.IncompleteSubtrees.Count == 0, "next scan recognises the converted entity without reading bytes");
             store.WriteSnapshot(scanned with { Gen = store.BeginGeneration(pair.A.RootId, "snapshot") });
-            Require(!LinkExclusions.Of(store, pair, !replace).Covers(local.Path), "converted pointer is not excluded as a foreign stub");
+            // An unavailable NTFS journal can independently protect this disposable root.
+            // Assert the foreign-stub classification, not the absence of unrelated gap protection.
+            Require(!store.LiveFlagged(pair.A.RootId, ItemFlags.Placeholder).Any(item => item.Path == local.Path) &&
+                !LinkExclusions.Of(store, pair, !replace).Summaries(pair.PairId)
+                    .Any(notice => notice.Rule == LinkExclusions.StubRule),
+                "converted pointer is not excluded as a foreign stub");
             var edited = remote with { Hash = new string('b', 64), VersionId = "revision-2", Size = 8,
                 Mtime = remote.Mtime.AddHours(1) };
             store.WriteDelta(new(pair.B.RootId, Side.B, remoteGen, "remote", "edited",

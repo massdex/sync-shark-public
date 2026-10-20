@@ -119,7 +119,10 @@ public sealed record WindowsCloudPlaceholderInfo(
     ulong FileId,
     ulong SyncRootFileId,
     bool IsDirectory,
-    uint RawPlaceholderState);
+    uint RawPlaceholderState)
+{
+    public long ModifiedDataSize { get; init; }
+}
 
 /// <summary>
 /// Owns a registered Windows Cloud Files sync root for one Sync Shark pair. Registration is durable;
@@ -1143,7 +1146,7 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
                     identity.DropboxId, identity.DropboxRevision, identity.ContentHash);
                 result = new WindowsCloudPlaceholderInfo(identity, state,
                     unchecked((ulong)header.FileId), unchecked((ulong)header.SyncRootFileId), directory,
-                    placeholderState);
+                    placeholderState) { ModifiedDataSize = header.ModifiedDataSize };
                 return true;
             }
             finally

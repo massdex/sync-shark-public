@@ -89,7 +89,44 @@ internal static class FilesOnDemandSettlementChecks
             "pair cause dedupes across items without root hold");
         StorageNotices.CompletePair(store, pair, "settlement");
         Require(!store.OpenNotices(pair.PairId).Any(n => n.Storage is not null), "pair recovery closes obsolete cause");
-        Console.WriteLine("PASS settlement exact remote identity, shared Retry serialization, cause-scoped Ignore and nonholding pair dedupe");
+        // A remote Move commits its durable acknowledgment alongside the ordinary result.
+        var moved = local with { Path = "Moved/file.txt", Flags = ItemFlags.OwnedPointer };
+        var cloud = local with { ObjectId = remote.Id!, VersionId = remote.Revision, Flags = ItemFlags.None };
+        var movedCloud = cloud with { Path = moved.Path };
+        var move = new SyncAction("move-pointer", 9, ActionKind.Move, Side.B, moved.Path, local.Path,
+            moved, cloud, false, "pointer-object");
+        store.RecordIntent(pair.PairId, move);
+        store.CommitResult(pair.PairId, gen, move, new(move.ActionId, Outcome.Done, moved, movedCloud, null, null));
+        var acknowledgment = store.StorageSettlementFor(localRoot.RootId, local.ObjectId, remoteRoot.RootId);
+        Require(acknowledgment is { Kind: StorageSettlement.AcknowledgeMove } && acknowledgment.Remote.RelativePath == moved.Path,
+            "remote Move durably queues typed acknowledgment at the new path");
+        Require(store.StorageSettlementPage().Any(item => item.JobId == acknowledgment!.JobId && item.Kind == StorageSettlement.AcknowledgeMove),
+            "bounded settlement page preserves acknowledgment job kind");
+        var acknowledgments = 0;
+        var ackWorker = new FilesOnDemandSettlement(store, (_, _) =>
+        {
+            acknowledgments++;
+            return Task.FromResult(new StorageObserved("OnlineOnly", false, true));
+        }, (_, error) => throw error);
+        await ackWorker.RunItemAsync(acknowledgment!, CancellationToken.None);
+        await ackWorker.RunItemAsync(acknowledgment!, CancellationToken.None);
+        Require(acknowledgments == 1, "completed acknowledgment replay is idempotent");
+        Require(store.StoragePointerFor(localRoot.RootId, local.ObjectId, remoteRoot.RootId)?.Remote.RelativePath == moved.Path,
+            "acknowledgment completion publishes relocated receipt");
+
+        store.RequireRehash(localRoot.RootId, moved, "pointer verification");
+        store.RequestPointerVerification(pair.PairId, localRoot.RootId, moved.ObjectId, moved.Path, remote);
+        store.RequestPointerVerification(pair.PairId, localRoot.RootId, moved.ObjectId, moved.Path, remote);
+        var verification = store.OpenNotices(pair.PairId).Single(n => n.Storage?.Operation == "pointer-verify");
+        store.SetPairPaused(pair.PairId, true);
+        await StorageNotices.ApplyAsync(store, null, verification, NoticeChoices.RetryNow, CancellationToken.None);
+        var hydration = store.StorageHydrationFor(localRoot.RootId, moved.ObjectId);
+        Require(hydration is not null && store.IsStorageHydrationRequested(hydration),
+            "verification Retry persists existing hydration sentinel while paused");
+        Require((store.ByObject(localRoot.RootId, moved.ObjectId)!.Flags & ItemFlags.NeedsRehash) != 0,
+            "queued hydration never clears content verification debt");
+        store.SetPairPaused(pair.PairId, false);
+        Console.WriteLine("PASS settlement receipt, move acknowledgment replay, verification hydration Retry and notice dedupe");
     }
     private static void Require(bool condition, string message)
     {

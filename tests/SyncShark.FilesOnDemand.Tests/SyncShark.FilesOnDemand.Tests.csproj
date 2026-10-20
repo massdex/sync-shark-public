@@ -14,6 +14,8 @@
     <Compile Include="../SyncShark.Core.Tests/FilesOnDemandSettlementChecks.cs" Link="FilesOnDemandSettlementChecks.cs" />
     <Compile Include="../SyncShark.Core.Tests/HydrationNoticeWriterChecks.cs" Link="HydrationNoticeWriterChecks.cs" />
     <Compile Include="../SyncShark.Core.Tests/FilesOnDemandNativePointerChecks.cs" Link="FilesOnDemandNativePointerChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/FilesOnDemandNativeEdgeChecks.cs" Link="FilesOnDemandNativeEdgeChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/OwnedPointerProofChecks.cs" Link="OwnedPointerProofChecks.cs" />
     <Compile Include="../SyncShark.Core.Tests/V2/NewPointerNativeChecks.cs" Link="NewPointerNativeChecks.cs" />
     <Compile Include="../SyncShark.Core.Tests/V2/NewPointerDownloadChecks.cs" Link="NewPointerDownloadChecks.cs" />
     <Compile Include="../SyncShark.Core.Tests/CloudFilesLifetimeChecks.cs" Link="CloudFilesLifetimeChecks.cs" />

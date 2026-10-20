@@ -189,6 +189,17 @@ internal static class StorageNotices
             store.CloseNotice(notice.NoticeId!, choice);
             return;
         }
+        if (item.Operation == "pointer-verify")
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!store.QueuePointerVerificationHydration(item.RootId, item.ObjectId))
+            {
+                Complete(store, pair.PairId, item);
+                return;
+            }
+            // Reuse the durable offline queue and its request sentinel, not callback retry or a new lane.
+            item = item with { Operation = "offline", Scope = "offline" };
+        }
         if (connections is null)
         {
             ct.ThrowIfCancellationRequested();

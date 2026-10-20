@@ -155,6 +155,11 @@ public sealed partial class SqliteStateStore
         PairDef pair, SyncAction action, ActionResult result)
     {
         if (!_storageEnabled) return;
+        if (action.Kind == ActionKind.Move)
+        {
+            QueuePointerMoveAcknowledgment(transaction, pair, action, result);
+            return;
+        }
         if (action.Kind is not (ActionKind.CopyNew or ActionKind.Update or ActionKind.KeepBoth)) return;
         var localSide = pair.A.Provider == SyncProviders.Local ? Side.A : Side.B;
         var localRoot = localSide == Side.A ? pair.A : pair.B;
@@ -177,7 +182,7 @@ public sealed partial class SqliteStateStore
         StoreSchema.Execute(_connection, transaction, """
             INSERT INTO storage_settlement(root_id,object_id,remote_binding,remote_json)
             VALUES($r,$o,$b,$j) ON CONFLICT(root_id,object_id,remote_binding)
-            DO UPDATE SET remote_json=excluded.remote_json,state=CASE WHEN json_extract(storage_settlement.remote_json,'$.Revision') IS NOT json_extract(excluded.remote_json,'$.Revision') OR json_extract(storage_settlement.remote_json,'$.ContentHash') IS NOT json_extract(excluded.remote_json,'$.ContentHash') OR json_extract(storage_settlement.remote_json,'$.Id') IS NOT json_extract(excluded.remote_json,'$.Id') THEN 'pending' ELSE storage_settlement.state END;
+            DO UPDATE SET kind=NULL,job_id=excluded.job_id,remote_json=excluded.remote_json,state=CASE WHEN json_extract(storage_settlement.remote_json,'$.Revision') IS NOT json_extract(excluded.remote_json,'$.Revision') OR json_extract(storage_settlement.remote_json,'$.ContentHash') IS NOT json_extract(excluded.remote_json,'$.ContentHash') OR json_extract(storage_settlement.remote_json,'$.Id') IS NOT json_extract(excluded.remote_json,'$.Id') THEN 'pending' ELSE storage_settlement.state END;
             """, ("$r", localRoot.RootId), ("$o", local.ObjectId), ("$b", remoteRoot.RootId),
             ("$j", JsonSerializer.Serialize(receipt)));
     }
@@ -191,20 +196,20 @@ public sealed partial class SqliteStateStore
         StoreSchema.Execute(_connection, null, """
             INSERT INTO storage_settlement(root_id,object_id,remote_binding,remote_json)
             VALUES($r,$o,$b,$j) ON CONFLICT(root_id,object_id,remote_binding)
-            DO UPDATE SET remote_json=excluded.remote_json,state=CASE WHEN json_extract(storage_settlement.remote_json,'$.Revision') IS NOT json_extract(excluded.remote_json,'$.Revision') OR json_extract(storage_settlement.remote_json,'$.ContentHash') IS NOT json_extract(excluded.remote_json,'$.ContentHash') OR json_extract(storage_settlement.remote_json,'$.Id') IS NOT json_extract(excluded.remote_json,'$.Id') THEN 'pending' ELSE storage_settlement.state END;
+            DO UPDATE SET kind=NULL,job_id=excluded.job_id,remote_json=excluded.remote_json,state=CASE WHEN json_extract(storage_settlement.remote_json,'$.Revision') IS NOT json_extract(excluded.remote_json,'$.Revision') OR json_extract(storage_settlement.remote_json,'$.ContentHash') IS NOT json_extract(excluded.remote_json,'$.ContentHash') OR json_extract(storage_settlement.remote_json,'$.Id') IS NOT json_extract(excluded.remote_json,'$.Id') THEN 'pending' ELSE storage_settlement.state END;
             """, ("$r", rootId), ("$o", objectId), ("$b", remoteBinding), ("$j", JsonSerializer.Serialize(remote)));
     });
 
     // Keep Retry outside the normal keyset query: OR/CASE priority would scan and sort the whole queue.
     // Literal -1 matches StorageDue.UserRequested and the partial index predicate.
     internal const string StorageSettlementRequestedSql =
-        "SELECT w.job_id,w.root_id,w.object_id,w.remote_binding,w.remote_json FROM " + StorageRootsSql +
+        "SELECT w.job_id,w.root_id,w.object_id,w.remote_binding,w.remote_json,w.kind FROM " + StorageRootsSql +
         " CROSS JOIN storage_settlement w ON w.job_id IN (SELECT sw.job_id FROM storage_settlement sw INDEXED BY storage_pending_requested " +
         "WHERE sw.root_id=roots.value AND sw.state='pending' AND sw.due=-1 ORDER BY sw.job_id LIMIT $limit) " +
         "ORDER BY w.job_id LIMIT $limit;";
 
     internal const string StorageSettlementRangeSql =
-        "SELECT w.job_id,w.root_id,w.object_id,w.remote_binding,w.remote_json FROM " + StorageRootsSql +
+        "SELECT w.job_id,w.root_id,w.object_id,w.remote_binding,w.remote_json,w.kind FROM " + StorageRootsSql +
         " CROSS JOIN storage_settlement w ON w.job_id IN (SELECT sw.job_id FROM storage_settlement sw INDEXED BY storage_pending_root " +
         "WHERE sw.root_id=roots.value AND sw.state='pending' AND sw.due<=$now AND sw.job_id>$after ORDER BY sw.job_id LIMIT $limit) " +
         StorageUnblockedSql + " AND w.state='pending' AND w.due<=$now AND w.job_id>$after ORDER BY w.job_id LIMIT $limit;";
@@ -226,7 +231,7 @@ public sealed partial class SqliteStateStore
             while (result.Count < pageSize && reader.Read())
                 if (seen.Add(reader.GetInt64(0)))
                     result.Add(new(reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetString(3),
-                        JsonSerializer.Deserialize<PilotRemoteEntry>(reader.GetString(4))!));
+                        JsonSerializer.Deserialize<PilotRemoteEntry>(reader.GetString(4))!, Kind: reader.IsDBNull(5) ? null : reader.GetString(5)));
             if (result.Count == pageSize) break;
             command.Parameters["$limit"].Value = pageSize;
         }

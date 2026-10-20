@@ -89,6 +89,9 @@ internal sealed class CloudFilesLifetime(
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             ct.ThrowIfCancellationRequested();
+            // A never-registered pair has no provider to reconnect, even if its saved
+            // remote account is incomplete. Existing connections still validate binding below.
+            if (!create && !_open.ContainsKey(pair.PairId) && !hasRegistration(pair)) return;
             var binding = PairMapping.CloudFilesBinding(pair);
             // Already open: validate the exact binding only. No registry or native probe per pointer/action.
             if (_open.TryGetValue(pair.PairId, out var prior))
@@ -96,7 +99,6 @@ internal sealed class CloudFilesLifetime(
                 prior.Binding.RequireSame(binding);
                 return;
             }
-            if (!create && !hasRegistration(pair)) return;
             // Native identity + recorded path, never Explorer registry publication, proves v2 ownership.
             string? expectedRegistrationId = null;
             if (noticeStore is not null && Directory.Exists(pair.A.RootPath))

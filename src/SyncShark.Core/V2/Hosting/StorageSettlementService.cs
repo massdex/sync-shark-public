@@ -121,7 +121,7 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
         if (claim == StorageClaim.None) return false;
         var local = store.ByObject(job.RootId, job.ObjectId);
         if (pair is null || local is null || !Included(pair, local.Path) ||
-            store.ResolveStoragePolicy(pair.A, local.Path) != "online-only")
+            (job.Kind != StorageSettlement.AcknowledgeMove && store.ResolveStoragePolicy(pair.A, local.Path) != "online-only"))
         {
             if (store.RetireStorageSettlement(job) && pair is not null) Complete(job);
             return false;
@@ -219,6 +219,8 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
     {
         var pair = Pair(job) ?? throw new IOException("The confirmed upload binding is no longer configured.");
         var local = store.ByObject(job.RootId, job.ObjectId) ?? throw new IOException("The local item disappeared. Resync before settlement.");
+        if (job.Kind == StorageSettlement.AcknowledgeMove)
+            return AcknowledgeMove(job, pair, local, ct);
         var remote = job.Remote with { RelativePath = local.Path };
         var provider = Provider(pair, ct);
         var (volume, fileId) = LocalItems.ParseObjectId(pair.A.RootObjectId);
@@ -257,6 +259,36 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
         var result = await provider.ConvertVerifiedSyncedFileAsync(remote, ct, true,
             new PilotDirectoryIdentity(itemVolume, itemId), Revalidate).ConfigureAwait(false);
         return new(result.State.Availability.ToString(), false, result.State.IsInSync);
+    }
+
+    private StorageObserved AcknowledgeMove(StorageSettlement job, PairDef pair, ItemState local, CancellationToken ct)
+    {
+        void Revalidate()
+        {
+            ct.ThrowIfCancellationRequested();
+            var latest = Pair(job);
+            if (latest is null || !Active(latest) || !store.IsCurrentStorageSettlement(job))
+                throw new IOException("Move acknowledgment is queued. Resume the pair and Retry.");
+            if (store.ByObject(job.RootId, job.ObjectId) is not { } current || current.Path != job.Remote.RelativePath ||
+                (current.Flags & ~ItemFlags.OwnedPointer) != 0 || !Included(latest, current.Path))
+                throw new WindowsCloudFilesProvider.PointerAcknowledgmentChangedException();
+            PairMapping.CloudFilesBinding(pair).RequireSame(PairMapping.CloudFilesBinding(latest));
+        }
+        try
+        {
+            Revalidate();
+            var (volume, id) = LocalItems.ParseObjectId(job.ObjectId);
+            var result = Provider(pair, ct).AcknowledgeDehydratedMove(job.Remote, new(volume, id), Revalidate);
+            return new(result.State.Availability.ToString(), result.State.IsPinned, result.State.IsInSync);
+        }
+        catch (WindowsCloudFilesProvider.PointerAcknowledgmentChangedException)
+        {
+            // Protect the entity before retiring its metadata-only job. Ordinary classification/hashing owns it now.
+            store.RequireRehash(job.RootId, local, "Pointer changed before move acknowledgment");
+            store.RequestPointerVerification(pair.PairId, job.RootId, job.ObjectId, local.Path, job.Remote);
+            store.RetireStorageSettlement(job);
+            throw;
+        }
     }
 
     private void Report(StorageSettlement job, Exception error)
@@ -446,7 +478,8 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
         try
         {
             var local = store.ByObject(job.RootId, job.ObjectId);
-            if (local is null || !Included(pair, local.Path) || store.ResolveStoragePolicy(pair.A, local.Path) == "online-only")
+            var verification = local is not null && (local.Flags & ItemFlags.NeedsRehash) != 0;
+            if (local is null || !Included(pair, local.Path) || (!verification && store.ResolveStoragePolicy(pair.A, local.Path) == "online-only"))
             {
                 if (store.CompleteStorageHydration(job)) StorageNotices.Complete(store, pair.PairId, item);
                 return;
@@ -457,7 +490,7 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
                 var latest = store.Pair(pair.PairId);
                 if (latest is null || !Active(latest) || !store.IsCurrentStorageHydration(job) ||
                     store.ByObject(job.RootId, job.ObjectId)?.Path != local.Path ||
-                    !Included(latest, local.Path) || store.ResolveStoragePolicy(latest.A, local.Path) == "online-only")
+                    !Included(latest, local.Path) || (!verification && store.ResolveStoragePolicy(latest.A, local.Path) == "online-only"))
                     throw new InvalidDataException("The pair, item or offline policy changed. Resume or resync before Retry.");
                 PairMapping.CloudFilesBinding(pair).RequireSame(PairMapping.CloudFilesBinding(latest));
             }
@@ -467,11 +500,21 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
             {
                 var provider = Provider(pair, ct);
                 var (volume, id) = LocalItems.ParseObjectId(job.ObjectId);
-                var result = await provider.HydrateOwnedPlaceholderAsync(local.Path, new(volume, id), Revalidate, ct).ConfigureAwait(false);
+                var result = await provider.HydrateOwnedPlaceholderAsync(local.Path, new(volume, id), Revalidate, ct, verification).ConfigureAwait(false);
                 observed = new(result.State.Availability.ToString(), true, result.State.IsInSync);
             }
             if (observed.Availability != nameof(SyncCloudFileAvailability.AvailableOffline) || !observed.Pinned)
                 throw new InvalidDataException("Offline hydration is not yet confirmed. Retry to finish downloading this item.");
+            if (verification)
+            {
+                // Persist targeted metadata reread before retiring hydration, so a crash cannot strand
+                // the scanner's prior Placeholder flags. Hash verification debt remains until normal sync.
+                var prior = store.SyncRetryAt(pair.PairId, local.Path);
+                var roots = (prior?.ReadRoots ?? []).Append(pair.A.RootId).Distinct().ToArray();
+                store.SaveSyncRetry(pair.PairId, prior is null
+                    ? new SyncRetry(local.Path, "scan", 0, "Hydrated pointer requires content verification", DateTimeOffset.MinValue, ReadRoots: roots)
+                    : prior with { ReadRoots = roots });
+            }
             if (store.CompleteStorageHydration(job, observed))
             {
                 StorageNotices.Complete(store, pair.PairId, item);

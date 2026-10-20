@@ -79,12 +79,13 @@ public sealed partial class SqliteStateStore
             var mode = ResolveStoragePolicy(root!, local.Path);
             if (mode != "online-only")
             {
-                StoreSchema.Execute(_connection, null, "DELETE FROM storage_settlement WHERE root_id=$r AND object_id=$o;", ("$r", rootId), ("$o", local.ObjectId));
+                StoreSchema.Execute(_connection, null, "DELETE FROM storage_settlement WHERE root_id=$r AND object_id=$o AND kind IS NULL;", ("$r", rootId), ("$o", local.ObjectId));
                 if ((local.Flags & ItemFlags.OwnedPointer) != 0)
-                    StoreSchema.Execute(_connection, null, "INSERT INTO storage_hydration(root_id,object_id) VALUES($r,$o) ON CONFLICT(root_id,object_id) DO UPDATE SET due=0,job_id=excluded.job_id;", ("$r", rootId), ("$o", local.ObjectId));
+                    StoreSchema.Execute(_connection, null, "INSERT INTO storage_hydration(root_id,object_id) VALUES($r,$o) ON CONFLICT(root_id,object_id) DO NOTHING;", ("$r", rootId), ("$o", local.ObjectId));
                 return;
             }
-            StoreSchema.Execute(_connection, null, "DELETE FROM storage_hydration WHERE root_id=$r AND object_id=$o;", ("$r", rootId), ("$o", local.ObjectId));
+            if ((local.Flags & ItemFlags.NeedsRehash) == 0)
+                StoreSchema.Execute(_connection, null, "DELETE FROM storage_hydration WHERE root_id=$r AND object_id=$o;", ("$r", rootId), ("$o", local.ObjectId));
             if (local.Flags != ItemFlags.None || local.Hash is null) return;
             foreach (var pair in pairs)
             {

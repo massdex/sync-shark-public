@@ -128,7 +128,8 @@ public sealed partial class SqliteStateStore
         var result = new List<StorageSettlement>();
         using var reader = command.ExecuteReader();
         while (reader.Read()) result.Add(new(reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetString(3),
-            JsonSerializer.Deserialize<PilotRemoteEntry>(reader.GetString(4))!, reader.FieldCount > 5 ? reader.GetInt64(5) : 0));
+            JsonSerializer.Deserialize<PilotRemoteEntry>(reader.GetString(4))!, reader.FieldCount > 5 ? reader.GetInt64(5) : 0,
+                reader.FieldCount > 6 && !reader.IsDBNull(6) ? reader.GetString(6) : null));
         return result;
     }
 
@@ -136,7 +137,7 @@ public sealed partial class SqliteStateStore
     {
         if (!_storageEnabled) return null;
         using var cmd = StoreSchema.Command(_connection, null,
-            "SELECT job_id,root_id,object_id,remote_binding,remote_json FROM storage_settlement WHERE root_id=$r AND object_id=$o AND remote_binding=$b;");
+            "SELECT job_id,root_id,object_id,remote_binding,remote_json,0,kind FROM storage_settlement WHERE root_id=$r AND object_id=$o AND remote_binding=$b;");
         cmd.Parameters.AddWithValue("$r", root); cmd.Parameters.AddWithValue("$o", item); cmd.Parameters.AddWithValue("$b", binding);
         return ReadStorageJobs(cmd).FirstOrDefault();
     });

@@ -38,6 +38,8 @@ public sealed class PilotLocalScanner
     // The caller passes expectedPairId only when storage is opted in, so this stays silent otherwise.
     internal Action<string>? OwnedPlaceholderProbeForTest { get; init; }
     internal Func<string, WindowsCloudPlaceholderInfo?>? ReadOwnedPlaceholderForTest { get; init; }
+    // V2 supplies durable entity/root ownership. No database or path-based cache lives in the scanner.
+    internal Func<string, WindowsCloudPlaceholderInfo, long, V2.OwnedPointerObservation>? ClassifyOwnedPointer { get; init; }
 
     private bool TryReadOwnedPlaceholder(string path, out WindowsCloudPlaceholderInfo? info)
     {
@@ -442,7 +444,7 @@ public sealed class PilotLocalScanner
                                     listed.LastWriteTimeUtc, null, rootLease.Identity.VolumeSerialNumber,
                                     (ulong)listed.FileId,
                                     stub ? SyncCloudFileAvailability.OnlineOnly : null,
-                                    ContentUnreadable: !stub));
+                                    ContentUnreadable: !stub || ClassifyOwnedPointer is not null));
                         }
                         continue;
                     }
@@ -460,14 +462,47 @@ public sealed class PilotLocalScanner
                                 "The Cloud Files placeholder kind differs from its signed Sync Shark identity."));
                             continue;
                         }
+                        var physicalSize = expectedDirectory ? 0 : new FileInfo(exactPath).Length;
+                        var proof = !expectedDirectory
+                            ? ClassifyOwnedPointer?.Invoke(relative, cloud, physicalSize) : null;
+                        if (proof is V2.OwnedPointerObservation.Foreign or V2.OwnedPointerObservation.NeedsVerification)
+                        {
+                            // An explicit observation preserves the entity and its new path. A blocked
+                            // decision alone would omit a renamed pointer and could lose its old-name hold.
+                            if (include)
+                                RecordEntry(new PilotLocalEntry(relative, PilotEntryKind.File, exactPath,
+                                    physicalSize, File.GetLastWriteTimeUtc(exactPath), null,
+                                    rootLease.Identity.VolumeSerialNumber, cloud.FileId,
+                                    cloud.State.Availability, ContentUnreadable: true,
+                                    NeedsRehash: proof == V2.OwnedPointerObservation.NeedsVerification));
+                            continue;
+                        }
+                        // Resident bytes are always ordinary hashable data, never an old receipt's hash.
+                        if (!expectedDirectory && cloud.State.Availability == SyncCloudFileAvailability.AvailableOffline)
+                        {
+                            if (!include) continue;
+                            if (MetadataOnly)
+                                RecordEntry(new PilotLocalEntry(relative, PilotEntryKind.File, exactPath,
+                                    physicalSize, File.GetLastWriteTimeUtc(exactPath), null,
+                                    rootLease.Identity.VolumeSerialNumber, cloud.FileId));
+                            else
+                            {
+                                var residentLease = await AcquireAsync();
+                                pendingResults.Enqueue((exactPath, relative,
+                                    ReadFileAsync(exactPath, relative, residentLease), true));
+                                if (pendingResults.Count >= maximumPending) await CommitNextAsync();
+                            }
+                            continue;
+                        }
                         // A placeholder's identity describes its last cloud version, not necessarily
-                        // its current local bytes. Never suppress an edit just because its old hash
-                        // is still present. Fully offline files can be hashed without recalling data.
+                        // its current local bytes. Only durable proof can admit a dirty renamed pointer.
                         var physicalMetadataChanged = !expectedDirectory &&
-                            (new FileInfo(exactPath).Length != cloud.Identity.LogicalSize ||
+                            (physicalSize != cloud.Identity.LogicalSize ||
                              cloud.Identity.ModifiedUtc is { } modified &&
                              File.GetLastWriteTimeUtc(exactPath) != modified.UtcDateTime);
-                        if (!expectedDirectory && (!cloud.State.IsInSync || physicalMetadataChanged))
+                        if (!expectedDirectory && proof != V2.OwnedPointerObservation.Pointer &&
+                            (!cloud.State.IsInSync || physicalMetadataChanged ||
+                             cloud.State.Availability == SyncCloudFileAvailability.PartiallyHydrated))
                         {
                             if (!include) continue;
                             if (cloud.State.Availability != SyncCloudFileAvailability.AvailableOffline)
@@ -823,9 +858,7 @@ public sealed class PilotLocalScanner
                 !WindowsCloudFilesProvider.TryReadOwnedPlaceholder(handle, directory: false, out var cloud) ||
                 cloud is null || cloud.IsDirectory || cloud.Identity.ObjectKind != "file" ||
                 !cloud.Identity.IsBoundTo(expectedPairId, contentProvider) ||
-                !string.Equals(cloud.Identity.RelativePath,
-                    PilotPath.NormalizeRelative(Path.GetRelativePath(rootLease.Path, fullPath)),
-                    StringComparison.OrdinalIgnoreCase) ||
+                // A rename changes the name, not the held NTFS entity or its resident bytes.
                 cloud.SyncRootFileId != rootLease.Identity.FileId ||
                 cloud.FileId != (((ulong)information.FileIndexHigh << 32) | information.FileIndexLow) ||
                 cloud.State.Availability != SyncCloudFileAvailability.AvailableOffline)

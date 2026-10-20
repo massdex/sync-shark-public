@@ -290,7 +290,10 @@ public sealed partial class LocalInventory : IInventorySource
         foreach (var item in candidates)
         {
             if (hashes.TryGetValue(item.Path, out var hash) && _known.CompleteRehash(_root.RootId, item, hash))
+            {
                 completed[item.Path] = hash;
+                CompletePointerVerification(item);
+            }
             else
             {
                 var reason = scan.Decisions.FirstOrDefault(decision => decision.RelativePath == item.Path)?.Reason
@@ -354,6 +357,7 @@ public sealed partial class LocalInventory : IInventorySource
                     ct.ThrowIfCancellationRequested();
                     if (hashes.TryGetValue(item.Path, out var hash) && _known.CompleteRehash(_root.RootId, item, hash))
                     {
+                        CompletePointerVerification(item);
                         // Completion unholds an entity, not just its selected name. Report every alias in pages.
                         for (var offset = 0; ; offset += 128)
                         {
@@ -503,6 +507,7 @@ public sealed partial class LocalInventory : IInventorySource
         new PilotLocalScanner { HashBufferBytes = _settings.LocalHashBufferBytes, CloudFilesAware = true,
             ReplaceOnlineOnlyStubs = _settings.ReplaceOnlineOnlyStubs,
             OwnedPlaceholderProbeForTest = OwnedPlaceholderProbeForTest,
+            ClassifyOwnedPointer = OwnedPointerClassifier(),
             ReadOwnedPlaceholderForTest = ReadOwnedPlaceholderForTest }
             .ScanAsync(lease, _productOwnedPaths, ct, refreshPaths: rows.Select(row => row.Path).ToArray(),
                 expectedPairId: _expectedPairId, contentProvider: OwnedContentProvider);
@@ -542,6 +547,7 @@ public sealed partial class LocalInventory : IInventorySource
             BetweenDirectories = refreshPaths is null ? PairPause.Check : null,
             DirectoryCompletedForTest = DirectoryCompletedForTest,
             OwnedPlaceholderProbeForTest = OwnedPlaceholderProbeForTest,
+            ClassifyOwnedPointer = OwnedPointerClassifier(),
             ReadOwnedPlaceholderForTest = ReadOwnedPlaceholderForTest }.ScanAsync(lease, _productOwnedPaths, ct,
             includePath: path => include(path) && !LocalItems.IsExcluded(path, _productOwnedRelative),
             traverseDirectory: path => include(path) && !LocalItems.IsExcluded(path, _productOwnedRelative) && exactPaths?.Contains(path) != true,

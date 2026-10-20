@@ -18,6 +18,11 @@ internal static class StorageQueuePlanChecks
             store.SavePair(new("pair", "Pair A", local, remote, [], [], true));
             store.EnableStorage();
             using var connection = Open(root);
+            using (var version = connection.CreateCommand())
+            {
+                version.CommandText = "SELECT sqlite_version();";
+                Console.WriteLine("Storage queue checks SQLite runtime: " + version.ExecuteScalar());
+            }
             RequestedIndexesMatchSentinel(connection);
             QueueQueriesUseSearchRanges(connection);
             SeedQueues(connection);
@@ -78,9 +83,14 @@ internal static class StorageQueuePlanChecks
             Require(!details.Any(line => line.StartsWith("SCAN ", StringComparison.OrdinalIgnoreCase) &&
                 !line.StartsWith("SCAN roots ", StringComparison.OrdinalIgnoreCase)),
                 index + ": no queue/receipt scan is allowed: " + detail);
+            // job_id is INTEGER PRIMARY KEY, so it is the rowid alias. SQLite may surface the
+            // candidate equality through a named index as job_id=? (settlement range uses
+            // storage_pending(state,job_id)) instead of INTEGER PRIMARY KEY (rowid=?); both are
+            // the same single-row point lookup, so accept either spelling.
             Require(details.Any(line => line.StartsWith("SEARCH ", StringComparison.OrdinalIgnoreCase) &&
-                line.Contains("rowid=?", StringComparison.OrdinalIgnoreCase)),
-                index + ": bounded candidates use rowid lookups: " + detail);
+                (line.Contains("rowid=?", StringComparison.OrdinalIgnoreCase) ||
+                    line.Contains("job_id=?", StringComparison.OrdinalIgnoreCase))),
+                index + ": bounded candidates use a job-key point lookup: " + detail);
         }
     }
 

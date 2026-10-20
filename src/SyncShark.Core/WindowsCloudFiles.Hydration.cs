@@ -32,7 +32,7 @@ public sealed partial class WindowsCloudFilesProvider
 
     /// <summary>One entity, bounded streaming hydration. No subtree enumeration and no dehydration.</summary>
     internal async Task<WindowsCloudPlaceholderInfo> HydrateOwnedPlaceholderAsync(string relativePath,
-        PilotDirectoryIdentity expectedLocalIdentity, Action revalidate, CancellationToken ct)
+        PilotDirectoryIdentity expectedLocalIdentity, Action revalidate, CancellationToken ct, bool verifyLocalChanges = false)
     {
         ThrowIfDisposed();
         var relative = PilotPath.NormalizeRelative(relativePath);
@@ -80,7 +80,7 @@ public sealed partial class WindowsCloudFilesProvider
                 throw new InvalidDataException("There is not enough free space to keep this item offline. Free space and Retry.");
             // Normal async reads request all missing ranges through the connected provider, with cancellation.
             // Hashing is streaming (constant memory) and verifies the exact provider revision before success.
-            if (stream.Length != current.Identity.LogicalSize)
+            if (stream.Length != current.Identity.LogicalSize && (!verifyLocalChanges || current.State.IsInSync))
                 throw new InvalidDataException("The offline item changed size. Resync before Retry.");
             var hash = await SyncContentIdentity.ComputeAsync(_pair.Provider, stream, ct).ConfigureAwait(false);
             if (current.State.IsInSync && !string.Equals(hash, current.Identity.ContentHash, StringComparison.OrdinalIgnoreCase))

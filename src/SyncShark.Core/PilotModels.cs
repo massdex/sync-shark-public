@@ -38,7 +38,8 @@ public sealed record PilotLocalEntry(
     string? CloudRevision = null,
     string? CloudFileId = null,
     bool ContentUnreadable = false,
-    bool Link = false);
+    bool Link = false,
+    bool NeedsRehash = false);
 
 /// <summary>
 /// One listed provider item. The provider-issued file/folder id remains the only key a provider API call
