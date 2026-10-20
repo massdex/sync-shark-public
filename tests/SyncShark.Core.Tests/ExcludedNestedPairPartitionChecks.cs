@@ -448,11 +448,21 @@ internal static class ExcludedNestedPairPartitionChecks
     // persisted parent policy and revision unchanged.
     private static async Task RealStoreRefusesPolicyChangeAsync()
     {
-        using var fixture = await FixtureAsync("real-store-policy-change");
+        await RealStoreRefusesPolicyChangeAsync(corresponding: true);
+        await RealStoreRefusesPolicyChangeAsync(corresponding: false);
+    }
+
+    private static async Task RealStoreRefusesPolicyChangeAsync(bool corresponding)
+    {
+        using var fixture = await FixtureAsync("real-store-policy-change-" + corresponding);
         var (childLeft, childRight, parentLeft, parentRight) = NestedDirectories(fixture.Root);
+        var rightChildName = corresponding ? ChildName : ChildName + "Mirror";
+        if (!corresponding)
+            childRight = Directory.CreateDirectory(IOPath.Combine(parentRight, rightChildName)).FullName;
         var child = await BindAsync(fixture, childLeft, childRight, "Child pair", []);
         var ownership = OwnershipRelativeNames(child, parentLeft, parentRight);
         var rules = new List<SyncSelectionRule> { new(ChildName, false) };
+        if (!corresponding) rules.Add(new SyncSelectionRule(rightChildName, false));
         rules.AddRange(ownership.Select(name => new SyncSelectionRule(name, false)));
         var parent = await BindAsync(fixture, parentLeft, parentRight, "Parent pair", rules);
         var store = new SyncPairStore(fixture.Instance.StateAuthority);
@@ -468,27 +478,28 @@ internal static class ExcludedNestedPairPartitionChecks
         {
             SelectionRules = ownership.Select(name => new SyncSelectionRule(name, false)).ToArray()
         };
-        Require(SyncPairPartitionPolicy.DecideCorrespondingIncluded(includedWithOwnership, retainedChild) ==
-                SyncPairPartitionRelation.CorrespondingIncluded,
+        Require((SyncPairPartitionPolicy.DecideCorrespondingIncluded(includedWithOwnership, retainedChild) ==
+                SyncPairPartitionRelation.CorrespondingIncluded) == corresponding,
             "ENP-15 removing only the data exclusion preserves the supported corresponding overlap");
         var noExclusion = retainedParent with
         {
             // Included corresponding overlaps are supported only with private control
             // ownership still excluded. Removing all exclusions must remain unsafe.
-            SelectionRules = [],
+            SelectionRules = corresponding ? [] : includedWithOwnership.SelectionRules,
             PolicyRevision = retainedParent.PolicyRevision + 1
         };
         Require(SyncPairPartitionPolicy.Decide(retainedParent, retainedChild) == SyncPairPartitionRelation.NestedAllowed &&
                 SyncPairPartitionPolicy.Decide(noExclusion, retainedChild) == SyncPairPartitionRelation.NestedRefused &&
                 SyncPairPartitionPolicy.DecideCorrespondingIncluded(noExclusion, retainedChild) != SyncPairPartitionRelation.CorrespondingIncluded,
-            "ENP-15 the fixture changes from a valid excluded partition to a unsafe overlap with exposed private control ownership");
+            "ENP-15 removing the required exclusions makes this nested partition unsafe");
         var refusedRemoval = await TrySaveAsync(store,
             new SyncPairSet([noExclusion, retainedChild], noExclusion.Id));
         Require(refusedRemoval.Length > 0,
-            "ENP-15 the real Store refuses a saved policy edit that removes the child and private control exclusions: " +
+            "ENP-15 the real Store refuses the unsafe saved policy edit (corresponding=" + corresponding + "): " +
             (refusedRemoval.Length == 0 ? "not refused" : refusedRemoval));
 
         var exceptionRules = new List<SyncSelectionRule> { new(ChildName, false), new(ChildName + "/Included", true) };
+        if (!corresponding) exceptionRules.Add(new SyncSelectionRule(rightChildName, false));
         exceptionRules.AddRange(ownership.Select(name => new SyncSelectionRule(name, false)));
         var withException = retainedParent with
         {
@@ -2589,7 +2600,7 @@ internal static class ExcludedNestedPairPartitionChecks
             "the safe-name validator accepts an ordinary component name");
         Require(SyncAuthorityCloudHierarchySnapshot.IsSafeNameComponent("Documents"),
             "the safe-name validator accepts another ordinary component name");
-        Require(SyncAuthorityCloudHierarchySnapshot.IsSafeNameComponent("Ãœbersicht-2026"),
+        Require(SyncAuthorityCloudHierarchySnapshot.IsSafeNameComponent("Übersicht-2026"),
             "the safe-name validator accepts a Unicode component name");
         return Task.CompletedTask;
     }
