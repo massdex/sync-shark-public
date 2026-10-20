@@ -184,7 +184,7 @@ public sealed partial class SyncRun
                                 .Select(item => item.Path).ToArray();
                             // Released history failures already require a user choice. Do not make that
                             // choice depend on the same unavailable history probe ever succeeding.
-                            var released = paths.Where(path => _store.SyncRetryAt(pair.PairId, path) is { Kind: "deletion-evidence", Held: not null })
+                            var released = paths.Where(path => _store.SyncRetryAt(pair.PairId, path) is { Kind: "deletion-evidence", Held: not null, ReprobeEvidence: false })
                                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
                             foreach (var path in released)
                             {
@@ -316,6 +316,11 @@ public sealed partial class SyncRun
                     { lock (sync) pending.Add(rule.Path); return; }
                     var isFolder = heldFolders.Contains(rule.Path);
                     var cloud = rule.Local == Side.A ? pair.B : pair.A;
+                    // Re-inclusion revoked old evidence, not the hold. An unanswered/failed probe
+                    // cannot enter the released-survivor decision path (or create an upload).
+                    if (heldRetry is { ReprobeEvidence: true } &&
+                        (deletionEvidence is null || deletionEvidence.LookupFailed))
+                    { lock (sync) pending.Add(rule.Path); return; }
                     if (heldRetry is { Kind: "deletion-evidence" } released)
                     {
                         var survivorRoot = rule.Local == Side.A ? pair.A : pair.B;
@@ -346,8 +351,8 @@ public sealed partial class SyncRun
                             deletable ? NoticeChoices.DeletionReviewRule : NoticeChoices.DeletionReviewRestoreOnlyRule,
                             NoticeKind.UserDecision, rule.Path,
                             deletable
-                                ? "Dropbox reports this file deleted. Nothing was deleted or uploaded. Choose Delete with Recovery, Keep and restore to Dropbox, or Ignore."
-                                : "Dropbox reports this item deleted. Nothing was deleted or uploaded. Choose Keep and restore to Dropbox, or Ignore to exclude this path from sync.",
+                                ? "Deletion evidence has been checked for this held file. Nothing was deleted or uploaded. Choose Delete with Recovery, Keep and restore to Dropbox, or Ignore."
+                                : "Deletion evidence has been checked for this held item. Nothing was deleted or uploaded. Choose Keep and restore to Dropbox, or Ignore to exclude this path from sync.",
                             "deletion-review");
                         _store.SaveSyncRetry(pair.PairId, released with { Kind = "decision", RetryAfter = DateTimeOffset.MinValue,
                             HeldReviewed = false, ReviewedActions = null, ProposedActions = [proposal], PendingNotice = attention });

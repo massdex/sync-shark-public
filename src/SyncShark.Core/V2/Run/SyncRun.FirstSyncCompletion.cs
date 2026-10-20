@@ -135,6 +135,11 @@ public sealed partial class SyncRun
             {
                 remaining.Remove(item.Path);
                 _store.ClearSyncRetry(pair.PairId, item.Path);
+                // Exclusion suspends an unresolved hold; it must survive notice pruning so
+                // re-inclusion cannot turn this item into an ordinary one-sided create.
+                if (excluded && item.Held is not null)
+                    _store.SaveSyncRetry(pair.PairId, new(item.Path, "deletion-evidence", 0, "",
+                        DateTimeOffset.MaxValue, Held: item.Held, ReprobeEvidence: true));
                 if (item.Held is { } held)
                     _store.RemoveDeletionEvidence(pair.PairId, held.Local == Side.A ? pair.B.RootId : pair.A.RootId, [item.Path]);
                 foreach (var notice in notices[item.Path])
@@ -160,7 +165,7 @@ public sealed partial class SyncRun
             RetryAfter = _time.GetUtcNow().AddSeconds(Math.Min(300, 10 * Math.Pow(2, Math.Min(attempts - 1, 5))))
         };
         _store.SaveSyncRetry(pair.PairId, retry);
-        if (retry.LastError != DropboxQuota.Detail && attempts >= 1 && retry.Kind is not ("planning" or "recovery"))
+        if (!retry.ReprobeEvidence && retry.LastError != DropboxQuota.Detail && attempts >= 1 && retry.Kind is not ("planning" or "recovery"))
             WriteNotices([new Notice(pair.PairId, 40, NoticeKind.Info, path,
                 $"Sync will retry this item later ({attempts} attempts): {retry.LastError}. Options: retry now / exclude / ignore.", "sync-retry",
                 FolderInspection: _store.Live(pair.A.RootId, [path]).Concat(_store.Live(pair.B.RootId, [path]))

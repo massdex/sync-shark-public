@@ -116,5 +116,30 @@ internal static partial class RunChecks
             "Ignore then reinclude never grants deletion authority without fresh evidence");
         Require(fx.Store.OpenNotices(fx.Pair.PairId).Any(n => n.ReasonKey == "deletion-evidence-pending" && n.Path == "held.txt"),
             "removing the exclusion lets fresh evidence raise the deletion-evidence notice again");
+        Require(fx.WriterB.Puts == 0 && await fx.B.ObserveAsync("held.txt", default) is null &&
+            fx.Store.SyncRetryAt(fx.Pair.PairId, "held.txt") is { Held: not null, ReprobeEvidence: true },
+            "unresolved re-included evidence remains durable and never uploads");
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        Require(fx.Store.OpenNotices(fx.Pair.PairId).Count(n => n.ReasonKey == "deletion-evidence-pending" && n.Path == "held.txt") == 1,
+            "backed-off held evidence keeps one pending notice");
+        fx.Provider.AddInventory(fx.Pair.B, new DeferredInventory(fx.B));
+        var retry = fx.Store.SyncRetryAt(fx.Pair.PairId, "held.txt")!;
+        fx.Store.SaveSyncRetry(fx.Pair.PairId, retry with { RetryAfter = DateTimeOffset.MinValue });
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        Require(fx.Store.OpenNotices(fx.Pair.PairId).Any(n => n.Path == "held.txt" && n.Kind == NoticeKind.UserDecision) &&
+            fx.WriterB.Puts == 0 && fx.WriterA.Deletes == 0,
+            "resolved survivor requires a decision instead of silently restoring");
+        Require(!fx.Store.OpenNotices(fx.Pair.PairId).Any(n => n.Path == "held.txt" && n.ReasonKey == "deletion-evidence-pending"),
+            "resolved evidence closes the pending notice");
+        var current = fx.Store.Pair(fx.Pair.PairId)!;
+        fx.Store.SavePair(current with { Excluded = ["folder"] });
+        fx.A.Seed("folder/new.txt", "ordinary new content");
+        var folderExcluded = fx.Store.Pair(fx.Pair.PairId)!;
+        fx.Store.SavePairIncluded(folderExcluded, folderExcluded with { Excluded = [] });
+        Require(fx.Store.SyncRetryAt(fx.Pair.PairId, "folder/new.txt") is null,
+            "re-inclusion does not invent evidence holds for ordinary new files");
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        Require(await fx.B.ObserveAsync("folder/new.txt", default) is not null,
+            "ordinary new file beneath a re-included folder uploads normally");
     }
 }

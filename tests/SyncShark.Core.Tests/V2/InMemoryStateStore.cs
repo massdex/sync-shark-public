@@ -358,6 +358,19 @@ internal sealed class InMemoryStateStore : IStateStore
                 if (_deletionEvidence.TryGetValue(previous.PairId + "\n" + root, out var evidence))
                     foreach (var path in evidence.Keys.Where(item => paths.Any(prefix =>
                         PairPath.IsSelfOrUnder(item, prefix))).ToArray()) evidence.Remove(path);
+            if (RebuildableSelection.Sides(included) is { } sides)
+            {
+                var heldPaths = ReadSyncRetries(previous.PairId).Where(retry => retry.Held is not null).Select(retry => retry.Path)
+                    .Concat(_notices.Where(notice => notice.PairId == previous.PairId && notice.ReasonKey == "deletion-evidence-pending" &&
+                        notice.NoticeId is not null && _closedNotices.TryGetValue(notice.NoticeId, out var choice) &&
+                        choice is NoticeChoices.Ignore or NoticeChoices.Exclude).Select(notice => notice.Path))
+                    .Where(candidate => paths.Any(prefix => PairPath.IsSelfOrUnder(candidate, prefix)) &&
+                        !included.Excluded.Any(retained => PairPath.IsSelfOrUnder(candidate, retained)))
+                    .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                foreach (var heldPath in heldPaths)
+                    SaveSyncRetry(previous.PairId, new(heldPath, "deletion-evidence", 0, "", DateTimeOffset.MinValue,
+                        Held: new HeldDeletion(heldPath, sides.Local), ReprobeEvidence: true));
+            }
             // Mirror SavePairIncluded: removing an exclusion reverses its Ignore, so a fresh problem at the path
             // may raise its notice again.
             foreach (var notice in _notices.Where(item => item.PairId == previous.PairId && item.NoticeId is not null &&

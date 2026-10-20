@@ -69,9 +69,47 @@ public sealed partial class SqliteStateStore
                 ("$p", pairNo), ("$a", rootA), ("$b", rootB), ("$k", key));
             // Re-inclusion starts matching afresh; retained prepare stamps must not revive an old deletion.
             StoreSchema.Execute(_connection, transaction,
-                "DELETE FROM sync_retry WHERE pair_no=$p " +
+                "DELETE FROM sync_retry WHERE pair_no=$p AND json_extract(json,'$.Held') IS NULL " +
                 "AND (path_key=$k OR substr(path_key,1,length($k)+1)=$k||'/');",
                 ("$p", pairNo), ("$k", key));
+            // Restore only known unresolved holds, never arbitrary one-sided/new files. Keep no
+            // old stamps or deletion consent. Page inside the same transaction as re-inclusion.
+            if (RebuildableSelection.Sides(included) is { } sides)
+            {
+                string? afterPath = null;
+                while (true)
+                {
+                    var paths = new List<string>(256);
+                    using (var command = StoreSchema.Command(_connection, transaction,
+                        "SELECT path FROM (SELECT json_extract(json,'$.Path') AS path FROM sync_retry " +
+                        "WHERE pair_no=$p AND json_extract(json,'$.Held') IS NOT NULL UNION " +
+                        "SELECT path FROM notice WHERE pair_no=$p AND state='closed' " +
+                        "AND reason_key='deletion-evidence-pending' AND choice IN ('ignore','exclude')) " +
+                        "WHERE (path=$raw COLLATE NOCASE OR substr(path,1,length($raw)+1)=($raw||'/') COLLATE NOCASE) " +
+                        "AND ($after IS NULL OR path>$after) ORDER BY path LIMIT 256;"))
+                    {
+                        command.Parameters.AddWithValue("$p", pairNo);
+                        command.Parameters.AddWithValue("$raw", path);
+                        command.Parameters.AddWithValue("$after", (object?)afterPath ?? DBNull.Value);
+                        using var reader = command.ExecuteReader();
+                        while (reader.Read()) paths.Add(reader.GetString(0));
+                    }
+                    if (paths.Count == 0) break;
+                    afterPath = paths[^1];
+                    foreach (var heldPath in paths.Where(candidate => !included.Excluded.Any(retained =>
+                        PairPath.IsSelfOrUnder(candidate, retained))))
+                    {
+                        var retry = new SyncRetry(heldPath, "deletion-evidence", 0, "", DateTimeOffset.MinValue,
+                            Held: new HeldDeletion(heldPath, sides.Local), ReprobeEvidence: true);
+                        StoreSchema.Execute(_connection, transaction,
+                            "INSERT INTO sync_retry(pair_no,path_key,json,retry_after) VALUES($p,$k,$j,$due) " +
+                            "ON CONFLICT(pair_no,path_key) DO UPDATE SET json=excluded.json,retry_after=excluded.retry_after;",
+                            ("$p", pairNo), ("$k", RowCodec.Key(heldPath)),
+                            ("$j", JsonSerializer.Serialize(retry, RowCodec.Json)),
+                            ("$due", retry.RetryAfter.ToUnixTimeMilliseconds()));
+                    }
+                }
+            }
             // An Ignore on this path was the request to stop syncing it. Removing the exclusion reverses that
             // request, so clear the dismissal: a fresh problem at the path (for example pending deletion evidence)
             // must be visible again instead of staying suppressed by the old ignore.

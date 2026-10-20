@@ -156,7 +156,7 @@ public sealed record SyncRetry(string Path, string Kind, int Attempts, string La
     DateTimeOffset RetryAfter, PrepareMatch? Match = null, HeldDeletion? Held = null,
     IReadOnlyList<SyncAction>? ReviewedActions = null, bool HeldReviewed = false,
     IReadOnlyList<SyncAction>? ProposedActions = null, ItemState? HeldExpected = null,
-    IReadOnlyList<string>? ReadRoots = null, Notice? PendingNotice = null);
+    IReadOnlyList<string>? ReadRoots = null, Notice? PendingNotice = null, bool ReprobeEvidence = false);
 
 /// <summary>The kind of notice raised to the user.</summary>
 public enum NoticeKind { Info, KeepBoth, EditBeatsDelete, AutoConflict, UserDecision }

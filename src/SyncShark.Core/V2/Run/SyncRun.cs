@@ -693,11 +693,15 @@ public sealed partial class SyncRun : ISyncRun
             allowUnreviewedEvidence: true);
         plan = execution.Plan;
         var tally = execution.Tally;
+        var unresolvedEvidence = execution.Pending.Where(path =>
+            _store.SyncRetryAt(pairId, path) is { Held: not null, Kind: not "decision" }).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        WriteNotices(unresolvedEvidence.Select(path => new Notice(pairId, 4, NoticeKind.Info, path,
+            "Deletion evidence is pending; this item will be retried without blocking other files.", "deletion-evidence-pending")));
         if (!ct.IsCancellationRequested)
         {
             UpdateRetryWork(pair, plan, tally, retries, execution.Pending, evaluated, scan.A.Complete && scan.B.Complete);
             RetainPlanningFailures(pair, plan);
-            CloseResolvedNotices(openNotices, plan, tally, evaluated);
+            CloseResolvedNotices(openNotices, plan, tally, path => evaluated(path) && _store.SyncRetryAt(pairId, path) is not { Held: not null, Kind: not "decision" });
             CloseAppliedDecisions(openNotices, plan, tally, decisions, resolvingNoticeId);
             AcknowledgeVerifiedRehash(pair, scan, plan, tally, evaluated, predicates.A, predicates.B, ct);
             AdvanceCursors(scan);
@@ -707,11 +711,12 @@ public sealed partial class SyncRun : ISyncRun
         throttle.Flush();
         var report = WithReconciliation(BuildReport(pairId, plan, tally, ct.IsCancellationRequested), reconcile)
             with { Deferred = _store.CountSyncRetries(pairId) };
-        return pendingEvidence.Count == 0 ? report : report with
+        var evidencePendingPaths = pendingEvidence.Keys.Concat(unresolvedEvidence).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        return evidencePendingPaths.Length == 0 ? report : report with
         {
             Outcome = string.Equals(report.Outcome, RunOutcomes.Complete, StringComparison.Ordinal)
                 ? RunOutcomes.Partial : report.Outcome,
-            DeletionEvidencePending = pendingEvidence.Keys.ToArray()
+            DeletionEvidencePending = evidencePendingPaths
         };
     }
 
