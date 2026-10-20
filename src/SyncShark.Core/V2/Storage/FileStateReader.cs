@@ -136,10 +136,13 @@ internal sealed class FileStateReader
             "ORDER BY f.dir_no,f.name_key,f.name LIMIT $limit OFFSET $offset;",
             [("$r", rootNo), ("$pk", RowCodec.Key(directory)), ("$limit", limit), ("$offset", offset)]);
 
-    public IReadOnlyList<ItemState> LiveFlaggedPage(long rootNo, ItemFlags flags, ItemState? after, int limit, SqliteTransaction? transaction = null)
+    public IReadOnlyList<ItemState> LiveFlaggedPage(long rootNo, ItemFlags flags, ItemState? after, int limit,
+        long? afterDirNo = null, SqliteTransaction? transaction = null)
     {
         var (parent, name) = after is null ? ("", "") : RowCodec.Split(after.Path);
-        var dir = after is null ? -1L : (long?)StoreSchema.Scalar(_connection, transaction,
+        // The cursor carries its folder number, so a folder deleted since the previous page still seeks from its key
+        // instead of silently ending the side. An older cursor without it falls back to the path lookup.
+        var dir = after is null ? -1L : afterDirNo ?? (long?)StoreSchema.Scalar(_connection, transaction,
             "SELECT dir_no FROM dir WHERE path=$path;", ("$path", parent)) ?? -1L;
         if (after is not null && dir < 0) return Array.Empty<ItemState>();
         // fs_refused is ordered by root, kind, then the WITHOUT ROWID primary key. Seek rather

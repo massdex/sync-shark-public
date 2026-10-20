@@ -186,12 +186,14 @@ public sealed partial class SqliteStateStore : IStateStore
         return rootNo is null ? Array.Empty<ItemState>() : _reads.LiveChildrenPage(rootNo.Value, directory, offset, limit);
     });
 
-    public IReadOnlyList<ItemState> LiveFlaggedPage(string rootId, ItemFlags flags, ItemState? after, int limit) => InStore(() =>
+    public IReadOnlyList<ItemState> LiveFlaggedPage(string rootId, ItemFlags flags, ItemState? after, int limit, long? afterDirNo = null) => InStore(() =>
     {
         if (limit is < 1 or > 200) throw new ArgumentOutOfRangeException(nameof(limit));
         var rootNo = RootNo(rootId);
-        return rootNo is null ? Array.Empty<ItemState>() : _reads.LiveFlaggedPage(rootNo.Value, flags, after, limit);
+        return rootNo is null ? Array.Empty<ItemState>() : _reads.LiveFlaggedPage(rootNo.Value, flags, after, limit, afterDirNo);
     });
+
+    public long? DirectoryNumber(string rootId, string path) => InStore(() => _dir.Find(path));
 
     public IReadOnlyList<string> DirectorySpellings(string rootId, string path) => InStore(() =>
     {
@@ -414,7 +416,7 @@ public sealed partial class SqliteStateStore : IStateStore
         using var transaction = _connection.BeginTransaction();
         var now = NowMs();
         foreach (var notice in ProviderNameNotices.Read(pair, (root, after) =>
-            roots[root.RootId] is { } rootNo ? _reads.LiveFlaggedPage(rootNo, ItemFlags.ProviderNameRefused, after, 100, transaction) : Array.Empty<ItemState>()))
+            roots[root.RootId] is { } rootNo ? _reads.LiveFlaggedPage(rootNo, ItemFlags.ProviderNameRefused, after, 100, transaction: transaction) : Array.Empty<ItemState>()))
             _notices.Add(transaction, pairNo, notice, now);
         transaction.Commit();
     });
@@ -436,6 +438,12 @@ public sealed partial class SqliteStateStore : IStateStore
             if (pairNo is null) return new List<Notice>();
         }
         return _notices.Open(pairNo);
+    });
+
+    public IReadOnlyList<Notice> OpenLinkNotices(string pairId) => InStore(() =>
+    {
+        var pairNo = PairNo(pairId);
+        return pairNo is null ? new List<Notice>() : _notices.OpenLinks(pairNo.Value);
     });
 
     public IReadOnlyList<RecoveryRecord> Recoveries(string pairId) => InStore(() =>

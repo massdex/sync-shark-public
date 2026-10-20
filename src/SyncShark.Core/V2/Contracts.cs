@@ -170,7 +170,9 @@ public sealed record Notice(string PairId, int Rule, NoticeKind Kind, string Pat
     RetainedNoticeVersion? RetainedVersion = null, NoticeRepair? Repair = null, bool FolderInspection = false, bool? UploadSuspended = null, Side? UploadQuotaSide = null, long? UploadQuotaNeedBytes = null);
 
 /// <summary>Identity-bound repair evidence, stored in the existing notice detail payload.</summary>
-public sealed record NoticeRepair(Side Side, ItemState Item, string? Destination = null);
+/// <param name="RetainedStaging">Bounded (20) list of excluded staging folders this link's attempts created; never deleted.</param>
+public sealed record NoticeRepair(Side Side, ItemState Item, string? Destination = null,
+    IReadOnlyList<string>? RetainedStaging = null);
 
 /// <summary>Exact per-item provenance for explicitly recovering a newest-wins loser, never a path-based guess.</summary>
 public sealed record RetainedNoticeVersion(string ActionId, Side Side, ItemState Loser, ItemState Winner);

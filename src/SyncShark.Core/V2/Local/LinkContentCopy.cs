@@ -22,7 +22,7 @@ internal static class LinkContentCopy
             using var handle = Open(path, false);
             var canonical = PilotDirectoryLease.FinalPath(handle);
             if (!string.Equals(canonical.TrimEnd('\\'), path.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
-                throw new IOException("Target uses an alias (short name, substituted drive, or redirected parent). Choose its full physical path: " + canonical + "." + Options);
+                throw new IOException("Target uses an alias (short name, substituted drive, or redirected parent). Recreate the link at the physical path " + canonical + ", or sync that path separately." + Options);
             if (!seen.Add(canonical)) throw new IOException("Link cycle detected." + Options);
             var (attributes, tag) = PilotPath.AttributeTag(handle);
             if (!PilotPath.IsLink(attributes, tag))
@@ -51,6 +51,15 @@ internal static class LinkContentCopy
 
     internal static bool Under(string path, string root) => string.Equals(Path.GetFullPath(path).TrimEnd('\\', '/'), Path.GetFullPath(root).TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase) ||
         Path.GetFullPath(path).StartsWith(Path.GetFullPath(root).TrimEnd('\\', '/') + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The regular-copy name beside the link; a file keeps its extension last so it opens normally.</summary>
+    internal static string CopyName(string leaf, ItemKind kind, int suffix)
+    {
+        var marker = " (copy" + (suffix == 1 ? "" : " " + suffix) + ")";
+        if (kind != ItemKind.File) return leaf + marker;
+        var stem = Path.GetFileNameWithoutExtension(leaf);
+        return stem.Length == 0 ? leaf + marker : stem + marker + Path.GetExtension(leaf);
+    }
 
     internal sealed class Prepared : IDisposable
     {
@@ -123,7 +132,15 @@ internal static class LinkContentCopy
         {
             _ct.ThrowIfCancellationRequested();
             if (_entries.Count >= MaximumEntries || depth > 64) throw new IOException("Copy exceeds 4096 entries or 64 directory levels." + Options);
-            PilotPath.NormalizeTopLevelName(Path.GetFileName(path));
+            // The target's own leaf name is replaced on publication, so only entries below it need a usable name.
+            if (depth > 0)
+            {
+                try { PilotPath.NormalizeTopLevelName(Path.GetFileName(path)); }
+                catch (ArgumentException)
+                {
+                    throw new IOException("Entry name not supported: " + path + ". Rename it in the target, or sync target separately." + Options);
+                }
+            }
             if (!_confirmed && _requiresConfirmation?.Invoke(path) == true)
                 throw new IOException("Target contains an excluded, protected, or nested-pair path: " + path + ". Copying bypasses that exclusion. Show target, then explicitly confirm the exact target path with --name." + Options);
             PilotPath.RequireSeparatedFromProductState(path);

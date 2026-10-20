@@ -50,7 +50,7 @@ internal sealed partial class NoticeTable
         // Fresh observations refresh revision evidence, but never erase an already-recorded effect intent.
         if (notice.Repair is { Destination: null } && ById(pairNo, noticeId, transaction)?.Notice is { Repair: { Destination: not null } captured } prior)
             notice = notice.ReasonKey == "link-item"
-                ? notice with { Repair = notice.Repair with { Destination = captured.Destination }, Detail = prior.Detail }
+                ? notice with { Repair = notice.Repair with { Destination = captured.Destination, RetainedStaging = notice.Repair.RetainedStaging ?? captured.RetainedStaging }, Detail = prior.Detail }
                 : notice with { Repair = captured };
         StoreSchema.Execute(_connection, transaction,
             "UPDATE notice SET state='open', choice=NULL, kind=$kind, path=$path, detail=$detail " +
@@ -61,14 +61,17 @@ internal sealed partial class NoticeTable
             ("$id", noticeId), ("$kind", notice.Kind.ToString()), ("$path", notice.Path), ("$detail", NoticeDetailCodec.Encode(notice)));
     }
 
-    /// <summary>The open notices of one pair, or of every pair, oldest first.</summary>
-    public IReadOnlyList<Notice> Open(long? pairNo)
+    /// <summary>The open notices of one pair (or of every pair), optionally one reason only, oldest first.</summary>
+    public IReadOnlyList<Notice> Open(long? pairNo, string? reasonKey = null)
     {
         using var command = StoreSchema.Command(_connection, null,
             "SELECT n.notice_id, p.pair_id, n.rule, n.kind, n.path, n.detail, n.reason_key FROM notice n " +
             "JOIN pair p ON p.pair_no=n.pair_no WHERE n.state='open'" +
-            (pairNo is null ? string.Empty : " AND n.pair_no=$p") + " ORDER BY n.created, n.notice_id;");
+            (pairNo is null ? string.Empty : " AND n.pair_no=$p") +
+            (reasonKey is null ? string.Empty : " AND n.reason_key=$reason") +
+            " ORDER BY n.created, n.notice_id;");
         if (pairNo is not null) command.Parameters.AddWithValue("$p", pairNo.Value);
+        if (reasonKey is not null) command.Parameters.AddWithValue("$reason", reasonKey);
         var notices = new List<Notice>();
         using var reader = command.ExecuteReader();
         while (reader.Read())
@@ -77,6 +80,9 @@ internal sealed partial class NoticeTable
                 reader.GetString(6), reader.GetString(0))));
         return notices;
     }
+
+    /// <summary>Open link-item notices for one pair, filtered by reason in SQL.</summary>
+    public IReadOnlyList<Notice> OpenLinks(long pairNo) => Open(pairNo, "link-item");
 
     /// <summary>Marks a notice closed with the user's choice; an unknown id is a no-op.</summary>
     public void Close(string noticeId, string? choice) =>

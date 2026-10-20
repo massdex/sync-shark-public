@@ -43,11 +43,15 @@ public interface IStateStore : IDisposable
         LiveChildren(rootId, directory).OrderBy(item => item.Path, StringComparer.Ordinal).Skip(offset).Take(limit).ToArray();
 
     /// <summary>Bounded flagged-item page for catalog backfill.</summary>
-    IReadOnlyList<ItemState> LiveFlaggedPage(string rootId, ItemFlags flags, ItemState? after, int limit)
+    /// <param name="afterDirNo">The cursor item's stored folder number, so a vanished folder still seeks from its key.</param>
+    IReadOnlyList<ItemState> LiveFlaggedPage(string rootId, ItemFlags flags, ItemState? after, int limit, long? afterDirNo = null)
     {
         var rows = LiveFlagged(rootId, flags);
         return (after is null ? rows : rows.SkipWhile(item => item.Path != after.Path).Skip(1)).Take(limit).ToArray();
     }
+
+    /// <summary>The stored folder number for a path, when the store keeps one; null permits a path lookup fallback.</summary>
+    long? DirectoryNumber(string rootId, string path) => null;
 
     /// <summary>Exact directory aliases through indexed keys, never ancestor children or subtrees.</summary>
     IReadOnlyList<string> DirectorySpellings(string rootId, string path);
@@ -200,6 +204,10 @@ public interface IStateStore : IDisposable
             AddNotices([notice]);
     }
     IReadOnlyList<Notice> OpenNotices(string? pairId);
+
+    /// <summary>Open link-item notices only; persistent stores filter this in SQL so a page never loads every notice.</summary>
+    IReadOnlyList<Notice> OpenLinkNotices(string pairId) =>
+        OpenNotices(pairId).Where(notice => notice.ReasonKey == "link-item").ToArray();
 
     /// <summary>Recovery copies recorded for this pair; the Recovery owner restores or expires them.</summary>
     IReadOnlyList<RecoveryRecord> Recoveries(string pairId);
