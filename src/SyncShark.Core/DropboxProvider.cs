@@ -1592,7 +1592,8 @@ public sealed partial class DropboxPilotClient(
 
         request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
         using var document = await SendUploadEffectAsync(request,
-            "The upload response was interrupted after request transmission.", cancellationToken);
+            "The upload response was interrupted after request transmission.", cancellationToken,
+            () => SyncUploadSource.Current.Value?.BeforeUpload());
         return ParseUploadResult(document.RootElement, expectedContentHash, source.Length);
     }
 
@@ -1743,7 +1744,8 @@ public sealed partial class DropboxPilotClient(
         startRequest.Headers.Add("Dropbox-API-Arg", JsonSerializer.Serialize(new { close = false }, JsonOptions));
         startRequest.Content = SessionContent(source, firstCount);
         using var started = await SendUploadEffectAsync(startRequest,
-            "The upload-session start response was interrupted after request transmission.", cancellationToken);
+            "The upload-session start response was interrupted after request transmission.", cancellationToken,
+            () => SyncUploadSource.Current.Value?.BeforeUpload());
         string sessionId;
         try
         {
@@ -1887,14 +1889,14 @@ public sealed partial class DropboxPilotClient(
     }
 
     private async Task<JsonDocument> SendUploadEffectAsync(HttpRequestMessage request, string interruptionMessage,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, Action? onSending = null)
     {
         HttpResponseMessage response;
         Interlocked.Increment(ref _providerCallCount);
         try
         {
             response = await SendResourceRequestAsync(request, HttpCompletionOption.ResponseHeadersRead,
-                cancellationToken);
+                cancellationToken, onSending);
         }
         catch (Exception exception) when (exception is HttpRequestException or OperationCanceledException)
         {
@@ -3489,7 +3491,12 @@ public sealed partial class DropboxPilotClient(
         }
         throw new DropboxApiException(response.StatusCode,
             $"Dropbox download refused (HTTP {(int)response.StatusCode}; {code}). {detail} " +
-            "No download bytes were accepted from this response.");
+            "No download bytes were accepted from this response.")
+        {
+            // Preserve the structured missing-source proof for the adapter's narrow mismatch mapping.
+            // Unknown, restricted and malformed refusals must remain failures, never inferred from HTTP 409 alone.
+            WriteErrorTag = code == "path/not_found" ? "not_found" : null
+        };
     }
 
     private sealed class LeaveOpenReadStream(Stream inner) : Stream

@@ -11,7 +11,8 @@ public sealed partial class SyncRun
         // Recheck only the account that refused this pair's upload, at most once per run.
         // A timeout or failed probe preserves the hold and good inventory.
         var root = notice.UploadQuotaSide == Side.A ? pair.A : pair.B;
-        if (root.Provider != SyncProviders.Dropbox || _endpoints.Writer(root) is not DropboxWriter writer) return;
+        if (!string.Equals(root.Provider, SyncProviders.Dropbox, StringComparison.OrdinalIgnoreCase) ||
+            _endpoints.Writer(root) is not DropboxWriter writer) return;
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);

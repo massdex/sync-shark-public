@@ -57,6 +57,9 @@ internal sealed partial class DropboxWire : HttpMessageHandler
     /// <summary>When set, the download body is these bytes instead of the node's exact revision bytes.</summary>
     public byte[]? DownloadBodyOverride { get; set; }
 
+    /// <summary>When set, every download is refused with this exact status and body (refusal-mapping checks).</summary>
+    public (HttpStatusCode Status, string Body)? DownloadRefusalOverride { get; set; }
+
     /// <summary>The cursor returned by get_latest_cursor.</summary>
     public string LatestCursor { get; set; } = "cursor-latest";
     public string? RevisionDeletedTime { get; set; } = "2026-10-12T08:00:00Z";
@@ -82,6 +85,7 @@ internal sealed partial class DropboxWire : HttpMessageHandler
     public Dictionary<string, string> NameWriteErrors { get; } = new(StringComparer.Ordinal);
     public List<string> AttemptedWritePaths { get; } = [];
     public bool UploadRefusalUsesReason { get; set; }
+    public Action? UploadSessionStarted { get; set; }
 
     /// <summary>Every list_folder scope, to distinguish subtree pruning from result filtering.</summary>
     public List<(string Path, bool Recursive)> ListRequests { get; } = new();

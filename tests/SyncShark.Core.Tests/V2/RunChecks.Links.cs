@@ -56,7 +56,13 @@ internal static partial class RunChecks
                 Require(first.Path == "a/one", "cursor starts in the first folder");
                 var dirNo = store.DirectoryNumber(fx.Pair.A.RootId, "a");
                 Require(dirNo is not null, "cursor captures the folder number");
-                using (var connection = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + SqliteStateStore.DatabasePath(folder)))
+                // Non-pooled: a pooled connection keeps state.db open after Dispose, so the finally could not delete the folder.
+                using (var connection = new Microsoft.Data.Sqlite.SqliteConnection(
+                    new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+                    {
+                        DataSource = SqliteStateStore.DatabasePath(folder),
+                        Pooling = false,
+                    }.ToString()))
                 {
                     connection.Open();
                     using var command = connection.CreateCommand();
