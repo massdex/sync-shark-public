@@ -1,0 +1,437 @@
+namespace Massdex.SyncShark.V2;
+
+/// <summary>Fast checks for the single composition home: temp folder only, and any HTTP request fails the check.</summary>
+internal static class EngineCompositionChecks
+{
+    public static async Task RunAsync()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "engine-composition-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        using var http = new HttpClient(new FailingHandler());
+        var host = new EngineHostInputs(root, null, http);
+
+        using (var first = EngineComposition.Open(host, V2Settings.Default, TimeProvider.System))
+        {
+            Require(File.Exists(first.DatabasePath), "the database is created at DatabasePath");
+            Require(first.DatabasePath == SqliteStateStore.DatabasePath(root), "DatabasePath has one source");
+            Require(first.Store.Pairs().Count == 0, "listing pairs opens no endpoint");
+            Require(Throws<SyncRunRefusedException>(() => first.Endpoints.Inventory(LocalRoot("missing", root))),
+                "an endpoint not opened for a run is refused");
+
+            var missing = Path.Combine(root, "no-such-folder");
+            var pair = new PairDef("p1", "p1", LocalRoot("a", missing),
+                new RootDef("b", SyncProviders.Dropbox, "acct", "/x", "id:x"), [], [], true);
+            Require(await ThrowsAsync<SyncRunRefusedException>(() => first.Endpoints.OpenAsync(pair, default)),
+                "a missing local root is refused before any effect");
+            var cloud = pair with { A = LocalRoot("a", root) };
+            Require(await ThrowsAsync<SyncRunRefusedException>(() => first.Endpoints.OpenAsync(cloud, default)),
+                "a pair whose sides cannot be bound is refused (no HTTP request made)");
+
+            var id = await first.Roots.ObjectIdAsync(SyncProviders.Local, null, root, default);
+            var (volume, fileId) = LocalItems.ParseObjectId(id);
+            using var lease = PilotDirectoryLease.Open(root);
+            Require(volume == lease.Identity.VolumeSerialNumber && fileId == lease.Identity.FileId,
+                "the local root object id round-trips to the folder's NTFS identity");
+            using (var watch = await first.Endpoints.WatchAsync(
+                       new RootDef("w", SyncProviders.Local, null, root, id), default))
+                Require(watch is LocalChangeWatch, "a local root is watched by a local change watch");
+            Require(await ThrowsAsync<Exception>(() => first.Endpoints.WatchAsync(LocalRoot("wm", missing), default)),
+                "watching a missing local root faults");
+            Require(await ThrowsAsync<SyncRunRefusedException>(() =>
+                    first.Roots.ObjectIdAsync(SyncProviders.Local, null, missing, default)),
+                "probing a missing local folder is refused");
+        }
+
+        using (var again = EngineComposition.Open(host, V2Settings.Default, TimeProvider.System))
+        {
+            Require(again.Store.Pairs().Count == 0, "the database reopens");
+            var auto = again.StartAutoSync(_ => false, () => TimeSpan.Zero);
+            await auto.StopAsync();
+            Require(ReferenceEquals(auto, again.StartAutoSync(_ => false, () => TimeSpan.Zero)),
+                "StartAutoSync returns the same instance and restarts it after a stop");
+        }
+
+        await DropboxSideAsync(Path.Combine(root, "dropbox"), http);
+        await RecoverySettingAsync(Path.Combine(root, "recovery"), http);
+        await WorkerSettingAsync(Path.Combine(root, "workers"), http);
+        await BatchSettingAsync(Path.Combine(root, "batches"), http);
+        await CliMappingAsync(Path.Combine(root, "cli"), http);
+        await NoEffectBeforeRefusalAsync(Path.Combine(root, "effects"), http);
+        await AccessRefusalAsync(Path.Combine(root, "access"), http);
+        LongpollTimeout(root, http);
+        await DataFolderOverlapAsync(Path.Combine(root, "overlap"), http);
+        await RecoveryRootedPairAsync(Path.Combine(root, "recovery-pair"), http);
+
+        var damagedRoot = Path.Combine(root, "damaged");
+        var damagedDb = SqliteStateStore.DatabasePath(damagedRoot);
+        Directory.CreateDirectory(Path.GetDirectoryName(damagedDb)!);
+        File.WriteAllBytes(damagedDb, Enumerable.Repeat((byte)0x5A, 8192).ToArray());
+        Require(Throws<StateDamagedException>(() =>
+                EngineComposition.Open(host with { ProductRoot = damagedRoot }, V2Settings.Default, TimeProvider.System)
+                    .Dispose()),
+            "a garbage database is reported damaged, never recreated");
+        Require(new FileInfo(damagedDb).Length == 8192, "the damaged database is left untouched");
+        Console.WriteLine("Engine composition checks passed. Temp folder: " + root);
+    }
+
+    // Dropbox side: the connection comes from root.AccountId; a missing connection, credential or root identity is
+    // refused, and a fully bound side opens, all without one HTTP request.
+    private static async Task DropboxSideAsync(string root, HttpClient http)
+    {
+        Directory.CreateDirectory(root);
+        var binding = new DropboxConnectionBinding(DropboxProviderConfiguration.RegisteredClientId, "account-id",
+            "root-namespace", "home-namespace", DropboxProviderConfiguration.ContentAccess,
+            DropboxProviderConfiguration.RequiredScopes).Normalize();
+        var pair = new PairDef("pd", "pd", DropboxRoot("da", binding.ConnectionId, "/a", "id:a"),
+            DropboxRoot("db", binding.ConnectionId, "/b", "id:b"), [], [], true);
+
+        using (var stateless = EngineComposition.Open(new EngineHostInputs(Path.Combine(root, "stateless"), null, http),
+                   V2Settings.Default, TimeProvider.System))
+            Require(await ThrowsAsync<SyncRunRefusedException>(() => stateless.Endpoints.OpenAsync(pair, default)),
+                "a Dropbox side without product state is refused");
+
+        using var instance = PilotInstanceLock.Acquire(Path.Combine(root, "state", "instance.lock"));
+        var credentials = new Credentials();
+        var host = new EngineHostInputs(root, instance.StateAuthority, http, DropboxCredentials: credentials);
+        using var composition = EngineComposition.Open(host, V2Settings.Default, TimeProvider.System);
+        Require(await ThrowsAsync<SyncRunRefusedException>(() => composition.Endpoints.OpenAsync(pair, default)),
+            "a Dropbox side whose connection is not retained is refused");
+        Require(await ThrowsAsync<SyncRunRefusedException>(() =>
+                composition.Roots.ObjectIdAsync(SyncProviders.Dropbox, binding.ConnectionId, "/a", default)),
+            "probing a Dropbox root without a retained connection is refused");
+        Require(await ThrowsAsync<SyncRunRefusedException>(() =>
+                composition.Roots.ObjectIdAsync(SyncProviders.Dropbox, null, "/a", default)),
+            "probing a Dropbox root that names no connection is refused");
+        Require(await ThrowsAsync<SyncRunRefusedException>(() => composition.Endpoints.WatchAsync(pair.A, default)),
+            "watching a Dropbox root without a retained connection is refused (no HTTP request)");
+        await new DropboxConnectionStore(instance.StateAuthority).SaveNewAsync(binding);
+        Require(await ThrowsAsync<SyncRunRefusedException>(() => composition.Endpoints.OpenAsync(pair, default)),
+            "a Dropbox side whose connection has no saved credential is refused");
+        Require(await ThrowsAsync<SyncRunRefusedException>(() =>
+                composition.Roots.ObjectIdAsync(SyncProviders.Dropbox, binding.ConnectionId, "/a", default)),
+            "probing a Dropbox root without a saved credential is refused");
+
+        credentials.Token = "fixture-refresh";
+        var unbound = pair with { B = pair.B with { RootObjectId = "" } };
+        Require(await ThrowsAsync<SyncRunRefusedException>(() => composition.Endpoints.OpenAsync(unbound, default)),
+            "a Dropbox side with no recorded root identity is refused");
+        var opened = await composition.Endpoints.OpenAsync(pair, default);
+        Require(opened.InventoryA is DropboxInventory && opened.WriterB is DropboxWriter,
+            "a retained connection with a credential opens Dropbox inventory and writer (no HTTP request)");
+    }
+
+    // Recovery location and retention (decision 55): the product settings store, no code default; missing or
+    // unusable is refused.
+    private static async Task RecoverySettingAsync(string root, HttpClient http)
+    {
+        Directory.CreateDirectory(root);
+        Require(new SyncTransferSettings().LocalRecoveryRoot is null, "the Recovery location has no code default");
+        Require(Throws<InvalidDataException>(() => SyncTransferSettings.Normalize(
+                new SyncTransferSettings(LocalRecoveryRoot: "relative\\recovery"))),
+            "the settings store rejects a relative Recovery location");
+        Require(Throws<InvalidDataException>(() => SyncTransferSettings.Normalize(
+                new SyncTransferSettings(RecoveryRetentionDays: 0))),
+            "the settings store rejects a non-positive Recovery retention");
+        Require(Throws<SyncRunRefusedException>(() => new EnginePaths(root, null).RequireRecoveryRoot()),
+            "an unset Recovery location is refused");
+        Require(Throws<SyncRunRefusedException>(() => new EnginePaths(root, "relative\\recovery").RequireRecoveryRoot()),
+            "a relative Recovery location is refused");
+        var absent = Enumerable.Range('D', 23).Select(letter => (char)letter)
+            .FirstOrDefault(letter => !Directory.Exists(letter + ":\\"));
+        if (absent != default)
+            Require(Throws<SyncRunRefusedException>(() =>
+                    new EnginePaths(root, absent + ":\\Recovery").RequireRecoveryRoot()),
+                "a Recovery location on an absent drive is refused");
+
+        using var instance = PilotInstanceLock.Acquire(Path.Combine(root, "state", "instance.lock"));
+        var host = new EngineHostInputs(root, instance.StateAuthority, http);
+        using (var unset = EngineComposition.Open(host, V2Settings.Default, TimeProvider.System))
+            Require(unset.Paths.RecoveryRoot is null && unset.Settings.RecoveryRetention == TimeSpan.FromDays(30),
+                "with nothing saved the Recovery location is unset and retention is the 30-day default");
+        var recovery = Path.Combine(root, "Recovery");
+        await new SyncTransferSettingsStore(instance.StateAuthority).SaveAsync(
+            new SyncTransferSettings(LocalRecoveryRoot: recovery, RecoveryRetentionDays: 7));
+        using var composition = EngineComposition.Open(host, V2Settings.Default, TimeProvider.System);
+        Require(composition.Paths.RecoveryRoot == recovery &&
+                composition.Settings.RecoveryRetention == TimeSpan.FromDays(7),
+            "the composition takes the Recovery location and retention from the settings store");
+        var paths = composition.Paths;
+        Require(paths.RequireRecoveryRoot() == recovery, "a usable Recovery location is returned in full");
+        var owned = paths.ProductOwnedPaths(recovery);
+        Require(owned.Contains(Path.GetFullPath(root)) && owned.Contains(Path.GetFullPath(paths.Spool)) &&
+                owned.Contains(recovery), "the data folder, spool and Recovery are product-owned for local scans");
+    }
+
+    private static async Task WorkerSettingAsync(string root, HttpClient http)
+    {
+        Directory.CreateDirectory(root);
+        using var instance = PilotInstanceLock.Acquire(Path.Combine(root, "state", "instance.lock"));
+        var host = new EngineHostInputs(root, instance.StateAuthority, http);
+        var settingsStore = new SyncTransferSettingsStore(instance.StateAuthority);
+        foreach (var cap in new[] { 0, 128 })
+        {
+            await settingsStore.SaveAsync(new SyncTransferSettings(ResourceMode: "Performance", MaximumConcurrentFiles: cap));
+            using var composition = EngineComposition.Open(host, V2Settings.Default, TimeProvider.System);
+            Require(composition.Settings.MaxWorkers == (cap == 0 ? V2Settings.Default.MaxWorkers : cap),
+                "explicit transfer concurrency governs v2 workers; automatic preserves the default");
+        }
+    }
+
+    // The engine batch tunables are adjustable through the product transfer settings the same way as the worker cap:
+    // an explicit value governs the engine, automatic (zero) keeps the engine default (the single home of each default).
+    private static async Task BatchSettingAsync(string root, HttpClient http)
+    {
+        Directory.CreateDirectory(root);
+        // Defaults live only in V2Settings.Default.
+        Require(V2Settings.Default.UploadBatchSize == 1000, "the upload batch size default is the provider maximum (1000)");
+        Require(V2Settings.Default.UploadCommitConcurrency == 1, "the upload commit concurrency default is one");
+        Require(V2Settings.Default.DeleteBatchSize == 1000, "the delete batch size default is the provider maximum (1000)");
+        // The product settings validate their own range (0 = automatic).
+        Require(Throws<InvalidDataException>(() => SyncTransferSettings.Normalize(new SyncTransferSettings(UploadBatchSize: 1001))),
+            "the settings store rejects an upload batch size above the provider maximum");
+        Require(Throws<InvalidDataException>(() => SyncTransferSettings.Normalize(new SyncTransferSettings(DeleteBatchSize: 1001))),
+            "the settings store rejects a delete batch size above the provider maximum");
+        Require(Throws<InvalidDataException>(() => SyncTransferSettings.Normalize(new SyncTransferSettings(UploadCommitConcurrency: 5))),
+            "the settings store rejects an upload commit concurrency above four");
+        Require(Throws<InvalidDataException>(() => SyncTransferSettings.Normalize(new SyncTransferSettings(UploadBatchSize: -1))),
+            "the settings store rejects a negative upload batch size");
+        var accepted = SyncTransferSettings.Normalize(new SyncTransferSettings(UploadBatchSize: 1000,
+            UploadCommitConcurrency: 4, DeleteBatchSize: 1000));
+        Require(accepted.UploadBatchSize == 1000 && accepted.UploadCommitConcurrency == 4 &&
+                accepted.DeleteBatchSize == 1000,
+            "the settings store accepts the maximum batch size and concurrency");
+
+        using var instance = PilotInstanceLock.Acquire(Path.Combine(root, "state", "instance.lock"));
+        var host = new EngineHostInputs(root, instance.StateAuthority, http);
+        var settingsStore = new SyncTransferSettingsStore(instance.StateAuthority);
+        foreach (var value in new[] { 0, 1000 })
+        {
+            await settingsStore.SaveAsync(new SyncTransferSettings(UploadBatchSize: value,
+                UploadCommitConcurrency: value == 0 ? 0 : 4, DeleteBatchSize: value));
+            using var composition = EngineComposition.Open(host, V2Settings.Default, TimeProvider.System);
+            var expectedBatch = value == 0 ? V2Settings.Default.UploadBatchSize : value;
+            Require(composition.Settings.UploadBatchSize == expectedBatch &&
+                    composition.Settings.DeleteBatchSize == expectedBatch &&
+                    composition.Settings.UploadCommitConcurrency == (value == 0 ? V2Settings.Default.UploadCommitConcurrency : 4),
+                value == 0
+                    ? "automatic batch settings preserve the engine defaults"
+                    : "explicit transfer settings govern the engine batch tunables");
+        }
+    }
+
+    // Run commands report an engine refusal as a review outcome, never a crash.
+    private static async Task CliMappingAsync(string root, HttpClient http)
+    {
+        Directory.CreateDirectory(root);
+        using var composition = EngineComposition.Open(new EngineHostInputs(root, null, http), V2Settings.Default,
+            TimeProvider.System);
+        var missing = Path.Combine(root, "no-such-folder");
+        var pair = new PairDef("pc", "pc", LocalRoot("ca", missing), LocalRoot("cb", root), [], [], true);
+        composition.Store.SavePair(pair);
+        var runtime = new V2CliRuntime(null, composition.Store, composition.Run, composition.Roots, root);
+        Require(await ThrowsAsync<SyncCliReviewException>(() =>
+                runtime.PrepareFirstSyncAsync(pair.PairId, _ => { }, default)),
+            "first-sync prepare maps an engine refusal to a review outcome");
+        Require(await ThrowsAsync<SyncCliReviewException>(() => runtime.LoadPlanAsync(pair.PairId, default, 10, 0)),
+            "plan maps an engine refusal to a review outcome");
+        Require(await ThrowsAsync<SyncCliReviewException>(() => runtime.RunPairAsync(pair.PairId, _ => { }, default)),
+            "run maps an engine refusal to a review outcome");
+    }
+
+    // Both sides' prerequisites are checked before any writer opens: a missing Dropbox credential on side B leaves
+    // side A's local folder without a control namespace and the Recovery folder uncreated.
+    private static async Task NoEffectBeforeRefusalAsync(string root, HttpClient http)
+    {
+        var product = Path.Combine(root, "product");
+        var local = Path.Combine(root, "local");
+        var recovery = Path.Combine(root, "Recovery");
+        Directory.CreateDirectory(product);
+        Directory.CreateDirectory(local);
+        using var instance = PilotInstanceLock.Acquire(Path.Combine(product, "state", "instance.lock"));
+        var binding = Binding();
+        await new DropboxConnectionStore(instance.StateAuthority).SaveNewAsync(binding);
+        await new SyncPairStore(instance.StateAuthority).GetOrCreateInstallationIdAsync();
+        await new SyncTransferSettingsStore(instance.StateAuthority).SaveAsync(
+            new SyncTransferSettings(LocalRecoveryRoot: recovery));
+        var credentials = new Credentials();
+        using var composition = EngineComposition.Open(
+            new EngineHostInputs(product, instance.StateAuthority, http, credentials, new FailingHandler()),
+            V2Settings.Default, TimeProvider.System);
+        var localId = await composition.Roots.ObjectIdAsync(SyncProviders.Local, null, local, default);
+        var pair = new PairDef("pe", "pe", new RootDef("ea", SyncProviders.Local, null, local, localId),
+            DropboxRoot("eb", binding.ConnectionId, "/e", "id:e"), [], [], true);
+        Require(await ThrowsAsync<SyncRunRefusedException>(() => composition.Endpoints.OpenAsync(pair, default)),
+            "a pair whose Dropbox side has no credential is refused");
+        Require(!Directory.EnumerateFileSystemEntries(local).Any(),
+            "the refusal allocated no control namespace in the local folder");
+        Require(!Directory.Exists(recovery), "the refusal created no Recovery folder");
+        credentials.Token = "fixture-refresh";
+        await composition.Endpoints.OpenAsync(pair, default);
+        Require(Directory.Exists(recovery), "once both sides pass, the writers open (Recovery folder created)");
+    }
+
+    // A revoked sign-in while creating a pair is an account-access refusal, which the CLI reports as review.
+    private static async Task AccessRefusalAsync(string root, HttpClient failing)
+    {
+        var product = Path.Combine(root, "product");
+        var local = Path.Combine(root, "local");
+        Directory.CreateDirectory(product);
+        Directory.CreateDirectory(local);
+        using var instance = PilotInstanceLock.Acquire(Path.Combine(product, "state", "instance.lock"));
+        var binding = Binding();
+        await new DropboxConnectionStore(instance.StateAuthority).SaveNewAsync(binding);
+        using var revoked = new HttpClient(new RevokedHandler());
+        using var composition = EngineComposition.Open(
+            new EngineHostInputs(product, instance.StateAuthority, revoked, new Credentials { Token = "fixture" },
+                new FailingHandler()), V2Settings.Default, TimeProvider.System);
+        Require(await ThrowsAsync<EndpointAccessException>(() =>
+                composition.Roots.ObjectIdAsync(SyncProviders.Dropbox, binding.ConnectionId, "/a", default)),
+            "a revoked sign-in while probing a Dropbox root is an account-access refusal");
+        var runtime = new V2CliRuntime(null, composition.Store, composition.Run, composition.Roots, product);
+        Require(await ThrowsAsync<SyncCliReviewException>(() =>
+                runtime.CreatePairAsync(binding.ConnectionId, "/a", local, null, null, false, default)),
+            "the CLI reports a revoked sign-in during pair create as a reconnect review");
+    }
+
+    // The production combination: a default HttpClient's 100 s timeout would cut a quiet long-poll short (why the
+    // long-poll uses a separate client); the pair-sync route client instead takes the batch transport timeout.
+    private static void LongpollTimeout(string root, HttpClient http)
+    {
+        using var composition = EngineComposition.Open(new EngineHostInputs(Path.Combine(root, "longpoll"), null,
+            http, LongpollHandler: new FailingHandler()), V2Settings.Default, TimeProvider.System);
+        var poll = V2Settings.Default.DropboxLongpollTimeout;
+        Require(composition.LongpollHttpTimeout >= poll + TimeSpan.FromSeconds(90) + TimeSpan.FromSeconds(30),
+            "the long-poll HTTP timeout covers the long-poll, Dropbox's 90 s jitter and headroom");
+        Require(new HttpClient().Timeout < poll + TimeSpan.FromSeconds(90),
+            "the shared client's default timeout alone would cut a quiet long-poll short (why a separate client)");
+        Require(EngineComposition.DropboxHttpTimeoutFor(V2Settings.Default) > V2Settings.Default.BatchOperationTimeout,
+            "the pair-sync route client's timeout sits above the explicit batch operation timeout");
+    }
+
+    // A local root never equals, contains or sits inside the data folder (database and spool live there).
+    private static async Task DataFolderOverlapAsync(string root, HttpClient http)
+    {
+        var product = Path.Combine(root, "product");
+        var inside = Path.Combine(product, "inside");
+        Directory.CreateDirectory(inside);
+        using var composition = EngineComposition.Open(new EngineHostInputs(product, null, http,
+            LongpollHandler: new FailingHandler()), V2Settings.Default, TimeProvider.System);
+        foreach (var path in new[] { product, inside, root })
+        {
+            var pair = new PairDef("po", "po", LocalRoot("oa", path), LocalRoot("ob", path), [], [], true);
+            Require(await ThrowsAsync<SyncRunRefusedException>(() => composition.Endpoints.OpenAsync(pair, default)),
+                "a local root equal to, inside or containing the data folder is refused: " + path);
+        }
+    }
+
+    // The user may pair the Recovery folder itself (e.g. to back it up). Its own Recovery copies land in an
+    // artifact-named subfolder (.syncshark-recovery-<pairId>) that the scan never inventories: no feedback loop.
+    private static async Task RecoveryRootedPairAsync(string root, HttpClient http)
+    {
+        var product = Path.Combine(root, "product");
+        var recovery = Path.Combine(root, "Recovery");
+        var other = Path.Combine(root, "other");
+        Directory.CreateDirectory(product);
+        Directory.CreateDirectory(recovery);
+        Directory.CreateDirectory(other);
+        File.WriteAllText(Path.Combine(recovery, "x.txt"), "keep me");
+        File.WriteAllText(Path.Combine(other, "y.txt"), "only here");
+        using var instance = PilotInstanceLock.Acquire(Path.Combine(product, "state", "instance.lock"));
+        await new SyncPairStore(instance.StateAuthority).GetOrCreateInstallationIdAsync();
+        await new SyncTransferSettingsStore(instance.StateAuthority).SaveAsync(
+            new SyncTransferSettings(LocalRecoveryRoot: recovery));
+        using var composition = EngineComposition.Open(new EngineHostInputs(product, instance.StateAuthority, http,
+            new Credentials(), new FailingHandler()), V2Settings.Default, TimeProvider.System);
+        var a = new RootDef("rr-a", SyncProviders.Local, null, recovery,
+            await composition.Roots.ObjectIdAsync(SyncProviders.Local, null, recovery, default));
+        var b = new RootDef("rr-b", SyncProviders.Local, null, other,
+            await composition.Roots.ObjectIdAsync(SyncProviders.Local, null, other, default));
+        var pair = new PairDef("p-recovery-rooted", "prr", a, b, [], [], true);
+        composition.Store.SavePair(pair);
+        var progress = new Progress<RunProgress>();
+        // B-165: the real local scan reports files without hashes; one-sided copies are hashed while planning.
+        var plan = await composition.Run.PreviewFirstSyncAsync(pair.PairId, progress, default);
+        var again = await composition.Run.PreviewFirstSyncAsync(pair.PairId, progress, default);
+        Require(Text(plan) == Text(again) && plan.Actions.Count(action => action.Kind == ActionKind.CopyNew) == 2 &&
+                plan.Actions.All(action => action.Kind != ActionKind.CopyNew || action.Source?.Hash is not null),
+            "the preview plans both one-sided copies with their hashes, the same plan each time: " + Text(plan));
+        var applied = await composition.Run.ApplyAsync(pair.PairId, plan, progress, default);
+        Require(applied.Failed == 0 && File.Exists(Path.Combine(other, "x.txt")) &&
+                File.Exists(Path.Combine(recovery, "y.txt")),
+            "the reviewed plan copies both one-sided files with the real local writers (" + applied.Outcome + " " +
+            string.Join("; ", applied.Failures.Select(f => f.Outcome + " " + f.Reason)) + ")");
+
+        File.Delete(Path.Combine(other, "x.txt"));
+        var deleted = await composition.Run.IncrementalAsync(pair.PairId, progress, default);
+        Require(!File.Exists(Path.Combine(recovery, "x.txt")) && deleted.Deleted == 1,
+            "a delete in the Recovery-rooted pair removes the file there (" + deleted.Outcome + " done " + deleted.Done +
+            " deleted " + deleted.Deleted + " failed " + deleted.Failed + " held " + deleted.Held + " " +
+            string.Join("; ", deleted.Failures.Select(f => f.Outcome + " " + f.Reason)) + " | " +
+            string.Join("; ", composition.Store.OpenNotices(pair.PairId).Select(n => n.Rule + " " + n.Path + " " + n.Detail)) + ")");
+        var copies = Directory.GetDirectories(recovery, ".syncshark-recovery-*");
+        Require(copies.Length == 1 && Directory.EnumerateFiles(copies[0]).Any(),
+            "the deleted file is preserved into the pair's own Recovery subfolder inside its root");
+
+        var next = await composition.Run.IncrementalAsync(pair.PairId, progress, default);
+        Require(next.Done == 0 && next.Uploaded == 0 && next.Downloaded == 0 && !File.Exists(Path.Combine(other,
+                Path.GetFileName(copies[0]))) &&
+                Directory.GetFileSystemEntries(other).Select(Path.GetFileName).SequenceEqual(["y.txt"]),
+            "the next scan does not see the Recovery copy (nothing synced back)");
+        Require(composition.Store.Live(a.RootId, [Path.GetFileName(copies[0])]).Count == 0,
+            "no Recovery artifact is recorded as data");
+    }
+    private static string Text(Plan plan) => string.Join("; ", plan.Actions.Select(action =>
+        $"{action.Kind} {action.Target} {action.Path} {action.Source?.Hash}"));
+
+    private static DropboxConnectionBinding Binding() =>
+        new DropboxConnectionBinding(DropboxProviderConfiguration.RegisteredClientId, "account-id",
+            "root-namespace", "home-namespace", DropboxProviderConfiguration.ContentAccess,
+            DropboxProviderConfiguration.RequiredScopes).Normalize();
+
+    private sealed class RevokedHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
+            Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.BadRequest)
+            {
+                Content = new StringContent("{\"error\":\"invalid_grant\",\"error_description\":\"revoked\"}",
+                    System.Text.Encoding.UTF8, "application/json")
+            });
+    }
+    private static RootDef DropboxRoot(string id, string connectionId, string path, string objectId) =>
+        new(id, SyncProviders.Dropbox, connectionId, path, objectId);
+
+    private static RootDef LocalRoot(string id, string path) => new(id, SyncProviders.Local, null, path, "id:local:0");
+
+    private sealed class Credentials : IDropboxRefreshTokenStore
+    {
+        public string? Token { get; set; }
+        public Task<string?> ReadAsync(CancellationToken cancellationToken = default) => Task.FromResult(Token);
+        public Task WriteAsync(string refreshToken, CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
+        public Task DeleteAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+    }
+
+    private static bool Throws<T>(Action action) where T : Exception
+    {
+        try { action(); return false; }
+        catch (T) { return true; }
+    }
+
+    private static async Task<bool> ThrowsAsync<T>(Func<Task> action) where T : Exception
+    {
+        try { await action(); return false; }
+        catch (T) { return true; }
+    }
+
+    private static void Require(bool condition, string label)
+    {
+        if (!condition) throw new InvalidOperationException(label);
+        Console.WriteLine("PASS " + label);
+    }
+
+    private sealed class FailingHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
+            throw new InvalidOperationException("No HTTP request is allowed in the composition checks: " + request.RequestUri);
+    }
+}
