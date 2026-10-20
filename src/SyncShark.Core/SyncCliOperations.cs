@@ -116,6 +116,9 @@ public interface ISyncCliOperations : ISyncCliRuntime
         SetAvailabilityAsync(pairId, path, availability, cancellationToken);
     Task<SyncCliAvailabilityData> SetStorageIntentAsync(string pairId, string path, string mode, CancellationToken cancellationToken) =>
         throw new SyncCliUsageException("Storage intent requires core v2. No files changed.");
+    Task<SyncCliAvailabilityData> SetStorageIntentAsync(string pairId, string path, string mode,
+        CancellationToken cancellationToken, string? backupDirectory, bool confirmWithoutBackup) =>
+        SetStorageIntentAsync(pairId, path, mode, cancellationToken);
     Task<object> ListStorageAsync(string pairId, int limit, int offset, CancellationToken cancellationToken) =>
         throw new SyncCliUsageException("Storage list requires core v2.");
     Task<SyncCliUpdateData> UpdatesAsync(bool download, CancellationToken cancellationToken);

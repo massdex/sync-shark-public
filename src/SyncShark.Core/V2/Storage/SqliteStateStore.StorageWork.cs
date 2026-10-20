@@ -7,7 +7,7 @@ public sealed partial class SqliteStateStore
 {
     internal const string HasStorageWorkSql = """
         SELECT EXISTS(SELECT 1 FROM storage_policy WHERE mode='online-only')
-          OR EXISTS(SELECT 1 FROM storage_settlement WHERE state='pending')
+          OR EXISTS(SELECT 1 FROM storage_settlement WHERE state='pending' AND due<=$now)
           OR EXISTS(SELECT 1 FROM storage_refresh WHERE due<=$now)
           OR EXISTS(SELECT 1 FROM storage_subtree_sweep)
           OR EXISTS(SELECT 1 FROM storage_hydration WHERE due<=$now)
@@ -142,7 +142,7 @@ public sealed partial class SqliteStateStore
     internal void RetryStorageSettlement(string root, string item, string binding) => InStore(() =>
     {
         if (!_storageEnabled) return;
-        StoreSchema.Execute(_connection, null, "UPDATE storage_settlement SET state='pending' WHERE root_id=$r AND object_id=$o AND remote_binding=$b;",
+        StoreSchema.Execute(_connection, null, "UPDATE storage_settlement SET state='pending',due=0 WHERE root_id=$r AND object_id=$o AND remote_binding=$b;",
             ("$r", root), ("$o", item), ("$b", binding));
     });
 
@@ -187,8 +187,10 @@ public sealed partial class SqliteStateStore
         StoreSchema.Execute(_connection, tx, "UPDATE storage_item SET remote_json=$new WHERE root_id=$r AND object_id=$o AND remote_binding=$b AND remote_json=$old;",
             ("$new", JsonSerializer.Serialize(remote)), ("$r", prior.RootId), ("$o", prior.ObjectId),
             ("$b", prior.RemoteBinding), ("$old", JsonSerializer.Serialize(prior.Remote)));
-        StoreSchema.Execute(_connection, tx, "DELETE FROM storage_refresh WHERE root_id=$r AND object_id=$o AND remote_binding=$b AND job_id=$v;", ("$r", prior.RootId),
-            ("$o", prior.ObjectId), ("$b", prior.RemoteBinding), ("$v", prior.JobId));
+        // A stale worker must not consume a newer revision's queued work after losing the receipt CAS.
+        if (StoreSchema.Changes(_connection, tx) != 0)
+            StoreSchema.Execute(_connection, tx, "DELETE FROM storage_refresh WHERE root_id=$r AND object_id=$o AND remote_binding=$b AND job_id=$v;", ("$r", prior.RootId),
+                ("$o", prior.ObjectId), ("$b", prior.RemoteBinding), ("$v", prior.JobId));
         tx.Commit();
     });
 
@@ -215,7 +217,12 @@ public sealed partial class SqliteStateStore
             DO UPDATE SET remote_json=excluded.remote_json,availability=excluded.availability,pinned=excluded.pinned,in_sync=excluded.in_sync;
             """, ("$r", root), ("$o", item), ("$b", binding), ("$j", JsonSerializer.Serialize(remote)),
             ("$a", observed.Availability), ("$p", observed.Pinned ? 1 : 0), ("$s", observed.InSync ? 1 : 0));
-
+        // A run that published this exact indexed revision has already done the refresh work.
+        // Keep a trigger queued for a newer concurrently indexed revision.
+        StoreSchema.Execute(_connection, tx, "DELETE FROM storage_refresh WHERE root_id=$r AND object_id=$o AND remote_binding=$b " +
+            "AND EXISTS(SELECT 1 FROM file_state f WHERE f.root_no=(SELECT root_no FROM root WHERE root_id=$b) " +
+            "AND f.object_id=$id AND f.version_id=$rev);",
+            ("$r", root), ("$o", item), ("$b", binding), ("$id", remote.Id), ("$rev", remote.Revision));
     }
 
     public IReadOnlyList<Notice> HydrationNoticesPage(string pairId, int limit = 16385) => InStore(() =>

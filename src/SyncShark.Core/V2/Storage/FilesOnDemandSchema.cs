@@ -19,6 +19,9 @@ internal static class FilesOnDemandSchema
         var legacyPeriodic = IsEnabled(connection) && StoreSchema.Scalar(connection, null, "SELECT 1 FROM sqlite_master WHERE name='storage_root_backoff';") is null;
         using var tx = connection.BeginTransaction();
         StoreSchema.Execute(connection, tx, Ddl);
+        // Additive lazy migration: existing opted-in stores gain item-scoped retry scheduling without a schema version.
+        if (StoreSchema.Scalar(connection, tx, "SELECT 1 FROM pragma_table_info('storage_settlement') WHERE name='due';") is null)
+            StoreSchema.Execute(connection, tx, "ALTER TABLE storage_settlement ADD COLUMN due INTEGER NOT NULL DEFAULT 0;");
         if (legacyPeriodic) StoreSchema.Execute(connection, tx, "DELETE FROM storage_refresh WHERE due>0;");
         // Preview builds changed the shared index. Restore its final26 predicate only on opted-in stores.
         if (StoreSchema.Scalar(connection, tx, "SELECT sql FROM sqlite_master WHERE name='fs_flagged';") is string sql && sql.Contains("~512", StringComparison.Ordinal))
@@ -58,6 +61,7 @@ internal static class FilesOnDemandSchema
         CREATE TABLE IF NOT EXISTS storage_settlement(job_id INTEGER PRIMARY KEY AUTOINCREMENT,
           root_id TEXT NOT NULL, object_id TEXT NOT NULL, remote_binding TEXT NOT NULL,
           remote_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
+          due INTEGER NOT NULL DEFAULT 0,
           UNIQUE(root_id,object_id,remote_binding));
         CREATE INDEX IF NOT EXISTS storage_pending_root ON storage_settlement(root_id,state,job_id);
         CREATE INDEX IF NOT EXISTS storage_pending ON storage_settlement(state,job_id);

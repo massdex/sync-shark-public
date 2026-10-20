@@ -61,7 +61,126 @@ internal static class FilesOnDemandServiceChecks
         Require(!store.OpenNotices(pair.PairId).Any(n => n.Storage?.ObjectId == files[0].ObjectId),
             "successful Retry closes the entity failure");
         await CheckOfflinePairRaceAsync(Path.Combine(root, "pair-race"));
+        await CheckSettlementSchedulingAsync(Path.Combine(root, "settlement-failures"));
+        await CheckRefreshClassification(Path.Combine(root, "refresh-classification"));
         Console.WriteLine("PASS bounded offline hydration, paused/backed-off admission, durable failure, callback correlation and Retry");
+    }
+
+    private static async Task CheckRefreshClassification(string root)
+    {
+        using var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System);
+        var a = new RootDef("local", SyncProviders.Local, null, root, SyncLocalEndpointStore.ObjectId(1, 1));
+        var b = new RootDef("remote", SyncProviders.Dropbox, "account", "/Remote", "remote-root");
+        var pair = new PairDef("pair", "Pair A", a, b, [], [], true);
+        store.SavePair(pair);
+        store.EnableStorage();
+        using var connections = new CloudFilesLifetime(
+            (_, _, _) => throw new InvalidOperationException("native provider must not open"), _ => false, store);
+        var receipt = new PilotRemoteEntry("Folder/file.bin", PilotEntryKind.File, "id:remote-file", "rev-1", 4, new string('a', 64));
+        var item = new StorageNotice(a.RootId, "id:local:00000001:00000000000000ae", b.RootId,
+            "remote-update", StorageNotices.ReceiptScope(receipt));
+        async Task ReportAsync(Exception error)
+        {
+            await using var service = new StorageSettlementService(store, connections);
+            service.ReportFailure(pair, "Folder/file.bin", item, error);
+        }
+        await ReportAsync(new HttpRequestException("offline", null, System.Net.HttpStatusCode.ServiceUnavailable));
+        var network = store.OpenNotices(pair.PairId).Single(n => n.Storage is not null);
+        Require(network.Path.Length == 0 && network.Storage is
+                { Operation: "availability", ObjectId: "", Scope: "network" },
+            "a refresh network failure is the same ONE pair notice as settlement");
+        Require(store.StorageRootBackedOff(a.RootId), "a refresh network failure durably backs off the root");
+        await ReportAsync(new HttpRequestException("denied", null, System.Net.HttpStatusCode.Unauthorized));
+        var auth = store.OpenNotices(pair.PairId).Single(n => n.Storage is not null);
+        Require(auth.NoticeId == network.NoticeId && auth.Storage!.Scope == "auth",
+            "a refresh auth failure updates that pair notice in place");
+        await ReportAsync(new SyncRunRefusedException("The Dropbox connection is not connected."));
+        var provider = store.OpenNotices(pair.PairId).Single(n => n.Storage is not null);
+        Require(provider.NoticeId == network.NoticeId && provider.Storage!.Scope == "provider",
+            "a refresh provider failure updates that pair notice in place");
+        store.ClearStorageRootBackoff(a.RootId);
+        await ReportAsync(new IOException("Edited local item", unchecked((int)0x80070020)));
+        Require(store.OpenNotices(pair.PairId).Any(n => n.Storage is { Operation: "remote-update" } stored &&
+                stored.ObjectId == item.ObjectId),
+            "a refresh item cause remains its own notice");
+        Require(!store.StorageRootBackedOff(a.RootId), "a refresh item cause never backs off the root");
+    }
+
+    private static async Task CheckSettlementSchedulingAsync(string root)
+    {
+        var clock = new OfflineClock();
+        using var store = SqliteStateStore.Open(root, V2Settings.Default, clock);
+        var a = new RootDef("local", SyncProviders.Local, null, root, SyncLocalEndpointStore.ObjectId(1, 1));
+        var b = new RootDef("remote", SyncProviders.Dropbox, "account", "/Remote", "remote-root");
+        var pair = new PairDef("pair", "Pair A", a, b, [], [], true);
+        store.SavePair(pair);
+        store.EnableStorage();
+        var hash = new string('a', 64);
+        var item = new ItemState("Folder/file.bin", ItemKind.File, "id:local:00000001:0000000000000002", null,
+            hash, 4, DateTimeOffset.UnixEpoch, ItemFlags.None);
+        store.WriteSnapshot(new Snapshot(a.RootId, Side.A, store.BeginGeneration(a.RootId, "snapshot"), "cursor", [item], []));
+        store.SetStoragePolicy(a.RootId, a.RootObjectId, "online-only");
+        var receipt = new PilotRemoteEntry(item.Path, PilotEntryKind.File, "id:remote-file", "rev-1", 4, hash);
+        store.QueueStorageSettlement(a.RootId, item.ObjectId, b.RootId, receipt);
+        using var connections = new CloudFilesLifetime(
+            (_, _, _) => throw new InvalidOperationException("native provider must not open"), _ => false, store);
+        var calls = 0;
+        var network = new HttpRequestException("offline", null, System.Net.HttpStatusCode.ServiceUnavailable);
+        Task<StorageObserved> FailNetwork(StorageSettlement job, CancellationToken token)
+        {
+            Interlocked.Increment(ref calls);
+            return Task.FromException<StorageObserved>(network);
+        }
+        async Task RunTurnAsync(Func<StorageSettlement, CancellationToken, Task<StorageObserved>> convert)
+        {
+            await using var service = new StorageSettlementService(store, connections, convert: convert);
+            await service.DrainAsync(CancellationToken.None);
+        }
+        await RunTurnAsync(FailNetwork);
+        Require(calls == 1, "one failed conversion, never one per file across the pair");
+        var pairNotice = store.OpenNotices(pair.PairId).Single(n => n.Storage is not null);
+        Require(pairNotice.Path.Length == 0 && pairNotice.Storage is
+                { Operation: "availability", ObjectId: "", Scope: "network" },
+            "a network settlement failure is ONE pair notice");
+        Require(store.StorageRootBackedOff(a.RootId), "a network settlement failure durably backs off the root");
+        Require(store.StorageSettlementFor(a.RootId, item.ObjectId, b.RootId) is not null,
+            "a failed settlement retains the item intent");
+        Require(store.StorageSettlementPage().Count == 0, "a failed settlement item is not due on the next pass");
+        await RunTurnAsync(FailNetwork);
+        Require(calls == 1, "no rehash or hold while the root is backed off");
+        clock.Advance(TimeSpan.FromMinutes(2));
+        await RunTurnAsync(FailNetwork);
+        Require(calls == 2 && store.OpenNotices(pair.PairId).Count(n => n.Storage is not null) == 1,
+            "an expired item due retries once and updates the same pair notice");
+
+        store.ClearStorageRootBackoff(a.RootId);
+        clock.Advance(TimeSpan.FromMinutes(2));
+        var itemError = new IOException("Sharing violation", unchecked((int)0x80070020));
+        Task<StorageObserved> FailItem(StorageSettlement job, CancellationToken token)
+        {
+            Interlocked.Increment(ref calls);
+            return Task.FromException<StorageObserved>(itemError);
+        }
+        await RunTurnAsync(FailItem);
+        Require(calls == 3, "the item cause is attempted after its due");
+        var itemNotice = store.OpenNotices(pair.PairId).Single(n => n.Storage?.ObjectId == item.ObjectId);
+        Require(itemNotice.Storage!.Operation == "settlement" && !PlanNotices.HasPathScope(itemNotice),
+            "an item-specific cause remains its own non-holding settlement notice");
+        Require(!store.StorageRootBackedOff(a.RootId), "an item-specific cause never backs off the whole root");
+        Require(store.StorageSettlementPage().Count == 0, "the item cause schedules only the item");
+        await RunTurnAsync(FailItem);
+        Require(calls == 3, "item backoff prevents an immediate rehash");
+        store.RetryStorageSettlement(a.RootId, item.ObjectId, b.RootId);
+        Require(store.StorageSettlementPage().Count == 1, "explicit Retry resets the item due");
+        clock.Advance(TimeSpan.FromMinutes(2));
+        await RunTurnAsync((_, _) => Task.FromResult(new StorageObserved("OnlineOnly", false, true)));
+        Require(calls == 3 && store.StorageSettlementFor(a.RootId, item.ObjectId, b.RootId) is null,
+            "an expired item due converts without another failure");
+        Require(store.OpenNotices(pair.PairId).All(n => n.Storage?.ObjectId != item.ObjectId),
+            "successful settlement closes its own item notice");
+        StorageNotices.CompletePair(store, pair, "settlement");
+        Require(store.OpenNotices(pair.PairId).Count(n => n.Storage is not null) == 0,
+            "pair recovery closes the availability notice");
     }
 
     private static async Task CheckOfflinePairRaceAsync(string root)
@@ -97,20 +216,23 @@ internal static class FilesOnDemandServiceChecks
         await Fail(0, attempt.Correlate(new IOException("Windows read failed")));
         Require(store.StorageHydrationFor(a.RootId, files[0].ObjectId) is not null,
             "same-attempt transport failure retains the durable item retry");
-        Require(store.OpenNotices(pair.PairId).Count == 1 && store.HasOpenStoragePairCause(pair.PairId),
-            "typed callback source produces the sole pair notice before callback persistence");
+        Require(store.OpenNotices(pair.PairId).Count == 1 && store.HasOpenStoragePairCause(pair.PairId) &&
+            store.StorageRootBackedOff(a.RootId) &&
+            store.OpenNotices(pair.PairId).All(n => n.Storage?.ObjectId == ""),
+            "typed callback source alone produces the pair notice and durable root backoff");
         await Fail(1, new IOException("Windows read failed"));
-        Require(store.OpenNotices(pair.PairId).Count == 1 && store.StorageHydrationFor(a.RootId, files[1].ObjectId) is not null,
-            "generic I/O under an existing transport cause retains retry without an item notice");
+        Require(store.OpenNotices(pair.PairId).Any(n => n.Storage?.ObjectId == files[1].ObjectId) &&
+            store.StorageHydrationFor(a.RootId, files[1].ObjectId) is not null,
+            "generic I/O without same-attempt evidence is an item failure even while a pair notice is open");
         using var itemAttempt = new WindowsCloudFilesProvider.OfflineHydrationAttempt(() => { });
         itemAttempt.Failed(new InvalidDataException("Content hash differs"));
         await Fail(2, itemAttempt.Correlate(new IOException("Windows read failed")));
         Require(store.OpenNotices(pair.PairId).Any(n => n.Storage?.ObjectId == files[2].ObjectId),
             "correlated item-specific failure remains visible during the pair outage");
-        Require(!StorageSettlementService.IsGenericOfflineIo(new IOException("Sharing", unchecked((int)0x80070020))) &&
-            !StorageSettlementService.IsGenericOfflineIo(new IOException("Disk full", unchecked((int)0x80070070))) &&
-            !StorageSettlementService.IsGenericOfflineIo(new InvalidDataException("Policy changed")),
-            "sharing, disk and policy failures never qualify for generic suppression");
+        Require(StorageNotices.ClassifyFailure(new IOException("Sharing", unchecked((int)0x80070020))) is null &&
+            StorageNotices.ClassifyFailure(new IOException("Disk full", unchecked((int)0x80070070))) is null &&
+            StorageNotices.ClassifyFailure(new InvalidDataException("Policy changed")) is null,
+            "specific item HRESULTs and policy faults never become pair causes");
         var recovered = 0;
         Task<StorageObserved> Success(PairDef _, ItemState item, Action validate, CancellationToken ct)
         {

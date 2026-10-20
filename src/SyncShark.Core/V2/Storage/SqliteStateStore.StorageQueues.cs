@@ -104,4 +104,13 @@ public sealed partial class SqliteStateStore
         StoreSchema.Execute(_connection, null, "UPDATE storage_refresh SET due=$due WHERE job_id=$id AND root_id=$r AND object_id=$o AND remote_binding=$b;",
             ("$due", NowMs() + Math.Max(0, (long)delay.TotalMilliseconds)), ("$id", job.JobId), ("$r", job.RootId), ("$o", job.ObjectId), ("$b", job.RemoteBinding));
     });
+
+    /// <summary>Item-scoped retry scheduling. A pair-level cause additionally backs off the whole root, so this row
+    /// only decides when a single item is worth another rehash after its exact cause is fixed.</summary>
+    public void DeferStorageSettlement(StorageSettlement job, TimeSpan delay) => InStore(() =>
+    {
+        if (!_storageEnabled) return;
+        StoreSchema.Execute(_connection, null, "UPDATE storage_settlement SET due=$due WHERE job_id=$id AND root_id=$r AND object_id=$o AND remote_binding=$b;",
+            ("$due", NowMs() + Math.Max(0, (long)delay.TotalMilliseconds)), ("$id", job.JobId), ("$r", job.RootId), ("$o", job.ObjectId), ("$b", job.RemoteBinding));
+    });
 }

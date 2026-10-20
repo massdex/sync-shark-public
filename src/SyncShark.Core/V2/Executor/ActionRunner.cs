@@ -62,7 +62,10 @@ internal sealed class ActionRunner
             return Failed(action, "Recovery location unavailable: " + recovery);
         var target = action.Target == Side.A ? _a : _b;
         var source = action.Target == Side.A ? _b : _a;
-        return await WithLeaseAsync(action, target, source, ct).ConfigureAwait(false);
+        return OwnedPointerUpdates.IsMetadataUpdate(action)
+            ? await _committer.RunPointerUpdateAsync(action,
+                () => WithLeaseAsync(action, target, source, ct), ct).ConfigureAwait(false)
+            : await WithLeaseAsync(action, target, source, ct).ConfigureAwait(false);
     }
 
     // Steps 1 and 2; null means "run the effect".
@@ -194,6 +197,16 @@ internal sealed class ActionRunner
             return await CommitAsync(action, new ActionResult(action.ActionId, Outcome.Skipped, null, null,
                 recoveryHolder.Reference, ProviderNameRefusedException.Detail) { ProviderNameRefused = true })
                 .ConfigureAwait(false);
+        }
+        catch (OwnedPointerDeferredException deferred) when (OwnedPointerUpdates.IsMetadataUpdate(action))
+        {
+            await _committer.DeferPointerUpdateAsync(action, deferred.Cause).ConfigureAwait(false);
+            return await CommitAsync(action, Skipped(action, deferred.Message)).ConfigureAwait(false);
+        }
+        catch (StoragePairException error) when (OwnedPointerUpdates.IsMetadataUpdate(action))
+        {
+            await _committer.DeferPointerUpdateAsync(action, error).ConfigureAwait(false);
+            return await CommitAsync(action, Skipped(action, error.Message)).ConfigureAwait(false);
         }
         catch (ProviderWriteThrottledException e)
         {

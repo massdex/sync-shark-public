@@ -273,6 +273,10 @@ public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatc
             {
                 writer.PointerUpdateProvider = token =>
                 {
+                    // Direct CLI must classify the missing host before any native registration probe.
+                    if (NewPointerProvider is null)
+                        throw new StoragePairException("host",
+                            "Updating an online-only item needs the background Cloud Files host. Start Sync Shark and retry; no bytes were read.");
                     var current = storage.Pair(pair.PairId) ?? throw new StoragePairException("binding",
                         "The pair was removed. Rescan before updating an online-only item.");
                     try { PairMapping.CloudFilesBinding(pair).RequireSame(PairMapping.CloudFilesBinding(current)); }

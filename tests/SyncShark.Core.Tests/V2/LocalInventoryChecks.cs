@@ -14,6 +14,7 @@ internal static class LocalInventoryChecks
         await FullMapsItemsAsync().ConfigureAwait(false);
         await FullIncludePredicateAsync().ConfigureAwait(false);
         await FullExcludedOfflineDirectoryAsync().ConfigureAwait(false);
+        await NoPreOptInOwnedPlaceholderProbeAsync().ConfigureAwait(false);
         await FullNestedPairPrunedAsync().ConfigureAwait(false);
         await RefreshExcludedPathsNotGuardedAsync().ConfigureAwait(false);
         await FullSkipsArtifactsAsync().ConfigureAwait(false);
@@ -150,6 +151,53 @@ internal static class LocalInventoryChecks
             LocalChecks.Require(excluded.IncompleteSubtrees.Count == 0 &&
                 excluded.Items.Select(item => item.Path).SequenceEqual(["visible.txt"]),
                 "pruning the online-only directory leaves a complete inventory of its visible sibling");
+        }
+        finally { File.SetAttributes(offline, attributes); }
+    }
+
+    // N10-a: before the storage feature is opted in, an ordinary pair's scan must take no extra native
+    // attribute/CfGetPlaceholderInfo open per placeholder or reparse entry. After opt-in (an owned
+    // pointer row, the same flag the writer's N10 gate uses) the probe is enabled.
+    private static async Task NoPreOptInOwnedPlaceholderProbeAsync()
+    {
+        var root = LocalChecks.FreshRoot("storage-probe-optin");
+        var offline = Path.Combine(root, "legacy-offline");
+        Directory.CreateDirectory(offline);
+        var attributes = File.GetAttributes(offline);
+        File.SetAttributes(offline, attributes | FileAttributes.Offline | FileAttributes.Directory);
+        try
+        {
+            LocalChecks.Require(PilotPath.IsUnsafeAttributes(File.GetAttributes(offline)),
+                "the fixture entry is an unsafe-attribute placeholder candidate");
+            using var known = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System);
+            LocalInventory Inventory()
+            {
+                var inventory = new LocalInventory(
+                    new RootDef("root-local", SyncProviders.Local, null, root, LocalChecks.ObjectIdOf(root)),
+                    Side.A, known, new HashSet<string>(StringComparer.OrdinalIgnoreCase), V2Settings.Default,
+                    TimeProvider.System, pairId: "pair-local-0001");
+                return inventory;
+            }
+            var probes = new List<string>();
+            var preOptIn = Inventory();
+            preOptIn.OwnedPlaceholderProbeForTest = probes.Add;
+            await preOptIn.FullAsync(1, _ => true, null!, CancellationToken.None);
+            LocalChecks.Require(probes.Count == 0,
+                "with no storage opt-in the scan takes no owned-placeholder native probe");
+
+            known.EnableStorage();
+            var generation = known.BeginGeneration("root-local", "snapshot");
+            known.WriteSnapshot(new Snapshot("root-local", Side.A, generation, "",
+                [LocalChecks.Item("owned.txt", ItemKind.File) with { Flags = ItemFlags.OwnedPointer }], []));
+            known.CompleteGeneration(generation, "", true);
+            LocalChecks.Require(known.HasOwnedPointers("root-local"),
+                "the synthetic owned pointer row makes the root's opt-in flag true");
+            probes.Clear();
+            var optedIn = Inventory();
+            optedIn.OwnedPlaceholderProbeForTest = probes.Add;
+            await optedIn.FullAsync(2, _ => true, null!, CancellationToken.None);
+            LocalChecks.Require(probes.Count == 1 && probes[0] == "legacy-offline",
+                "after opt-in exactly the unsafe entry is probed for an owned placeholder");
         }
         finally { File.SetAttributes(offline, attributes); }
     }

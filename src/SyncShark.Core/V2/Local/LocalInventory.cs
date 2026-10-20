@@ -9,6 +9,10 @@ public sealed partial class LocalInventory : IInventorySource
     private readonly RootDef _root;
     private readonly IDefenderHistory? _history;
     private readonly string? _pairId;
+    // N10-a: the owned-placeholder probe is opt-in only. Until this root has an owned pointer (the
+    // same N10 flag the writer uses), scans must take no extra native attribute open per placeholder.
+    // A store without the storage feature answers from its in-memory flag and never touches the schema.
+    private readonly string? _expectedPairId;
     private readonly Side _side;
     private readonly IStateStore _known;
     private readonly IReadOnlySet<string> _productOwnedPaths;
@@ -32,6 +36,8 @@ public sealed partial class LocalInventory : IInventorySource
         _history = history;
         _pairId = pairId;
         _known = known ?? throw new ArgumentNullException(nameof(known));
+        _expectedPairId = pairId is not null && _known is SqliteStateStore store && store.HasOwnedPointers(root.RootId)
+            ? pairId : null;
         _productOwnedPaths = productOwnedPaths ?? throw new ArgumentNullException(nameof(productOwnedPaths));
         // The relative form the shared exclusion test needs; the scanner keeps the absolute set for enumeration.
         _productOwnedRelative = LocalItems.ProductOwnedRelative(_root.RootPath, productOwnedPaths);
@@ -494,9 +500,10 @@ public sealed partial class LocalInventory : IInventorySource
         CancellationToken ct) =>
         HashScanOverride is { } scanOverride ? Task.FromResult(scanOverride(rows)) :
         new PilotLocalScanner { HashBufferBytes = _settings.LocalHashBufferBytes, CloudFilesAware = true,
-            ReplaceOnlineOnlyStubs = _settings.ReplaceOnlineOnlyStubs }
+            ReplaceOnlineOnlyStubs = _settings.ReplaceOnlineOnlyStubs,
+            OwnedPlaceholderProbeForTest = OwnedPlaceholderProbeForTest }
             .ScanAsync(lease, _productOwnedPaths, ct, refreshPaths: rows.Select(row => row.Path).ToArray(),
-                expectedPairId: _pairId, contentProvider: OwnedContentProvider);
+                expectedPairId: _expectedPairId, contentProvider: OwnedContentProvider);
 
     /// <summary>Accepts a scanned hash only for a file whose identity, size and mtime still match its row.</summary>
     private static void Accept(IReadOnlyList<ItemState> rows, PilotLocalScan scan, Dictionary<string, string> result)
@@ -531,17 +538,21 @@ public sealed partial class LocalInventory : IInventorySource
         return new PilotLocalScanner { MetadataOnly = true, CloudFilesAware = true,
             ReplaceOnlineOnlyStubs = _settings.ReplaceOnlineOnlyStubs, WalkCheckpoint = walk,
             BetweenDirectories = refreshPaths is null ? PairPause.Check : null,
-            DirectoryCompletedForTest = DirectoryCompletedForTest }.ScanAsync(lease, _productOwnedPaths, ct,
+            DirectoryCompletedForTest = DirectoryCompletedForTest,
+            OwnedPlaceholderProbeForTest = OwnedPlaceholderProbeForTest }.ScanAsync(lease, _productOwnedPaths, ct,
             includePath: path => include(path) && !LocalItems.IsExcluded(path, _productOwnedRelative),
             traverseDirectory: path => include(path) && !LocalItems.IsExcluded(path, _productOwnedRelative) && exactPaths?.Contains(path) != true,
             onInventory: p is null
                 ? null
                 : (path, found) => { ProgressGuard.Report(p, $"{found:N0} items: {path}", ct); return Task.CompletedTask; },
-            refreshPaths: refreshPaths, expectedPairId: _pairId, contentProvider: OwnedContentProvider);
+            refreshPaths: refreshPaths, expectedPairId: _expectedPairId, contentProvider: OwnedContentProvider);
     }
 
-    private string? OwnedContentProvider => _pairId is not null && _known.Pair(_pairId) is { } pair
+    private string? OwnedContentProvider => _expectedPairId is { } pairId && _known.Pair(pairId) is { } pair
         ? (pair.A.RootId == _root.RootId ? pair.B.Provider : pair.A.Provider) : null;
+
+    /// <summary>Observes each owned-placeholder probe the scanner would take; null in production.</summary>
+    internal Action<string>? OwnedPlaceholderProbeForTest { get; set; }
 
     private static bool UnderHeldDescendant(string path, IReadOnlySet<string> heldPaths)
     {

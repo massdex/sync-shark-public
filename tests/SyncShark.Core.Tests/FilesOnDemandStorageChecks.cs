@@ -10,6 +10,7 @@ internal static class FilesOnDemandStorageChecks
         await FilesOnDemandServiceChecks.RunAsync(Path.Combine(root, "service"));
         CloudFilesOwnershipChecks.Run();
         await NewPointerDownloadChecks.RunAsync();
+        await PointerUpdateCoordinationChecks.RunAsync(Path.Combine(root, "pointer-coordination"));
         await HydrationNoticeWriterChecks.RunAsync(Path.Combine(root, "hydration-notices"));
         await FilesOnDemandSettlementChecks.RunAsync(Path.Combine(root, "settlement-service"));
         await StoreWorkChecksAsync(Path.Combine(root, "store-work"));
@@ -33,7 +34,8 @@ internal static class FilesOnDemandStorageChecks
                 new RootDef("remote", SyncProviders.Dropbox, "account", "/Remote", "remote-root"), [], [], true));
             // The intent path needs no run object or endpoint. It cannot accidentally wait on a run gate.
             var cli = new V2CliRuntime(null, store, null!, null!, root);
-            await cli.SetStorageIntentAsync("pair", "Folder", "online-only", CancellationToken.None);
+            await cli.SetStorageIntentAsync("pair", "Folder", "online-only", CancellationToken.None,
+                Path.Combine(root, "Recovery"), false);
             if (OperatingSystem.IsWindows() && new DriveInfo(Path.GetPathRoot(Path.GetFullPath(root))!).DriveType == DriveType.Removable)
             {
                 Require(store.StorageFolderSummaries(local).Count == 1, "removable volume retains online-only intent for later eligibility");

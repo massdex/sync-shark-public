@@ -106,7 +106,7 @@ internal static class StorageNoticeLaneChecks
             writer.Register(pair);
             writer.Prime("pair");
             writer.Report(pair, "Folder/busy.bin",
-                new StoragePairException("backlog", "queue busy"), null);
+                new StoragePairException("backlog", "queue busy"), _ => null);
             writer.Drain();
             var backlog = SingleStorageNotice(store, pair);
             HydrationNoticeWriterChecks.Require(backlog.Storage is { Operation: StorageNotices.HydrationPairOperation, ObjectId: "" },
@@ -125,41 +125,41 @@ internal static class StorageNoticeLaneChecks
     private static void PairCauseIsOneNotice(SqliteStateStore store, PairDef pair)
     {
         // Positive transport/auth/provider evidence classifies as a pair cause; item-specific faults never do.
-        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyHydrationFailure(
+        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyFailure(
                 new HttpRequestException("denied", null, HttpStatusCode.Unauthorized))) == "auth",
             "an HTTP 401 is account auth");
-        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyHydrationFailure(
+        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyFailure(
                 new DropboxApiException(HttpStatusCode.Unauthorized, "token")
                 { OAuthError = DropboxOAuthError.InvalidGrant })) == "auth",
             "an OAuth invalid_grant is account auth");
-        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyHydrationFailure(
+        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyFailure(
                 new EndpointAccessException("access refused"))) == "auth",
             "the mapped account-access refusal is auth");
-        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyHydrationFailure(
+        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyFailure(
                 new DropboxCredentialUnavailableException("connection"))) == "auth",
             "a missing protected credential is auth");
-        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyHydrationFailure(
+        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyFailure(
                 new HttpRequestException("offline", null, HttpStatusCode.ServiceUnavailable))) == "network",
             "an HTTP 503 is transport");
-        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyHydrationFailure(
+        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyFailure(
                 new HttpRequestException("offline"))) == "network",
             "a connection failure without a status is transport");
-        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyHydrationFailure(
+        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyFailure(
                 new ProviderTransportTimeoutException("stalled"))) == "network",
             "a bounded read timeout is transport");
-        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyHydrationFailure(
+        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyFailure(
                 new SocketException((int)SocketError.HostUnreachable))) == "network",
             "a socket failure is transport");
-        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyHydrationFailure(
+        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyFailure(
                 new SyncRunRefusedException("The Dropbox connection is not connected."))) == "provider",
             "a disconnected provider is pair-level");
-        HydrationNoticeWriterChecks.Require(StorageNotices.ClassifyHydrationFailure(
+        HydrationNoticeWriterChecks.Require(StorageNotices.ClassifyFailure(
                 new InvalidDataException("The expected Dropbox range identity is incomplete.")) is null,
             "a missing item revision/hash stays item-specific");
-        HydrationNoticeWriterChecks.Require(StorageNotices.ClassifyHydrationFailure(
+        HydrationNoticeWriterChecks.Require(StorageNotices.ClassifyFailure(
                 new DropboxApiException(HttpStatusCode.Conflict, "changed")) is null,
             "a remote change conflict stays item-specific");
-        HydrationNoticeWriterChecks.Require(StorageNotices.ClassifyHydrationFailure(
+        HydrationNoticeWriterChecks.Require(StorageNotices.ClassifyFailure(
                 new IOException("The hydrated range differs from the exact provider placeholder identity.")) is null,
             "a range mismatch stays item-specific");
 
@@ -170,7 +170,7 @@ internal static class StorageNoticeLaneChecks
             writer.Prime("pair");
             for (var index = 0; index < 10; index++)
                 writer.Report(pair, "Folder/offline-" + index + ".bin",
-                    new HttpRequestException("offline", null, HttpStatusCode.ServiceUnavailable), null);
+                    new HttpRequestException("offline", null, HttpStatusCode.ServiceUnavailable), _ => null);
             HydrationNoticeWriterChecks.Require(writer.PendingEvents == 1,
                 "an offline burst coalesces to one queued pair cause, not one per file");
             writer.Drain();
@@ -179,6 +179,8 @@ internal static class StorageNoticeLaneChecks
         HydrationNoticeWriterChecks.Require(network.Path.Length == 0 &&
             network.Storage is { Operation: StorageNotices.HydrationPairOperation, ObjectId: "", Scope: "network" },
             "a transport failure is ONE pair notice, not a per-item failure");
+        HydrationNoticeWriterChecks.Require(store.StorageRootBackedOff(pair.A.RootId),
+            "the same offline burst durably backs off the local root");
 
         // A different pair-level cause updates that same notice.
         StorageNotices.Report(store, pair, "Folder/auth.bin",

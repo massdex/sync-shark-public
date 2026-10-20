@@ -3,7 +3,11 @@ namespace Massdex.SyncShark.V2;
 public sealed partial class V2CliRuntime
 {
     public Task<SyncCliAvailabilityData> SetStorageIntentAsync(string pairId, string path, string mode,
-        CancellationToken cancellationToken) => SetAvailabilityAsync(pairId, path, mode, cancellationToken);
+        CancellationToken cancellationToken) => SetStorageIntentAsync(pairId, path, mode, cancellationToken, null, false);
+
+    public Task<SyncCliAvailabilityData> SetStorageIntentAsync(string pairId, string path, string mode,
+        CancellationToken cancellationToken, string? backupDirectory, bool confirmWithoutBackup) =>
+        SetStorageIntentCoreAsync(pairId, path, mode, cancellationToken, backupDirectory, confirmWithoutBackup);
 
     /// <inheritdoc />
     /// <remarks>
@@ -13,12 +17,49 @@ public sealed partial class V2CliRuntime
     /// instead of refusing the request.
     /// </remarks>
     public Task<SyncCliAvailabilityData> SetAvailabilityAsync(string pairId, string path, string availability,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken) =>
+        SetStorageIntentCoreAsync(pairId, path, availability, cancellationToken, null, false);
+
+    private Task<SyncCliAvailabilityData> SetStorageIntentCoreAsync(string pairId, string path, string availability,
+        CancellationToken cancellationToken, string? backupDirectory, bool confirmWithoutBackup)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var pair = RequirePair(pairId);
         var store = StoragePolicyStore;
         var local = StorageLocalRoot(pair);
+        if (availability is not ("inherit" or "offline" or "online-only"))
+            throw new ArgumentException("Unknown storage mode.", nameof(availability));
+        var validatedPath = SqliteStateStore.StorageRelativePath(path);
+        var optInNote = "";
+        if (!store.IsStorageEnabled)
+        {
+            if (availability != "online-only")
+                return Task.FromResult(new SyncCliAvailabilityData(pairId, validatedPath, false,
+                    "No change: Files On-Demand has not been enabled. Ordinary files already use offline storage; " +
+                    "there is no storage override to remove. The schema was not changed."));
+            // Use the configured Recovery volume, not the state volume or a machine-specific default.
+            var authority = _instanceLock?.StateAuthority;
+            string? settingsWarning = null;
+            if (backupDirectory is null && authority is not null)
+            {
+                try { backupDirectory = new SyncTransferSettingsStore(authority).Load().LocalRecoveryRoot; }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+                {
+                    settingsWarning = "Could not read the configured Recovery location: " + error.Message + " ";
+                }
+            }
+            var optIn = store.EnableStorageWithBackup(backupDirectory, confirmWithoutBackup);
+            if (settingsWarning is not null) optIn = optIn with { Warning = settingsWarning + optIn.Warning };
+            if (!optIn.Enabled)
+                return Task.FromResult(new SyncCliAvailabilityData(pairId, validatedPath, false,
+                    "Online-only intent is awaiting your backup choice; no policy or schema changed. " + optIn.Warning));
+            optInNote = optIn.BackupPath is { } backup
+                ? " Pre-storage state backup: " + backup + ". To roll back, stop every Sync Shark process; " +
+                  "retain the current state.db and its -wal/-shm sidecars together elsewhere, then copy this backup to " +
+                  SqliteStateStore.DatabasePath(_productRoot) + ". Do not leave current sidecars beside the restored database. " +
+                  "This restores pre-command state, not file contents; later state changes are not in the backup."
+                : " " + optIn.Warning;
+        }
 
         // Deliberately independent of Run.UpdatePairSettings: intent is accepted during an active run.
         // A valid relative path with no indexed identity is retained as unresolved intent by the store.
@@ -61,7 +102,7 @@ public sealed partial class V2CliRuntime
                         "the saved intent binds to that identity");
         }
 
-        var note = StoragePhaseNote(availability);
+        var note = StoragePhaseNote(availability) + optInNote;
         if (reasons.Count == 0)
             return Task.FromResult(new SyncCliAvailabilityData(pairId, relative, availability == "online-only",
                 "Saved " + availability + " intent." + note +
@@ -166,12 +207,15 @@ public sealed partial class V2CliRuntime
         // The advertised help says 1..200; use that literal rather than an activity-specific constant.
         limit = Math.Clamp(limit, 1, 200);
         offset = Math.Max(0, offset);
-        StoragePolicyStore.EnableStorage();
-        return Task.FromResult<object>(new { pairId, limit, offset,
+        var enabled = StoragePolicyStore.IsStorageEnabled;
+        return Task.FromResult<object>(new { pairId, limit, offset, enabled,
             unresolvedIntents = StoragePolicyStore.UnresolvedStorageIntents(StorageLocalRoot(pair), limit, offset),
             folders = StoragePolicyStore.StorageFolderSummaries(StorageLocalRoot(pair), limit, offset),
-            detail = "Explicit online-only folders; counts describe indexed descendant files, including nested overrides. " +
-                     "Unknown means no confirmed physical observation." });
+            detail = enabled
+                ? "Explicit online-only folders; counts describe indexed descendant files, including nested overrides. " +
+                  "Unknown means no confirmed physical observation."
+                : "Files On-Demand has not been enabled. This read-only listing creates no storage schema; " +
+                  "ordinary files use offline storage." });
     }
 
 }

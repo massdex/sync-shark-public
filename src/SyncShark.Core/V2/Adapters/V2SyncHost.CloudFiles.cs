@@ -254,7 +254,7 @@ internal sealed class HydrationNoticeWriter : IDisposable
     {
         // Positive type evidence only, and only after Windows I/O completion. A pair-level cause is coalesced by
         // (pair, cause) so an offline burst of thousands of reads queues one event, not one per file.
-        var pairError = StorageNotices.ClassifyHydrationFailure(error);
+        var pairError = StorageNotices.ClassifyFailure(error);
         lock (_gate)
         {
             if (_disposed) return;
@@ -262,7 +262,7 @@ internal sealed class HydrationNoticeWriter : IDisposable
             if (pairError is not null)
             {
                 _pairHydrationCauses.Add(pair.PairId);
-                EnqueueLocked(NoticeKind.PairFailure, pair.PairId, string.Empty, null, pairError, null, pairError.Cause);
+                EnqueueLocked(NoticeKind.PairFailure, pair.PairId, string.Empty, pair, pairError, null, pairError.Cause);
             }
             else
                 EnqueueLocked(NoticeKind.Failure, pair.PairId, path, pair, error, resolve, localObjectId);

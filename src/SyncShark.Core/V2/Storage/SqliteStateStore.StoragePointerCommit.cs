@@ -2,6 +2,22 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SqliteStateStore
 {
+    // Called under the shared entity gate before recording an intent or observing the provider.
+    // Compare opaque revisions for equality only; never order provider revision strings.
+    internal bool StoragePointerUpdateIsStale(PairDef pair, SyncAction action) => InStore(() =>
+    {
+        if (action.ExpectedTarget is not { } expected || action.Source is not { } remote) return true;
+        var indexedRemote = ByObject(pair.B.RootId, remote.ObjectId);
+        if (indexedRemote is not null && indexedRemote.VersionId != remote.VersionId) return true;
+        var receipt = StoragePointerFor(pair.A.RootId, expected.ObjectId, pair.B.RootId);
+        if (receipt is null) return false;
+        var baseline = BaselinesAt(pair.PairId, Side.A, [expected.Path])
+            .FirstOrDefault(point => point.A.ObjectId == expected.ObjectId && point.B.ObjectId == remote.ObjectId);
+        return baseline is null || receipt.Remote.Revision != baseline.B.VersionId || receipt.Remote.Id != remote.ObjectId || receipt.Remote.Revision == remote.VersionId ||
+            receipt.Remote.ContentHash != expected.Hash || receipt.Remote.Size != expected.Size ||
+            receipt.Remote.ModifiedUtc != expected.Mtime;
+    });
+
     internal bool RetireStorageForResync(StorageSettlement job, PairDef pair, string path, string reason) => InStore(() =>
     {
         if (!IsCurrentStorageSettlement(job)) return false;

@@ -22,6 +22,11 @@ internal static class HydrationNoticeWriterChecks
             new RootDef("remote", SyncProviders.Dropbox, "fixture-account", "/Remote", "remote-root"), [], [], true));
         var pair = store.Pair("pair")!;
         var metadata = new StorageNotice(local.RootId, "object-1", pair.B.RootId, "hydration");
+        // Regression: "receipt" and "cause" are vocabulary labels, not ShortId.Make's 1-4 letter prefixes.
+        // The old Report path threw ArgumentException for "cause" before persistence, then swallowed it.
+        var remote = new PilotRemoteEntry("Folder/file.txt", PilotEntryKind.File, "id:file", "rev-1", 4, new string('a', 64));
+        Require(StorageNotices.ReceiptScope(remote) == "receipt" + ShortId.Hex16(remote.Id!, remote.Revision!, remote.ContentHash!),
+            "receipt scope accepts its long vocabulary label without calling the short-prefix API");
 
         // The callback path only queues: no placeholder open and no SQLite write before the worker runs. Draining on
         // the calling thread is deterministic; the product worker is the same Process loop, so no timed polling.
@@ -39,7 +44,8 @@ internal static class HydrationNoticeWriterChecks
             Require(!store.OpenNotices("pair").Any(notice => notice.Storage is not null),
                 "reporting a failure performs no store work on the calling thread");
             writer.Drain();
-            Require(writer.PersistedFailures == 1, "the drained failure is persisted once");
+            Require(writer.PersistedFailures == 1 && writer.FirstPersistenceError is null,
+                "the cause label no longer throws a swallowed short-prefix error; the failure is persisted once");
             Require(resolves == 1, "the placeholder is resolved once, off the I/O path");
             Require(writer.Succeeded("pair", "Folder/file.txt", _ => metadata), "a persisted failure tracks its success");
             writer.Drain();

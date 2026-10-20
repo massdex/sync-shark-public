@@ -32,6 +32,7 @@ public sealed partial class SqliteStateStore
     public void SetStoragePolicy(string rootId, string objectId, string mode) => InStore(() =>
     {
         if (mode is not ("inherit" or "offline" or "online-only")) throw new ArgumentException("Unknown storage mode.", nameof(mode));
+        if (mode != "online-only" && !IsStorageEnabled) return;
         EnableStorage();
         // Policy and its resumable sweep are one durable intent.
         using var tx = _connection.BeginTransaction();
@@ -83,9 +84,8 @@ public sealed partial class SqliteStateStore
     public string SetStoragePolicyAtPath(RootDef root, string path, string mode) => InStore(() =>
     {
         if (mode is not ("inherit" or "offline" or "online-only")) throw new ArgumentException("Unknown storage mode.", nameof(mode));
-        var relative = path.Replace('\\', '/').Trim('/');
-        if (relative.Split('/').Any(part => part is "." or "..") || Path.IsPathRooted(path) || path.Contains(':'))
-            throw new ArgumentException("Use a relative path inside the pair, or an empty path for its root.", nameof(path));
+        var relative = StorageRelativePath(path);
+        if (mode != "online-only" && !IsStorageEnabled) return relative;
         EnableStorage();
         var objectId = root.RootObjectId;
         if (relative.Length != 0)
@@ -201,8 +201,8 @@ public sealed partial class SqliteStateStore
         using var command = StoreSchema.Command(_connection, null,
             "SELECT w.job_id,w.root_id,w.object_id,w.remote_binding,w.remote_json FROM " + StorageRootsSql +
             " CROSS JOIN storage_settlement w ON w.job_id IN (SELECT sw.job_id FROM storage_settlement sw INDEXED BY storage_pending_root " +
-            "WHERE sw.root_id=roots.value AND sw.state='pending' AND sw.job_id>$after ORDER BY sw.job_id LIMIT $limit) " +
-            StorageUnblockedSql + " AND w.state='pending' AND w.job_id>$after ORDER BY w.job_id LIMIT $limit;");
+            "WHERE sw.root_id=roots.value AND sw.state='pending' AND sw.due<=$now AND sw.job_id>$after ORDER BY sw.job_id LIMIT $limit) " +
+            StorageUnblockedSql + " AND w.state='pending' AND w.due<=$now AND w.job_id>$after ORDER BY w.job_id LIMIT $limit;");
         StorageRootParameters(command, activeRoots);
         command.Parameters.AddWithValue("$after", afterJobId);
         command.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 512));

@@ -22,7 +22,7 @@ internal static class StorageNotices
     internal const string OfflineOperation = "offline";
 
     internal static string ReceiptScope(PilotRemoteEntry remote) =>
-        ShortId.Make("receipt", remote.Id ?? "", remote.Revision ?? "", remote.ContentHash ?? "");
+        "receipt" + ShortId.Hex16(remote.Id ?? "", remote.Revision ?? "", remote.ContentHash ?? "");
     private static string Family(StorageNotice item) => "storage:" + item.Operation + ":" +
         ShortId.Make("item", item.RootId, item.ObjectId, item.RemoteBinding) + ":";
     internal static string Prefix(StorageNotice item) => Family(item) + (item.Scope is null ? "" : item.Scope + ":");
@@ -41,7 +41,7 @@ internal static class StorageNotices
             item = item with { ObjectId = "", Operation = operation, Scope = pairError.Cause };
             path = "";
         }
-        var reason = Prefix(item) + ShortId.Make("cause", error.GetType().Name,
+        var reason = Prefix(item) + "cause" + ShortId.Hex16(error.GetType().Name,
             error.HResult.ToString(System.Globalization.CultureInfo.InvariantCulture), error.Message);
         var pairScoped = item.Operation == HydrationPairOperation;
         var label = item.Operation == HydrationPairOperation ? "hydration" : item.Operation;
@@ -84,12 +84,13 @@ internal static class StorageNotices
         store.CloseStorageNoticeBatch(pair.PairId, [new(pair.A.RootId, "", pair.B.RootId, HydrationPairOperation)]);
 
     /// <summary>
-    /// Positive-evidence classification for a failed hydration read. A pair-level cause (network, account auth or a
-    /// disconnected provider) fails every file, so it is reported as ONE pair notice; anything item-specific (a
-    /// missing revision/hash, a changed remote revision, a range/disk fault) stays a per-item notice. Never infers
-    /// from message text, and a local cancellation is not a failure to report.
+    /// Positive-evidence classification shared by every storage lane (hydration, its durable offline lane, settlement
+    /// and pointer refresh). A pair-level cause (network, account auth or a disconnected provider) fails every file,
+    /// so it is reported as ONE pair notice; anything item-specific (a missing revision/hash, a changed remote
+    /// revision, a range/disk fault) stays a per-item notice. Never infers from message text, and a local
+    /// cancellation is not a failure to report.
     /// </summary>
-    internal static StoragePairException? ClassifyHydrationFailure(Exception error)
+    internal static StoragePairException? ClassifyFailure(Exception error)
     {
         foreach (var current in Chain(error))
         {

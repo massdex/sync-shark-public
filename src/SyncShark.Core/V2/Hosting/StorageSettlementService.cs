@@ -4,7 +4,8 @@ namespace Massdex.SyncShark.V2;
 internal sealed class StorageSettlementService(SqliteStateStore store, CloudFilesLifetime connections,
     Func<PairDef, string, CancellationToken, Task<PilotRemoteEntry?>>? observeRemote = null,
     StorageNotice? target = null, Func<PairDef, bool>? paused = null,
-    Func<PairDef, ItemState, Action, CancellationToken, Task<StorageObserved>>? hydrate = null) : IAsyncDisposable
+    Func<PairDef, ItemState, Action, CancellationToken, Task<StorageObserved>>? hydrate = null,
+    Func<StorageSettlement, CancellationToken, Task<StorageObserved>>? convert = null) : IAsyncDisposable
 {
     private readonly CancellationTokenSource _stop = new();
     private Task? _loop;
@@ -64,7 +65,6 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
                 {
                     lane.PrepareTurn();
                     cursor = await lane.HydratePageAsync(cursor, _stop.Token).ConfigureAwait(false);
-                    lane.CloseObsoletePairNotices();
                 }
                 else cursor = 0;
                 await Task.Delay(cursor == 0 ? TimeSpan.FromSeconds(15) : TimeSpan.FromMilliseconds(100), _stop.Token).ConfigureAwait(false);
@@ -95,7 +95,8 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
     {
         var pair = Pair(job);
         // Root admission precedes all item/policy queries; SQL also excludes paused/backed-off roots.
-        if (pair is not null && (!Active(pair) || _reportedPairs.ContainsKey(pair.PairId))) return false;
+        if (pair is not null && (!Active(pair) || _reportedPairs.ContainsKey(pair.PairId) ||
+            store.StorageRootBackedOff(pair.A.RootId))) return false;
         var local = store.ByObject(job.RootId, job.ObjectId);
         if (pair is null || local is null || !Included(pair, local.Path) ||
             store.ResolveStoragePolicy(pair.A, local.Path) != "online-only")
@@ -103,7 +104,8 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
             if (store.RetireStorageSettlement(job) && pair is not null) Complete(job);
             return false;
         }
-        return Active(pair) && !_reportedPairs.ContainsKey(pair.PairId);
+        return Active(pair) && !_reportedPairs.ContainsKey(pair.PairId) &&
+            !store.StorageRootBackedOff(pair.A.RootId);
     }
 
     // Direct CLI runs do one bounded turn, not an unbounded drain of the database.
@@ -111,7 +113,7 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
     {
         if (!store.HasStorageWork()) return;
         PrepareTurn();
-        var worker = new FilesOnDemandSettlement(store, ConvertAsync, Report, Eligible, Complete);
+        var worker = new FilesOnDemandSettlement(store, ConvertItemAsync, Report, Eligible, Complete);
         if (target is not null)
         {
             if (target.Operation == "settlement" && store.StorageSettlementFor(target.RootId, target.ObjectId, target.RemoteBinding) is { } job)
@@ -130,7 +132,7 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
 
     private async Task LoopAsync()
     {
-        var worker = new FilesOnDemandSettlement(store, ConvertAsync, Report, Eligible, Complete);
+        var worker = new FilesOnDemandSettlement(store, ConvertItemAsync, Report, Eligible, Complete);
         long cursor = 0;
         string pointerCursor = "";
         while (!_stop.IsCancellationRequested)
@@ -148,7 +150,6 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
                     await Task.WhenAll(settlements, pointers).ConfigureAwait(false);
                     cursor = await settlements.ConfigureAwait(false);
                     pointerCursor = await pointers.ConfigureAwait(false);
-                    CloseObsoletePairNotices();
                 }
                 else { cursor = 0; pointerCursor = ""; }
                 await Task.Delay(sweepVisited == 0 && cursor == 0 && pointerCursor.Length == 0 ? TimeSpan.FromSeconds(15) : TimeSpan.FromMilliseconds(100), _stop.Token).ConfigureAwait(false);
@@ -169,6 +170,9 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
         !string.IsNullOrEmpty(expected.ContentHash) && actual.Revision == expected.Revision &&
         string.Equals(actual.ContentHash, expected.ContentHash, StringComparison.OrdinalIgnoreCase) &&
         actual.Size == expected.Size;
+
+    private async Task<StorageObserved> ConvertItemAsync(StorageSettlement job, CancellationToken ct) =>
+        convert is null ? await ConvertAsync(job, ct).ConfigureAwait(false) : await convert(job, ct).ConfigureAwait(false);
 
     private async Task<StorageObserved> ConvertAsync(StorageSettlement job, CancellationToken ct)
     {
@@ -217,11 +221,22 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
 
     private void Report(StorageSettlement job, Exception error)
     {
-        if (Pair(job) is { } pair && store.IsCurrentStorageSettlement(job) &&
-            (error is not StoragePairException || _reportedPairs.TryAdd(pair.PairId, 0)))
+        if (Pair(job) is not { } pair || !store.IsCurrentStorageSettlement(job)) return;
+        // Schedule this item's next attempt before reporting, so a notice failure cannot turn a bounded retry
+        // into a rehash on every pass.
+        store.DeferStorageSettlement(job, RetryDelay);
+        ReportFailure(pair, store.ByObject(job.RootId, job.ObjectId)?.Path ?? "", Metadata(job, "settlement"), error);
+    }
+
+    // Shared by settlement and pointer refresh: a network/auth/provider failure is ONE pair notice plus a durable
+    // root backoff, while item-specific causes keep their per-item notice. Never starts native work by itself.
+    internal void ReportFailure(PairDef pair, string path, StorageNotice item, Exception error)
+    {
+        var failure = (Exception?)StorageNotices.ClassifyFailure(error) ?? error;
+        if (failure is not StoragePairException || _reportedPairs.TryAdd(pair.PairId, 0))
         {
-            if (error is StoragePairException) Backoff(pair);
-            StorageNotices.Report(store, pair, store.ByObject(job.RootId, job.ObjectId)?.Path ?? "", Metadata(job, "settlement"), error);
+            if (failure is StoragePairException) Backoff(pair);
+            StorageNotices.Report(store, pair, path, item, failure);
         }
     }
     private static StorageNotice Metadata(StorageSettlement job, string operation) =>
@@ -249,7 +264,7 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
         var pair = Pair(job);
         if (pair is null) { store.RetireStoragePointer(job); return; }
         if (!Active(pair)) return;
-        if (_reportedPairs.ContainsKey(pair.PairId)) return;
+        if (_reportedPairs.ContainsKey(pair.PairId) || store.StorageRootBackedOff(pair.A.RootId)) return;
         var item = Metadata(job, "remote-update");
         try
         {
@@ -340,11 +355,7 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
         catch (Exception error)
         {
             store.DeferStoragePointer(job, RetryDelay);
-            if (error is not StoragePairException || _reportedPairs.TryAdd(pair.PairId, 0))
-            {
-                if (error is StoragePairException) Backoff(pair);
-                StorageNotices.Report(store, pair, store.ByObject(job.RootId, job.ObjectId)?.Path ?? "", item, error);
-            }
+            ReportFailure(pair, store.ByObject(job.RootId, job.ObjectId)?.Path ?? "", item, error);
         }
     }, token);
 
@@ -365,7 +376,6 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
         if (!Active(pair) || _reportedPairs.ContainsKey(pair.PairId) ||
             (target is null && store.StorageRootBackedOff(job.RootId)) || !store.IsCurrentStorageHydration(job)) return;
         var item = new StorageNotice(job.RootId, job.ObjectId, pair.B.RootId, "offline", "offline");
-        var pairCauseAtStart = store.HasOpenStoragePairCause(pair.PairId);
         try
         {
             var local = store.ByObject(job.RootId, job.ObjectId);
@@ -404,10 +414,10 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
         catch (Exception error)
         {
             store.DeferStorageHydration(job, RetryDelay);
-            var failure = (Exception?)StorageNotices.ClassifyHydrationFailure(error) ?? error;
-            // The callback has the typed transport cause; native FileStream I/O can expose only a
-            // generic HRESULT. Do not duplicate its pair notice with per-file offline failures.
-            if (IsGenericOfflineIo(error) && (pairCauseAtStart || store.HasOpenStoragePairCause(pair.PairId))) return;
+            var failure = (Exception?)StorageNotices.ClassifyFailure(error) ?? OfflineSource(error);
+            // A classified pair cause takes the same deduped pair path as every other lane: one notice plus a
+            // durable root backoff. Only the per-item duplicate is avoided by classification, never by the
+            // presence of an older, unrelated pair notice.
             if (failure is not StoragePairException || _reportedPairs.TryAdd(pair.PairId, 0))
             {
                 if (failure is StoragePairException) Backoff(pair);
@@ -416,10 +426,9 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
         }
     }, ct);
 
-    // Only uninformative I/O statuses qualify. Specific native statuses (sharing, disk, access,
-    // missing file), typed validation errors, and correlated item-source errors retain item notices.
-    internal static bool IsGenericOfflineIo(Exception error) =>
-        WindowsCloudFilesProvider.OfflineHydrationAttempt.IsGenericReadFailure(error);
+    // Keep a correlated item-specific source as the notice cause instead of the generic reader wrapper.
+    private static Exception OfflineSource(Exception error) =>
+        error is WindowsCloudFilesProvider.OfflineHydrationSourceException { InnerException: { } source } ? source : error;
 
     internal async Task StopAsync()
     {

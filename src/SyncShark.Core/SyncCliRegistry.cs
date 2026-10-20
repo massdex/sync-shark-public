@@ -26,7 +26,7 @@ public static class SyncCliRegistry
     [
         "--pair", "--account", "--path", "--key", "--search", "--choice", "--rules", "--settings", "--update",
         "--limit", "--offset", "--generation", "--minutes", "--selection", "--availability", "--local",
-        "--until", "--timeout-seconds",
+        "--until", "--timeout-seconds", "--backup-directory",
         "--name", "--priority", "--provider"
         , "--description", "--choices", "--group", "--filter", "--seconds", "--side",
         "--categories", "--severity", "--entity", "--run", "--order", "--type", "--since", "--after", "--before",
@@ -384,9 +384,9 @@ public static class SyncCliRegistry
             SyncCliRequestKind.State, "yes", "sets one path's device availability through the existing storage rules",
             "the product state or the running application", "direct|running-application",
             "--pair,--path,--availability,--yes", Mutating: true, RequiresYes: true, RequiresPair: true),
-        new("storage online-only", "storage online-only --pair <exact-id> --path <relative-path>",
-            SyncCliRequestKind.State, "none", "persists online-only intent; does not immediately remove local bytes",
-            "retained authority", "direct|running-application", "--pair,--path", Mutating: true, RequiresPair: true),
+        new("storage online-only", "storage online-only --pair <exact-id> --path <relative-path> [--backup-directory <absolute-directory>] [--confirm-without-backup]",
+            SyncCliRequestKind.State, "none", "backs up state before first opt-in, then persists online-only intent; backup failure offers retry, another directory or explicit confirmation without backup; does not immediately remove local bytes",
+            "retained authority", "direct|running-application", "--pair,--path,--backup-directory,--confirm-without-backup", Mutating: true, RequiresPair: true),
         new("storage offline", "storage offline --pair <exact-id> --path <relative-path>",
             SyncCliRequestKind.State, "none", "persists offline intent and queues existing pointers for bounded hydration by the background host", "retained authority",
             "direct|running-application", "--pair,--path", Mutating: true, RequiresPair: true),
@@ -1295,7 +1295,8 @@ public static class SyncCliRegistry
             case "storage offline":
             case "storage inherit":
                 return await operations.SetStorageIntentAsync(invocation.PairId!, RequirePath(invocation),
-                    invocation.Command[8..], cancellationToken);
+                    invocation.Command[8..], cancellationToken, invocation.Value("--backup-directory"),
+                    invocation.Flag("--confirm-without-backup"));
             case "availability set":
                 if (invocation.Availability is null || invocation.Path is null)
                     throw new SyncCliUsageException(

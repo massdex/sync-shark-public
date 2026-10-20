@@ -33,6 +33,10 @@ jobs:
         shell: pwsh
         run: ./tools/ci/check-personal-literals.ps1
 
+      - name: Check short-id prefix contracts
+        shell: pwsh
+        run: ./tools/ci/check-short-id-prefixes.ps1
+
       - name: Set up .NET 8
         uses: actions/setup-dotnet@v4
         with:

@@ -6,6 +6,11 @@ internal interface IOwnedPointerUpdateTarget
     Task<ItemState> UpdateOwnedPointerAsync(SyncAction action, IEndpointWriter source, CancellationToken ct);
 }
 
+internal sealed class OwnedPointerDeferredException(StoragePairException cause) : IOException(cause.Message, cause)
+{
+    internal StoragePairException Cause { get; } = cause;
+}
+
 internal static class OwnedPointerUpdates
 {
     // Only unchanged-target propagation. Conflict choices and Recovery-first replacements must
@@ -27,9 +32,18 @@ public sealed partial class LocalWriter : IOwnedPointerUpdateTarget
     async Task<ItemState> IOwnedPointerUpdateTarget.UpdateOwnedPointerAsync(SyncAction action,
         IEndpointWriter source, CancellationToken ct)
     {
-        if (!OwnedPointerUpdates.IsMetadataUpdate(action) || _side != action.Target ||
-            PointerUpdateProvider is not { } getProvider)
-            throw new IOException("The online-only update is not connected to its owned root. Start the host and retry; no bytes were read.");
+        try { return await UpdatePointerCoreAsync(action, source, ct).ConfigureAwait(false); }
+        catch (StoragePairException error) { throw new OwnedPointerDeferredException(error); }
+    }
+
+    private async Task<ItemState> UpdatePointerCoreAsync(SyncAction action, IEndpointWriter source, CancellationToken ct)
+    {
+        if (!OwnedPointerUpdates.IsMetadataUpdate(action) || _side != action.Target)
+            throw new InvalidOperationException("The action is not an owned pointer metadata update.");
+        var getProvider = PointerUpdateProvider ?? throw new StoragePairException("host",
+            "The online-only update is not connected to its owned root. Start the host and retry; no bytes were read.");
+        // Pair availability precedes remote observation and native target inspection, including direct CLI runs.
+        var provider = getProvider(ct);
         var planned = action.Source!;
         var expected = action.ExpectedTarget!;
         var confirmed = await source.ObserveAsync(planned.Path, ct).ConfigureAwait(false);
@@ -56,7 +70,6 @@ public sealed partial class LocalWriter : IOwnedPointerUpdateTarget
             var previous = DropboxItems.ToEntry(expected with { Path = action.Path,
                 ObjectId = pointer.Identity.DropboxId!, VersionId = pointer.Identity.DropboxRevision,
                 Flags = ItemFlags.None });
-            var provider = getProvider(ct);
             var (volume, id) = LocalItems.ParseObjectId(expected.ObjectId);
             var result = provider.UpdateDehydratedPlaceholder(previous,
                 DropboxItems.ToEntry(confirmed! with { Path = action.Path }), new(volume, id), () =>

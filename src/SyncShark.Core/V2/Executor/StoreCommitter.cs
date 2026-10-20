@@ -30,6 +30,70 @@ internal sealed class StoreCommitter
         _gen = gen;
     }
 
+    private bool _pointerPairReported;
+
+    // The entity gate spans native effect AND durable baseline/receipt publication. Refresh uses
+    // this same gate, so its pre-effect revision CAS sees the run's committed receipt (and vice versa).
+    internal async Task<ActionResult?> RunPointerUpdateAsync(SyncAction action,
+        Func<Task<ActionResult?>> run, CancellationToken ct)
+    {
+        if (_store is not SqliteStateStore store || store.Pair(_pairId) is not { } pair)
+            return await run().ConfigureAwait(false);
+        ActionResult? result = null;
+        await FilesOnDemandSettlement.SerializeAsync(store, pair.A.RootId, action.ExpectedTarget!.ObjectId, async () =>
+        {
+            if (store.StoragePointerUpdateIsStale(pair, action))
+            {
+                const string reason = "The pointer revision was already applied or changed. Resync uses the current receipt; no bytes were read.";
+                SavePointerRetry(pair, action, reason);
+                var skipped = new ActionResult(action.ActionId, Outcome.Skipped, null, null, null, reason);
+                result = skipped;
+                await CommitAsync(action, skipped).ConfigureAwait(false);
+                return;
+            }
+            result = await run().ConfigureAwait(false);
+            if (result?.Outcome == Outcome.Done)
+            {
+                await RunOperations.WaitAsync(_storeGate, "store commit gate").ConfigureAwait(false);
+                try
+                {
+                    // Positive evidence from this apply clears a prior-run availability cause, but
+                    // never hides an unavailable pointer already encountered by this same apply.
+                    if (!_pointerPairReported) StorageNotices.CompletePair(store, pair, "pointer");
+                }
+                finally { _storeGate.Release(); }
+            }
+        }, ct).ConfigureAwait(false);
+        return result;
+    }
+
+    internal async Task DeferPointerUpdateAsync(SyncAction action, StoragePairException error)
+    {
+        await RunOperations.WaitAsync(_storeGate, "store commit gate").ConfigureAwait(false);
+        try
+        {
+            var pair = _store.Pair(_pairId) ?? throw new InvalidOperationException("The pointer pair was removed.");
+            SavePointerRetry(pair, action, error.Message);
+            if (!_pointerPairReported)
+            {
+                if (_store is not SqliteStateStore store)
+                    throw new InvalidOperationException("Pointer notices require the durable storage store.");
+                StorageNotices.Report(store, pair, string.Empty,
+                    new StorageNotice(pair.A.RootId, string.Empty, pair.B.RootId, "pointer"), error);
+                _pointerPairReported = true;
+            }
+        }
+        finally { _storeGate.Release(); }
+    }
+
+    private void SavePointerRetry(PairDef pair, SyncAction action, string reason)
+    {
+        var prior = _store.SyncRetryAt(_pairId, action.Path);
+        var roots = (prior?.ReadRoots ?? []).Concat(new[] { pair.A.RootId, pair.B.RootId }).Distinct().ToArray();
+        _store.SaveSyncRetry(_pairId, (prior ?? new SyncRetry(action.Path, "scan", 0, reason,
+            DateTimeOffset.MinValue)) with { ReadRoots = roots, RetryAfter = DateTimeOffset.MinValue });
+    }
+
     internal DefenderGrant? DefenderGrantConflict(SyncAction action) => _store.DefenderGrantConflict(_pairId, action);
 
     /// <summary>Completes once the action's intent is durable; a cancelled caller records nothing.</summary>
