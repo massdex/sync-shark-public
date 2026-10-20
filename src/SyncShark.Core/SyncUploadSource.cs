@@ -1,0 +1,15 @@
+namespace Massdex.SyncShark;
+
+/// <summary>Owns a copy source until its bytes are staged or the copy exits.</summary>
+internal sealed class SyncUploadSource(Stream source) : IAsyncDisposable
+{
+    internal static readonly AsyncLocal<SyncUploadSource?> Current = new();
+    private Stream? _source = source;
+
+    /// <summary>Releases this source only when the staging adapter consumed the same stream.</summary>
+    internal ValueTask ReleaseAsync(Stream source) => ReferenceEquals(_source, source)
+        ? DisposeAsync() : ValueTask.CompletedTask;
+
+    public ValueTask DisposeAsync() => Interlocked.Exchange(ref _source, null)?.DisposeAsync()
+        ?? ValueTask.CompletedTask;
+}
