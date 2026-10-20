@@ -175,21 +175,34 @@ internal static class ProtectionBatchChecks
             var details = new List<string>();
             using var reader = command.ExecuteReader();
             while (reader.Read()) details.Add(reader.GetString(3));
+            var label = sql == SqliteStateStore.ProtectionRootSql ? "root" : direct ? "direct" : "directories";
+            Console.WriteLine($"Protection plan ({label}), SQLite {connection.ServerVersion}:\n{string.Join("\n", details)}");
+            // SQLite 3.53.4 describes an indexed EXISTS probe as "SEARCH f EXISTS USING
+            // PRIMARY KEY"; older versions omit EXISTS. Check the access and bound keys,
+            // not adjacency of the table alias and USING. Never accept a physical-table scan.
+            bool Seeks(string alias, string access, params string[] keys) => details.Any(d =>
+                d.StartsWith($"SEARCH {alias} ", StringComparison.Ordinal) &&
+                d.Contains($" {access} ", StringComparison.Ordinal) &&
+                keys.All(key => d.Contains(key, StringComparison.Ordinal)));
+            var scansTable = details.Any(d =>
+            {
+                var words = d.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                return words.Length >= 2 && words[0] == "SCAN" &&
+                    words[1] is "d" or "f" or "gi" or "dir" or "file_state" or "local_gap_item";
+            });
             if (sql == SqliteStateStore.ProtectionRootSql)
             {
-                LocalChecks.Require(details.Any(d => d.Contains("fs_flagged", StringComparison.Ordinal)) &&
-                    details.Any(d => d.Contains("fs_obj", StringComparison.Ordinal)) &&
-                    details.Any(d => d.Contains("SEARCH gi USING PRIMARY KEY", StringComparison.Ordinal)) &&
-                    !details.Any(d => d.StartsWith("SCAN f", StringComparison.Ordinal)),
+                LocalChecks.Require(Seeks("f", "INDEX fs_flagged", "root_no=?") &&
+                    Seeks("f", "INDEX fs_obj", "root_no=?") &&
+                    Seeks("gi", "PRIMARY KEY", "root_no=?") && !scansTable,
                     "root containment uses flagged, object and pending entity indexes");
                 return;
             }
-            LocalChecks.Require(details.Any(d => d.Contains("dir_key", StringComparison.Ordinal)) &&
-                details.Any(d => d.Contains("SEARCH f USING PRIMARY KEY (root_no=? AND dir_no=?", StringComparison.Ordinal)) &&
-                details.Any(d => d.Contains("SEARCH gi USING PRIMARY KEY (root_no=? AND object_id=?)", StringComparison.Ordinal)) &&
-                !details.Any(d => d.StartsWith("SCAN d", StringComparison.Ordinal) || d.StartsWith("SCAN f", StringComparison.Ordinal)),
+            LocalChecks.Require(Seeks("d", "INDEX dir_key", "path_key=?") &&
+                Seeks("f", "PRIMARY KEY", "root_no=?", "dir_no=?") &&
+                Seeks("gi", "PRIMARY KEY", "root_no=?", "object_id=?") && !scansTable,
                 "protection probes indexed directories, file PK and gap entity PK without whole-table scan");
-            if (!direct) LocalChecks.Require(details.Any(d => d.Contains("path_key>? AND path_key<?", StringComparison.Ordinal)),
+            if (!direct) LocalChecks.Require(Seeks("d", "INDEX dir_key", "path_key>?", "path_key<?"),
                 "folder containment uses explicit indexed range rather than per-candidate correlated subtree");
         }
     }
