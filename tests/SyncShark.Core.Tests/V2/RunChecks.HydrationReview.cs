@@ -168,7 +168,15 @@ internal static partial class RunChecks
                 store.MarkFirstSyncDone(fx.Pair.PairId);
                 await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
             }
-            else await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, notice.NoticeId!, NoticeChoices.Exclude, default);
+            else
+            {
+                // Pending-evidence notices expose Ignore as their path-exclusion action, not Exclude.
+                Require(NoticeChoices.Options(notice).Any(option => option.Choice == NoticeChoices.Ignore),
+                    "pending evidence offers the Ignore action used to exclude this path");
+                await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, notice.NoticeId!, NoticeChoices.Ignore, default);
+            }
+            Require(store.Pair(fx.Pair.PairId)!.Excluded.Contains(item.Path),
+                "notice Ignore and CLI Exclude both persist the path exclusion");
             Require(store.SyncRetryAt(fx.Pair.PairId, item.Path) is { Held: not null, RetryAfter: var due } && due == DateTimeOffset.MaxValue,
                 "Exclude atomically keeps dormant hold provenance");
             var excluded = store.Pair(fx.Pair.PairId)!;
