@@ -448,14 +448,49 @@ internal static class ExcludedNestedPairPartitionChecks
     // persisted parent policy and revision unchanged.
     private static async Task RealStoreRefusesPolicyChangeAsync()
     {
-        using var fixture = await FixtureAsync("real-store-policy-change");
+        await RealStoreRefusesPolicyChangeAsync(corresponding: true);
+        await RealStoreRefusesPolicyChangeAsync(corresponding: false);
+    }
+
+    private static async Task RealStoreRefusesPolicyChangeAsync(bool corresponding)
+    {
+        using var fixture = await FixtureAsync("real-store-policy-change-" + corresponding);
         var (childLeft, childRight, parentLeft, parentRight) = NestedDirectories(fixture.Root);
+        var rightChildName = corresponding ? ChildName : ChildName + "Mirror";
+        if (!corresponding)
+            childRight = Directory.CreateDirectory(IOPath.Combine(parentRight, rightChildName)).FullName;
         var child = await BindAsync(fixture, childLeft, childRight, "Child pair", []);
         var ownership = OwnershipRelativeNames(child, parentLeft, parentRight);
         var rules = new List<SyncSelectionRule> { new(ChildName, false) };
+        if (!corresponding) rules.Add(new SyncSelectionRule(rightChildName, false));
         rules.AddRange(ownership.Select(name => new SyncSelectionRule(name, false)));
-        var parent = await BindAsync(fixture, parentLeft, parentRight, "Parent pair", rules);
         var store = new SyncPairStore(fixture.Instance.StateAuthority);
+        SyncPair parent;
+        if (corresponding)
+        {
+            parent = await BindAsync(fixture, parentLeft, parentRight, "Parent pair", rules);
+        }
+        else
+        {
+            // The Host conservatively refuses this non-corresponding endpoint layout.
+            // Keep that refusal explicit, but independently reach the real Store validator:
+            // its valid excluded baseline needs no active parent root or transfer authority.
+            var hostRefusal = string.Empty;
+            try
+            {
+                await BindAsync(fixture, parentLeft, parentRight, "Parent pair", rules);
+            }
+            catch (InvalidOperationException error)
+            {
+                hostRefusal = error.Message;
+            }
+            Require(hostRefusal == "The root overlaps another active pair or recovery authority boundary.",
+                "ENP-15 the Host refuses the non-corresponding layout at the overlap gate: " + hostRefusal);
+            parent = DraftFor(parentLeft, parentRight, "Parent pair", rules);
+            Require(SyncPairPartitionPolicy.Decide(parent, child) == SyncPairPartitionRelation.NestedAllowed,
+                "ENP-15 the Store baseline excludes both differently named child subtrees and their ownership");
+            await store.SaveAsync(new SyncPairSet([parent, child], parent.Id));
+        }
         var set = await fixture.Database.LoadPairSetAsync();
         var retainedParent = set.Pairs.Single(item => item.Id == parent.Id);
         var retainedChild = set.Pairs.Single(item => item.Id == child.Id);
@@ -464,31 +499,35 @@ internal static class ExcludedNestedPairPartitionChecks
         var beforeRevision = await ScalarAsync(fixture.DatabasePath,
             "SELECT configuration_revision FROM sync_pair WHERE pair_id='" + parent.Id + "'");
 
+        Require(beforeJson.Length > 0 && beforeRevision.Length > 0,
+            "ENP-15 the real Store retained the valid baseline before either policy-edit refusal");
+
         var includedWithOwnership = retainedParent with
         {
             SelectionRules = ownership.Select(name => new SyncSelectionRule(name, false)).ToArray()
         };
-        Require(SyncPairPartitionPolicy.DecideCorrespondingIncluded(includedWithOwnership, retainedChild) ==
-                SyncPairPartitionRelation.CorrespondingIncluded,
+        Require((SyncPairPartitionPolicy.DecideCorrespondingIncluded(includedWithOwnership, retainedChild) ==
+                SyncPairPartitionRelation.CorrespondingIncluded) == corresponding,
             "ENP-15 removing only the data exclusion preserves the supported corresponding overlap");
         var noExclusion = retainedParent with
         {
             // Included corresponding overlaps are supported only with private control
             // ownership still excluded. Removing all exclusions must remain unsafe.
-            SelectionRules = [],
+            SelectionRules = corresponding ? [] : includedWithOwnership.SelectionRules,
             PolicyRevision = retainedParent.PolicyRevision + 1
         };
         Require(SyncPairPartitionPolicy.Decide(retainedParent, retainedChild) == SyncPairPartitionRelation.NestedAllowed &&
                 SyncPairPartitionPolicy.Decide(noExclusion, retainedChild) == SyncPairPartitionRelation.NestedRefused &&
                 SyncPairPartitionPolicy.DecideCorrespondingIncluded(noExclusion, retainedChild) != SyncPairPartitionRelation.CorrespondingIncluded,
-            "ENP-15 the fixture changes from a valid excluded partition to a unsafe overlap with exposed private control ownership");
+            "ENP-15 removing the required exclusions makes this nested partition unsafe");
         var refusedRemoval = await TrySaveAsync(store,
             new SyncPairSet([noExclusion, retainedChild], noExclusion.Id));
-        Require(refusedRemoval.Length > 0,
-            "ENP-15 the real Store refuses a saved policy edit that removes the child and private control exclusions: " +
+        Require(refusedRemoval.Contains("does not exclude the whole nested subtree", StringComparison.Ordinal),
+            "ENP-15 the real Store refuses the unsafe saved policy edit (corresponding=" + corresponding + "): " +
             (refusedRemoval.Length == 0 ? "not refused" : refusedRemoval));
 
         var exceptionRules = new List<SyncSelectionRule> { new(ChildName, false), new(ChildName + "/Included", true) };
+        if (!corresponding) exceptionRules.Add(new SyncSelectionRule(rightChildName, false));
         exceptionRules.AddRange(ownership.Select(name => new SyncSelectionRule(name, false)));
         var withException = retainedParent with
         {
@@ -497,7 +536,7 @@ internal static class ExcludedNestedPairPartitionChecks
         };
         var refusedException = await TrySaveAsync(store,
             new SyncPairSet([withException, retainedChild], withException.Id));
-        Require(refusedException.Length > 0,
+        Require(refusedException.Contains("does not exclude the whole nested subtree", StringComparison.Ordinal),
             "ENP-15 the real Store refuses an included exception below the excluded child: " +
             (refusedException.Length == 0 ? "not refused" : refusedException));
 
