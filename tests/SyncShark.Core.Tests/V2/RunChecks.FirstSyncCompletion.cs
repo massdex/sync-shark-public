@@ -9,6 +9,7 @@ internal static partial class RunChecks
             "local reading label is accurate without changing cloud-provider identity semantics");
         await Reconcile_Uncertain_StopsBeforeInventoryAsync();
         await Completion_PostPreviewDeleteAsync();
+        await Completion_RetryAddedAfterPlanningAsync();
         await Completion_UnreviewedEvidenceCursorAsync();
         await Completion_ReleasedEvidenceAsync();
         await Completion_ApplyPreservesDecisionAsync();
@@ -444,12 +445,52 @@ internal static partial class RunChecks
         Require(batch.Count == 256 && store.RetryProtected(fx.Pair.PairId, "retry", active, true) &&
             !store.RetryProtected(fx.Pair.PairId, batch[0].Path, active, false),
             "bounded indexed retry batch protects unselected siblings and their containing folder");
+        store.SaveSyncRetry(fx.Pair.PairId, new("Ärger/x", "sync", 1, "pending", DateTimeOffset.MinValue));
+        store.SaveSyncRetry(fx.Pair.PairId, new("ſ/x", "sync", 1, "pending", DateTimeOffset.MinValue));
+        store.SaveSyncRetry(fx.Pair.PairId, new("held/x", "sync", 1, "held", DateTimeOffset.MaxValue));
         var protection = RetryProtection.Create(store, fx.Pair.PairId, active);
-        foreach (var path in new[] { "", "retry", "RETRY/299.txt", "retry/299.txt/child", "retry/299.txt-suffix", batch[0].Path, "absent" })
+        var cached = RetryProtection.CachedFallback(store, fx.Pair.PairId, active);
+        foreach (var path in new[] { "", "retry", "RETRY/299.txt", "retry/299.txt/child", "retry/299.txt-suffix", batch[0].Path, "absent",
+            "ärger/X", "ÄRGER", "ſ/X", "S/x", "s", "held", "held/X", "held/x/child" })
             foreach (var descendants in new[] { false, true })
-                Require(protection(path, descendants) == store.RetryProtected(fx.Pair.PairId, path, active, descendants),
-                    "bounded retry snapshot agrees with SQLite protection");
+            {
+                var expected = store.RetryProtected(fx.Pair.PairId, path, active, descendants);
+                Require(protection(path, descendants) == expected && cached(path, descendants) == expected,
+                    "bounded retry snapshot and folder cache agree with SQLite protection");
+            }
+        var recorder = new RecordingStore(store);
+        var folderCache = RetryProtection.CachedFallback(recorder, fx.Pair.PairId, active);
+        for (var n = 0; n < 10_000; n++)
+            Require(!folderCache($"absent/deep/folder/{n}", false), "fallback does not invent protection");
+        Require(recorder.RetryProtectionCalls == 1, "ten thousand siblings share one ancestor query");
+        for (var n = 0; n < 5000; n++) folderCache($"absent/{n}/child", false);
+        Require(folderCache("held/x/child", false), "cache rollover preserves protection");
         Console.WriteLine("PASS Completion_StuckNoticeLifecycle");
+    }
+
+    private static async Task Completion_RetryAddedAfterPlanningAsync()
+    {
+        foreach (var injectAt in new[] { 2, 3 })
+        {
+            var fx = Build(record: true);
+            var source = fx.A.Seed("protected.txt", "keep");
+            fx.B.Seed("protected.txt", "keep");
+            var run = fx.Run();
+            await FirstSyncAsync(run, fx);
+            await fx.A.DeleteAsync(new SyncAction("source-delete", 6, ActionKind.Delete, Side.A,
+                source.Path, null, null, source, false, null), CancellationToken.None);
+            var reads = 0;
+            fx.Recorder!.OnRetryPathsRead = () =>
+            {
+                if (++reads == injectAt)
+                    fx.Store.SaveSyncRetry(fx.Pair.PairId, new(source.Path, "sync", 1, "late protection", DateTimeOffset.MaxValue));
+            };
+            await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+            Require(reads >= injectAt && fx.WriterB.Deletes == 0 &&
+                await fx.B.ObserveAsync(source.Path, CancellationToken.None) is not null,
+                "retry saved after planning blocks deletion at each fresh safety snapshot");
+        }
+        Console.WriteLine("PASS Completion_RetryAddedAfterPlanning");
     }
 
     private static async Task Completion_PostPreviewDeleteAsync()

@@ -955,8 +955,8 @@ public sealed partial class SyncRun
             }
             return !unsettled.GetViewBetween(path + "/", path + "0").Any();
         }
-        _store.AcknowledgeRehash(pair.A.RootId, scan.A.RehashThrough, path => includeA(path) && Settled(path), ct);
-        _store.AcknowledgeRehash(pair.B.RootId, scan.B.RehashThrough, path => includeB(path) && Settled(path), ct);
+        _store.AcknowledgeRehash(pair.A.RootId, scan.A.RehashThrough, path => Settled(path) && includeA(path), ct);
+        _store.AcknowledgeRehash(pair.B.RootId, scan.B.RehashThrough, path => Settled(path) && includeB(path), ct);
     }
 
     // The paths this run joined and planned for: current and baseline paths on both sides.

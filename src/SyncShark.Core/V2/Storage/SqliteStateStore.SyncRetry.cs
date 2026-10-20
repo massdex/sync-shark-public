@@ -29,6 +29,35 @@ public sealed partial class SqliteStateStore
         }
     }
 
+    public IEnumerable<string> ReadSyncRetryPaths(string pairId)
+    {
+        var after = "";
+        var first = true;
+        while (true)
+        {
+            var batch = InStore(() =>
+            {
+                var rows = new List<string>();
+                using var command = StoreSchema.Command(_connection, null,
+                    "SELECT path_key FROM sync_retry WHERE pair_no=$p AND path_key" + (first ? ">=" : ">") + "$after ORDER BY path_key LIMIT 256;");
+                command.Parameters.AddWithValue("$p", RequirePair(pairId));
+                command.Parameters.AddWithValue("$after", after);
+                using var reader = command.ExecuteReader();
+                while (reader.Read()) rows.Add(reader.GetString(0));
+                return rows;
+            });
+            if (batch.Count == 0) yield break;
+            foreach (var path in batch) yield return path;
+            after = batch[^1];
+            first = false;
+        }
+    }
+
+    public bool SyncRetryExists(string pairId, string path) => InStore(() =>
+        StoreSchema.Scalar(_connection, null,
+            "SELECT 1 FROM sync_retry WHERE pair_no=$p AND path_key=$k;",
+            ("$p", RequirePair(pairId)), ("$k", RowCodec.Key(path))) is not null);
+
     public void SaveSyncRetry(string pairId, SyncRetry retry) => InStore(() =>
         StoreSchema.Execute(_connection, null,
             "INSERT INTO sync_retry(pair_no,path_key,json,retry_after) VALUES($p,$key,$json,$due) " +

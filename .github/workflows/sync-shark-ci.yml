@@ -116,6 +116,9 @@ jobs:
           - suite: corresponding-overlap
             flag: --corresponding-included-overlap-checks
             takes-root: true
+          - suite: first-sync-completion
+            flag: --first-sync-completion-checks
+            takes-root: false
           - suite: storage
             flag: --v2-storage-checks
             takes-root: true

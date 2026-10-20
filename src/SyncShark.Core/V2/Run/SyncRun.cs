@@ -596,12 +596,18 @@ public sealed partial class SyncRun : ISyncRun
         var heldPaths = PendingDecisions(pairId, decisions).Concat(pendingEvidence.Keys)
             .Concat(retryHeld.Select(item => item.Path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var links = before.With(current).WithPending(heldPaths).WithPending(ScanFailures(scan));
-        Func<string, bool, bool>? retryProtection = null;
-        if (retryCount > activeRetries.Count)
+        var fallbackReported = false;
+        void ReportRetryFallback()
         {
-            retryProtection = RetryProtection.Create(_store, pairId, activeRetries);
-            links = links.WithRetryProtection((path, descendants) => retryProtection!(path, descendants));
+            if (fallbackReported) return;
+            fallbackReported = true;
+            try { progress.Report(new RunProgress(RunPhases.Comparing, null, 0, 0)
+                { Message = "Retry protection snapshot limit reached; using indexed lookups with a bounded folder cache." }); }
+            catch { /* Display failures never change protection. */ }
         }
+        Func<string, bool, bool> retryProtection = RetryProtection.Create(_store, pairId, activeRetries, ReportRetryFallback);
+        void RefreshRetryProtection() => retryProtection = RetryProtection.Create(_store, pairId, activeRetries, ReportRetryFallback);
+        links = links.WithRetryProtection((path, descendants) => retryProtection(path, descendants));
         var predicates = Predicates(pair, links);
         var scanner = new RunScope(_store, predicates.A, predicates.B, links, rules: PairInclude.IgnoreRules(pair), decisions: decisions);
         IReadOnlyDictionary<string, Side?>? winners = decisions?.ToDictionary(entry => entry.Key,
@@ -675,16 +681,14 @@ public sealed partial class SyncRun : ISyncRun
             StringComparer.OrdinalIgnoreCase)).ToArray() };
         var retrySelection = RebuildableSelection.Sides(pair) is { } retrySides
             ? new RebuildableSelection(retrySides.Cloud, rebuildableRetries) : null;
-        // Planning has finished reading its fixed retry input. Before any retry mutation or execution,
-        // restore live checks so newly retained failures cannot be hidden by the planning snapshot.
-        if (retryProtection is not null)
-            retryProtection = (path, descendants) => _store.RetryProtected(pairId, path, activeRetries, descendants);
-        plan = ApplySafetyFilter(pair, ActionPredicates(retryPair, links, retrySelection),
-            await ApplyReviewedRetriesAsync(pair, plan, retries, ct));
+        plan = await ApplyReviewedRetriesAsync(pair, plan, retries, ct);
+        RefreshRetryProtection();
+        plan = ApplySafetyFilter(pair, ActionPredicates(retryPair, links, retrySelection), plan);
         RaiseLinksSummary(pair, current);
         var openNotices = _store.OpenNotices(pair.PairId);
         RetainPlanningFailures(pair, plan);
         WriteNotices(plan.Notices);
+        RefreshRetryProtection();
         plan = ApplySafetyFilter(pair, ActionPredicates(retryPair, links.WithPending(
             _store.ReadSyncRetries(pairId).Where(retry => retry.PendingNotice is not null).Select(retry => retry.Path)), retrySelection), plan);
         plan = plan with { HeldDeletions = retryHeld, FirstSyncOptions = Options(pair, false, winners, null) };
@@ -702,6 +706,7 @@ public sealed partial class SyncRun : ISyncRun
             RetainPlanningFailures(pair, plan);
             CloseResolvedNotices(openNotices, plan, tally, evaluated);
             CloseAppliedDecisions(openNotices, plan, tally, decisions, resolvingNoticeId);
+            RefreshRetryProtection();
             AcknowledgeVerifiedRehash(pair, scan, plan, tally, evaluated, predicates.A, predicates.B, ct);
             AdvanceCursors(scan);
             _store.Prune();

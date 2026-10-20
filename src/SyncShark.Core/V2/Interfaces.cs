@@ -157,6 +157,8 @@ public interface IStateStore : IDisposable
     void RecordIntent(string pairId, SyncAction a);
 
     IEnumerable<SyncRetry> ReadSyncRetries(string pairId);
+    IEnumerable<string> ReadSyncRetryPaths(string pairId) => ReadSyncRetries(pairId).Select(row => row.Path);
+    bool SyncRetryExists(string pairId, string path) => SyncRetryAt(pairId, path) is not null;
     void SaveSyncRetry(string pairId, SyncRetry retry);
     void ClearSyncRetry(string pairId, string path);
     SyncRetry? SyncRetryAt(string pairId, string path);

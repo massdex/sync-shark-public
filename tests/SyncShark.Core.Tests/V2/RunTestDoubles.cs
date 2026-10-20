@@ -293,10 +293,22 @@ internal sealed class RecordingStore : IStateStore
 
     public RecordingStore(IStateStore inner) => _inner = inner;
     public IEnumerable<SyncRetry> ReadSyncRetries(string pairId) => _inner.ReadSyncRetries(pairId);
+    public Action? OnRetryPathsRead { get; set; }
+    public IEnumerable<string> ReadSyncRetryPaths(string pairId)
+    {
+        OnRetryPathsRead?.Invoke();
+        return _inner.ReadSyncRetryPaths(pairId);
+    }
+    public bool SyncRetryExists(string pairId, string path) => _inner.SyncRetryExists(pairId, path);
     public SyncRetry? SyncRetryAt(string pairId, string path) => _inner.SyncRetryAt(pairId, path);
     public IReadOnlyList<SyncRetry> DueSyncRetries(string pairId, DateTimeOffset now, int limit) => _inner.DueSyncRetries(pairId, now, limit);
     public int CountSyncRetries(string pairId) => _inner.CountSyncRetries(pairId);
-    public bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants) => _inner.RetryProtected(pairId, path, active, descendants);
+    public int RetryProtectionCalls { get; private set; }
+    public bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants)
+    {
+        RetryProtectionCalls++;
+        return _inner.RetryProtected(pairId, path, active, descendants);
+    }
     public void SaveSyncRetry(string pairId, SyncRetry retry) => _inner.SaveSyncRetry(pairId, retry);
     public void ClearSyncRetry(string pairId, string path) => _inner.ClearSyncRetry(pairId, path);
     public void RequireRehash(string rootId, ItemState item, string reason) => _inner.RequireRehash(rootId, item, reason);
