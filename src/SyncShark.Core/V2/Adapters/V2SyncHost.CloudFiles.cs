@@ -44,7 +44,7 @@ internal sealed class CloudFilesLifetime(
             catch (Exception error) when (error is not OperationCanceledException)
             {
                 failures.Add(pair.Name + ": Cloud Files needs attention: " + error.Message);
-                ProgressGuard.Invoke(report, pair, error);
+                report?.Invoke(pair, error);
             }
         }
         return failures;

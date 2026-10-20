@@ -79,21 +79,21 @@ public sealed class DefenderHistory : IDefenderHistory
             if (count == 0) break;
             for (var i = 0; i < count; i++)
             {
-                if (++total > maxChars) { ProgressGuard.Invoke(limitReached); return false; }
+                if (++total > maxChars) { limitReached?.Invoke(); return false; }
                 var c = buffer[i];
                 if (c != '\n')
                 {
-                    if (line.Length >= 32768) { ProgressGuard.Invoke(limitReached); return false; }
+                    if (line.Length >= 32768) { limitReached?.Invoke(); return false; }
                     if (c != '\r') line.Append(c);
                     continue;
                 }
                 if (!complete && line.ToString().StartsWith("STATUS:", StringComparison.Ordinal))
-                    ProgressGuard.Invoke(status, AvailabilityForMode(line.ToString()[7..]));
+                    status?.Invoke(AvailabilityForMode(line.ToString()[7..]));
                 else if (line.ToString() == "COMPLETE") complete = true;
                 else if (line.Length != 0)
                 {
                     if (complete) return false;
-                    if (evidence.Count >= maxRecords) { ProgressGuard.Invoke(limitReached); return false; }
+                    if (evidence.Count >= maxRecords) { limitReached?.Invoke(); return false; }
                     try
                     {
                         using var doc = JsonDocument.Parse(line.ToString());
@@ -103,7 +103,7 @@ public sealed class DefenderHistory : IDefenderHistory
                         {
                             var parsed = Parse(element.GetRawText());
                             if (parsed.Count != 1) { valid = false; continue; }
-                            if (evidence.Count >= maxRecords) { ProgressGuard.Invoke(limitReached); return false; }
+                            if (evidence.Count >= maxRecords) { limitReached?.Invoke(); return false; }
                             evidence.Add(parsed[0]);
                         }
                     }
