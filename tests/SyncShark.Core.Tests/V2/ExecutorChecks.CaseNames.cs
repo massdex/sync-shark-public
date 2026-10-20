@@ -9,10 +9,10 @@ internal static partial class ExecutorChecks
         foreach (var exact in new[] { false, true })
         {
             var (store, a, b, executor) = Rig();
-            var folderA = a.Seed("Child/Capsules", "", ItemKind.Folder);
-            var folderB = b.Seed(exact ? "Child/Capsules" : "Child/capsules", "", ItemKind.Folder);
-            var oldA = target == Side.B ? folderA with { Path = "Child/CAPSULES" } : folderA;
-            var oldB = target == Side.A ? folderB with { Path = "Child/CAPSULES" } : folderB;
+            var folderA = a.Seed("Child/Folders", "", ItemKind.Folder);
+            var folderB = b.Seed(exact ? "Child/Folders" : "Child/folders", "", ItemKind.Folder);
+            var oldA = target == Side.B ? folderA with { Path = "Child/FOLDERS" } : folderA;
+            var oldB = target == Side.A ? folderB with { Path = "Child/FOLDERS" } : folderB;
             SeedBaseline(store, "folder", oldA, oldB);
             var source = target == Side.A ? b : a;
             var child = source.Seed((target == Side.A ? folderB.Path : folderA.Path) + "/child.txt", "child");
@@ -39,34 +39,34 @@ internal static partial class ExecutorChecks
     }
 
     /// <summary>
-    /// The real Child/Capsules shape: the local folder was renamed by case only and every child baseline still
+    /// The Child/Folders shape: the local folder was renamed by case only and every child baseline still
     /// carries the old spelling. Adoption and edits proceed without any Move, and the whole subtree raises exactly
     /// one CaseOnlyNames Info: the topmost differing folder's.
     /// </summary>
     private static async Task CaseOnlyFolder_BaselinedChildren_AdoptEditOneNotice()
     {
         var (store, a, b, executor) = Rig();
-        const string old = "Child/capsules";
+        const string old = "Child/folders";
         var ev = new Evidence(false, false, false, false);
         var options = new PlanOptions(TimeSpan.FromSeconds(2), false,
             new LabelRule("{name} [{side} version {time}]{ext}", "d MMM HH.mm", TimeSpan.Zero, "Local", "Dropbox"), 10);
 
-        var folderA = a.Seed("Child/Capsules", "", ItemKind.Folder);
+        var folderA = a.Seed("Child/Folders", "", ItemKind.Folder);
         var folderB = b.Seed(old, "", ItemKind.Folder);
         SeedBaseline(store, "folder", folderA with { Path = old }, folderB);
 
         // An unchanged child: only its ancestor's spelling differs, so it adopts silently.
-        var childA = a.Seed("Child/Capsules/child.txt", "child");
+        var childA = a.Seed("Child/Folders/child.txt", "child");
         var childB = b.Seed(old + "/child.txt", "child");
         SeedBaseline(store, "child", childA with { Path = old + "/child.txt" }, childB);
 
         // Its own leaf also changed case under the differing folder: the topmost notice covers it.
-        var nestedA = a.Seed("Child/Capsules/Notes.txt", "notes");
+        var nestedA = a.Seed("Child/Folders/Notes.txt", "notes");
         var nestedB = b.Seed(old + "/notes.txt", "notes");
         SeedBaseline(store, "nested", nestedA with { Path = old + "/notes.txt" }, nestedB);
 
         // Edited while the ancestor moved by case only: the content edit must still propagate.
-        var editedA = a.Seed("Child/Capsules/edited.txt", "new content");
+        var editedA = a.Seed("Child/Folders/edited.txt", "new content");
         var editedB = b.Seed(old + "/edited.txt", "old");
         SeedBaseline(store, "edited",
             editedA with { Path = old + "/edited.txt", Hash = editedB.Hash, Size = editedB.Size }, editedB);

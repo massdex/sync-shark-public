@@ -8,11 +8,11 @@ internal static partial class PlannerChecks
         foreach (var exact in new[] { false, true })
         foreach (var folder in new[] { false, true })
         {
-            var a = folder ? D("Child/Capsules", "a") : F("Child/Capsules", "a", "h1");
-            var b = folder ? D("Child/capsules", "b") : F("Child/capsules", "b", "h1");
+            var a = folder ? D("Child/Folders", "a") : F("Child/Folders", "a", "h1");
+            var b = folder ? D("Child/folders", "b") : F("Child/folders", "b", "h1");
             if (exact) b = b with { Path = a.Path };
-            var baseline = Base("case", changed == Side.A ? a with { Path = "Child/CAPSULES" } : a,
-                changed == Side.B ? b with { Path = "Child/CAPSULES" } : b);
+            var baseline = Base("case", changed == Side.A ? a with { Path = "Child/FOLDERS" } : a,
+                changed == Side.B ? b with { Path = "Child/FOLDERS" } : b);
             var plan = Decide(Row(baseline, a, b));
             var adopt = plan.Actions.Single();
             Require(adopt.Kind == ActionKind.Adopt && adopt.Target == Side.B &&
@@ -30,21 +30,21 @@ internal static partial class PlannerChecks
     }
 
     /// <summary>
-    /// The real Child/Capsules shape: the folder was renamed by case only and every child baseline still carries
+    /// The Child/Folders shape: the folder was renamed by case only and every child baseline still carries
     /// the old spelling. Only the topmost differing folder is reported; a child whose own leaf is unchanged and a
     /// nested child that also changed case both stay silent.
     /// </summary>
     private static void CaseEquivalentChildren_OnlyTopmostFolderNotices()
     {
-        var folderA = D("Child/Capsules", "fa");
-        var folderB = D("Child/capsules", "fb");
-        var folderBase = Base("folder", folderA with { Path = "Child/capsules" }, folderB);
-        var childA = F("Child/Capsules/child.txt", "ca", "h1");
-        var childB = F("Child/capsules/child.txt", "cb", "h1");
-        var childBase = Base("child", childA with { Path = "Child/capsules/child.txt" }, childB);
-        var nestedA = F("Child/Capsules/Notes.txt", "na", "h1");
-        var nestedB = F("Child/capsules/notes.txt", "nb", "h1");
-        var nestedBase = Base("nested", nestedA with { Path = "Child/capsules/notes.txt" }, nestedB);
+        var folderA = D("Child/Folders", "fa");
+        var folderB = D("Child/folders", "fb");
+        var folderBase = Base("folder", folderA with { Path = "Child/folders" }, folderB);
+        var childA = F("Child/Folders/child.txt", "ca", "h1");
+        var childB = F("Child/folders/child.txt", "cb", "h1");
+        var childBase = Base("child", childA with { Path = "Child/folders/child.txt" }, childB);
+        var nestedA = F("Child/Folders/Notes.txt", "na", "h1");
+        var nestedB = F("Child/folders/notes.txt", "nb", "h1");
+        var nestedBase = Base("nested", nestedA with { Path = "Child/folders/notes.txt" }, nestedB);
 
         var plan = Decide(false, Row(folderBase, folderA, folderB), Row(childBase, childA, childB),
             Row(nestedBase, nestedA, nestedB));

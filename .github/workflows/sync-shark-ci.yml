@@ -5,6 +5,7 @@ on:
     branches:
       - 'claude-code/v2-*'
       - 'main'
+      - 'ci/**'
   workflow_dispatch:
 
 # One run per branch: a new commit cancels the run it supersedes.
