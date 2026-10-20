@@ -28,7 +28,58 @@ internal static class StorageExplicitRetryChecks
                 await PairCauseAsync(Path.Combine(directory, "preserved-" + cause), queue, cause, succeeds: true, clearsPair: false);
             Priority(Path.Combine(directory, "priority"), queue);
         }
+        foreach (var cause in new[] { "network", "auth", "provider" })
+            await CliPairNoticeAsync(Path.Combine(root, "cli-pair-" + cause), cause, active: true, clears: true);
+        foreach (var cause in new[] { "volume", "unknown" })
+            await CliPairNoticeAsync(Path.Combine(root, "cli-pair-kept-" + cause), cause, active: true, clears: false);
+        await CliPairNoticeAsync(Path.Combine(root, "cli-pair-paused"), "network", active: false, clears: false);
+        await CliPausedItemAsync(Path.Combine(root, "cli-paused-item"));
         Console.WriteLine("PASS explicit Retry across settlement/offline/refresh: exact target, pause/disable persistence, re-deferral, shared-gate idempotence and cursor-independent priority (synthetic providers only)");
+        Console.WriteLine("PASS direct CLI Retry: pair backoff clears only for connectivity causes on an active pair, and a paused pair keeps it with the queued explanation on the notice");
+    }
+
+    /// <summary>A direct CLI pair-notice Retry never performs native work; it clears the root backoff only for
+    /// connectivity evidence on an active pair, leaving every other cause and a paused pair backed off.</summary>
+    private static async Task CliPairNoticeAsync(string root, string cause, bool active, bool clears)
+    {
+        using var fixture = new Fixture(root, Queue.Settlement);
+        StorageNotices.Report(fixture.Store, fixture.Pair, "",
+            new StorageNotice(fixture.Pair.A.RootId, "", fixture.Pair.B.RootId, "availability", cause),
+            new StoragePairException(cause, "Synthetic pair cause"));
+        fixture.Store.SetStorageRootBackoff(fixture.Pair.A.RootId, Deferred);
+        if (!active) fixture.Suspend(disabled: false, suspended: true);
+        var notice = fixture.Store.OpenNotices(fixture.Pair.PairId).Single(n => n.Storage?.Operation == "availability");
+        var cli = new V2CliRuntime(null, fixture.Store, null!, null!, root);
+        await cli.ResolveConflictAsync(fixture.Pair.PairId, "", NoticeChoices.RetryNow, notice.NoticeId, 0, null,
+            CancellationToken.None);
+        Require(fixture.Store.StorageRootBackedOff(fixture.Pair.A.RootId) == !clears,
+            "cli pair cause " + cause + (active ? " on an active pair" : " on a paused pair") +
+            (clears ? " clears the root backoff" : " keeps the root backoff"));
+        Require(fixture.Calls == 0 && fixture.Pending(0) && fixture.Notice(0) is not null,
+            "cli pair Retry for cause " + cause + " performs no native work and leaves item work untouched");
+        Require(fixture.Store.NoticeById(fixture.Pair.PairId, notice.NoticeId!) is { Closed: false },
+            "cli pair Retry for cause " + cause + " leaves the pair notice open");
+    }
+
+    /// <summary>A paused pair keeps a CLI item Retry queued, keeps the root backoff, and stores the same
+    /// queued explanation the attended path records, so the app explains why nothing ran.</summary>
+    private static async Task CliPausedItemAsync(string root)
+    {
+        using var fixture = new Fixture(root, Queue.Settlement);
+        var notice = fixture.Notice(0) ?? throw new InvalidOperationException("Missing paused CLI fixture notice.");
+        fixture.Suspend(disabled: false, suspended: true);
+        fixture.Store.SetStorageRootBackoff(fixture.Pair.A.RootId, Deferred);
+        var cli = new V2CliRuntime(null, fixture.Store, null!, null!, root);
+        await cli.ResolveConflictAsync(fixture.Pair.PairId, notice.Path, NoticeChoices.RetryNow, notice.NoticeId, 0,
+            null, CancellationToken.None);
+        Require(fixture.Due(0) == StorageDue.UserRequested && fixture.Calls == 0,
+            "cli paused-pair Retry persists the atomic request without native execution");
+        Require(fixture.Store.StorageRootBackedOff(fixture.Pair.A.RootId),
+            "cli paused-pair Retry keeps the root backoff");
+        Require(fixture.Notice(0)?.Detail.Contains(StorageSettlementService.RetryQueuedMessage, StringComparison.Ordinal) == true,
+            "cli paused-pair Retry stores the queued explanation on the notice");
+        Require(fixture.Notice(0)?.NoticeId == notice.NoticeId,
+            "cli paused-pair Retry preserves the open notice identity");
     }
 
     private static async Task ActiveAsync(string root, Queue queue)

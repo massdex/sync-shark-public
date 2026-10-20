@@ -213,17 +213,41 @@ internal static class StorageNotices
             {
                 queued = store.RequestStorageHydration(hydrationJob);
             }
+            // A settlement notice whose row is gone (already settled, or the identity was purged) or whose
+            // scope names a different receipt has nothing left to verify: mirror the attended store-only close.
+            else if (item.Operation == "settlement")
+            {
+                Complete(store, pair.PairId, item);
+                return;
+            }
             var inactivePair = !pair.Enabled || store.PairPaused(pair.PairId) || (paused?.Invoke(pair) ?? false);
             string message;
             if (queued)
+            {
+                // The app records the same explanation on the notice (RecordNoticeChoiceFailure) so it explains
+                // why nothing ran; keep the CLI path consistent and store it once.
+                if (inactivePair && !notice.Detail.Contains(StorageSettlementService.RetryQueuedMessage, StringComparison.Ordinal))
+                    store.RecordNoticeChoiceFailure(notice, StorageSettlementService.RetryQueuedMessage);
                 message = inactivePair
-                    ? "Retry queued; it will run when the pair resumes. Start the background app with autosync start, or open the app."
-                    : "Retry queued; the background app will retry it now. If it is not running, use autosync start or open the app.";
+                    ? "Retry saved; it will run when the pair resumes. Start the Sync Shark background app with autosync start, or open the app."
+                    : "Retry saved. It will run when the Sync Shark background app starts (autosync start) or the next time the app runs.";
+            }
             else if (item.ObjectId.Length == 0)
             {
-                store.ClearStorageRootBackoff(item.RootId);
-                message = "The pair retry delay is cleared. Start the background app with autosync start, or open the app; " +
-                    "pending work retries on its normal schedule. Retry this notice in the app to verify the pair immediately.";
+                // Only connectivity evidence lets an explicit Retry drop the root backoff, and only for an active
+                // pair: binding, volume, host, backlog and unknown causes are not fixed by retrying.
+                if ((item.Scope is "network" or "auth" or "provider") && !inactivePair)
+                {
+                    store.ClearStorageRootBackoff(item.RootId);
+                    message = "The pair retry delay is cleared. Start the background app with autosync start, or open the app; " +
+                        "pending work retries on its normal schedule. Retry this notice in the app to verify the pair immediately.";
+                }
+                else if (inactivePair)
+                    message = "This pair is paused or disabled, so the pair verification cannot run. Enable or resume it, " +
+                        "then Retry; the pair retry delay is unchanged.";
+                else
+                    message = "The cause shown in this notice is not a connectivity failure, so Retry cannot clear the " +
+                        "pair retry delay. Correct the cause, then Retry in the app; the delay stays in place.";
             }
             else
                 message = "This verification needs the Sync Shark background app. Start it with autosync start, or open the app, " +
