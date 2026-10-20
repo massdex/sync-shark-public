@@ -83,9 +83,20 @@ internal static partial class AutoSyncChecks
         {
             var before = rig.Run.Runs("p1");
             rig.Run.Then(error);
-            rig.Auto.Kick("p1");
-            await rig.ParkedAsync(AutoStatus.Waiting);
-            rig.Clock.Advance(Settings.ChangeQuietWindow);
+            if (rig.State("p1").RetryAt is { } retryAt)
+            {
+                // Waiting already describes the previous failure's backoff. A Kick followed by
+                // Parked(Waiting) can observe that OLD wait before the Kick is consumed, then
+                // advance the clock before the new debounce timer exists. Exercise automatic
+                // retries instead: the previous Fail has joined the parked retry timer.
+                rig.Clock.Advance(retryAt - rig.Clock.GetUtcNow());
+            }
+            else
+            {
+                rig.WatchA.Signal();
+                await rig.ParkedAsync(AutoStatus.Waiting);
+                rig.Clock.Advance(Settings.ChangeQuietWindow);
+            }
             await Until(() => rig.Run.Runs("p1") == before + 1 && rig.State("p1").RetryAt > rig.Clock.GetUtcNow() &&
                 rig.Clock.ActiveTimers == 1, "failure is parked");
         }
@@ -93,9 +104,11 @@ internal static partial class AutoSyncChecks
         var notice = rig._store.OpenNotices("p1").Single();
         rig._store.CloseNotice(notice.NoticeId!, NoticeChoices.Ignore);
         for (var i = 0; i < 4; i++)
+        {
             await Fail(i % 2 == 0 ? new IOException("socket unavailable") : new HttpRequestException("network unavailable"));
-        Require(rig._store.OpenNotices("p1").Count == 0, "changing cause does not reset Ignore in one outage");
-        rig.Clock.Advance(SafetyPoll);
+            Require(rig._store.OpenNotices("p1").Count == 0, "each cause change preserves Ignore in one outage");
+        }
+        rig.Clock.Advance(rig.State("p1").RetryAt!.Value - rig.Clock.GetUtcNow());
         await rig.ParkedAsync(AutoStatus.Idle);
         for (var i = 0; i < 3; i++) await Fail(new HttpRequestException("second outage"));
         Require(rig._store.OpenNotices("p1").Count == 1, "success resets Ignore for the next outage");
