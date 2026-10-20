@@ -48,8 +48,10 @@ internal sealed partial class NoticeTable
         // completed choice or replace its committed target identity with a planned source stamp.
         if (notice.RetainedVersion is not null) return;
         // Fresh observations refresh revision evidence, but never erase an already-recorded effect intent.
-        if (notice.Repair is { Destination: null } && ById(pairNo, noticeId, transaction)?.Notice.Repair is { Destination: not null } captured)
-            notice = notice with { Repair = captured };
+        if (notice.Repair is { Destination: null } && ById(pairNo, noticeId, transaction)?.Notice is { Repair: { Destination: not null } captured } prior)
+            notice = notice.ReasonKey == "link-item"
+                ? notice with { Repair = notice.Repair with { Destination = captured.Destination }, Detail = prior.Detail }
+                : notice with { Repair = captured };
         StoreSchema.Execute(_connection, transaction,
             "UPDATE notice SET state='open', choice=NULL, kind=$kind, path=$path, detail=$detail " +
             "WHERE notice_id=$id AND NOT ($retry=1 AND COALESCE(choice,'')='ignore') " +

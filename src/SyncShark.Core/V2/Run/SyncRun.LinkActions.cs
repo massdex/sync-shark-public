@@ -1,53 +1,78 @@
+using System.Text;
+using System.Text.Json;
+
 namespace Massdex.SyncShark.V2;
 
 public sealed partial class SyncRun
 {
-    private string ShowLinkItems(PairDef pair, int offset)
+    private sealed record LinkPageCursor(Side Side, ItemState Item);
+
+    private string ShowLinkItems(PairDef pair, NoticeActionInput? input)
     {
-        if (offset < 0 || offset > int.MaxValue - 50) throw new SyncRunRefusedException("Invalid page offset.");
+        if (input?.Offset is > 0) throw new SyncRunRefusedException("Link pages use the returned cursor with --name, not an offset. Start without a cursor to refresh.");
+        LinkPageCursor? cursor = null;
+        if (input?.Name is { } encoded)
+        {
+            try { cursor = JsonSerializer.Deserialize<LinkPageCursor>(Convert.FromBase64String(encoded)); }
+            catch (Exception e) when (e is FormatException or JsonException) { throw new SyncRunRefusedException("Invalid link page cursor. Refresh without a cursor."); }
+            if (cursor?.Item is null || !Enum.IsDefined(cursor.Side) || !Enum.IsDefined(cursor.Item.Kind) ||
+                string.IsNullOrWhiteSpace(cursor.Item.Path) || !PilotPath.IsWindowsTransferPath(cursor.Item.Path))
+                throw new SyncRunRefusedException("Invalid link page cursor. Refresh without a cursor.");
+        }
         var notices = new List<Notice>(50);
-        var lines = new List<string> { $"Links, offset {offset}. Refresh notices for individual actions. No targets have been scanned or copied." };
-        var skipped = 0;
-        var more = false;
+        var lines = new List<string> { "Links (up to 50 per page). No targets have been scanned or copied." };
+        LinkPageCursor? next = null;
+        var budget = 200; // Bound excluded-row work as well as visible rows.
         foreach (var (root, side) in new[] { (pair.A, Side.A), (pair.B, Side.B) })
         {
-            if (root.Provider != SyncProviders.Local) continue;
-            ItemState? after = null;
-            while (true)
+            if (root.Provider != SyncProviders.Local || cursor?.Side == Side.B && side == Side.A) continue;
+            var after = cursor?.Side == side ? cursor.Item : null;
+            while (budget > 0 && notices.Count < 50)
             {
-                var page = _store.LiveFlaggedPage(root.RootId, ItemFlags.Link, after, 50);
-                if (page.Count == 0) break;
+                var page = _store.LiveFlaggedPage(root.RootId, ItemFlags.Link, after, Math.Min(50 - notices.Count, budget));
+                if (page.Count == 0) { next = null; break; }
                 foreach (var item in page)
                 {
+                    budget--;
+                    after = item;
+                    next = new(side, item);
                     if (pair.Excluded.Any(path => PairPath.IsSelfOrUnder(item.Path, path))) continue;
-                    if (skipped++ < offset) continue;
-                    if (notices.Count == 50) { more = true; break; }
                     notices.Add(new(pair.PairId, LinkExclusions.Rule, NoticeKind.Info, item.Path,
-                        "Link left untouched. Show target is read-only; Sync target separately gives guidance. Create regular copy explicitly copies at most 256 MiB / 4096 entries beside this link. Nested links are never followed.",
+                        "Link left untouched. Show target is read-only. Create regular copy copies at most 256 MiB / 4096 entries beside this link. Nested links are never followed.",
                         "link-item", Repair: new NoticeRepair(side, item)));
                     lines.Add($"{side}: {item.Path}");
                 }
-                if (more) break;
-                var next = page[^1];
-                if (after is not null && after.Path == next.Path && after.ObjectId == next.ObjectId) break;
-                after = next;
             }
-            if (more) break;
+            if (budget == 0 || notices.Count == 50) break;
         }
+        // Only the current page stays open, except repairs that retain a copy/staging location.
+        var current = notices.Select(n => (n.Repair!.Side, n.Repair.Item.ObjectId)).ToHashSet();
+        foreach (var old in _store.OpenNotices(pair.PairId).Where(n => n.ReasonKey == "link-item" && n.Repair?.Destination is null))
+            if (old.Repair is { } repair && !current.Contains((repair.Side, repair.Item.ObjectId))) _store.CloseNotice(old.NoticeId!, "page-changed");
         if (notices.Count > 0) _store.AddNotices(notices);
-        if (more) lines.Add($"More items: next offset {offset + 50}.");
-        if (notices.Count == 0) lines.Add("No included links on this page. Retry sync to refresh inventory.");
+        if (next is not null) lines.Add("Next cursor (--name): " + Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(next))));
+        if (notices.Count == 0) lines.Add("No included links on this page. Use the next cursor if present, or retry sync to refresh inventory.");
         return string.Join(Environment.NewLine, lines);
     }
 
-    private async Task<string> LinkNoticeActionAsync(PairDef pair, Notice notice, string choice, CancellationToken ct)
+    private async Task<string> LinkNoticeActionAsync(PairDef pair, Notice notice, string choice, CancellationToken ct, NoticeActionInput? input)
     {
         var repair = notice.Repair ?? throw new SyncRunRefusedException("Refresh the link list first.");
         var root = repair.Side == Side.A ? pair.A : pair.B;
+        if (_store.ByObject(root.RootId, repair.Item.ObjectId) is { } live)
+        {
+            repair = repair with { Item = live };
+            notice = notice with { Path = live.Path, Repair = repair };
+        }
         if (root.Provider != SyncProviders.Local || !PilotPath.IsWindowsTransferPath(repair.Item.Path))
             throw new SyncRunRefusedException("Choose a local link with a safe relative path. Use its provider to inspect other links.");
+        string? stage = null;
         try
         {
+            if (choice == NoticeChoices.RemoveLinkStaging)
+                return repair.Destination is { } retained && LocalItems.IsArtifactPath(retained)
+                    ? "Remove staging manually in Explorer after reviewing its contents: " + LocalItems.FullPath(root.RootPath, retained) + ". It is excluded from sync. Sync Shark has not deleted anything."
+                    : "No incomplete staging is recorded. A published copy is not staging and must not be removed by this option. No files changed.";
             var link = LocalItems.FullPath(root.RootPath, repair.Item.Path);
             if (choice is NoticeChoices.ShowTarget or NoticeChoices.SyncTargetSeparately)
             {
@@ -57,20 +82,39 @@ public sealed partial class SyncRun
                     "Create a separate pair for the regular target folder (for a file, select its parent folder). Choose a non-overlapping cloud destination and review nested-pair rules. No pair was created." + Environment.NewLine +
                     "CLI hint: SyncShark.exe --cli pairs create --account <exact-account-id> --path <new-remote-path> --local <target-folder> --yes";
             }
+            if (repair.Destination is { } existing && !LocalItems.IsArtifactPath(existing) && choice != NoticeChoices.CopyLinkAgain)
+                return "A copy was published at " + existing + ". Choose Copy again to create another; the previous copy is never overwritten.";
             if (!pair.Enabled) throw new IOException("Enable the pair before copying, or sync the target separately.");
             RefuseLayout(pair);
             var include = BuildPredicates(pair, PairInclude.ForAction);
-            if (!(repair.Side == Side.A ? include.A : include.B)(notice.Path))
-                throw new IOException("The link is excluded or belongs to a nested pair. Review folder settings or Ignore.");
+            var included = repair.Side == Side.A ? include.A : include.B;
+            if (!included(notice.Path)) throw new IOException("The link is excluded or belongs to a nested pair. Review folder settings or Ignore.");
             await _endpoints.PrepareAsync(pair, ct).ConfigureAwait(false);
-            var destination = (notice.Path.LastIndexOf('/') is var cut && cut >= 0 ? notice.Path[..(cut + 1)] : "") +
-                "Link-copy-" + Guid.NewGuid().ToString("N") + (repair.Item.Kind == ItemKind.File ? Path.GetExtension(notice.Path) : "");
-            if (!include.A(destination) || !include.B(destination)) throw new IOException("Copy destination is excluded. Review folder settings.");
-            foreach (var endpoint in new[] { pair.A, pair.B })
-                if (_store.ProtectionBatch(endpoint.RootId, ItemFlags.Link | ItemFlags.Placeholder | ItemFlags.NeedsRehash, [destination]).Any(p => p.Covered || p.Contains) ||
-                    await _endpoints.Writer(endpoint).ObserveAsync(destination, ct).ConfigureAwait(false) is not null)
-                    throw new IOException("Copy destination is occupied or protected. Choose Create regular copy again for a new name, or Ignore.");
-            using var prepared = new LinkContentCopy.Prepared(root, repair.Item, choice == NoticeChoices.CopyLinkOutsideRoot, ct);
+            bool RequiresConfirmation(string path)
+            {
+                if (!LinkContentCopy.Under(path, root.RootPath)) return true;
+                var relative = Path.GetRelativePath(root.RootPath, path).Replace('\\', '/');
+                return LocalItems.IsArtifactPath(relative) || !included(relative) ||
+                    _store.ProtectionBatch(root.RootId, ItemFlags.Link | ItemFlags.Placeholder | ItemFlags.NeedsRehash, [relative]).Any(p => p.Covered);
+            }
+            var confirm = choice == NoticeChoices.CopyLinkOutsideRoot || input?.Name is not null;
+            using var prepared = new LinkContentCopy.Prepared(root, repair.Item, confirm, ct, input?.Name, RequiresConfirmation);
+            var prefix = notice.Path.LastIndexOf('/') is var cut && cut >= 0 ? notice.Path[..(cut + 1)] : "";
+            var leaf = Path.GetFileName(notice.Path);
+            string destination = "";
+            for (var suffix = 1; suffix <= 10000; suffix++)
+            {
+                destination = prefix + leaf + " (copy" + (suffix == 1 ? "" : " " + suffix) + ")";
+                PilotPath.NormalizeTopLevelName(Path.GetFileName(destination));
+                if (!include.A(destination) || !include.B(destination)) throw new IOException("Copy destination is excluded. Review folder settings.");
+                var localDestination = LocalItems.FullPath(root.RootPath, destination);
+                var occupied = File.Exists(localDestination) || Directory.Exists(localDestination);
+                foreach (var endpoint in new[] { pair.A, pair.B })
+                    occupied |= _store.ProtectionBatch(endpoint.RootId, ItemFlags.Link | ItemFlags.Placeholder | ItemFlags.NeedsRehash, [destination]).Any(p => p.Covered || p.Contains) ||
+                        await _endpoints.Writer(endpoint).ObserveAsync(destination, ct).ConfigureAwait(false) is not null;
+                if (!occupied) break;
+                if (suffix == 10000) throw new IOException("No free copy name. Rename the link or review existing copies.");
+            }
             var writer = _endpoints.Writer(root);
             var demand = new SyncAction(ShortId.Make("lnk", pair.PairId, destination), notice.Rule, ActionKind.CopyNew,
                 repair.Side, destination, null, repair.Item with { Size = prepared.Bytes }, null, false, null);
@@ -78,17 +122,20 @@ public sealed partial class SyncRun
                 ? await space.AdmitFreeSpaceAsync(demand, ct).ConfigureAwait(false) : FreeSpaceAdmission.Granted;
             using var reservation = admission.Reservation;
             if (admission.Refusal is { } refusal) throw new IOException(refusal.Detail);
+            stage = prefix + LinkContentCopy.Prepared.StagingName();
+            notice = notice with { Repair = repair with { Destination = stage }, Detail = "Copy in progress. Excluded staging: " + stage + ". Retry rebuilds; Remove staging gives manual cleanup guidance. Earlier retained staging: " + repair.Destination };
+            _store.AddNotices([notice]); // Persist before any staging writes, including process interruption.
+            await prepared.CopyAsync(LocalItems.FullPath(root.RootPath, destination), ct, LocalItems.FullPath(root.RootPath, stage)).ConfigureAwait(false);
+            var result = "Created regular copy: " + destination + ". It syncs normally on the next run. The link was not deleted or changed. Empty excluded staging: " + stage;
+            _store.AddNotices([notice with { Detail = result, Repair = repair with { Destination = destination } }]);
             _store.SaveSyncRetry(pair.PairId, new(destination, "sync", 0, "Observe explicit regular link copy.", DateTimeOffset.MinValue));
-            await prepared.CopyAsync(LocalItems.FullPath(root.RootPath, destination), ct).ConfigureAwait(false);
-            var result = "Created regular copy: " + destination + ". It syncs normally on the next run. The link was not deleted or changed.";
-            _store.AddNotices([notice with { Detail = result }]);
             return result;
         }
-        catch (Exception error) when (RunFailure(error, ct))
+        catch (Exception error) when (error is OperationCanceledException || RunFailure(error, ct))
         {
             var result = "Link action not completed: " + BlockerDiagnostic.Describe(error) +
-                " Options: Show target, Sync target separately, Retry, or Ignore. Any already-created partial copy is retained; the link is unchanged.";
-            // Read-only choices do not mutate even notice state.
+                " Options: Show target, Sync target separately, Retry (rebuild), Remove staging, or Ignore. The link is unchanged." +
+                (stage is null ? "" : " Retained excluded staging (never uploaded): " + stage + ". Previous retained location: " + repair.Destination);
             if (choice is not (NoticeChoices.ShowTarget or NoticeChoices.SyncTargetSeparately)) _store.AddNotices([notice with { Detail = result }]);
             return result;
         }

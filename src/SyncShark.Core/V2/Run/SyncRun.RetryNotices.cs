@@ -13,8 +13,8 @@ public sealed partial class SyncRun
             if (saved is null || saved.Value.Closed || !NoticeChoices.IsRetryNotice(saved.Value.Notice) ||
                 !NoticeChoices.Options(saved.Value.Notice).Any(option => option.Choice == choice))
                 throw new SyncRunRefusedException("That retry notice or option is no longer available. Refresh notices.");
-            if (input?.Name is not null && choice != NoticeChoices.Rename || input?.Offset is > 0 && choice != NoticeChoices.ShowRemaining)
-                throw new SyncRunRefusedException("Name is only for Rename; offset is only for Show remaining items.");
+            if (input?.Name is not null && choice is not (NoticeChoices.Rename or NoticeChoices.CopyLinkOutsideRoot or NoticeChoices.CopyLinkAgain or NoticeChoices.ShowRemaining) || input?.Offset is > 0 && choice != NoticeChoices.ShowRemaining)
+                throw new SyncRunRefusedException("Name is for Rename, exact link target confirmation, or a link page cursor; offset is only for non-link remaining items.");
             var notice = saved.Value.Notice;
             noticeId = notice.NoticeId!; // A legacy id resolves to the canonical notice before any effect or closure.
             var pair = _store.Pair(pairId) ?? throw new SyncRunRefusedException("The pair is no longer available.");
@@ -36,12 +36,12 @@ public sealed partial class SyncRun
             if (choice == NoticeChoices.Rename) return await RenameNoticeItemAsync(pair, notice, input?.Name, token);
             if (choice is NoticeChoices.ExportDocx or NoticeChoices.ExportMarkdown or NoticeChoices.ExportPdf)
                 return await ExportNoticeDocumentAsync(pair, notice, choice, token);
-            if (choice is NoticeChoices.ShowTarget or NoticeChoices.SyncTargetSeparately or NoticeChoices.CopyLink or NoticeChoices.CopyLinkOutsideRoot)
-                return await LinkNoticeActionAsync(pair, notice, choice, token);
+            if (choice is NoticeChoices.ShowTarget or NoticeChoices.SyncTargetSeparately or NoticeChoices.CopyLink or NoticeChoices.CopyLinkOutsideRoot or NoticeChoices.CopyLinkAgain or NoticeChoices.RemoveLinkStaging || notice.ReasonKey == "link-item" && choice == NoticeChoices.RetryNow)
+                return await LinkNoticeActionAsync(pair, notice, choice, token, input);
             if (choice == NoticeChoices.MakeAvailableOffline) return await MakeNoticeAvailableOfflineAsync(pair, notice, token);
             if (choice == NoticeChoices.ShowRemaining) return notice.ReasonKey == "stubs-left-alone"
                 ? ShowOnlineOnlyItems(pair, input?.Offset ?? 0) : notice.ReasonKey == "links-excluded"
-                ? ShowLinkItems(pair, input?.Offset ?? 0) : RemainingItems(pair, notice, input?.Offset ?? 0);
+                ? ShowLinkItems(pair, input) : RemainingItems(pair, notice, input?.Offset ?? 0);
             if (choice == NoticeChoices.OpenDropbox)
             {
                 var cloud = new[] { pair.A, pair.B }.FirstOrDefault(root => root.Provider == SyncProviders.Dropbox)

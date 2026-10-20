@@ -19,6 +19,8 @@ public static class NoticeChoices
     public const string OpenDropbox = "open-in-dropbox";
     public const string ShowTarget = "show-target";
     public const string SyncTargetSeparately = "sync-target-separately";
+    public const string CopyLinkAgain = "create-regular-copy-again";
+    public const string RemoveLinkStaging = "remove-link-staging";
     public const string CopyLink = "create-regular-copy";
     public const string CopyLinkOutsideRoot = "create-regular-copy-confirm-outside-root";
     public const string MakeAvailableOffline = "make-available-offline";
@@ -54,7 +56,7 @@ public static class NoticeChoices
     public static bool IsRetryNotice(Notice notice) => notice.RetainedVersion is null &&
         (notice.FreeSpace is not null || notice.Repair is not null || notice.ReasonKey is "deletion-evidence-pending" or "links-excluded" or "link-item" or "stubs-left-alone" or "online-only-item" or "unreadable" or ItemBlocked or "dropbox-storage-full" or "export-required" or "sync-retry" or "deletion-review" or "planning-degraded" or "recovery-unavailable" || IsRemovalAttention(notice));
 
-    public static bool IsRetryChoice(string choice) => choice is ShowTarget or SyncTargetSeparately or CopyLink or CopyLinkOutsideRoot or CheckHistoryAgain or ReviewDeletion or OpenStorage or ReviewReserve or ExportDocx or ExportMarkdown or ExportPdf or MakeAvailableOffline or Rename or ShowRemaining or OpenDropbox or RepairHelp or RetryNow or Exclude or Ignore or DeleteReviewed or KeepRestore or OpenFolderSettings or OpenRecoverySettings or Dismiss;
+    public static bool IsRetryChoice(string choice) => choice is ShowTarget or SyncTargetSeparately or CopyLink or CopyLinkOutsideRoot or CopyLinkAgain or RemoveLinkStaging or CheckHistoryAgain or ReviewDeletion or OpenStorage or ReviewReserve or ExportDocx or ExportMarkdown or ExportPdf or MakeAvailableOffline or Rename or ShowRemaining or OpenDropbox or RepairHelp or RetryNow or Exclude or Ignore or DeleteReviewed or KeepRestore or OpenFolderSettings or OpenRecoverySettings or Dismiss;
 
     public static bool IsRetainedVersionChoice(string choice) =>
         choice is UseOtherVersion or SaveOtherVersionAsCopy or Dismiss;
@@ -83,11 +85,13 @@ public static class NoticeChoices
             ? [new(CheckHistoryAgain, "Check history again"), new(ReviewDeletion, "Review deletion evidence"),
                new(Ignore, "Keep; exclude from sync")]
             : notice.ReasonKey == "links-excluded"
-            ? [new(ShowRemaining, "Review links (50 per page)")]
+            ? [new(ShowRemaining, "Review links (50 per page; optional cursor)", RequestsName: true)]
             : notice.ReasonKey == "link-item"
             ? [new(ShowTarget, "Show target"), new(SyncTargetSeparately, "Sync target separately"),
-               new(CopyLink, "Create regular copy"), new(CopyLinkOutsideRoot, "Create regular copy — confirm outside-root access"),
-               new(RetryNow, "Retry this item"), new(Ignore, "Leave link; exclude from sync")]
+               new(CopyLink, "Create regular copy"), new(CopyLinkOutsideRoot, "Create regular copy — confirm target access (exact target path)", RequestsName: true),
+               new(CopyLinkAgain, "Copy again (exact target path if excluded/outside)", RequestsName: true),
+               new(RemoveLinkStaging, "Remove staging (manual cleanup guidance)"),
+               new(RetryNow, "Retry copy (rebuild; re-confirm excluded target)"), new(Ignore, "Leave link; exclude from sync")]
             : notice.ReasonKey == "stubs-left-alone"
             ? [new(ShowRemaining, "Review online-only files (50 per page)")]
             : notice.ReasonKey == "online-only-item"

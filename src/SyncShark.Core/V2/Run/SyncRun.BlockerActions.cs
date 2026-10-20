@@ -121,6 +121,8 @@ public sealed partial class SyncRun
             var live = _store.ByObject(root.RootId, repair.Item.ObjectId);
             if (live is null)
                 _store.CloseNotice(notice.NoticeId, "item-gone");
+            else if (notice.ReasonKey == "link-item" && !PairPath.Same(live.Path, repair.Item.Path))
+                _store.AddNotices([notice with { Path = live.Path, Repair = repair with { Item = live } }]);
             else if (notice.ReasonKey != "link-item" && repair.Destination is null && !PairPath.Same(live.Path, repair.Item.Path) &&
                 !live.Flags.HasFlag(ItemFlags.ProviderNameRefused) &&
                 PilotPath.IsWindowsTransferPath(DropboxNameMapping.MatchPath(live)) && !BlockerNames.DropboxRefuses(live.Path))

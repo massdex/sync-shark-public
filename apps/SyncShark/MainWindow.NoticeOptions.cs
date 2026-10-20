@@ -10,6 +10,7 @@ public partial class MainWindow
     private async Task ShowRemainingNoticeItemsAsync(DecisionRow row)
     {
         var offset = 0;
+        string? cursor = null;
         var text = new System.Windows.Controls.TextBox { IsReadOnly = true, TextWrapping = TextWrapping.Wrap,
             VerticalScrollBarVisibility = System.Windows.Controls.ScrollBarVisibility.Auto, Height = 380, Margin = new Thickness(12) };
         var panel = new System.Windows.Controls.StackPanel();
@@ -23,10 +24,12 @@ public partial class MainWindow
             {
                 var result = await _authorityHost.ResolveConflictSelectionCommandAsync(
                     [new(new(row.ConflictId ?? "", row.PairId, row.Path, row.ConflictGeneration ?? 0),
-                        SyncAuthorityConflictResolutionKind.PreserveBoth, V2.NoticeChoices.ShowRemaining, new(Offset: offset))],
+                        SyncAuthorityConflictResolutionKind.PreserveBoth, V2.NoticeChoices.ShowRemaining, new(Name: cursor, Offset: cursor is null ? offset : 0))],
                     connectionId: _workspaceAccountId);
                 text.Text = result.Items.Single().Result?.Decisions.Single().Reason ?? "Listing unavailable; retry.";
-                next.IsEnabled = text.Text.Contains("More items: next offset", StringComparison.Ordinal);
+                const string cursorPrefix = "Next cursor (--name): ";
+                cursor = text.Text.Split('\n').FirstOrDefault(line => line.StartsWith(cursorPrefix, StringComparison.Ordinal))?[cursorPrefix.Length..].Trim();
+                next.IsEnabled = cursor is not null || text.Text.Contains("More items: next offset", StringComparison.Ordinal);
             }
             catch (Exception error) { text.Text = error.Message; }
         }
@@ -64,19 +67,23 @@ public partial class MainWindow
                 return;
             }
             NoticeActionInput? input = null;
-            if (option.Choice == V2.NoticeChoices.Rename && option.RequestsName)
+            if (option.RequestsName && option.Choice != V2.NoticeChoices.ShowRemaining)
             {
-                var name = new System.Windows.Controls.TextBox { Text = V2.BlockerNames.Suggest(row.Path), MinWidth = 320, Margin = new Thickness(12) };
+                var rename = option.Choice == V2.NoticeChoices.Rename;
+                var name = new System.Windows.Controls.TextBox { Text = rename ? V2.BlockerNames.Suggest(row.Path) : "", MinWidth = 320, Margin = new Thickness(12) };
                 var panel = new System.Windows.Controls.StackPanel();
-                panel.Children.Add(new System.Windows.Controls.TextBlock { Text = "Choose a new name. Existing files are never overwritten.", Margin = new Thickness(12) });
+                panel.Children.Add(new System.Windows.Controls.TextBlock { Text = rename
+                    ? "Choose a new name. Existing files are never overwritten."
+                    : "Paste the exact path from Show target to confirm reading it, including excluded or nested-pair content. Copy again may leave this blank for an included target.",
+                    TextWrapping = TextWrapping.Wrap, MaxWidth = 540, Margin = new Thickness(12) });
                 panel.Children.Add(name);
-                var confirm = new Button { Content = "Rename", IsDefault = true, Margin = new Thickness(12) };
+                var confirm = new Button { Content = rename ? "Rename" : "Confirm copy", IsDefault = true, Margin = new Thickness(12) };
                 panel.Children.Add(confirm);
-                var dialog = new Window { Title = "Rename blocked item", Owner = this, Content = panel,
+                var dialog = new Window { Title = rename ? "Rename blocked item" : "Confirm link target access", Owner = this, Content = panel,
                     SizeToContent = SizeToContent.WidthAndHeight, WindowStartupLocation = WindowStartupLocation.CenterOwner };
                 confirm.Click += (_, _) => dialog.DialogResult = true;
                 if (dialog.ShowDialog() != true) return;
-                input = new NoticeActionInput(name.Text);
+                input = new NoticeActionInput(string.IsNullOrWhiteSpace(name.Text) ? null : name.Text);
             }
             if (option.Choice == V2.NoticeChoices.ShowRemaining)
             {

@@ -1185,6 +1185,7 @@ internal static partial class CliChecks
         Require(children.Offset == 50, "child inspection carries its bounded page offset");
         foreach (var choice in new[] { Massdex.SyncShark.V2.NoticeChoices.ShowTarget,
             Massdex.SyncShark.V2.NoticeChoices.SyncTargetSeparately, Massdex.SyncShark.V2.NoticeChoices.CopyLink,
+            Massdex.SyncShark.V2.NoticeChoices.CopyLinkAgain, Massdex.SyncShark.V2.NoticeChoices.RemoveLinkStaging,
             Massdex.SyncShark.V2.NoticeChoices.CopyLinkOutsideRoot, Massdex.SyncShark.V2.NoticeChoices.MakeAvailableOffline,
             Massdex.SyncShark.V2.NoticeChoices.ExportDocx, Massdex.SyncShark.V2.NoticeChoices.ExportMarkdown,
             Massdex.SyncShark.V2.NoticeChoices.ExportPdf, Massdex.SyncShark.V2.NoticeChoices.CheckHistoryAgain,
@@ -1196,6 +1197,10 @@ internal static partial class CliChecks
             Require(action.Choice == choice && Massdex.SyncShark.V2.NoticeChoices.IsRetryChoice(choice),
                 "offline and export actions share the exact-target CLI notice route");
         }
+        var confirmation = SyncCliRegistry.Parse(["--cli", "conflicts", "resolve", "--pair", "pair-a",
+            "--path", "link", "--choice", Massdex.SyncShark.V2.NoticeChoices.CopyLinkOutsideRoot,
+            "--name", "D:/Target", "--key", "notice-a", "--generation", "0", "--yes"]);
+        Require(confirmation.Name == "D:/Target", "link confirmation carries the exact target path");
         await LocalPathArgumentChecksAsync();
         var ordinaryReplyWait = TimeSpan.FromMinutes(30);
         foreach (var seconds in new[] { "1800", "4500", "86400" })

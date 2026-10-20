@@ -207,7 +207,7 @@ public static class SyncCliRegistry
             SyncCliRequestKind.State, "none", "one conflict's identities, sizes, hashes and retained-text flags",
             "the product state or the running application", "direct|running-application",
             "--pair,--path,--account", RequiresPair: true),
-        new("conflicts resolve", "conflicts resolve --pair <exact-id> --path <relative-path> --choice <decision> --key <conflict-id> --generation <n> --yes [--name <safe-name>] [--offset <n>] [--timeout-seconds <seconds>]",
+        new("conflicts resolve", "conflicts resolve --pair <exact-id> --path <relative-path> --choice <decision> --key <conflict-id> --generation <n> --yes [--name <safe-name|confirmed-target|link-page-cursor>] [--offset <n>] [--timeout-seconds <seconds>]",
             SyncCliRequestKind.State, "yes", "applies one explicit conflict or blocker action (including link target inspection, bounded regular copies, single-file offline and document export) with the stale-plan guard",
             "the product state or the running application", "direct|running-application",
             "--pair,--path,--choice,--key,--generation,--account,--yes,--timeout-seconds,--name,--offset", Mutating: true, RequiresYes: true,
@@ -581,7 +581,7 @@ public static class SyncCliRegistry
         V2.NoticeChoices.UseOtherVersion, V2.NoticeChoices.SaveOtherVersionAsCopy, V2.NoticeChoices.Dismiss,
         V2.NoticeChoices.RetryNow, V2.NoticeChoices.Exclude, V2.NoticeChoices.Ignore,
         V2.NoticeChoices.DeleteReviewed, V2.NoticeChoices.KeepRestore, V2.NoticeChoices.RepairHelp, V2.NoticeChoices.Rename, V2.NoticeChoices.ShowRemaining, V2.NoticeChoices.OpenDropbox,
-        V2.NoticeChoices.ShowTarget, V2.NoticeChoices.SyncTargetSeparately, V2.NoticeChoices.CopyLink, V2.NoticeChoices.CopyLinkOutsideRoot,
+        V2.NoticeChoices.ShowTarget, V2.NoticeChoices.SyncTargetSeparately, V2.NoticeChoices.CopyLink, V2.NoticeChoices.CopyLinkOutsideRoot, V2.NoticeChoices.CopyLinkAgain, V2.NoticeChoices.RemoveLinkStaging,
         V2.NoticeChoices.MakeAvailableOffline, V2.NoticeChoices.ExportDocx, V2.NoticeChoices.ExportMarkdown, V2.NoticeChoices.ExportPdf,
         V2.NoticeChoices.CheckHistoryAgain, V2.NoticeChoices.ReviewDeletion, V2.NoticeChoices.OpenStorage, V2.NoticeChoices.ReviewReserve,
         V2.NoticeChoices.OpenRecoverySettings, V2.NoticeChoices.OpenFolderSettings];
@@ -899,7 +899,7 @@ public static class SyncCliRegistry
                     V2.NoticeChoices.SaveOtherVersionAsCopy or V2.NoticeChoices.Dismiss or
                     V2.NoticeChoices.RetryNow or V2.NoticeChoices.Exclude or V2.NoticeChoices.Ignore or
                     V2.NoticeChoices.DeleteReviewed or V2.NoticeChoices.KeepRestore or V2.NoticeChoices.RepairHelp or V2.NoticeChoices.Rename or V2.NoticeChoices.ShowRemaining or V2.NoticeChoices.OpenDropbox or
-                    V2.NoticeChoices.ShowTarget or V2.NoticeChoices.SyncTargetSeparately or V2.NoticeChoices.CopyLink or V2.NoticeChoices.CopyLinkOutsideRoot or
+                    V2.NoticeChoices.ShowTarget or V2.NoticeChoices.SyncTargetSeparately or V2.NoticeChoices.CopyLink or V2.NoticeChoices.CopyLinkOutsideRoot or V2.NoticeChoices.CopyLinkAgain or V2.NoticeChoices.RemoveLinkStaging or
                     V2.NoticeChoices.MakeAvailableOffline or V2.NoticeChoices.ExportDocx or V2.NoticeChoices.ExportMarkdown or V2.NoticeChoices.ExportPdf or
                     V2.NoticeChoices.CheckHistoryAgain or V2.NoticeChoices.ReviewDeletion or V2.NoticeChoices.OpenStorage or V2.NoticeChoices.ReviewReserve or
                     V2.NoticeChoices.OpenRecoverySettings or V2.NoticeChoices.OpenFolderSettings;

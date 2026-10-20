@@ -10,6 +10,7 @@ internal static class LinkContentCopy
     internal const long MaximumBytes = 256L * 1024 * 1024;
     internal const int MaximumEntries = 4096;
     private const string Options = " Show target, sync the target separately, or Ignore to leave the link untouched.";
+    internal static Action<string>? EntryCopiedForTest { get; set; }
     internal sealed record Target(string Path, bool InsideRoot);
 
     internal static Target Show(string root, string link)
@@ -18,39 +19,38 @@ internal static class LinkContentCopy
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         for (var hops = 0; hops < 64; hops++)
         {
-            if (!seen.Add(path)) throw new IOException("Link cycle detected." + Options);
-            FileSystemInfo info = (File.GetAttributes(path) & FileAttributes.Directory) != 0
-                ? new DirectoryInfo(path) : new FileInfo(path);
-            var target = info.ResolveLinkTarget(false);
-            if (target is null)
+            using var handle = Open(path, false);
+            var canonical = PilotDirectoryLease.FinalPath(handle);
+            if (!string.Equals(canonical.TrimEnd('\\'), path.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+                throw new IOException("Target uses an alias (short name, substituted drive, or redirected parent). Choose its full physical path: " + canonical + "." + Options);
+            if (!seen.Add(canonical)) throw new IOException("Link cycle detected." + Options);
+            var (attributes, tag) = PilotPath.AttributeTag(handle);
+            if (!PilotPath.IsLink(attributes, tag))
             {
                 if (hops == 0) throw new IOException("This item is no longer a supported link." + Options);
-                // Do not silently follow a junction in a target's parent path.
-                RequireRegularParents(path);
-                return new(path, Under(path, root));
+                if (PilotPath.IsUnsafeHandle(handle, attributes)) throw new IOException("Target is online-only or has an unsupported reparse tag." + Options);
+                if (Directory.GetParent(path) is null) throw new IOException("Target is a whole volume. Sync it separately." + Options);
+                return new(canonical, Under(canonical, root));
             }
-            path = Path.GetFullPath(target.FullName);
+            FileSystemInfo info = (attributes & FileAttributes.Directory) != 0 ? new DirectoryInfo(path) : new FileInfo(path);
+            path = Path.GetFullPath(info.ResolveLinkTarget(false)?.FullName ?? throw new IOException("Unsupported link target." + Options));
         }
         throw new IOException("Link chain is cyclic or exceeds 64 hops." + Options);
     }
 
-    internal static void ValidateTarget(string root, string link, Target target, bool allowOutside)
+    internal static void ValidateTarget(string root, string link, Target target, bool allowOutside, string? confirmedTarget = null)
     {
+        if (allowOutside && (confirmedTarget is null || !Path.IsPathFullyQualified(confirmedTarget) ||
+            !string.Equals(Path.GetFullPath(confirmedTarget), target.Path, StringComparison.OrdinalIgnoreCase)))
+            throw new IOException("The confirmed target does not match the current target: " + target.Path + ". Show target again and confirm that exact path with --name." + Options);
         if (!target.InsideRoot && !allowOutside)
-            throw new IOException("Target is outside the pair root. Choose 'Create regular copy — confirm outside-root access' explicitly to permit reading it." + Options);
+            throw new IOException("Target is outside the pair root: " + target.Path + ". Choose 'Create regular copy — confirm target access' with this exact target path to permit reading it." + Options);
         if (Under(link, target.Path)) throw new IOException("Copy would recurse into itself: the target is an ancestor of the link." + Options);
         PilotPath.RequireSeparatedFromProductState(target.Path);
     }
 
-    private static bool Under(string path, string root) => string.Equals(Path.GetFullPath(path).TrimEnd('\\', '/'), Path.GetFullPath(root).TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase) ||
+    internal static bool Under(string path, string root) => string.Equals(Path.GetFullPath(path).TrimEnd('\\', '/'), Path.GetFullPath(root).TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase) ||
         Path.GetFullPath(path).StartsWith(Path.GetFullPath(root).TrimEnd('\\', '/') + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
-
-    private static void RequireRegularParents(string path)
-    {
-        for (var parent = Directory.GetParent(path); parent is not null; parent = parent.Parent)
-            if ((parent.Attributes & (FileAttributes.ReparsePoint | FileAttributes.Offline)) != 0)
-                throw new IOException("A target parent is redirected or online-only; choose its regular physical location instead." + Options);
-    }
 
     internal sealed class Prepared : IDisposable
     {
@@ -58,43 +58,45 @@ internal static class LinkContentCopy
         private readonly List<IDisposable> _leases = [];
         private readonly List<(string Relative, FileStream? Content)> _entries = [];
         private readonly Dictionary<string, PilotDirectoryLease> _parents = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Func<string, bool>? _requiresConfirmation;
+        private readonly bool _confirmed;
         internal long Bytes { get; private set; }
-        private PilotDirectoryLease HoldDirectory(string path)
+
+        private PilotDirectoryLease HoldDirectory(string path, bool source = false)
         {
             path = Path.GetFullPath(path);
-            if (_parents.TryGetValue(path, out var held)) return held;
-            var parent = Directory.GetParent(path);
-            if (parent is not null) HoldDirectory(parent.FullName);
-            if ((File.GetAttributes(path) & (FileAttributes.ReparsePoint | FileAttributes.Offline)) != 0)
-                throw new IOException("A directory is redirected or online-only." + Options);
-            var lease = parent is null ? PilotDirectoryLease.OpenVolumeRootForAllocation(path) : PilotDirectoryLease.Open(path);
-            // A read guard denies delete-sharing while the source tree is copied.
-            if (parent is not null)
+            if (!_parents.TryGetValue(path, out var lease))
             {
-                var guard = PilotDirectoryLease.OpenDirectoryReadGuard(path, lease.Identity);
-                lease.Dispose();
-                lease = guard;
+                // No ancestor walk: a held handle's FinalPath proves the binding. In particular,
+                // a parent containing product data is not itself a source or destination.
+                lease = PilotDirectoryLease.OpenProductDirectoryReadGuard(path);
+                _leases.Add(lease);
+                _parents.Add(path, lease);
             }
-            _leases.Add(lease);
-            // Freeze reparse metadata as well as renames while path-based enumeration is in use.
-            // A read-only directory handle with no WRITE/DELETE sharing rejects concurrent redirection.
-            var guardHandle = Open(path, true);
-            _leases.Add(guardHandle);
-            if (!PilotDirectoryLease.GetFileInformationByHandle(guardHandle, out var heldInfo) ||
-                (heldInfo.FileAttributes & FileAttributes.ReparsePoint) != 0 ||
-                !string.Equals(PilotDirectoryLease.FinalPath(guardHandle).TrimEnd('\\'), path.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
-                throw new IOException("A directory changed during inspection." + Options);
-            _parents.Add(path, lease);
+            if (source)
+            {
+                PilotPath.RequireSeparatedFromProductState(path);
+                var guard = Open(path, true);
+                _leases.Add(guard);
+                if (!PilotDirectoryLease.GetFileInformationByHandle(guard, out var info) ||
+                    PilotPath.IsUnsafeHandle(guard, info.FileAttributes) ||
+                    !string.Equals(PilotDirectoryLease.FinalPath(guard), path, StringComparison.OrdinalIgnoreCase))
+                    throw new IOException("Source directory changed or is online-only." + Options);
+            }
             return lease;
         }
 
-        internal Prepared(RootDef root, ItemState item, bool allowOutside, CancellationToken ct = default)
+        internal Prepared(RootDef root, ItemState item, bool allowOutside, CancellationToken ct = default,
+            string? confirmedTarget = null, Func<string, bool>? requiresConfirmation = null)
         {
             _ct = ct;
+            _requiresConfirmation = requiresConfirmation;
+            _confirmed = allowOutside;
             try
             {
                 if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Link copies require Windows NTFS guards.");
                 if (!PilotPath.IsWindowsTransferPath(item.Path)) throw new IOException("Unsafe link path." + Options);
+                PilotPath.RequireSeparatedFromProductState(root.RootPath);
                 var rootLease = HoldDirectory(root.RootPath);
                 var id = LocalItems.ParseObjectId(root.RootObjectId);
                 if (rootLease.Identity != new PilotDirectoryIdentity(id.Volume, id.FileId)) throw new IOException("Pair root identity changed.");
@@ -103,15 +105,16 @@ internal static class LinkContentCopy
                 using var linkHandle = Open(link, false);
                 if (!PilotDirectoryLease.GetFileInformationByHandle(linkHandle, out var info)) throw new Win32Exception(Marshal.GetLastWin32Error());
                 var expected = LocalItems.ParseObjectId(item.ObjectId);
-                if (info.VolumeSerialNumber != expected.Volume || (((ulong)info.FileIndexHigh << 32) | info.FileIndexLow) != expected.FileId ||
-                    (info.FileAttributes & FileAttributes.ReparsePoint) == 0)
+                var (attributes, tag) = PilotPath.AttributeTag(linkHandle);
+                if (info.VolumeSerialNumber != expected.Volume || (((ulong)info.FileIndexHigh << 32) | info.FileIndexLow) != expected.FileId || !PilotPath.IsLink(attributes, tag))
                     throw new IOException("Link identity changed. Refresh the link list first.");
                 var target = Show(root.RootPath, link);
-                ValidateTarget(root.RootPath, link, target, allowOutside);
-                HoldDirectory(Path.GetDirectoryName(target.Path)!);
+                ValidateTarget(root.RootPath, link, target, allowOutside, confirmedTarget);
+                var parent = Path.GetDirectoryName(target.Path);
+                if (string.IsNullOrEmpty(parent)) throw new IOException("Target is a whole volume. Sync it separately." + Options);
+                // The source itself is frozen below; its parent need not be locked (and may be a volume root).
                 Scan(target.Path, "", 0);
-                // Target changes during preflight never broaden outside-root permission.
-                if (Show(root.RootPath, link) != target) throw new IOException("Link target changed during inspection. Retry.");
+                if (Show(root.RootPath, link) != target) throw new IOException("Link target changed during inspection. Show target again and confirm its current path.");
             }
             catch { Dispose(); throw; }
         }
@@ -120,13 +123,17 @@ internal static class LinkContentCopy
         {
             _ct.ThrowIfCancellationRequested();
             if (_entries.Count >= MaximumEntries || depth > 64) throw new IOException("Copy exceeds 4096 entries or 64 directory levels." + Options);
-            var attributes = File.GetAttributes(path);
-            if ((attributes & FileAttributes.ReparsePoint) != 0)
-                throw new IOException("Target contains another link (possibly a loop). Nested links are never followed." + Options);
-            if (PilotPath.IsOnlineOnlyAttributes(attributes)) throw new IOException("Target contains online-only content. Make it available offline first." + Options);
+            PilotPath.NormalizeTopLevelName(Path.GetFileName(path));
+            if (!_confirmed && _requiresConfirmation?.Invoke(path) == true)
+                throw new IOException("Target contains an excluded, protected, or nested-pair path: " + path + ". Copying bypasses that exclusion. Show target, then explicitly confirm the exact target path with --name." + Options);
+            PilotPath.RequireSeparatedFromProductState(path);
+            using var inspection = Open(path, false);
+            var (attributes, tag) = PilotPath.AttributeTag(inspection);
+            if (PilotPath.IsLink(attributes, tag)) throw new IOException("Target contains another link (possibly a loop). Nested links are never followed." + Options);
+            if (PilotPath.IsUnsafeHandle(inspection, attributes)) throw new IOException("Target contains online-only or unsupported content. Make it available offline first." + Options);
             if ((attributes & FileAttributes.Directory) != 0)
             {
-                HoldDirectory(path);
+                HoldDirectory(path, source: true);
                 _entries.Add((relative, null));
                 foreach (var child in Directory.EnumerateFileSystemEntries(path))
                     Scan(child, relative.Length == 0 ? Path.GetFileName(child) : Path.Combine(relative, Path.GetFileName(child)), depth + 1);
@@ -136,8 +143,7 @@ internal static class LinkContentCopy
             try
             {
                 if (!PilotDirectoryLease.GetFileInformationByHandle(handle, out var info) ||
-                    (info.FileAttributes & (FileAttributes.ReparsePoint | FileAttributes.Directory)) != 0 ||
-                    PilotPath.IsOnlineOnlyAttributes(info.FileAttributes) ||
+                    (info.FileAttributes & FileAttributes.Directory) != 0 || PilotPath.IsUnsafeHandle(handle, info.FileAttributes) ||
                     !string.Equals(PilotDirectoryLease.FinalPath(handle), Path.GetFullPath(path), StringComparison.OrdinalIgnoreCase))
                     throw new IOException("Source changed or is not a regular offline file." + Options);
                 var stream = new FileStream(handle, FileAccess.Read);
@@ -149,32 +155,77 @@ internal static class LinkContentCopy
             catch { handle.Dispose(); throw; }
         }
 
-        internal async Task CopyAsync(string destination, CancellationToken ct)
+        // The caller records this excluded location before creating it, so crashes retain a visible repair.
+        internal static string StagingName() => SyncLocalTransfer.ArtifactPrefix + Guid.NewGuid().ToString("N") + ".partial";
+
+        internal async Task CopyAsync(string destination, CancellationToken ct, string? stagingPath = null)
         {
+            PilotPath.RequireSeparatedFromProductState(destination);
             var parent = HoldDirectory(Path.GetDirectoryName(destination)!);
+            var name = PilotPath.NormalizeTopLevelName(Path.GetFileName(destination));
+            if (File.Exists(destination) || Directory.Exists(destination)) throw new IOException("Copy destination is occupied." + Options);
             if (new DriveInfo(Path.GetPathRoot(destination)!).AvailableFreeSpace < Bytes + MaximumBytes)
                 throw new IOException("Free storage first; a link copy retains a 256 MiB reserve." + Options);
-            var destinations = new Dictionary<string, PilotDirectoryLease>(StringComparer.OrdinalIgnoreCase) { [""] = parent };
-            foreach (var (relative, content) in _entries)
+            stagingPath ??= Path.Combine(parent.Path, StagingName());
+            if (!string.Equals(Path.GetDirectoryName(stagingPath), parent.Path, StringComparison.OrdinalIgnoreCase) ||
+                !SyncLocalTransfer.IsTransferArtifactName(Path.GetFileName(stagingPath))) throw new IOException("Invalid copy staging location.");
+            using var stage = PilotDirectoryLease.CreateChild(parent, Path.GetFileName(stagingPath), hidden: true);
+            var payload = Path.Combine(stage.Path, "content");
+            var destinations = new Dictionary<string, PilotDirectoryLease>(StringComparer.OrdinalIgnoreCase) { [""] = stage };
+            var createdDirectories = new List<PilotDirectoryLease>();
+            PilotDirectoryLease? topDirectory = null;
+            SyncLocalFileAuthority? topFile = null;
+            try
             {
+                foreach (var (relative, content) in _entries)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    var path = relative.Length == 0 ? payload : Path.Combine(payload, relative);
+                    var parentKey = relative.Length == 0 ? "" : Path.GetDirectoryName(relative) ?? "";
+                    var directory = destinations[parentKey];
+                    directory.VerifyBinding();
+                    if (content is null)
+                    {
+                        var created = PilotDirectoryLease.CreateChild(directory, Path.GetFileName(path), hidden: false);
+                        if (relative.Length == 0) topDirectory = created;
+                        else createdDirectories.Add(created);
+                        destinations[relative] = created;
+                    }
+                    else
+                    {
+                        if (relative.Length == 0)
+                        {
+                            topFile = SyncLocalFileAuthority.CreateNewUnprotectedFile(path);
+                            content.Position = 0;
+                            await content.CopyToAsync(topFile.Stream, 81920, ct).ConfigureAwait(false);
+                            topFile.Stream.Flush(flushToDisk: true);
+                        }
+                        else
+                        {
+                            await using var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                            content.Position = 0;
+                            await content.CopyToAsync(output, 81920, ct).ConfigureAwait(false);
+                            output.Flush(flushToDisk: true);
+                        }
+                    }
+                    EntryCopiedForTest?.Invoke(path);
+                }
                 ct.ThrowIfCancellationRequested();
-                var path = relative.Length == 0 ? destination : Path.Combine(destination, relative);
-                var parentKey = relative.Length == 0 ? "" : Path.GetDirectoryName(relative) ?? "";
-                var directory = destinations[parentKey];
-                directory.VerifyBinding();
-                if (content is null)
-                {
-                    var created = PilotDirectoryLease.CreateChild(directory, Path.GetFileName(path), hidden: false);
-                    _leases.Add(created);
-                    destinations[relative] = created;
-                }
-                else
-                {
-                    // Parent leases prevent replacement; CreateNew never truncates or follows an existing link.
-                    await using var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-                    await content.CopyToAsync(output, 81920, ct).ConfigureAwait(false);
-                }
+                stage.VerifyBinding();
+                parent.VerifyBinding();
+                // Release descendants only; the exact top object remains held from creation to publication.
+                for (var i = createdDirectories.Count - 1; i >= 0; i--) createdDirectories[i].Dispose();
+                createdDirectories.Clear();
+                if (topDirectory is not null) topDirectory.RenameTo(parent, name);
+                else topFile!.RenameTo(parent, name, replaceIfExists: false);
             }
+            finally
+            {
+                for (var i = createdDirectories.Count - 1; i >= 0; i--) createdDirectories[i].Dispose();
+                topDirectory?.Dispose();
+                topFile?.Dispose();
+            }
+            // The empty staging directory remains excluded; no automatic deletion is authorised.
         }
 
         public void Dispose()
