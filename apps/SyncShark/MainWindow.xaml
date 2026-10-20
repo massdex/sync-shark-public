@@ -1,0 +1,760 @@
+<Window x:Class="Massdex.SyncShark.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="clr-namespace:Massdex.SyncShark"
+        xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
+        Title="Sync Shark" Icon="Assets/SyncShark.ico" Foreground="{DynamicResource Ink}" Width="1240" Height="790" MinWidth="760" MinHeight="520"
+        WindowStartupLocation="CenterScreen" WindowStyle="None" ResizeMode="CanResize" SizeChanged="Window_SizeChanged">
+  <shell:WindowChrome.WindowChrome>
+    <shell:WindowChrome CaptionHeight="68" ResizeBorderThickness="6" GlassFrameThickness="0" CornerRadius="0" />
+  </shell:WindowChrome.WindowChrome>
+  <Window.Resources>
+    <!-- The retained official Dropbox glyph is one flat brand blue (#0061FF). The theme token
+         DropboxBlue stays #0061FE for general product chrome, so the mark carries the exact
+         brand value on its own scoped brush instead of reusing that token. -->
+    <SolidColorBrush x:Key="DropboxBrandBlue" Color="#FF0061FF" />
+    <DataTemplate x:Key="FolderIconTemplate">
+      <Viewbox Width="20" Height="18" Stretch="Uniform" VerticalAlignment="Center">
+        <Canvas Width="24" Height="20">
+          <Path Fill="{DynamicResource WarningBrush}" Data="M2,4 H9 L11,7 H22 V19 H2 Z" />
+          <Path Fill="{DynamicResource WarningBrush}" Opacity="0.78" Data="M2,7 H22 V9 H2 Z" />
+        </Canvas>
+      </Viewbox>
+    </DataTemplate>
+    <!-- The four official blue glyph paths of the retained Dropbox SVG, unabridged and at their
+         own coordinates: the mark only, with no wordmark. The canvas is that glyph's bounding
+         box plus its own equal 0.4785 / 0.3203 margins, so proportions are unchanged. -->
+    <DataTemplate x:Key="DropboxIconTemplate">
+      <Viewbox Stretch="Uniform" VerticalAlignment="Center" HorizontalAlignment="Center">
+        <Canvas Width="29.8472" Height="25.1367">
+          <Path Fill="{StaticResource DropboxBrandBlue}" Data="M7.70076 0.320312L0.478516 4.91332L7.70076 9.50633L14.9242 4.91332L22.1465 9.50633L29.3687 4.91332L22.1465 0.320312L14.9242 4.91332L7.70076 0.320312Z" />
+          <Path Fill="{StaticResource DropboxBrandBlue}" Data="M7.70076 18.6925L0.478516 14.0994L7.70076 9.50633L14.9242 14.0994L7.70076 18.6925Z" />
+          <Path Fill="{StaticResource DropboxBrandBlue}" Data="M14.9242 14.0994L22.1465 9.50633L29.3687 14.0994L22.1465 18.6925L14.9242 14.0994Z" />
+          <Path Fill="{StaticResource DropboxBrandBlue}" Data="M14.9242 24.8164L7.70077 20.2234L14.9242 15.6304L22.1465 20.2234L14.9242 24.8164Z" />
+        </Canvas>
+      </Viewbox>
+    </DataTemplate>
+    <!-- The retained official Google Drive PNG keeps its full 128 px artwork as a WPF image
+         resource and is scaled uniformly in place; no redraw and no rendering library. -->
+    <DataTemplate x:Key="GoogleDriveIconTemplate">
+      <Viewbox Stretch="Uniform" VerticalAlignment="Center" HorizontalAlignment="Center">
+        <Image Source="Assets/google-drive.png" Width="128" Height="128" Stretch="Uniform" />
+      </Viewbox>
+    </DataTemplate>
+    <!-- U1: the neutral mark for the shared account picker's all-accounts entry and for any account
+         whose provider identity is not known. No provider is claimed when none is known. -->
+    <DataTemplate x:Key="NeutralAccountIconTemplate">
+      <ui:CommandGlyph IconName="user" Width="18" Height="18" />
+    </DataTemplate>
+    <!-- One cloud-side mark for the pair editor and its trees: the account's own provider binding
+         selects the artwork, so no surface assumes Dropbox when another provider is selected. -->
+    <Style x:Key="CloudProviderMark" TargetType="ContentControl">
+      <Setter Property="ui:ProviderMark.Provider" Value="{Binding ProviderPresentation.Key, RelativeSource={RelativeSource AncestorType={x:Type Window}}}" />
+    </Style>
+    <Style x:Key="EndpointKindMarkHost" TargetType="ContentControl">
+      <!-- UI354-ICON1: one shared endpoint-kind mark host. The host owns the size, so the authentic
+           registered artwork can never inflate an intrinsic size into the layout. -->
+      <Setter Property="Width" Value="28" />
+      <Setter Property="Height" Value="28" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+      <Setter Property="Focusable" Value="False" />
+      <Setter Property="IsTabStop" Value="False" />
+      <Setter Property="ClipToBounds" Value="True" />
+    </Style>
+    <Style x:Key="PairProviderButton" TargetType="Button">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="{DynamicResource Ink}" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="Margin" Value="0" />
+      <Setter Property="MinWidth" Value="0" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="Width" Value="34" />
+      <Setter Property="Height" Value="34" />
+      <Setter Property="HorizontalAlignment" Value="Left" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="PairProviderChrome" CornerRadius="7" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="PairProviderChrome" Property="Background" Value="{DynamicResource HoverSurface}" /></Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="PairProviderChrome" Property="BorderBrush" Value="{DynamicResource FocusBrush}" /><Setter TargetName="PairProviderChrome" Property="BorderThickness" Value="2" /></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.48" /></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Window.Resources>
+  <Grid Background="{DynamicResource Canvas}">
+    <Grid.RowDefinitions><RowDefinition Height="68" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+    <Grid.ColumnDefinitions><ColumnDefinition x:Name="NavigationColumn" Width="196" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+    <Border x:Name="StartupLoadingHost" Grid.Row="1" Grid.Column="1" Panel.ZIndex="35" Background="{DynamicResource Canvas}" Padding="28">
+      <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="540">
+        <Image Source="Assets/SyncShark-64.png" Width="48" Height="48" HorizontalAlignment="Left" Margin="0,0,0,18" />
+        <TextBlock Text="Starting Sync Shark" FontSize="24" FontWeight="SemiBold" />
+        <TextBlock x:Name="StartupLoadingText" Text="Loading saved accounts and folder pairs…" TextWrapping="Wrap" Margin="0,10,0,14" AutomationProperties.LiveSetting="Polite" />
+        <ProgressBar x:Name="StartupLoadingProgress" IsIndeterminate="True" Height="4" />
+        <Button x:Name="StartupRetryButton" Content="Retry loading" Click="MainWindow_Loaded" Visibility="Collapsed" HorizontalAlignment="Left" Margin="0,16,0,0" ToolTip="Read the saved app state again and safely reconcile any interrupted work. Completed effects are not repeated." />
+        <Button x:Name="StartupRepairButton" Content="Repair interrupted setup" Click="StartupRepair_Click" Visibility="Collapsed" HorizontalAlignment="Left" Margin="0,8,0,0" ToolTip="Restore the last coherent published revision of the interrupted folder pair. Only saved setup metadata is rewritten; no file is transferred, moved or deleted, and nothing is approved or synced." />
+        <TextBlock x:Name="StartupRepairStatus" Visibility="Collapsed" TextWrapping="Wrap" Margin="0,8,0,0" Foreground="{DynamicResource MutedInk}" AutomationProperties.LiveSetting="Polite" />
+      </StackPanel>
+    </Border>
+
+    <Border Grid.Row="0" Grid.ColumnSpan="2" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Border}" BorderThickness="0,0,0,1">
+      <Grid>
+        <Grid.ColumnDefinitions><ColumnDefinition x:Name="HeaderBrandColumn" Width="196" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+        <StackPanel x:Name="HeaderBrandPanel" Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="16,0">
+          <Image x:Name="HeaderBrandIcon" Source="Assets/SyncShark-64.png" Width="42" Height="42" Margin="0,0,10,0" />
+          <StackPanel x:Name="HeaderBrandText" VerticalAlignment="Center"><TextBlock Text="Sync Shark" FontSize="17" FontWeight="SemiBold" /><TextBlock Text="by Massdex" FontSize="12" Foreground="{DynamicResource MutedInk}" /></StackPanel>
+        </StackPanel>
+        <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="20,0" Visibility="Collapsed">
+          <Border Padding="11,6" CornerRadius="12" Background="{DynamicResource SelectedSurface}"><TextBlock x:Name="HeaderState" Text="Checking cloud account…" Foreground="{DynamicResource SelectedInk}" FontWeight="SemiBold" /></Border>
+          <Button x:Name="HeaderAccountButton" Content="Checking account…" Click="HeaderAccount_Click" Margin="8,0,0,0" ToolTip="Open connection and account details" AutomationProperties.Name="Open storage connection details" shell:WindowChrome.IsHitTestVisibleInChrome="True" />
+        </StackPanel>
+        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Top" shell:WindowChrome.IsHitTestVisibleInChrome="True">
+          <Button Style="{StaticResource CaptionButton}" Content="—" ToolTip="Minimize" Click="Minimize_Click" />
+          <Button x:Name="MaximizeButton" Style="{StaticResource CaptionButton}" Content="□" ToolTip="Maximize" Click="Maximize_Click" />
+          <Button Style="{StaticResource CaptionButton}" Content="✕" ToolTip="Close" Click="Close_Click" />
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <Border x:Name="NavigationBorder" Grid.Row="1" Grid.Column="0" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Border}" BorderThickness="0,0,1,0">
+      <Grid>
+        <Grid.RowDefinitions><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+        <ListBox x:Name="Navigation" Grid.Row="0" Margin="10,14" BorderThickness="0" Background="Transparent" ScrollViewer.HorizontalScrollBarVisibility="Disabled" SelectionChanged="Navigation_SelectionChanged" SelectedIndex="0" AutomationProperties.Name="Sync Shark navigation">
+          <ListBox.Resources>
+            <Style TargetType="ListBoxItem">
+              <Setter Property="Padding" Value="14,12" /><Setter Property="Margin" Value="0,3" /><Setter Property="HorizontalContentAlignment" Value="Stretch" /><Setter Property="FontSize" Value="14" />
+              <Setter Property="Foreground" Value="{DynamicResource Ink}" /><Setter Property="Background" Value="Transparent" /><Setter Property="BorderBrush" Value="Transparent" /><Setter Property="BorderThickness" Value="3,0,0,0" />
+              <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem"><Border CornerRadius="9" Padding="{TemplateBinding Padding}" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1"><ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center" /></Border></ControlTemplate></Setter.Value></Setter>
+              <Style.Triggers><Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="{DynamicResource SelectedSurface}" /><Setter Property="Foreground" Value="{DynamicResource FocusBrush}" /><Setter Property="FontWeight" Value="SemiBold" /></Trigger><Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="{DynamicResource HoverSurface}" /></Trigger><Trigger Property="IsKeyboardFocused" Value="True"><Setter Property="FocusVisualStyle" Value="{x:Null}" /><Setter Property="BorderBrush" Value="{DynamicResource FocusBrush}" /></Trigger></Style.Triggers>
+            </Style>
+          </ListBox.Resources>
+          <ListBoxItem Tag="Dashboard"><TextBlock Text="↻   Dashboard" /></ListBoxItem>
+          <ListBoxItem Tag="Pairs"><TextBlock Text="⇄   Folder pairs" /></ListBoxItem>
+          <ListBoxItem Tag="Connections"><TextBlock Text="◉   Connections" /></ListBoxItem>
+          <ListBoxItem Tag="Bootstrap" Visibility="Collapsed"><TextBlock Text="✓   First sync" /></ListBoxItem>
+          <ListBoxItem Tag="Activity"><TextBlock Text="◷   Activity" /></ListBoxItem>
+          <ListBoxItem Tag="Queue" Visibility="Collapsed"><TextBlock Text="≡   Queue" /></ListBoxItem>
+          <ListBoxItem Tag="Conflicts" Visibility="Collapsed"><TextBlock Text="△   Conflicts" /></ListBoxItem>
+          <ListBoxItem Tag="Recovery"><TextBlock Text="↶   Recovery" /></ListBoxItem>
+          <ListBoxItem Tag="Rewind" Visibility="Collapsed"><TextBlock Text="⟲   Dropbox Rewind" /></ListBoxItem>
+          <ListBoxItem Tag="Settings"><TextBlock Text="⚙   Settings" /></ListBoxItem>
+        </ListBox>
+        <Button x:Name="SidebarToggle" Grid.Row="1" Margin="10,8,10,12" Height="40" Content="☰   Collapse sidebar" Click="SidebarToggle_Click" HorizontalContentAlignment="Center" ToolTip="Collapse sidebar" AutomationProperties.Name="Collapse sidebar" />
+      </Grid>
+    </Border>
+
+    <Grid Grid.Row="1" Grid.Column="1" Margin="20">
+      <Border x:Name="DashboardPage" Background="Transparent">
+        <Grid>
+          <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" MinHeight="110" /><RowDefinition Height="220" /></Grid.RowDefinitions>
+          <Grid Grid.Row="0" Margin="0,0,0,14">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+            <StackPanel><TextBlock Text="Sync dashboard" FontSize="24" FontWeight="SemiBold" /><TextBlock Text="Keep your selected folders in sync between this computer and your cloud accounts." FontSize="14" Foreground="{DynamicResource MutedInk}" Margin="0,4,0,0" TextWrapping="Wrap" /></StackPanel>
+            <Button Grid.Column="1" x:Name="ConnectButton" Content="Checking connection…" Click="Connect_Click" IsEnabled="False" VerticalAlignment="Top" AutomationProperties.HelpText="Open the selected cloud account or connect an account when none is connected" />
+          </Grid>
+
+          <Border Grid.Row="1" Background="{DynamicResource RaisedSurface}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,12">
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="250" /></Grid.ColumnDefinitions>
+              <Button Grid.Column="0" x:Name="RunButton" Style="{StaticResource PrimaryButton}" Content="Run sync" Click="Run_Click" />
+              <Button Grid.Column="1" x:Name="PauseButton" Content="Pause sync" Click="Pause_Click" IsEnabled="False" ToolTip="Pause safely between transfers" />
+              <Button Grid.Column="2" x:Name="StopButton" Content="Stop run" Click="Stop_Click" IsEnabled="False" />
+              <StackPanel Grid.Column="3" VerticalAlignment="Center" Margin="8,0"><TextBlock x:Name="PhaseText" Text="Configure one pair and connect a cloud account." TextWrapping="Wrap" TextTrimming="None" /><ProgressBar x:Name="RunProgress" Height="7" Margin="0,6,0,0" /></StackPanel>
+              <TextBox Grid.Column="4" x:Name="FilterBox" ToolTip="Filter visible run decisions" TextChanged="Filter_Changed" AutomationProperties.Name="Filter current run" />
+            </Grid>
+          </Border>
+
+          <UniformGrid x:Name="CardsPanel" Grid.Row="2" Columns="6" Margin="0,0,0,12">
+            <Border Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="9" Padding="12,9" Margin="0,0,8,8"><StackPanel><TextBlock Text="Uploaded" FontSize="14" Foreground="{DynamicResource MutedInk}" /><TextBlock x:Name="UploadedCount" Text="Not measured" FontSize="22" FontWeight="SemiBold" /><TextBlock Text="{Binding ProviderPresentation.CloudTargetLabel, RelativeSource={RelativeSource AncestorType={x:Type Window}}}" FontSize="11" Foreground="{DynamicResource MutedInk}" /></StackPanel></Border>
+            <Border Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="9" Padding="12,9" Margin="0,0,8,8"><StackPanel><TextBlock Text="Downloaded" FontSize="14" Foreground="{DynamicResource MutedInk}" /><TextBlock x:Name="DownloadedCount" Text="Not measured" FontSize="22" FontWeight="SemiBold" /><TextBlock Text="To this PC" FontSize="11" Foreground="{DynamicResource MutedInk}" /></StackPanel></Border>
+            <Border Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="9" Padding="12,9" Margin="0,0,8,8"><StackPanel><TextBlock Text="Identical" FontSize="14" Foreground="{DynamicResource MutedInk}" /><TextBlock x:Name="IdenticalCount" Text="Not measured" FontSize="22" FontWeight="SemiBold" /><TextBlock Text="Already matched" FontSize="11" Foreground="{DynamicResource MutedInk}" /></StackPanel></Border>
+            <Border Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="9" Padding="12,9" Margin="0,0,8,8"><StackPanel><TextBlock Text="Conflicts" FontSize="14" Foreground="{DynamicResource MutedInk}" /><TextBlock x:Name="ConflictCount" Text="Not measured" FontSize="22" FontWeight="SemiBold" /><TextBlock Text="Preserved unchanged" FontSize="11" Foreground="{DynamicResource MutedInk}" /></StackPanel></Border>
+            <Border Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="9" Padding="12,9" Margin="0,0,0,8"><StackPanel><TextBlock Text="Blocked" FontSize="14" Foreground="{DynamicResource MutedInk}" /><TextBlock x:Name="BlockedCount" Text="Not measured" FontSize="22" FontWeight="SemiBold" /><TextBlock Text="Needs attention" FontSize="11" Foreground="{DynamicResource MutedInk}" /></StackPanel></Border>
+            <Border Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="9" Padding="12,9" Margin="0,0,0,8"><StackPanel><TextBlock Text="Pending" FontSize="14" Foreground="{DynamicResource MutedInk}" /><TextBlock x:Name="QueueCount" Text="0" FontSize="22" FontWeight="SemiBold" /><TextBlock Text="Work still to finish" FontSize="11" Foreground="{DynamicResource MutedInk}" /></StackPanel></Border>
+          </UniformGrid>
+
+          <Grid Grid.Row="3">
+            <DataGrid x:Name="ResultGrid" ItemsSource="{Binding VisibleRows}" AutoGenerateColumns="False" HorizontalScrollBarVisibility="Auto" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling" PreviewMouseRightButtonDown="ResultGrid_PreviewMouseRightButtonDown" MouseDoubleClick="ResultGrid_MouseDoubleClick" AutomationProperties.Name="Current sync decisions">
+              <DataGrid.ContextMenu><ContextMenu><MenuItem Header="Open details" Click="OpenDetails_Click" /><Separator /><MenuItem Header="Keep local; retain cloud version" Click="ResolveKeepLocal_Click" /><MenuItem Header="Keep cloud; retain local version" Click="ResolveKeepDropbox_Click" /><MenuItem Header="Preserve both versions" Click="ResolvePreserveBoth_Click" /><Separator /><MenuItem Header="Copy path" Click="CopyPath_Click" /><MenuItem Header="Copy technical details" Click="CopyTechnical_Click" /></ContextMenu></DataGrid.ContextMenu>
+              <DataGrid.Columns><DataGridTextColumn Header="Connection" Binding="{Binding Connection}" Width="190" /><DataGridTextColumn Header="Pair" Binding="{Binding PairName}" Width="150" SortMemberPath="PairName" /><DataGridTextColumn Header="Path" Binding="{Binding Path}" Width="*" SortMemberPath="Path" /><DataGridTextColumn Header="Outcome" Binding="{Binding Outcome}" Width="130" SortMemberPath="Outcome" /><DataGridTextColumn Header="Reason" Binding="{Binding Reason}" Width="2*" SortMemberPath="Reason" /></DataGrid.Columns>
+            </DataGrid>
+            <Border x:Name="EmptyResultsSurface" Margin="1,35,1,1" Background="{DynamicResource Surface}" IsHitTestVisible="False"><StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="430"><TextBlock Text="No run results yet" FontSize="17" FontWeight="SemiBold" HorizontalAlignment="Center" /><TextBlock Text="Select a pair and run sync. Upload, download, identical, conflict, recovered and blocked outcomes will appear here." Foreground="{DynamicResource MutedInk}" TextAlignment="Center" TextWrapping="Wrap" Margin="0,6,0,0" /></StackPanel></Border>
+          </Grid>
+
+          <TabControl Grid.Row="4" Margin="0,12,0,0">
+            <TabItem Header="Summary"><TextBlock x:Name="SummaryText" Margin="12" Text="No sync has run in this session." TextWrapping="Wrap" /></TabItem>
+            <TabItem Header="Details"><TextBox x:Name="DetailsText" Margin="8" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" /></TabItem>
+            <TabItem Header="Technical"><TextBox x:Name="TechnicalText" Margin="8" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" /></TabItem>
+            <TabItem Header="Live activity"><Grid Margin="8"><Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><TextBlock Text="What Sync Shark is doing now" FontWeight="SemiBold" /><Button Grid.Column="1" Content="Open full activity" Click="OpenActivity_Click" /></Grid><TextBox Grid.Row="1" x:Name="ConsoleText" Margin="0,8,0,0" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" /></Grid></TabItem>
+          </TabControl>
+        </Grid>
+      </Border>
+
+      <Border x:Name="PairsPage" Visibility="Collapsed">
+        <ScrollViewer x:Name="PairsScroller" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" PanningMode="VerticalOnly" Focusable="False" ScrollChanged="PairsScroller_ScrollChanged">
+          <StackPanel HorizontalAlignment="Stretch" Width="{Binding ViewportWidth, ElementName=PairsScroller, Mode=OneWay}">
+            <Grid x:Name="PairsHeaderGrid" Margin="0,0,0,14">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+              <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+              <StackPanel><TextBlock Text="Folder Pairs" FontSize="24" FontWeight="SemiBold" ToolTip="Choose what stays in sync between this computer and your cloud accounts." AutomationProperties.HelpText="Choose what stays in sync between this computer and your cloud accounts." /></StackPanel>
+              <WrapPanel x:Name="PairsHeaderActions" Grid.Column="1" VerticalAlignment="Top">
+                <Grid x:Name="PairSearchHost" Width="220"><TextBox x:Name="PairSearchBox" Padding="31,7,9,7" TextChanged="PairSearch_Changed" AutomationProperties.Name="Search folder pairs" ToolTip="Search folder pairs by name or folder." /><TextBlock x:Name="PairSearchIcon" Text="⌕" FontSize="18" Foreground="{DynamicResource MutedInk}" Margin="10,0,0,1" HorizontalAlignment="Left" VerticalAlignment="Center" IsHitTestVisible="False" /><TextBlock x:Name="PairSearchCue" Text="Search folder pairs…" Foreground="{DynamicResource MutedInk}" Margin="31,0,8,0" VerticalAlignment="Center" IsHitTestVisible="False"><TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Visibility" Value="Collapsed" /><Style.Triggers><DataTrigger Binding="{Binding Text, ElementName=PairSearchBox}" Value=""><Setter Property="Visibility" Value="Visible" /></DataTrigger></Style.Triggers></Style></TextBlock.Style></TextBlock></Grid>
+                <Button x:Name="AddPairButton" Content="＋ Add pair" Style="{StaticResource PrimaryButton}" Click="NewPair_Click" />
+                <Button x:Name="SyncAllNowButton" Content="Sync all now" Click="RunAllPairsNow_Click"><Button.ToolTip><ToolTip><StackPanel><TextBlock Text="Sync all now" Foreground="{DynamicResource DropboxBlue}" FontWeight="SemiBold" /><TextBlock Text="Checks every live pair now and syncs any detected changes." TextWrapping="Wrap" /></StackPanel></ToolTip></Button.ToolTip></Button>
+              </WrapPanel>
+            </Grid>
+            <TextBlock x:Name="PairPageActionFeedback" Visibility="Collapsed" Foreground="{DynamicResource MutedInk}" Margin="0,0,0,12" TextWrapping="Wrap" AutomationProperties.Name="Action status" />
+            <Border Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="9" Margin="0,0,0,12">
+              <DockPanel LastChildFill="True">
+                <ContentControl x:Name="NewPairEditorHost" DockPanel.Dock="Top" Visibility="Collapsed" Margin="8,8,8,0">
+                  <Border x:Name="PairEditorPanel" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="9" Padding="16">
+                    <Grid>
+                      <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                      <Grid Grid.Row="0" Margin="0,0,0,14">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                        <StackPanel><TextBlock x:Name="PairEditorHeading" Text="Edit folder pair" FontSize="19" FontWeight="SemiBold" /><TextBlock Text="Choose the folders you want to keep in sync." FontSize="14" Foreground="{DynamicResource MutedInk}" Margin="0,3,12,0" TextWrapping="Wrap" /><Border x:Name="PairEditorStatus" Visibility="Collapsed" Background="{DynamicResource RaisedSurface}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="6" Padding="9,6" Margin="0,8,12,0"><TextBlock x:Name="PairEditorStatusText" Foreground="{DynamicResource MutedInk}" TextWrapping="Wrap" /></Border></StackPanel>
+                        <WrapPanel x:Name="PairEditorActions" Grid.Column="1" HorizontalAlignment="Right"><Button x:Name="SavePairButton" Style="{StaticResource PrimaryButton}" Content="Save pair" Click="SavePair_Click" /><Button x:Name="CancelPairButton" Content="Cancel" Click="CancelPairEdit_Click" /><Button x:Name="EditorSyncNowButton" Content="Sync now" Click="RunPairNow_Click"><Button.ToolTip><ToolTip><StackPanel><TextBlock Text="Sync now" Foreground="{DynamicResource DropboxBlue}" FontWeight="SemiBold" /><TextBlock Text="Checks this pair now and syncs any detected changes." TextWrapping="Wrap" /></StackPanel></ToolTip></Button.ToolTip></Button></WrapPanel>
+                      </Grid>
+                      <Expander x:Name="PairIdentityDisclosure" Grid.Row="1" Header="Pair Details" Margin="0,0,0,10">
+                      <Grid x:Name="PairIdentityGrid" Margin="0,10,0,4">
+                        <Grid.ColumnDefinitions><ColumnDefinition x:Name="PairNameColumn" Width="*" /><ColumnDefinition x:Name="SyncTypeColumn" Width="230" /></Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                        <StackPanel Margin="0,0,16,0"><TextBlock x:Name="PairNameLabel" Text="Pair Name" FontWeight="SemiBold" Margin="0,0,0,5" /><TextBox x:Name="PairNameBox" MaxLength="80" TextChanged="PairName_Changed" AutomationProperties.LabeledBy="{Binding ElementName=PairNameLabel}" /></StackPanel>
+                        <StackPanel x:Name="SyncTypePanel" Grid.Column="1"><TextBlock Text="Connection" FontWeight="SemiBold" Margin="0,0,0,5" /><TextBlock x:Name="PairConnectionSummary" Text="Checking connection…" Padding="9,8" Background="{DynamicResource RaisedSurface}" /></StackPanel>
+                      </Grid>
+                      </Expander>
+                      <TabControl x:Name="PairEditorTabs" Grid.Row="2" SelectionChanged="PairEditorTabs_SelectionChanged">
+                        <TabItem Header="Folders">
+                          <Grid Margin="12">
+                            <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                            <Grid Grid.Row="0" Margin="0,0,0,10">
+                              <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                              <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                              <StackPanel>
+                                <CheckBox x:Name="WholeRootSelectionBox" Visibility="Collapsed" IsThreeState="True" IsChecked="False" Click="WholeRootSelection_Click" Content="Sync everything in these folders" AutomationProperties.Name="Sync everything in these folders" />
+                                <TextBlock Text="Tick a folder to sync everything inside it. A dash means only some folders inside are synced." Foreground="{DynamicResource MutedInk}" Margin="0,0,12,0" TextWrapping="Wrap" />
+                                <TextBlock x:Name="FolderSelectionSummary" Text="Choose a folder on each side. Folder choices then appear directly in both trees." Foreground="{DynamicResource MutedInk}" Margin="0,4,12,0" TextWrapping="Wrap" />
+                                <TextBlock x:Name="FolderSearchScopeText" Text="Searches the folders currently loaded. Expand or load a folder to search deeper." FontSize="12" Foreground="{DynamicResource MutedInk}" Margin="0,3,12,0" TextWrapping="Wrap" />
+                              </StackPanel>
+                              <WrapPanel x:Name="FolderToolbar" Grid.Column="1" VerticalAlignment="Top" HorizontalAlignment="Right">
+                                <Grid Width="190"><TextBox x:Name="FolderSelectionSearchBox" Padding="31,7,9,7" TextChanged="FolderSelectionFilter_Changed" ToolTip="Search the folders shown in both trees" AutomationProperties.Name="Search folders" /><TextBlock x:Name="FolderSearchIcon" Text="⌕" FontSize="18" Foreground="{DynamicResource MutedInk}" Margin="10,0,0,1" HorizontalAlignment="Left" VerticalAlignment="Center" IsHitTestVisible="False" /><TextBlock x:Name="FolderSearchCue" Text="Search folders…" Foreground="{DynamicResource MutedInk}" Margin="31,0,8,0" VerticalAlignment="Center" IsHitTestVisible="False"><TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Visibility" Value="Collapsed" /><Style.Triggers><DataTrigger Binding="{Binding Text, ElementName=FolderSelectionSearchBox}" Value=""><Setter Property="Visibility" Value="Visible" /></DataTrigger></Style.Triggers></Style></TextBlock.Style></TextBlock></Grid>
+                                <ComboBox x:Name="FolderSelectionFilterBox" Width="155" SelectionChanged="FolderSelectionFilter_Changed"><ComboBoxItem Content="All folders" IsSelected="True" /><ComboBoxItem Content="Only on this computer" /><ComboBoxItem Content="Only in cloud" /><ComboBoxItem Content="Online-only" /><ComboBoxItem Content="Mixed" /><ComboBoxItem Content="Excluded" /><ComboBoxItem Content="Needs attention" /></ComboBox>
+                                <Button x:Name="ChangePairRootsButton" Visibility="Collapsed" Content="Choose different folders…" Click="ChangePairRoots_Click" ToolTip="Browse to a different starting folder on this computer and in the cloud" />
+                                <Button Content="Refresh" Click="RefreshFolderSelection_Click" ToolTip="Reload the folder trees for the current pair or draft. This refreshes folder information; it does not sync or change files." AutomationProperties.HelpText="Reload the folder trees for the current pair or draft. This refreshes folder information; it does not sync or change files." />
+                              </WrapPanel>
+                            </Grid>
+                            <Border x:Name="PairEndpointStrip" Grid.Row="1" Background="{DynamicResource RaisedSurface}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="7" Padding="14" Margin="0,0,0,10">
+                              <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                                <StackPanel Grid.Column="0" Margin="0,0,12,0">
+                                  <TextBlock Text="Left endpoint" FontWeight="SemiBold" />
+                                  <StackPanel Orientation="Horizontal" Margin="0,6,0,0"><ContentControl x:Name="LeftEndpointKindIcon" Style="{StaticResource EndpointKindMarkHost}" VerticalAlignment="Center" Margin="0,0,8,0" /><ComboBox x:Name="LeftEndpointKindBox" Width="160" SelectionChanged="PairEndpointKind_Changed" AutomationProperties.Name="Left endpoint type" /></StackPanel>
+                                  <ComboBox x:Name="LeftEndpointAccountBox" Margin="0,6,0,0" SelectionChanged="PairEndpointAccount_Changed" AutomationProperties.Name="Left endpoint account" />
+                                  <Grid Margin="0,6,0,0">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                    <TextBox x:Name="LeftEndpointPathBox" Grid.Column="0" IsReadOnly="True" IsHitTestVisible="False" Margin="0,0,8,0" PreviewMouseLeftButtonUp="PairEndpointPath_Click" AutomationProperties.Name="Left endpoint folder" />
+                                    <Button x:Name="LeftEndpointBrowseButton" Grid.Column="1" Content="Browse…" Tag="Left" Click="PairEndpointBrowse_Click" AutomationProperties.Name="Choose the left endpoint folder" />
+                                  </Grid>
+                                  <TextBlock x:Name="LeftEndpointSummary" Foreground="{DynamicResource MutedInk}" TextWrapping="Wrap" Margin="0,6,0,0" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" VerticalAlignment="Top" Margin="4,0,4,0">
+                                  <TextBlock Text="Direction" FontWeight="SemiBold" HorizontalAlignment="Center" />
+                                  <TextBlock Text="&#x21C4;" FontSize="20" HorizontalAlignment="Center" Foreground="{DynamicResource DropboxBlue}" Margin="0,2,0,2" />
+                                  <ComboBox x:Name="PairDirectionBox" Width="160" SelectionChanged="PairDirection_Changed" AutomationProperties.Name="Sync direction" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="2" Margin="12,0,0,0">
+                                  <TextBlock Text="Right endpoint" FontWeight="SemiBold" />
+                                  <StackPanel Orientation="Horizontal" Margin="0,6,0,0"><ContentControl x:Name="RightEndpointKindIcon" Style="{StaticResource EndpointKindMarkHost}" VerticalAlignment="Center" Margin="0,0,8,0" /><ComboBox x:Name="RightEndpointKindBox" Width="160" SelectionChanged="PairEndpointKind_Changed" AutomationProperties.Name="Right endpoint type" /></StackPanel>
+                                  <ComboBox x:Name="RightEndpointAccountBox" Margin="0,6,0,0" SelectionChanged="PairEndpointAccount_Changed" AutomationProperties.Name="Right endpoint account" />
+                                  <Grid Margin="0,6,0,0">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                    <TextBox x:Name="RightEndpointPathBox" Grid.Column="0" IsReadOnly="True" IsHitTestVisible="False" Margin="0,0,8,0" PreviewMouseLeftButtonUp="PairEndpointPath_Click" AutomationProperties.Name="Right endpoint folder" />
+                                    <Button x:Name="RightEndpointBrowseButton" Grid.Column="1" Content="Browse…" Tag="Right" Click="PairEndpointBrowse_Click" AutomationProperties.Name="Choose the right endpoint folder" />
+                                  </Grid>
+                                  <TextBlock x:Name="RightEndpointSummary" Foreground="{DynamicResource MutedInk}" TextWrapping="Wrap" Margin="0,6,0,0" />
+                                </StackPanel>
+                                <TextBlock x:Name="PairEndpointValidationText" Grid.Row="1" Grid.ColumnSpan="3" Foreground="{DynamicResource MutedInk}" TextWrapping="Wrap" Margin="0,10,0,0" />
+                              </Grid>
+                            </Border>
+                            <Grid x:Name="PairRootGrid" Grid.Row="2">
+                              <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                              <Grid.ColumnDefinitions><ColumnDefinition x:Name="LocalRootColumn" Width="*" /><ColumnDefinition Width="42" /><ColumnDefinition x:Name="DropboxRootColumn" Width="*" /></Grid.ColumnDefinitions>
+                              <Border x:Name="LocalRootPanel" Grid.Column="0" Background="{DynamicResource RaisedSurface}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="7" Padding="14">
+                                <Grid>
+                                  <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="260" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                                  <StackPanel Orientation="Horizontal"><ContentControl ContentTemplate="{StaticResource FolderIconTemplate}" Margin="0,0,9,0" /><TextBlock Text="This computer" FontSize="16" FontWeight="SemiBold" /></StackPanel>
+                                  <TextBlock Grid.Row="1" Text="Paired folder on this computer" Foreground="{DynamicResource MutedInk}" Margin="0,2,0,7" />
+                                  <TextBox x:Name="LocalRootBox" Grid.Row="2" IsReadOnly="True" Margin="0,0,0,8" AutomationProperties.Name="Folder on this computer"><TextBox.ToolTip><ToolTip><StackPanel><TextBlock Text="This computer" Foreground="{DynamicResource DropboxBlue}" FontWeight="SemiBold" /><TextBlock Text="The folder on this computer linked to the cloud folder beside it." TextWrapping="Wrap" /></StackPanel></ToolTip></TextBox.ToolTip></TextBox>
+                                  <Grid Grid.Row="3" Margin="0,0,0,8">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                    <TextBox x:Name="LocalPathEntryBox" Grid.Column="0" Margin="0,0,8,0" KeyDown="LocalPathEntry_KeyDown" ToolTip="Type or paste a full folder path such as C:\Users\You\Documents, then press Enter or Go to path." AutomationProperties.Name="Full path on this computer" />
+                                    <Button x:Name="GoToLocalPathButton" Grid.Column="1" Content="Go to path" Click="GoToLocalPath_Click" ToolTip="Open the typed folder in this tree. Only the folders along that path are read." AutomationProperties.Name="Open the typed folder on this computer" />
+                                    <Button x:Name="CreateLocalFolderButton" Grid.Column="2" Margin="8,0,0,0" Content="Create Folder" Click="CreateLocalFolder_Click" ToolTip="Create one new folder inside the folder selected or typed here. Nothing is ticked for sync, and no pair, account or sync state changes." AutomationProperties.Name="Create a folder on this computer"><Button.Style><Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}"><Setter Property="IsEnabled" Value="False" /><Style.Triggers><DataTrigger Binding="{Binding IsEnabled, ElementName=LocalPathEntryBox}" Value="True"><Setter Property="IsEnabled" Value="True" /></DataTrigger></Style.Triggers></Style></Button.Style></Button>
+                                  </Grid>
+                                  <Grid Grid.Row="4">
+                                    <Grid.RowDefinitions><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                                    <TreeView x:Name="LocalRootTree" ScrollViewer.HorizontalScrollBarVisibility="Disabled" Visibility="Collapsed" ItemsSource="{Binding LocalRootNodes}" SelectedItemChanged="LocalRootTree_SelectedItemChanged" TreeViewItem.Expanded="LocalRootTree_Expanded" AutomationProperties.Name="Choose folders on this computer"><TreeView.ItemContainerStyle><Style TargetType="TreeViewItem" BasedOn="{StaticResource {x:Type TreeViewItem}}"><Setter Property="HorizontalContentAlignment" Value="Stretch" /><Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}" /><Setter Property="Visibility" Value="{Binding IsFilterVisible, Converter={StaticResource BooleanToVisibilityConverter}}" /><EventSetter Event="MouseDoubleClick" Handler="FolderTreeItem_DoubleClick" /><Setter Property="Template"><Setter.Value><ControlTemplate TargetType="TreeViewItem"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions><Border x:Name="HeaderBorder" Background="Transparent" Padding="4,3" Margin="{Binding IndentMargin}"><ContentPresenter ContentSource="Header" HorizontalAlignment="Stretch" /></Border><ItemsPresenter x:Name="ItemsHost" Grid.Row="1" Margin="0" /></Grid><ControlTemplate.Triggers><Trigger Property="IsExpanded" Value="False"><Setter TargetName="ItemsHost" Property="Visibility" Value="Collapsed" /></Trigger><Trigger Property="IsSelected" Value="True"><Setter TargetName="HeaderBorder" Property="Background" Value="{DynamicResource SelectedSurface}" /><Setter Property="Foreground" Value="{DynamicResource SelectedInk}" /></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter></Style></TreeView.ItemContainerStyle><TreeView.ItemTemplate><HierarchicalDataTemplate ItemsSource="{Binding Children}"><Grid MinHeight="32"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><CheckBox Style="{StaticResource FolderTreeCheckBox}" IsChecked="{Binding IsChecked, Mode=OneWay}" IsThreeState="True" Margin="0,0,6,0" Click="LocalGlobalFolderCheck_Click" Visibility="{Binding CanSelect, Converter={StaticResource BooleanToVisibilityConverter}}" AutomationProperties.Name="{Binding Name, StringFormat=Change selection for {0} on this computer}" /><ContentControl Grid.Column="1" ContentTemplate="{StaticResource FolderIconTemplate}" Margin="0,0,7,0" VerticalAlignment="Center" /><TextBlock Grid.Column="2" Text="{Binding Name}" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type TreeViewItem}}}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTip="{Binding Name}" /><Button Grid.Column="3" Width="34" Height="30" Padding="6" Margin="6,0,0,0" VerticalAlignment="Center" Click="FolderStorage_Click" Visibility="{Binding StorageChoice.Visible, Converter={StaticResource BooleanToVisibilityConverter}, FallbackValue=Collapsed, TargetNullValue=Collapsed}" ToolTip="{Binding StorageChoice.Description}" AutomationProperties.Name="{Binding StorageChoice.Description}"><ui:CommandGlyph IconName="{Binding StorageChoice.Icon}" /></Button><TextBlock Grid.Column="4" Text="{Binding Status}" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type TreeViewItem}}}" Margin="8,0,6,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" /><ToggleButton Grid.Column="5" IsChecked="{Binding IsExpanded, Mode=TwoWay}" Click="FolderChevron_Click"><ToggleButton.Style><Style TargetType="ToggleButton" BasedOn="{StaticResource FolderChevronButton}"><Setter Property="Content" Value="›" /><Setter Property="AutomationProperties.Name" Value="{Binding Name, StringFormat=Expand {0} on this computer}" /><Style.Triggers><Trigger Property="IsChecked" Value="True"><Setter Property="Content" Value="⌄" /><Setter Property="AutomationProperties.Name" Value="{Binding Name, StringFormat=Collapse {0} on this computer}" /></Trigger><DataTrigger Binding="{Binding CanExpand}" Value="False"><Setter Property="Visibility" Value="Hidden" /></DataTrigger></Style.Triggers></Style></ToggleButton.Style></ToggleButton></Grid></HierarchicalDataTemplate></TreeView.ItemTemplate></TreeView>
+                                    <TreeView x:Name="LocalFolderSelectionTree" ItemsSource="{Binding FolderSelectionRoots}" SelectedItemChanged="FolderSelectionTree_SelectedItemChanged" AutomationProperties.Name="Folders on this computer selected for two-way sync"><TreeView.ContextMenu><ContextMenu><MenuItem Header="Make available offline" Click="KeepFolderOnDevice_Click" /><MenuItem Header="Make online-only" Click="FreeFolderSpace_Click" /></ContextMenu></TreeView.ContextMenu><TreeView.ItemContainerStyle><Style TargetType="TreeViewItem"><Setter Property="IsExpanded" Value="True" /></Style></TreeView.ItemContainerStyle><TreeView.ItemTemplate><HierarchicalDataTemplate ItemsSource="{Binding Children}"><StackPanel Orientation="Horizontal"><CheckBox IsChecked="{Binding IsChecked, Mode=OneWay}" IsThreeState="True" Margin="2,0,8,0" Click="FolderSelectionTree_Click" AutomationProperties.Name="Change two-way folder selection"><CheckBox.ToolTip><ToolTip><StackPanel><TextBlock Text="{Binding SelectionTitle}" Foreground="{DynamicResource DropboxBlue}" FontWeight="SemiBold" /><TextBlock Text="{Binding SelectionDescription}" TextWrapping="Wrap" /></StackPanel></ToolTip></CheckBox.ToolTip></CheckBox><ContentControl ContentTemplate="{StaticResource FolderIconTemplate}" Margin="0,0,7,0" /><TextBlock Text="{Binding FolderName}" /><TextBlock Text="{Binding LocalStatus}" Foreground="{DynamicResource MutedInk}" Margin="8,0,0,0" /></StackPanel></HierarchicalDataTemplate></TreeView.ItemTemplate></TreeView>
+                                    <Border x:Name="LocalHierarchyEmptyState" Grid.Row="0" Visibility="Collapsed" VerticalAlignment="Top" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="6" Padding="10" Margin="0,2,0,0"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><CheckBox x:Name="LocalHierarchyRootSelectionBox" IsChecked="{Binding IsChecked, ElementName=WholeRootSelectionBox, Mode=OneWay}" IsThreeState="True" Margin="2,0,8,0" VerticalAlignment="Center" Click="HierarchyRootSelection_Click" AutomationProperties.Name="Sync the complete folder on this computer" /><ContentControl Grid.Column="1" ContentTemplate="{StaticResource FolderIconTemplate}" Margin="0,0,8,0" VerticalAlignment="Center" /><StackPanel Grid.Column="2"><TextBlock x:Name="LocalHierarchyRootNameText" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" /><TextBlock x:Name="LocalHierarchyEmptyStateText" Foreground="{DynamicResource MutedInk}" Margin="0,2,0,0" TextWrapping="Wrap" /></StackPanel></Grid></Border>
+                                    <Border x:Name="LocalHierarchyNotice" Grid.Row="1" Visibility="Collapsed" Background="{DynamicResource SelectedSurface}" BorderBrush="{DynamicResource ErrorBrush}" BorderThickness="1" CornerRadius="6" Padding="10" Margin="0,8,0,0"><TextBlock x:Name="LocalHierarchyNoticeText" TextWrapping="Wrap" /></Border>
+                                  </Grid>
+                                  <Button x:Name="OpenLocalFolderButton" Grid.Row="5" Content="Open in File Explorer" Click="OpenLocalPairFolder_Click" HorizontalAlignment="Left" Margin="0,8,0,0" />
+                                </Grid>
+                              </Border>
+                              <TextBlock x:Name="PairDirectionGlyph" Grid.Column="1" Text="⇄" FontSize="20" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{DynamicResource DropboxBlue}" />
+                              <Border x:Name="DropboxRootPanel" Grid.Column="2" Background="{DynamicResource RaisedSurface}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="7" Padding="14">
+                                <Grid>
+                                  <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="260" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                                  <StackPanel Orientation="Horizontal"><ContentControl Style="{StaticResource CloudProviderMark}" Margin="0,0,9,0" /><TextBlock Text="{Binding ProviderPresentation.Name, RelativeSource={RelativeSource AncestorType={x:Type Window}}}" FontSize="16" FontWeight="SemiBold" /></StackPanel>
+                                  <TextBlock Grid.Row="1" Text="{Binding ProviderPresentation.CloudPanelSubtitle, RelativeSource={RelativeSource AncestorType={x:Type Window}}}" Foreground="{DynamicResource MutedInk}" Margin="0,2,0,7" />
+                                  <TextBox x:Name="DropboxRootBox" Grid.Row="2" IsReadOnly="True" Margin="0,0,0,8" AutomationProperties.Name="{Binding ProviderPresentation.CloudFolderPrompt, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"><TextBox.ToolTip><ToolTip><StackPanel><TextBlock Text="{Binding ProviderPresentation.Name, RelativeSource={RelativeSource AncestorType={x:Type Window}}}" Foreground="{DynamicResource DropboxBlue}" FontWeight="SemiBold" /><TextBlock Text="{Binding ProviderPresentation.CloudFolderHint, RelativeSource={RelativeSource AncestorType={x:Type Window}}}" TextWrapping="Wrap" /></StackPanel></ToolTip></TextBox.ToolTip></TextBox>
+                                  <Grid Grid.Row="3">
+                                    <Grid.RowDefinitions><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                                    <TreeView x:Name="DropboxRootTree" ScrollViewer.HorizontalScrollBarVisibility="Disabled" Visibility="Collapsed" ItemsSource="{Binding DropboxRootNodes}" SelectedItemChanged="DropboxRootTree_SelectedItemChanged" TreeViewItem.Expanded="DropboxRootTree_Expanded" AutomationProperties.Name="{Binding ProviderPresentation.CloudRootTreeName, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"><TreeView.ItemContainerStyle><Style TargetType="TreeViewItem" BasedOn="{StaticResource {x:Type TreeViewItem}}"><Setter Property="HorizontalContentAlignment" Value="Stretch" /><Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}" /><Setter Property="Visibility" Value="{Binding IsFilterVisible, Converter={StaticResource BooleanToVisibilityConverter}}" /><EventSetter Event="MouseDoubleClick" Handler="FolderTreeItem_DoubleClick" /><Setter Property="Template"><Setter.Value><ControlTemplate TargetType="TreeViewItem"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions><Border x:Name="HeaderBorder" Background="Transparent" Padding="4,3" Margin="{Binding IndentMargin}"><ContentPresenter ContentSource="Header" HorizontalAlignment="Stretch" /></Border><ItemsPresenter x:Name="ItemsHost" Grid.Row="1" Margin="0" /></Grid><ControlTemplate.Triggers><Trigger Property="IsExpanded" Value="False"><Setter TargetName="ItemsHost" Property="Visibility" Value="Collapsed" /></Trigger><Trigger Property="IsSelected" Value="True"><Setter TargetName="HeaderBorder" Property="Background" Value="{DynamicResource SelectedSurface}" /><Setter Property="Foreground" Value="{DynamicResource SelectedInk}" /></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter></Style></TreeView.ItemContainerStyle><TreeView.ItemTemplate><HierarchicalDataTemplate ItemsSource="{Binding Children}"><Grid MinHeight="32"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><CheckBox Style="{StaticResource FolderTreeCheckBox}" IsChecked="{Binding IsChecked, Mode=OneWay}" IsThreeState="True" Margin="0,0,6,0" Click="DropboxGlobalFolderCheck_Click" Visibility="{Binding CanSelect, Converter={StaticResource BooleanToVisibilityConverter}}" ><AutomationProperties.Name><MultiBinding StringFormat="Change selection for {0} {1}"><Binding Path="Name" /><Binding Path="ProviderPresentation.CloudChildSuffix" RelativeSource="{RelativeSource AncestorType={x:Type Window}}" FallbackValue="in Dropbox" /></MultiBinding></AutomationProperties.Name></CheckBox><ContentControl Grid.Column="1" Style="{StaticResource CloudProviderMark}" Margin="0,0,7,0" VerticalAlignment="Center" /><TextBlock Grid.Column="2" Text="{Binding Name}" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type TreeViewItem}}}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTip="{Binding Name}" /><Button Grid.Column="3" Width="34" Height="30" Padding="6" Margin="6,0,0,0" VerticalAlignment="Center" Click="FolderStorage_Click" Visibility="{Binding StorageChoice.Visible, Converter={StaticResource BooleanToVisibilityConverter}, FallbackValue=Collapsed, TargetNullValue=Collapsed}" ToolTip="{Binding StorageChoice.Description}" AutomationProperties.Name="{Binding StorageChoice.Description}"><ui:CommandGlyph IconName="{Binding StorageChoice.Icon}" /></Button><TextBlock Grid.Column="4" Text="{Binding Status}" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type TreeViewItem}}}" Margin="8,0,6,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" /><ToggleButton Grid.Column="5" IsChecked="{Binding IsExpanded, Mode=TwoWay}" Click="FolderChevron_Click"><ToggleButton.Style><Style TargetType="ToggleButton" BasedOn="{StaticResource FolderChevronButton}"><Setter Property="Content" Value="›" /><Setter Property="AutomationProperties.Name"><Setter.Value><MultiBinding StringFormat="Expand {0} {1}"><Binding Path="Name" /><Binding Path="ProviderPresentation.CloudChildSuffix" RelativeSource="{RelativeSource AncestorType={x:Type Window}}" FallbackValue="in Dropbox" /></MultiBinding></Setter.Value></Setter><Style.Triggers><Trigger Property="IsChecked" Value="True"><Setter Property="Content" Value="⌄" /><Setter Property="AutomationProperties.Name"><Setter.Value><MultiBinding StringFormat="Collapse {0} {1}"><Binding Path="Name" /><Binding Path="ProviderPresentation.CloudChildSuffix" RelativeSource="{RelativeSource AncestorType={x:Type Window}}" FallbackValue="in Dropbox" /></MultiBinding></Setter.Value></Setter></Trigger><DataTrigger Binding="{Binding CanExpand}" Value="False"><Setter Property="Visibility" Value="Hidden" /></DataTrigger></Style.Triggers></Style></ToggleButton.Style></ToggleButton></Grid></HierarchicalDataTemplate></TreeView.ItemTemplate></TreeView>
+                                    <TreeView x:Name="DropboxFolderSelectionTree" ItemsSource="{Binding FolderSelectionRoots}" SelectedItemChanged="FolderSelectionTree_SelectedItemChanged" AutomationProperties.Name="{Binding ProviderPresentation.CloudSelectionTreeName, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"><TreeView.ContextMenu><ContextMenu><MenuItem Header="Make available offline" Click="KeepFolderOnDevice_Click" /><MenuItem Header="Make online-only" Click="FreeFolderSpace_Click" /></ContextMenu></TreeView.ContextMenu><TreeView.ItemContainerStyle><Style TargetType="TreeViewItem"><Setter Property="IsExpanded" Value="True" /></Style></TreeView.ItemContainerStyle><TreeView.ItemTemplate><HierarchicalDataTemplate ItemsSource="{Binding Children}"><StackPanel Orientation="Horizontal"><CheckBox IsChecked="{Binding IsChecked, Mode=OneWay}" IsThreeState="True" Margin="2,0,8,0" Click="FolderSelectionTree_Click" AutomationProperties.Name="Change two-way folder selection"><CheckBox.ToolTip><ToolTip><StackPanel><TextBlock Text="{Binding SelectionTitle}" Foreground="{DynamicResource DropboxBlue}" FontWeight="SemiBold" /><TextBlock Text="{Binding SelectionDescription}" TextWrapping="Wrap" /></StackPanel></ToolTip></CheckBox.ToolTip></CheckBox><ContentControl Style="{StaticResource CloudProviderMark}" Margin="0,0,7,0" /><TextBlock Text="{Binding FolderName}" /><TextBlock Text="{Binding DropboxStatus}" Foreground="{DynamicResource MutedInk}" Margin="8,0,0,0" /></StackPanel></HierarchicalDataTemplate></TreeView.ItemTemplate></TreeView>
+                                    <Border x:Name="DropboxHierarchyEmptyState" Grid.Row="0" Visibility="Collapsed" VerticalAlignment="Top" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="6" Padding="10" Margin="0,2,0,0"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><CheckBox x:Name="DropboxHierarchyRootSelectionBox" IsChecked="{Binding IsChecked, ElementName=WholeRootSelectionBox, Mode=OneWay}" IsThreeState="True" Margin="2,0,8,0" VerticalAlignment="Center" Click="HierarchyRootSelection_Click" AutomationProperties.Name="{Binding ProviderPresentation.CloudRootSelectionName, RelativeSource={RelativeSource AncestorType={x:Type Window}}}" /><ContentControl Grid.Column="1" Style="{StaticResource CloudProviderMark}" Margin="0,0,8,0" VerticalAlignment="Center" /><StackPanel Grid.Column="2"><TextBlock x:Name="DropboxHierarchyRootNameText" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" /><TextBlock x:Name="DropboxHierarchyEmptyStateText" Foreground="{DynamicResource MutedInk}" Margin="0,2,0,0" TextWrapping="Wrap" /></StackPanel></Grid></Border>
+                                    <Border x:Name="DropboxHierarchyNotice" Grid.Row="1" Visibility="Collapsed" Background="{DynamicResource SelectedSurface}" BorderBrush="{DynamicResource ErrorBrush}" BorderThickness="1" CornerRadius="6" Padding="10" Margin="0,8,0,0"><TextBlock x:Name="DropboxHierarchyNoticeText" TextWrapping="Wrap" /></Border>
+                                  </Grid>
+                                  <Grid Grid.Row="4" Margin="0,8,0,0"><Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions><WrapPanel x:Name="DropboxRootBrowserActions" Visibility="Collapsed"><Button x:Name="CreateOrSelectDropboxFolderButton" Content="Create or select folder…" Click="BrowseDropbox_Click" ToolTip="{Binding ProviderPresentation.CloudBrowserHint, RelativeSource={RelativeSource AncestorType={x:Type Window}}}" AutomationProperties.Name="{Binding ProviderPresentation.CloudBrowserName, RelativeSource={RelativeSource AncestorType={x:Type Window}}}" /><Button x:Name="LoadMoreDropboxRootButton" Content="Load more folders" Click="LoadMoreDropboxRoot_Click" Visibility="Collapsed" /><TextBlock x:Name="DropboxRootBrowserStatus" Text="Choose a cloud folder." Foreground="{DynamicResource MutedInk}" VerticalAlignment="Center" TextWrapping="Wrap" /></WrapPanel><WrapPanel x:Name="SavedDropboxActions" Grid.Row="1" Margin="0,7,0,0"><Button Content="Open paired folder on dropbox.com" Click="OpenPairOnDropbox_Click" Visibility="{Binding ProviderPresentation.CloudWebFolderLink, RelativeSource={RelativeSource AncestorType={x:Type Window}}, Converter={StaticResource BooleanToVisibilityConverter}}" /></WrapPanel></Grid>
+                                </Grid>
+                              </Border>
+                            </Grid>
+                            <TextBox x:Name="AvailabilityPathBox" Visibility="Collapsed" IsReadOnly="True" AutomationProperties.Name="Selected file or folder for storage" />
+                          </Grid>
+                        </TabItem>
+                        <TabItem Header="Sync Preview">
+                          <Grid Margin="14">
+                            <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                            <Grid>
+                              <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                              <TextBlock Text="What Will Sync" FontSize="17" FontWeight="SemiBold" />
+                              <Button Grid.Column="1" Content="Review first sync" Click="OpenFirstSync_Click" ToolTip="Review the initial actions for this pair before its first transfer." />
+                            </Grid>
+                            <StackPanel Grid.Row="1" Margin="0,5,0,12">
+                              <WrapPanel x:Name="PairPreviewTotals" />
+                              <TextBlock x:Name="PairPreviewSummary" Text="Open this tab to load pending changes for this pair. Sync now performs a fresh check." Foreground="{DynamicResource MutedInk}" TextWrapping="Wrap" />
+                            </StackPanel>
+                            <Border x:Name="PairPreviewUnavailable" Grid.Row="2" Visibility="Collapsed" Background="{DynamicResource RaisedSurface}" BorderBrush="{DynamicResource ErrorBrush}" BorderThickness="1" CornerRadius="7" Padding="14" Margin="0,0,0,12">
+                              <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                <StackPanel><TextBlock Text="Preview Unavailable" FontWeight="SemiBold" /><TextBlock x:Name="PairPreviewUnavailableReason" Text="Repair this pair before loading its sync preview." Foreground="{DynamicResource MutedInk}" Margin="0,4,12,0" TextWrapping="Wrap" /></StackPanel>
+                                <Button Grid.Column="1" Content="Repair folders" Click="ChangePairRoots_Click" VerticalAlignment="Center" />
+                              </Grid>
+                            </Border>
+                            <DataGrid x:Name="PairPreviewGrid" Grid.Row="3" ItemsSource="{Binding PairPreviewRows}" AutoGenerateColumns="False" MinHeight="190">
+                              <DataGrid.Columns>
+                                <DataGridTextColumn Header="Change" Binding="{Binding Change}" Width="145" />
+                                <DataGridTextColumn Header="Path" Binding="{Binding Path}" Width="*" />
+                                <DataGridTextColumn Header="Status" Binding="{Binding StateLabel}" Width="180">
+                                  <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock" BasedOn="{x:Static DataGridTextColumn.DefaultElementStyle}"><Setter Property="ToolTip" Value="{Binding State}" /></Style></DataGridTextColumn.ElementStyle>
+                                </DataGridTextColumn>
+                              </DataGrid.Columns>
+                            </DataGrid>
+                          </Grid>
+                        </TabItem>
+                        <TabItem Header="Sync Settings">
+                          <Grid Margin="14"><Grid.ColumnDefinitions><ColumnDefinition Width="190" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                            <TextBlock Text="Sync Type:" VerticalAlignment="Center" /><ComboBox x:Name="SyncTypeBox" Grid.Column="1" SelectedIndex="0" SelectionChanged="PairEditorSetting_Changed" Width="330" HorizontalAlignment="Left"><ComboBox.ToolTip><ToolTip><StackPanel><TextBlock Text="Sync Type:" Foreground="{DynamicResource DropboxBlue}" FontWeight="SemiBold" /><TextBlock Text="Choose whether changes sync in both directions or only one direction." TextWrapping="Wrap" /></StackPanel></ToolTip></ComboBox.ToolTip><ComboBoxItem Content="Two-Way" IsSelected="True" ToolTip="Changes made on this computer sync to the cloud. Changes made in the cloud sync to this computer." /><ComboBoxItem Content="Upload Only" ToolTip="Automatically copy local changes to the cloud. Cloud-only changes are not downloaded. Conflicting edits remain protected for review." /><ComboBoxItem Content="Download Only" ToolTip="Automatically copy cloud changes to this computer. Local-only changes are not uploaded. Conflicting edits remain protected for review." /></ComboBox>
+                            <TextBlock Grid.Row="1" Text="Live Sync:" VerticalAlignment="Center" Margin="0,14,0,0" /><CheckBox x:Name="PairEnabledBox" Grid.Row="1" Grid.Column="1" Style="{StaticResource PairToggle}" Content="Live sync" IsChecked="True" Checked="PairEnabled_Changed" Unchecked="PairEnabled_Changed" Margin="0,14,0,0" AutomationProperties.Name="Live sync"><CheckBox.ToolTip><ToolTip><StackPanel><TextBlock Text="Live Sync:" Foreground="{DynamicResource DropboxBlue}" FontWeight="SemiBold" /><TextBlock Text="Automatically syncs changes after Sync Shark detects them. Local changes are usually detected immediately. Cloud changes may take about 30 seconds." TextWrapping="Wrap" /></StackPanel></ToolTip></CheckBox.ToolTip></CheckBox>
+                            <TextBlock Grid.Row="2" Text="Storage on This Computer:" VerticalAlignment="Center" Margin="0,14,0,0" /><StackPanel Grid.Row="2" Grid.Column="1" Margin="0,14,0,0"><ComboBox x:Name="PairStorageBox" Width="330" HorizontalAlignment="Left" SelectionChanged="PairStorage_Changed" AutomationProperties.Name="Storage on this computer"><ComboBoxItem Content="Available offline" IsSelected="True" ToolTip="Files are downloaded and kept on this computer so they can be opened without an internet connection." /><ComboBoxItem Content="Online-only" ToolTip="Files appear in File Explorer and download when opened, saving space on this computer." /></ComboBox><TextBlock x:Name="StorageSupportText" Foreground="{DynamicResource MutedInk}" Margin="0,5,0,0" TextWrapping="Wrap" /><CheckBox x:Name="PairFilesOnDemandBox" Visibility="Collapsed" AutomationProperties.Name="Stored online-only setting" /></StackPanel>
+                            <TextBlock Grid.Row="3" Text="Sync Deletions:" VerticalAlignment="Center" Margin="0,14,0,0" />
+                            <CheckBox x:Name="PairDeletionBox" Grid.Row="3" Grid.Column="1" Style="{StaticResource PairToggle}" Content="Apply deletions in both directions after saving a Recovery copy" Margin="0,14,0,0" Click="PairEditorSetting_Changed" AutomationProperties.Name="Sync Deletions" />
+                            <TextBlock Grid.Row="4" Text="Sync Order:" VerticalAlignment="Center" Margin="0,14,0,0" /><ComboBox x:Name="PairPriorityChoice" Grid.Row="4" Grid.Column="1" Width="330" HorizontalAlignment="Left" Margin="0,14,0,0" SelectionChanged="PairPriorityChoice_Changed"><ComboBox.ToolTip><ToolTip><StackPanel><TextBlock Text="Sync Order:" Foreground="{DynamicResource DropboxBlue}" FontWeight="SemiBold" /><TextBlock Text="Controls which pair Sync Shark starts first when more than one pair is waiting to sync." TextWrapping="Wrap" /></StackPanel></ToolTip></ComboBox.ToolTip><ComboBoxItem Content="First" Tag="50" /><ComboBoxItem Content="Normal" Tag="0" IsSelected="True" /><ComboBoxItem Content="Last" Tag="-50" /></ComboBox><TextBox x:Name="PairPriorityBox" Grid.Row="4" Grid.Column="1" Text="0" Visibility="Collapsed" AutomationProperties.Name="Stored sync order value" />
+                            <StackPanel x:Name="IgnoreRulesPanel" Grid.Row="5" Grid.ColumnSpan="2" Margin="0,24,0,0" />
+                          </Grid>
+                        </TabItem>
+                        <TabItem Header="Sync Status">
+                          <Grid Margin="14">
+                            <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                            <Border Background="{DynamicResource RaisedSurface}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="7" Padding="14">
+                              <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><StackPanel><TextBlock x:Name="PairHealthOverallText" Text="Checking…" FontSize="18" FontWeight="SemiBold" /><TextBlock x:Name="PairHealthReasonText" Text="Open this tab to see this pair's health." Foreground="{DynamicResource MutedInk}" Margin="0,5,18,0" TextWrapping="Wrap" MaxWidth="720" /></StackPanel><WrapPanel Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Top"><Button Content="Choose different folders…" Click="ChangePairRoots_Click" /><Button Content="Check again" Click="CheckPairConnection_Click" /></WrapPanel></Grid>
+                            </Border>
+                            <Grid Grid.Row="1" Margin="0,12,0,0">
+                              <Grid.ColumnDefinitions><ColumnDefinition Width="150" /><ColumnDefinition Width="*" /><ColumnDefinition Width="150" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                              <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                              <TextBlock x:Name="PairHealthLocalTitle" Text="Left endpoint" FontWeight="SemiBold" TextWrapping="Wrap" />
+                              <StackPanel Grid.Column="1" Margin="0,0,20,14">
+                                <TextBlock Text="Status:" Foreground="{DynamicResource MutedInk}" FontSize="12" />
+                                <TextBlock x:Name="PairHealthLocalText" Text="Checking…" TextWrapping="Wrap" />
+                                <TextBlock Text="Folder location:" Foreground="{DynamicResource MutedInk}" FontSize="12" Margin="0,9,0,2" />
+                                <Button Tag="local" Click="PairHealthPath_Click" HorizontalContentAlignment="Left" Padding="0" Margin="0" Background="Transparent" BorderThickness="0" Foreground="{DynamicResource DropboxBlue}" ToolTip="Open actions for this endpoint's exact folder."><TextBlock x:Name="PairHealthLocalPath" TextWrapping="Wrap" /></Button>
+                              </StackPanel>
+                              <TextBlock x:Name="PairHealthRemoteTitle" Grid.Column="2" Text="Right endpoint" FontWeight="SemiBold" TextWrapping="Wrap" />
+                              <StackPanel Grid.Column="3" Margin="0,0,0,14">
+                                <TextBlock Text="Status:" Foreground="{DynamicResource MutedInk}" FontSize="12" />
+                                <TextBlock x:Name="PairHealthDropboxText" Text="Checking…" TextWrapping="Wrap" />
+                                <TextBlock Text="Folder location:" Foreground="{DynamicResource MutedInk}" FontSize="12" Margin="0,9,0,2" />
+                                <Button Tag="dropbox" Click="PairHealthPath_Click" HorizontalContentAlignment="Left" Padding="0" Margin="0" Background="Transparent" BorderThickness="0" Foreground="{DynamicResource DropboxBlue}" ToolTip="Open actions for this endpoint's exact folder."><TextBlock x:Name="PairHealthRemotePath" TextWrapping="Wrap" /></Button>
+                              </StackPanel>
+                              <TextBlock Grid.Row="1" Text="Live Sync:" FontWeight="SemiBold" /><TextBlock x:Name="PairHealthLiveSyncText" Grid.Row="1" Grid.Column="1" Text="Checking…" Margin="0,0,20,9" />
+                              <TextBlock Grid.Row="1" Grid.Column="2" Text="Folder Monitor:" FontWeight="SemiBold" /><TextBlock x:Name="PairHealthMonitorText" Grid.Row="1" Grid.Column="3" Text="Checking…" Margin="0,0,0,9" />
+                              <TextBlock Grid.Row="2" Text="First Sync:" FontWeight="SemiBold" /><TextBlock x:Name="PairHealthFirstSyncText" Grid.Row="2" Grid.Column="1" Text="Checking…" TextWrapping="Wrap" Margin="0,0,20,9" />
+                              <TextBlock Grid.Row="2" Grid.Column="2" Text="Recovery:" FontWeight="SemiBold" /><TextBlock x:Name="PairHealthRecoveryText" Grid.Row="2" Grid.Column="3" Text="Checking…" TextWrapping="Wrap" Margin="0,0,0,9" />
+                              <TextBlock Grid.Row="3" Text="Pending Changes:" FontWeight="SemiBold" /><TextBlock x:Name="PairHealthPendingText" Grid.Row="3" Grid.Column="1" Text="0" />
+                              <TextBlock Grid.Row="3" Grid.Column="2" Text="Conflicts:" FontWeight="SemiBold" /><TextBlock x:Name="PairHealthConflictsText" Grid.Row="3" Grid.Column="3" Text="0" />
+                            </Grid>
+                            <StackPanel Grid.Row="2" Margin="0,16,0,0">
+                              <TextBlock Text="Windows Explorer Ownership" FontWeight="SemiBold" />
+                              <TextBlock x:Name="PairOwnershipText" Text="Not Checked" TextWrapping="Wrap" Margin="0,5,0,8" />
+                              <WrapPanel x:Name="PairOwnershipActions" />
+                            </StackPanel>
+                            <TextBlock Grid.Row="3" Text="A pair that needs attention remains editable so you can repair its folder connection. Sync Shark will not sync that pair until its blocking problem is resolved." Foreground="{DynamicResource MutedInk}" TextWrapping="Wrap" Margin="0,12,0,0" />
+                          </Grid>
+                        </TabItem>
+                        <TabItem Header="Advanced">
+                          <StackPanel Margin="14">
+                            <TextBlock Text="Recovery" FontSize="17" FontWeight="SemiBold" />
+                            <Grid Margin="0,10,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="190" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                              <TextBlock Text="Recovery Folder:" VerticalAlignment="Center" /><TextBox x:Name="RecoveryRootBox" Grid.Column="1" IsReadOnly="True" Margin="0,0,8,0" AutomationProperties.Name="Cloud Recovery folder"><TextBox.ToolTip><ToolTip><StackPanel><TextBlock Text="Recovery Folder:" Foreground="{DynamicResource DropboxBlue}" FontWeight="SemiBold" /><TextBlock Text="The cloud folder where Sync Shark saves restorable copies before replacing or deleting synced files and folders." TextWrapping="Wrap" /></StackPanel></ToolTip></TextBox.ToolTip></TextBox><StackPanel Grid.Column="2" Orientation="Horizontal"><Button Content="Use recommended" Click="UseRecommendedRecovery_Click" ToolTip="Use /Apps/Sync Shark/Recovery" /><Button x:Name="BrowseRecoveryButton" Content="Choose…" Click="BrowseRecovery_Click" /></StackPanel>
+                              <TextBlock Grid.Row="1" Text="Protect Recovery Copies For:" VerticalAlignment="Center" Margin="0,10,0,0" /><ComboBox x:Name="RecoveryRetentionBox" Grid.Row="1" Grid.Column="1" Width="220" HorizontalAlignment="Left" Margin="0,10,0,0" SelectionChanged="PairEditorSetting_Changed" ToolTip="Sets how long recovery copies are protected from cleanup. Sync Shark never removes them without a warning and your confirmation."><ComboBoxItem Content="30 days minimum" Tag="30" /><ComboBoxItem Content="90 days minimum" Tag="90" IsSelected="True" /><ComboBoxItem Content="180 days minimum" Tag="180" /><ComboBoxItem Content="Until I remove them" Tag="Never" /></ComboBox>
+                              <TextBlock Grid.Row="2" Text="Recovery Use:" VerticalAlignment="Center" Margin="0,10,0,0" /><StackPanel Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,10,0,0"><TextBlock x:Name="RecoveryUsageText" Text="Not loaded" Foreground="{DynamicResource MutedInk}" VerticalAlignment="Center" Margin="0,0,12,0" /><Button Content="Review cleanup…" Click="CleanupRecovery_Click" /></StackPanel>
+                            </Grid>
+                            <Separator Margin="0,16" />
+                            <TextBlock Text="Troubleshooting" FontSize="17" FontWeight="SemiBold" />
+                            <WrapPanel Margin="0,10,0,0"><Button Content="Check folder connection" Click="CheckPairConnection_Click"><Button.ToolTip><ToolTip><StackPanel><TextBlock Text="Check folder connection" Foreground="{DynamicResource DropboxBlue}" FontWeight="SemiBold" /><TextBlock Text="Checks that this pair still points to the same local and cloud folders. It does not scan or sync their contents." TextWrapping="Wrap" /></StackPanel></ToolTip></Button.ToolTip></Button><Button Content="Rescan folder structure" Click="RescanPairStructure_Click" ToolTip="Reloads folder names and selection status without syncing file contents." /></WrapPanel>
+                            <Expander Header="Diagnostic Information" Margin="0,12,0,0"><Expander.ToolTip><ToolTip><StackPanel><TextBlock Text="Diagnostic Information" Foreground="{DynamicResource DropboxBlue}" FontWeight="SemiBold" /><TextBlock Text="Shows the pair ID and the saved identities of its local and cloud folders. Support may use these values to diagnose a connection problem." TextWrapping="Wrap" /></StackPanel></ToolTip></Expander.ToolTip><Grid Margin="0,10,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="190" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions><TextBlock Text="{Binding ProviderPresentation.CloudFolderIdLabel, RelativeSource={RelativeSource AncestorType={x:Type Window}}}" /><TextBlock x:Name="DropboxFolderIdText" Grid.Column="1" Text="Not selected" Foreground="{DynamicResource MutedInk}" TextTrimming="CharacterEllipsis" /><TextBlock Grid.Row="1" Text="Recovery Folder ID" Margin="0,8,0,0" /><TextBlock x:Name="RecoveryFolderIdText" Grid.Row="1" Grid.Column="1" Text="Not selected" Foreground="{DynamicResource MutedInk}" Margin="0,8,0,0" TextTrimming="CharacterEllipsis" /><TextBlock Grid.Row="2" Text="Connection" Margin="0,8,0,0" /><TextBlock x:Name="ConnectionText" Grid.Row="2" Grid.Column="1" Text="Checking cloud account…" Margin="0,8,0,0" /></Grid></Expander>
+                            <Button x:Name="DisableFilesOnDemandButton" Content="Make every file available offline and turn off online-only storage…" Click="DisableFilesOnDemand_Click" HorizontalAlignment="Left" Margin="0,14,0,0" IsEnabled="False" />
+                          </StackPanel>
+                        </TabItem>
+                        <TabItem Header="Storage">
+                          <Grid x:Name="PairStorageTabHost" />
+                        </TabItem>
+                      </TabControl>
+                    </Grid>
+                  </Border>
+                </ContentControl>
+                <DataGrid x:Name="PairList" ItemsSource="{Binding PairRows}" AutoGenerateColumns="False" MinHeight="92" BorderThickness="0" RowHeight="68" SelectionMode="Single" SelectionChanged="PairList_SelectionChanged" PreviewMouseRightButtonDown="PairList_PreviewMouseRightButtonDown" MouseDoubleClick="PairList_MouseDoubleClick" HorizontalScrollBarVisibility="Auto" RowDetailsVisibilityMode="Collapsed" AutomationProperties.Name="Folder pairs">
+                  <DataGrid.RowStyle><Style TargetType="DataGridRow" BasedOn="{StaticResource {x:Type DataGridRow}}"><Style.Triggers><Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="{DynamicResource RaisedSurface}" /><Setter Property="Foreground" Value="{DynamicResource Ink}" /><Setter Property="BorderBrush" Value="{DynamicResource DropboxBlue}" /><Setter Property="BorderThickness" Value="3,0,0,0" /></Trigger></Style.Triggers></Style></DataGrid.RowStyle>
+                  <DataGrid.ContextMenu><ContextMenu><MenuItem x:Name="PairEditMenuItem" Header="Edit pair" Click="EditPair_Click" /><MenuItem x:Name="PairSyncNowMenuItem" Header="Sync now" Click="RunPairNow_Click" /><Separator /><MenuItem x:Name="PairDuplicateMenuItem" Header="Duplicate pair" Click="DuplicatePair_Click" /><MenuItem x:Name="PairDeleteMenuItem" Header="Delete pair…" Click="DeletePair_Click" /></ContextMenu></DataGrid.ContextMenu>
+                  <DataGrid.RowDetailsTemplate><DataTemplate><ContentControl x:Name="PairRowDetailsHost" Loaded="PairRowDetailsHost_Loaded" Unloaded="PairRowDetailsHost_Unloaded" HorizontalAlignment="Left" Width="{Binding ActualWidth, RelativeSource={RelativeSource AncestorType={x:Type DataGrid}}}" Margin="0,6,0,12" /></DataTemplate></DataGrid.RowDetailsTemplate>
+                  <DataGrid.Columns>
+                    <DataGridTemplateColumn Width="46"><DataGridTemplateColumn.CellTemplate><DataTemplate><Button Tag="{Binding}" Click="TogglePairEditor_Click" Style="{StaticResource PairProviderButton}" Width="28" Height="54" AutomationProperties.Name="{Binding Name, StringFormat=Expand or collapse {0}}" AutomationProperties.ItemStatus="{Binding ExpandedStateLabel}" AutomationProperties.HelpText="{Binding EndpointMarks.AccessibleName}" ToolTip="{Binding ExpandCollapseHint}"><ui:PairEndpointMark Presentation="{Binding EndpointMarks}" /></Button></DataTemplate></DataGridTemplateColumn.CellTemplate></DataGridTemplateColumn>
+                    <DataGridTemplateColumn Header="Pair" Width="170"><DataGridTemplateColumn.CellTemplate><DataTemplate><StackPanel><TextBlock Text="{Binding Name}" FontWeight="SemiBold" /><TextBlock Text="{Binding Connection}" FontSize="12" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type DataGridRow}}}" TextTrimming="CharacterEllipsis" /></StackPanel></DataTemplate></DataGridTemplateColumn.CellTemplate></DataGridTemplateColumn>
+                    <DataGridTemplateColumn Header="This computer" Width="2*" MinWidth="175"><DataGridTemplateColumn.CellTemplate><DataTemplate><StackPanel Orientation="Horizontal"><ContentControl ContentTemplate="{StaticResource FolderIconTemplate}" Margin="0,0,9,0" /><TextBlock Text="{Binding LocalRoot}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" /></StackPanel></DataTemplate></DataGridTemplateColumn.CellTemplate></DataGridTemplateColumn>
+                    <DataGridTextColumn Header="Sync Type" Binding="{Binding SyncType}" Width="95" />
+                    <DataGridTemplateColumn Width="1.6*" MinWidth="155"><DataGridTemplateColumn.HeaderTemplate><DataTemplate><TextBlock Text="{Binding ProviderPresentation.Name, RelativeSource={RelativeSource AncestorType={x:Type Window}}}" /></DataTemplate></DataGridTemplateColumn.HeaderTemplate><DataGridTemplateColumn.CellTemplate><DataTemplate><StackPanel Orientation="Horizontal"><ContentControl ui:ProviderMark.Provider="{Binding Provider}" /><TextBlock Text="{Binding DropboxRoot}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" /></StackPanel></DataTemplate></DataGridTemplateColumn.CellTemplate></DataGridTemplateColumn>
+                    <DataGridTemplateColumn Header="Sync Status" Width="220"><DataGridTemplateColumn.CellTemplate><DataTemplate><Button Click="OpenPairSyncStatus_Click" Background="Transparent" BorderThickness="0" Padding="0" HorizontalAlignment="Left" HorizontalContentAlignment="Left" AutomationProperties.Name="Open pair sync status"><Button.ToolTip><ToolTip><StackPanel MaxWidth="360"><TextBlock Text="{Binding Status}" Foreground="{DynamicResource DropboxBlue}" FontWeight="SemiBold" /><TextBlock Text="{Binding StatusDetail}" TextWrapping="Wrap" /></StackPanel></ToolTip></Button.ToolTip><Border Padding="7,3" CornerRadius="9" HorizontalAlignment="Left" BorderThickness="1"><Border.Style><Style TargetType="Border"><Setter Property="BorderBrush" Value="{DynamicResource SuccessBrush}" /><Style.Triggers><DataTrigger Binding="{Binding Enabled}" Value="False"><Setter Property="BorderBrush" Value="{DynamicResource WarningBrush}" /></DataTrigger><DataTrigger Binding="{Binding GlobalLiveSyncEnabled}" Value="False"><Setter Property="BorderBrush" Value="{DynamicResource WarningBrush}" /></DataTrigger><DataTrigger Binding="{Binding NeedsAttention}" Value="True"><Setter Property="BorderBrush" Value="{DynamicResource ErrorBrush}" /></DataTrigger></Style.Triggers></Style></Border.Style><StackPanel MaxWidth="140"><TextBlock Text="{Binding Status}" FontWeight="SemiBold" VerticalAlignment="Center"><TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Foreground" Value="{DynamicResource SuccessBrush}" /><Style.Triggers><DataTrigger Binding="{Binding Enabled}" Value="False"><Setter Property="Foreground" Value="{DynamicResource WarningBrush}" /></DataTrigger><DataTrigger Binding="{Binding GlobalLiveSyncEnabled}" Value="False"><Setter Property="Foreground" Value="{DynamicResource WarningBrush}" /></DataTrigger><DataTrigger Binding="{Binding NeedsAttention}" Value="True"><Setter Property="Foreground" Value="{DynamicResource ErrorBrush}" /></DataTrigger></Style.Triggers></Style></TextBlock.Style></TextBlock><TextBlock Text="{Binding StatusSummary}" FontSize="12" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type DataGridRow}}}" TextTrimming="CharacterEllipsis" /></StackPanel></Border></Button></DataTemplate></DataGridTemplateColumn.CellTemplate></DataGridTemplateColumn>
+                    <DataGridTemplateColumn Header="Live Sync" Width="150"><DataGridTemplateColumn.CellTemplate><DataTemplate><CheckBox Style="{StaticResource PairToggle}" IsChecked="{Binding Enabled, Mode=OneWay}" IsEnabled="{Binding CanChangeLiveSync}" Content="{Binding LiveSyncLabel}" Tag="{Binding}" Click="PairLiveSync_Click" Loaded="PairLiveSync_Loaded" ToolTip="Turn automatic syncing on or off for this folder pair. Manual Sync now remains available." AutomationProperties.Name="Toggle live sync for this pair" /></DataTemplate></DataGridTemplateColumn.CellTemplate></DataGridTemplateColumn>
+                  </DataGrid.Columns>
+                </DataGrid>
+              </DockPanel>
+            </Border>
+          </StackPanel>
+        </ScrollViewer>
+      </Border>
+
+      <Border x:Name="BootstrapPage" Visibility="Collapsed">
+        <Grid>
+          <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+          <StackPanel Margin="0,0,0,12">
+            <TextBlock Text="First sync review" FontSize="24" FontWeight="SemiBold" />
+            <TextBlock x:Name="BootstrapSubtitle" Text="Review the current plan for this pair. One-sided items are copied to the missing side, identical items establish the baseline, and conflicts wait for your choice. Sync Shark checks both folders again before making changes." Foreground="{DynamicResource MutedInk}" Margin="0,4,0,0" TextWrapping="Wrap" />
+            <TextBlock x:Name="BootstrapSummary" Text="Select a pair and run Sync now once to inventory both sides." Margin="0,8,0,0" TextWrapping="Wrap" />
+            <TextBlock x:Name="BootstrapRetainedProblem" Text="" Foreground="{DynamicResource ErrorBrush}" Margin="0,6,0,0" TextWrapping="Wrap" Visibility="Collapsed" AutomationProperties.Name="Retained first sync problem" />
+            <Button x:Name="BootstrapRetainedProblemLink" Content="View the exact run" Click="OpenRetainedFirstSyncProblem_Click" HorizontalAlignment="Left" Margin="0,4,0,0" Visibility="Collapsed" ToolTip="Open the exact retained run and its completed actions in Activity." AutomationProperties.Name="View the exact first sync run" />
+            <Button x:Name="RepairBootstrapMappingsButton" Content="Repair copied file mappings" Click="RepairBootstrapMappings_Click" HorizontalAlignment="Left" Margin="0,4,0,0" Visibility="Collapsed" ToolTip="Verify the completed copied-file history and current endpoint identities. Distinct files are preserved and separated in the new inventory; only verified obsolete move predecessors enter protected recovery. Uncertain operations are refused." AutomationProperties.Name="Repair copied file mappings" />
+            <TextBlock x:Name="BootstrapEndpointSummary" Text="" Foreground="{DynamicResource MutedInk}" Margin="0,4,0,0" TextWrapping="Wrap" AutomationProperties.Name="First sync endpoints" />
+          </StackPanel>
+          <Grid Grid.Row="1" Margin="0,0,0,12">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="250" /><ColumnDefinition Width="230" /></Grid.ColumnDefinitions>
+            <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+            <StackPanel Grid.Column="0" Orientation="Horizontal"><TextBlock Text="Pair" VerticalAlignment="Center" Margin="0,0,6,0" /><ComboBox x:Name="BootstrapPairBox" Width="210" ItemsSource="{Binding PairRows}" DisplayMemberPath="Name" SelectedValuePath="Id" SelectionChanged="BootstrapPair_SelectionChanged" AutomationProperties.Name="First sync folder pair" /></StackPanel>
+            <Button Grid.Column="1" x:Name="ApproveBootstrapButton" Style="{StaticResource PrimaryButton}" Content="Confirm choices and sync" Click="ApproveBootstrap_Click" IsEnabled="False"><Button.ToolTip><ToolTip><StackPanel MaxWidth="360"><TextBlock Text="Confirm choices and sync" Foreground="{DynamicResource DropboxBlue}" FontWeight="SemiBold" /><TextBlock Text="Confirms the complete reviewed choices and starts syncing. Each file is rechecked before copying; conflicting files are retained for resolution while independent safe files continue." TextWrapping="Wrap" /></StackPanel></ToolTip></Button.ToolTip></Button>
+            <Button Grid.Column="2" x:Name="RefreshBootstrapButton" Content="Scan again" Click="RefreshBootstrap_Click" ToolTip="Checks both selected folders again and updates the first-sync plan without copying, replacing or deleting files." />
+            <Grid Grid.Column="4"><TextBox x:Name="BootstrapSearchBox" Padding="31,7,9,7" TextChanged="BootstrapFilter_Changed" ToolTip="Search the complete first-sync inventory." AutomationProperties.Name="Search first-sync inventory" /><TextBlock Text="⌕" FontSize="18" Foreground="{DynamicResource MutedInk}" Margin="10,0,0,1" HorizontalAlignment="Left" VerticalAlignment="Center" IsHitTestVisible="False" /><TextBlock Text="Search paths…" Foreground="{DynamicResource MutedInk}" Margin="31,0,8,0" VerticalAlignment="Center" IsHitTestVisible="False"><TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Visibility" Value="Collapsed" /><Style.Triggers><DataTrigger Binding="{Binding Text, ElementName=BootstrapSearchBox}" Value=""><Setter Property="Visibility" Value="Visible" /></DataTrigger></Style.Triggers></Style></TextBlock.Style></TextBlock></Grid>
+            <ComboBox Grid.Column="5" x:Name="BootstrapGroupFilter" SelectionChanged="BootstrapFilter_Changed">
+              <ComboBoxItem Content="All groups" Tag="All groups" IsSelected="True" /><ComboBoxItem Content="Local newer" Tag="Local newer" /><ComboBoxItem Content="Cloud newer" Tag="Dropbox newer" /><ComboBoxItem Content="Approximately equal time" Tag="Approximately equal time" /><ComboBoxItem Content="Unreliable or missing time" Tag="Unreliable or missing time" /><ComboBoxItem Content="Identical" Tag="Identical" /><ComboBoxItem Content="Local only" Tag="Local only" /><ComboBoxItem Content="Cloud only" Tag="Dropbox only" /><ComboBoxItem Content="Changed locally since sync" Tag="Local changed since sync" /><ComboBoxItem Content="Changed remotely since sync" Tag="Dropbox changed since sync" /><ComboBoxItem Content="Unreliable or missing" Tag="Unreliable or missing" />
+            </ComboBox>
+            <WrapPanel Grid.Row="1" Grid.ColumnSpan="6" Margin="0,8,0,0">
+              <Button Content="Edit folder choices" Click="OpenSelectiveFromBootstrap_Click" ToolTip="Open this pair at its selected folders, then return here to review the updated scope." />
+              <Button Content="Review matching conflicts…" Click="ReviewBootstrapConflicts_Click" ToolTip="Open the conflicts that match the current group and search." />
+              <ComboBox x:Name="BootstrapSelectedActionBox" Width="165" SelectedIndex="0" AutomationProperties.Name="Action for selected first-sync items" ToolTip="Choose what the selected items should do.">
+                <ComboBoxItem Content="Recommended" Tag="Recommended" /><ComboBoxItem Content="Upload" Tag="Upload" /><ComboBoxItem Content="Download" Tag="Download" /><ComboBoxItem Content="Skip for now" Tag="Skip for now" />
+              </ComboBox>
+              <Button Content="Apply to selected" Click="ApplySelectedBootstrapAction_Click" ToolTip="Apply the chosen action only where it matches the item's current location." />
+              <ComboBox x:Name="BootstrapMatchingActionBox" Width="165" SelectedIndex="0" AutomationProperties.Name="Action for every matching first-sync item" ToolTip="Choose what every item matching the current filters should do.">
+                <ComboBoxItem Content="Recommended" Tag="Recommended" /><ComboBoxItem Content="Upload" Tag="Upload" /><ComboBoxItem Content="Download" Tag="Download" /><ComboBoxItem Content="Skip for now" Tag="Skip for now" />
+              </ComboBox>
+              <Button Content="Apply to all matching" Click="ApplyAllMatchingBootstrapAction_Click" ToolTip="Apply the chosen action to every matching item, including results not loaded on screen." />
+              <Button x:Name="UseRecommendedBootstrapButton" Content="Use recommended choices" Click="UseRecommendedBootstrapChoices_Click" ToolTip="Set every displayed first-sync item to its recommended action. This is a draft choice: no files change until you confirm choices and sync." AutomationProperties.Name="Use recommended choices" />
+              <ComboBox x:Name="BootstrapItemFilter" Width="118" SelectionChanged="BootstrapFilter_Changed" ToolTip="Show all items, folders only, or files only.">
+                <ComboBoxItem Content="All items" IsSelected="True" /><ComboBoxItem Content="Folders" /><ComboBoxItem Content="Files" />
+              </ComboBox>
+              <ComboBox x:Name="BootstrapTypeFilter" Width="120" IsEditable="True" SelectionChanged="BootstrapFilter_Changed" LostKeyboardFocus="BootstrapTypeFilter_LostKeyboardFocus" ToolTip="Filter by Folder, File, or an extension such as PDF or DOCX.">
+                <ComboBoxItem Content="All types" IsSelected="True" /><ComboBoxItem Content="Folder" /><ComboBoxItem Content="File" /><ComboBoxItem Content="PDF" /><ComboBoxItem Content="DOCX" /><ComboBoxItem Content="XLSX" /><ComboBoxItem Content="JPG" /><ComboBoxItem Content="PNG" /><ComboBoxItem Content="TXT" />
+              </ComboBox>
+              <Button x:Name="LoadMoreBootstrapButton" Content="Load more" Click="LoadMoreBootstrap_Click" />
+            </WrapPanel>
+          </Grid>
+          <DataGrid x:Name="BootstrapGrid" Grid.Row="2" ItemsSource="{Binding BootstrapRows}" AutoGenerateColumns="False" SelectionMode="Extended" HorizontalScrollBarVisibility="Visible" EnableRowVirtualization="True" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling" AutomationProperties.Name="First sync inventory">
+            <DataGrid.Columns>
+              <DataGridTextColumn Header="Pair" Binding="{Binding PairName}" Width="130" MinWidth="120" />
+              <DataGridTextColumn Header="Path" Binding="{Binding Path}" Width="2*" MinWidth="180" />
+              <DataGridTemplateColumn Header="Action" Width="1.15*" MinWidth="130">
+                <DataGridTemplateColumn.CellTemplate>
+                  <DataTemplate>
+                    <ComboBox ItemsSource="{Binding ActionChoices}" DisplayMemberPath="Display" SelectedValuePath="Value" SelectedValue="{Binding SelectedAction, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{Binding CanChooseAction}" Margin="0" Padding="5,3" AutomationProperties.Name="First sync action" />
+                  </DataTemplate>
+                </DataGridTemplateColumn.CellTemplate>
+              </DataGridTemplateColumn>
+              <DataGridTextColumn Header="What will happen" Binding="{Binding Effect}" Width="1.4*" MinWidth="165" />
+              <DataGridTextColumn Header="Item" Binding="{Binding ItemKind}" Width="80" MinWidth="72" />
+              <DataGridTextColumn Header="Type" Binding="{Binding FileType}" Width="75" MinWidth="70" />
+              <DataGridTextColumn Header="Where it is now" Binding="{Binding DisplayGroup}" Width="1.2*" MinWidth="125" />
+              <DataGridTextColumn Header="Left size" Binding="{Binding LeftSize}" Width="90" MinWidth="85" />
+              <DataGridTextColumn Header="Right size" Binding="{Binding RightSize}" Width="100" MinWidth="95" />
+              <DataGridTextColumn Header="Left modified" Binding="{Binding LeftModified}" Width="150" MinWidth="140" />
+              <DataGridTextColumn Header="Right modified" Binding="{Binding RightModified}" Width="155" MinWidth="145" />
+            </DataGrid.Columns>
+          </DataGrid>
+          <TextBlock x:Name="BootstrapChoiceSummary" Grid.Row="3" Margin="0,8,0,0" Foreground="{DynamicResource MutedInk}" Text="Recommended actions are selected. Skip for now leaves an item unchanged and waiting here." TextWrapping="Wrap" />
+        </Grid>
+      </Border>
+
+      <Border x:Name="ActivityPage" Visibility="Collapsed">
+        <Grid>
+          <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+          <StackPanel Margin="0,0,0,10"><TextBlock Text="Activity" FontSize="24" FontWeight="SemiBold" /><TextBlock Text="Every sync check, transfer, move, conflict and recovery action—live and retained after restart." Foreground="{DynamicResource MutedInk}" Margin="0,4,0,0" TextWrapping="Wrap" /></StackPanel>
+          <StackPanel Grid.Row="1" Margin="0,0,0,10">
+            <TextBlock x:Name="ActivityPageSummary" Text="Newest retained events" Foreground="{DynamicResource MutedInk}" Margin="0,0,0,7" />
+            <WrapPanel>
+              <Button Content="Open queue" Click="OpenQueue_Click" /><Button Content="Review conflicts" Click="OpenConflicts_Click" />
+              <ComboBox x:Name="ActivityPairBox" Width="180" ItemsSource="{Binding ActivityPairChoices}" DisplayMemberPath="DisplayName" SelectionChanged="ActivityFilter_Changed" AutomationProperties.Name="Filter activity by folder pair" />
+              <Grid Width="220"><TextBox x:Name="ActivitySearchBox" Padding="31,7,9,7" TextChanged="ActivityFilter_Changed" ToolTip="Search by pair, path, action, explanation or run ID." AutomationProperties.Name="Search activity" /><TextBlock Text="⌕" FontSize="18" Foreground="{DynamicResource MutedInk}" Margin="10,0,0,1" HorizontalAlignment="Left" VerticalAlignment="Center" IsHitTestVisible="False" /><TextBlock Text="Search activity…" Foreground="{DynamicResource MutedInk}" Margin="31,0,8,0" VerticalAlignment="Center" IsHitTestVisible="False"><TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Visibility" Value="Collapsed" /><Style.Triggers><DataTrigger Binding="{Binding Text, ElementName=ActivitySearchBox}" Value=""><Setter Property="Visibility" Value="Visible" /></DataTrigger></Style.Triggers></Style></TextBlock.Style></TextBlock></Grid>
+              <ComboBox x:Name="ActivityFilterBox" Width="165" SelectionChanged="ActivityFilter_Changed"><ComboBoxItem Content="All actions" IsSelected="True" /><ComboBoxItem Content="Uploads / downloads" Tag="Transfers" /><ComboBoxItem Content="Moves" /><ComboBoxItem Content="Conflicts" /><ComboBoxItem Content="Recovery / deletions" /><ComboBoxItem Content="Needs attention" /></ComboBox>
+              <ComboBox x:Name="ActivityTypeFilter" Width="120" IsEditable="True" Text="All types" SelectionChanged="ActivityFilter_Changed" LostKeyboardFocus="ActivityTypeFilter_LostKeyboardFocus" ToolTip="Show folders, files, or one file type such as PDF or DOCX." AutomationProperties.Name="Filter activity by item type"><ComboBoxItem Content="All types" IsSelected="True" /><ComboBoxItem Content="Folders" /><ComboBoxItem Content="Files" /></ComboBox>
+              <ComboBox x:Name="ActivityDateBox" Width="120" SelectionChanged="ActivityFilter_Changed" AutomationProperties.Name="Filter activity by date"><ComboBoxItem Content="All time" IsSelected="True" /><ComboBoxItem Content="Today" /><ComboBoxItem Content="Last 7 days" /><ComboBoxItem Content="Last 30 days" /></ComboBox>
+              <Button x:Name="LoadMoreActivityButton" Content="Load more" Click="LoadMoreActivity_Click" />
+            </WrapPanel>
+          </StackPanel>
+          <DataGrid x:Name="ActivityGrid" Grid.Row="2" ItemsSource="{Binding ActivityRows}" AutoGenerateColumns="False" MinColumnWidth="70" EnableRowVirtualization="True" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling" PreviewMouseRightButtonDown="ActivityGrid_PreviewMouseRightButtonDown" AutomationProperties.Name="Durable sync activity"><DataGrid.ContextMenu><ContextMenu Opened="ActivityContextMenu_Opening"><MenuItem x:Name="ActivityOpenPairMenuItem" Header="Open folder pair" Click="OpenActivityPair_Click" /><MenuItem x:Name="ActivityOpenRecoveryMenuItem" Header="Open Recovery" Click="OpenActivityRecovery_Click" /><Separator /><MenuItem x:Name="ActivityCopyPathMenuItem" Header="Copy path" Click="CopyActivityPath_Click" /><MenuItem x:Name="ActivityCopyDetailsMenuItem" Header="Copy details" Click="CopyActivityDetails_Click" /></ContextMenu></DataGrid.ContextMenu><DataGrid.Columns><DataGridTextColumn Header="When" Binding="{Binding When}" Width="170" /><DataGridTextColumn Header="Pair" Binding="{Binding PairName}" Width="145" /><DataGridTextColumn Header="Item" Binding="{Binding ItemKind}" Width="75" /><DataGridTextColumn Header="Type" Binding="{Binding FileType}" Width="85" /><DataGridTextColumn Header="Path" Binding="{Binding Path}" Width="*" MinWidth="160" /><DataGridTextColumn Header="Action" Binding="{Binding Outcome}" Width="145" /><DataGridTextColumn Header="Details" Binding="{Binding Reason}" Width="2*" MinWidth="220" /></DataGrid.Columns></DataGrid>
+        </Grid>
+      </Border>
+      <Border x:Name="QueuePage" Visibility="Collapsed"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions><StackPanel Margin="0,0,0,10"><TextBlock Text="Pending work" FontSize="24" FontWeight="SemiBold" /><TextBlock Text="Transfers and recovery work that Sync Shark still needs to finish. Interrupted work stays here after restart so it can continue safely." Foreground="{DynamicResource MutedInk}" Margin="0,4,0,0" TextWrapping="Wrap" /></StackPanel><Grid Grid.Row="1" Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><TextBlock x:Name="QueuePageSummary" Text="Current pending work" Foreground="{DynamicResource MutedInk}" VerticalAlignment="Center" /><WrapPanel Grid.Column="1"><TextBox x:Name="QueueSearchBox" Width="190" TextChanged="QueueFilter_Changed" ToolTip="Search pending work by pair, path, action or status." AutomationProperties.Name="Search pending work" /><ComboBox x:Name="QueueFilterBox" Width="150" SelectionChanged="QueueFilter_Changed"><ComboBoxItem Content="All" IsSelected="True" /><ComboBoxItem Content="Needs recovery" /><ComboBoxItem Content="Blocked" /><ComboBoxItem Content="Uploads / downloads" Tag="Transfers" /><ComboBoxItem Content="Moves" /></ComboBox><Button x:Name="LoadMoreQueueButton" Content="Load more" Click="LoadMoreQueue_Click" /></WrapPanel></Grid><DataGrid Grid.Row="2" ItemsSource="{Binding QueueRows}" AutoGenerateColumns="False" EnableRowVirtualization="True" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling" AutomationProperties.Name="Pending sync work"><DataGrid.Columns><DataGridTextColumn Header="Added" Binding="{Binding Enqueued}" Width="180" /><DataGridTextColumn Header="Connection" Binding="{Binding Connection}" Width="190" /><DataGridTextColumn Header="Pair" Binding="{Binding Pair}" Width="170" /><DataGridTextColumn Header="Path" Binding="{Binding Path}" Width="*" /><DataGridTextColumn Header="Sync Order" Binding="{Binding Priority}" Width="90" /><DataGridTextColumn Header="Action" Binding="{Binding Operation}" Width="130" /><DataGridTextColumn Header="Status" Binding="{Binding State}" Width="190" /></DataGrid.Columns></DataGrid></Grid></Border>
+      <Border x:Name="ConflictsPage" Visibility="Collapsed">
+        <Grid>
+          <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+          <StackPanel Margin="0,0,0,12">
+            <TextBlock Text="Conflicts" FontSize="24" FontWeight="SemiBold" />
+            <Expander x:Name="ConflictGuidanceExpander" Header="How to Resolve Conflicts" FontSize="12" Margin="0,4,0,0">
+              <TextBlock Text="Compare both versions, then choose what to keep for selected items or every conflict matching the current filters. Modified times help form a recommendation, but Sync Shark never chooses for you." Foreground="{DynamicResource MutedInk}" Margin="0,6,0,0" TextWrapping="Wrap" />
+            </Expander>
+            <TextBlock x:Name="ConflictSelectionSummary" Text="No all-matching selection is active." Foreground="{DynamicResource MutedInk}" Margin="0,5,0,0" TextWrapping="Wrap">
+              <TextBlock.Style><Style TargetType="TextBlock"><Style.Triggers>
+                <DataTrigger Binding="{Binding Text, RelativeSource={RelativeSource Self}}" Value="No all-matching selection is active."><Setter Property="Visibility" Value="Collapsed" /></DataTrigger>
+              </Style.Triggers></Style></TextBlock.Style>
+            </TextBlock>
+          </StackPanel>
+          <TextBlock x:Name="ConflictActionFeedback" Visibility="Collapsed" Foreground="{DynamicResource MutedInk}" Margin="0,0,0,10" TextWrapping="Wrap" AutomationProperties.Name="Action status" />
+          <WrapPanel Grid.Row="1" Margin="0,0,0,12">
+            <ComboBox x:Name="ConflictGroupFilter" Width="185" SelectionChanged="ConflictFilter_Changed" ToolTip="Group conflicts by which version was modified more recently">
+              <ComboBoxItem Content="All groups" IsSelected="True" /><ComboBoxItem Content="Newer version" Tag="Newer version" /><ComboBoxItem Content="Approximately equal time" /><ComboBoxItem Content="Unreliable or missing time" />
+            </ComboBox>
+            <TextBox x:Name="ConflictSearchBox" Width="190" TextChanged="ConflictFilter_Changed" ToolTip="Filter conflict paths" AutomationProperties.Name="Filter conflicts" />
+            <Button x:Name="LoadMoreConflictsButton" Content="Load more" Click="LoadMoreConflicts_Click" />
+            <Expander Header="Bulk Actions" Margin="4,6,0,0" FontSize="12">
+              <WrapPanel Margin="0,8,0,0">
+                <Button x:Name="KeepLocalConflictButton" Style="{StaticResource PrimaryButton}" Content="Use left" Click="ResolveKeepLocal_Click" AutomationProperties.Name="Use the left endpoint's version for the selected conflicts. The right endpoint's version is retained in Recovery first." />
+                <Button x:Name="KeepDropboxConflictButton" Content="Use right" Click="ResolveKeepDropbox_Click" AutomationProperties.Name="Use the right endpoint's version for the selected conflicts. The left endpoint's version is retained in Recovery first." />
+                <Button x:Name="PreserveBothConflictButton" Content="Keep both" Click="ResolvePreserveBoth_Click" AutomationProperties.Name="Keep both versions for selected conflicts" />
+                <Button x:Name="SelectAllMatchingConflictsButton" Content="Select all matching" Click="SelectAllConflicts_Click" ToolTip="Target every conflict matching this pair, group and search, including rows not loaded on screen." />
+              </WrapPanel>
+            </Expander>
+          </WrapPanel>
+          <DataGrid x:Name="ConflictGrid" Grid.Row="2" ItemsSource="{Binding ConflictRows}" AutoGenerateColumns="False" HorizontalScrollBarVisibility="Visible" EnableRowVirtualization="True" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling" SelectionMode="Extended" SelectionChanged="ConflictGrid_SelectionChanged" PreviewMouseRightButtonDown="ConflictGrid_PreviewMouseRightButtonDown" MouseDoubleClick="CompareConflict_Click" AutomationProperties.Name="Pair-bound conflicts">
+            <DataGrid.ContextMenu><ContextMenu><MenuItem Header="Compare…" Click="CompareConflict_Click" /><Separator /><MenuItem Header="Use left" Tag="keep-left" Click="ResolveKeepLocal_Click" AutomationProperties.Name="Use the left endpoint's version for the selected conflicts. The right endpoint's version is retained in Recovery first." /><MenuItem Header="Use right" Tag="keep-right" Click="ResolveKeepDropbox_Click" AutomationProperties.Name="Use the right endpoint's version for the selected conflicts. The left endpoint's version is retained in Recovery first." /><MenuItem Header="Keep both" Click="ResolvePreserveBoth_Click" AutomationProperties.Name="Keep both conflict versions" /></ContextMenu></DataGrid.ContextMenu>
+            <DataGrid.Columns>
+              <DataGridTemplateColumn Header="Options" Width="Auto">
+                <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                  <ItemsControl ItemsSource="{Binding NoticeOptions}" Tag="{Binding}">
+                    <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate><DataTemplate>
+                      <Button Content="{Binding Label}" Tag="{Binding Tag, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                              Click="NoticeOption_Click" ToolTip="Apply the selected notice action. 'Use the other version' replaces the current file and keeps the replaced version recoverable (local Recovery or Dropbox version history); 'Save the other version as a copy' adds a separate file; 'Dismiss' changes no files." />
+                    </DataTemplate></ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                </DataTemplate></DataGridTemplateColumn.CellTemplate>
+              </DataGridTemplateColumn>
+              <DataGridTextColumn Header="Connection" Binding="{Binding Connection}" Width="130" />
+              <DataGridTextColumn Header="Pair" Binding="{Binding PairName}" Width="110" />
+              <DataGridTextColumn Header="Path" Binding="{Binding Path}" Width="*" MinWidth="160" />
+              <DataGridTextColumn Header="Comparison" Binding="{Binding GroupDisplay}" Width="135" />
+              <DataGridTextColumn Header="Recommendation" Binding="{Binding Recommendation}" Width="115" />
+              <DataGridTextColumn Header="Left modified" Binding="{Binding LocalModified}" Width="140" />
+              <DataGridTextColumn Header="Right modified" Binding="{Binding DropboxModified}" Width="145" />
+            </DataGrid.Columns>
+          </DataGrid>
+        </Grid>
+      </Border>
+
+      <Border x:Name="RecoveryPage" Visibility="Collapsed">
+        <Grid>
+          <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+          <StackPanel Margin="0,0,0,12">
+            <TextBlock Text="Recovery" FontSize="24" FontWeight="SemiBold" />
+            <TextBlock Text="Browse protected recovery copies, revisions and deleted items supported by the selected pair. Replacements preview and retain the current destination first." Foreground="{DynamicResource MutedInk}" Margin="0,4,0,0" TextWrapping="Wrap" />
+            <TextBlock x:Name="RecoverySummary" Text="Choose a pair to load its retained recovery records." Margin="0,8,0,0" TextWrapping="Wrap" />
+          </StackPanel>
+          <WrapPanel Grid.Row="1" Margin="0,0,0,12">
+            <TextBlock Text="Pair" VerticalAlignment="Center" Margin="0,0,8,0" />
+            <ComboBox x:Name="RecoveryPairBox" Width="230" ItemsSource="{Binding RecoveryPairChoices}" DisplayMemberPath="DisplayName" SelectedValuePath="Id" SelectionChanged="RecoveryPair_SelectionChanged" AutomationProperties.Name="Recovery pair" />
+            <Button Content="Refresh archives + deleted" Click="RefreshRecovery_Click" ToolTip="Refresh retained Sync Shark archives and available deleted-item metadata for this pair's provider." />
+            <Button Content="Dropbox Rewind" Click="OpenRewind_Click" ToolTip="Open the guided Dropbox Rewind workflow for a whole-folder rollback." />
+            <StackPanel Orientation="Horizontal">
+              <TextBox x:Name="RecoverySearchBox" Width="180" TextChanged="RecoveryFilter_Changed" ToolTip="Filter the recovery items already loaded; no provider refresh." AutomationProperties.Name="Filter recovery items" />
+              <TextBox x:Name="RecoveryPathBox" Width="260" ToolTip="Enter a path from this pair to load its provider's retained revision history." AutomationProperties.Name="Revision path" />
+              <Button Content="Load revisions" Click="LoadRecoveryRevisions_Click" ToolTip="Load this path's retained revision history from its own provider." />
+            </StackPanel>
+            <StackPanel Orientation="Horizontal">
+              <Button x:Name="RestoreOriginalButton" Style="{StaticResource PrimaryButton}" Content="Restore original" Click="RestoreOriginal_Click" ToolTip="Preview, retain any occupied destination, then restore to the original path." />
+              <Button x:Name="RestoreCopyButton" Content="Restore as copy" Click="RestoreCopy_Click" ToolTip="Preview and restore to a new collision-free path without replacing the current destination." />
+              <Button x:Name="RemoveRecoveryButton" Content="Remove selected copy…" Click="RemoveRecovery_Click" IsEnabled="False" ToolTip="Permanently removes the selected Sync Shark Recovery copy after a separate warning. Activity history is kept." />
+            </StackPanel>
+          </WrapPanel>
+          <DataGrid x:Name="RecoveryGrid" Grid.Row="2" ItemsSource="{Binding RecoveryRows}" AutoGenerateColumns="False" HorizontalScrollBarVisibility="Visible" EnableRowVirtualization="True" VirtualizingPanel.VirtualizationMode="Recycling" SelectionMode="Single" SelectionChanged="RecoveryGrid_SelectionChanged" AutomationProperties.Name="Recovery browser">
+            <DataGrid.Columns>
+              <DataGridTextColumn Header="Connection" Binding="{Binding Connection}" Width="140" />
+              <DataGridTextColumn Header="Pair" Binding="{Binding PairName}" Width="100" />
+              <DataGridTextColumn Header="Type" Binding="{Binding Source}" Width="110" />
+              <DataGridTextColumn Header="Original path" Binding="{Binding Path}" Width="1.5*" MinWidth="180" />
+              <DataGridTextColumn Header="Location" Binding="{Binding Location}" Width="*" MinWidth="150" />
+              <DataGridTextColumn Header="Size" Binding="{Binding Size}" Width="80" />
+              <DataGridTextColumn Header="Retained" Binding="{Binding Retained}" Width="150" />
+              <DataGridTextColumn Header="Retention" Binding="{Binding Retention}" Width="160" />
+              <DataGridTextColumn Header="Health" Binding="{Binding Health}" Width="180" />
+            </DataGrid.Columns>
+          </DataGrid>
+          <Grid Grid.Row="3" Margin="2,12,0,0">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+            <TextBlock x:Name="RecoveryDetails" Foreground="{DynamicResource MutedInk}" Text="No recovery item selected." TextWrapping="Wrap" />
+            <Button x:Name="LoadMoreRecoveryButton" Grid.Column="1" Content="Load more" Click="LoadMoreRecovery_Click" Visibility="Collapsed" ToolTip="Load the next bounded page of protected archives and Dropbox deleted-item metadata." />
+          </Grid>
+        </Grid>
+      </Border>
+
+      <Border x:Name="RewindPage" Visibility="Collapsed">
+        <Grid>
+          <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+          <StackPanel Margin="0,0,0,12">
+            <TextBlock Text="Dropbox Rewind" FontSize="24" FontWeight="SemiBold" />
+            <TextBlock Text="Coordinate an intentional Dropbox rollback without allowing ordinary local uploads to reverse it. Sync Shark checkpoints and pauses the selected pair before opening Dropbox." Foreground="{DynamicResource MutedInk}" Margin="0,4,0,0" TextWrapping="Wrap" />
+          </StackPanel>
+          <Border Grid.Row="1" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="9" Padding="14" Margin="0,0,0,12">
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="150" /><ColumnDefinition Width="260" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+              <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+              <TextBlock Text="Affected Pair" VerticalAlignment="Center" /><ComboBox x:Name="RewindPairBox" Grid.Column="1" ItemsSource="{Binding PairRows}" DisplayMemberPath="Name" SelectedValuePath="Id" SelectionChanged="RewindPair_SelectionChanged" AutomationProperties.Name="Dropbox Rewind pair" />
+              <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right"><Button x:Name="PrepareRewindButton" Style="{StaticResource PrimaryButton}" Content="Checkpoint + open Dropbox" Click="PrepareRewind_Click" ToolTip="Create complete local and Dropbox checkpoints, pause this pair, then open its folder on dropbox.com." /><Button Content="Open Dropbox folder" Click="OpenDropboxRewind_Click" ToolTip="Open the selected pair folder; choose Folder settings, then Rewind this folder." /></StackPanel>
+              <TextBlock Grid.Row="1" Text="Expected Account" Margin="0,10,0,0" /><TextBlock x:Name="RewindAccountText" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Text="No connected account" Margin="0,10,0,0" />
+              <TextBlock Grid.Row="2" Text="Dropbox Folder" Margin="0,10,0,0" /><TextBlock x:Name="RewindPathText" Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" Text="—" Margin="0,10,0,0" TextTrimming="CharacterEllipsis" />
+            </Grid>
+          </Border>
+          <Grid Grid.Row="2" Margin="0,0,0,12">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+            <TextBlock x:Name="RewindStatusText" Text="Prepare a checkpoint before using Rewind on dropbox.com." VerticalAlignment="Center" TextWrapping="Wrap" />
+            <StackPanel Grid.Column="1" Orientation="Horizontal"><Button x:Name="DetectRewindButton" Content="Detect + preview rollback" Click="DetectRewind_Click" ToolTip="After Dropbox confirms Rewind is complete, inventory both sides and preview the intentional rollback batch without local effects." /><Button x:Name="ApplyRewindButton" Style="{StaticResource PrimaryButton}" Content="Apply preview" Click="ApplyRewind_Click" IsEnabled="False" ToolTip="Apply only the exact reviewed paths. Every path and provider-effect boundary is durably checkpointed; post-checkpoint local work becomes a conflict." /><Button x:Name="ResumeRewindButton" Content="Resume normal sync" Click="ResumeRewind_Click" IsEnabled="False" ToolTip="Resume only after the reviewed batch is provably complete. Before apply, cancellation requires a live check that Dropbox still matches the checkpoint." /></StackPanel>
+          </Grid>
+          <DataGrid x:Name="RewindGrid" Grid.Row="3" ItemsSource="{Binding RewindRows}" AutoGenerateColumns="False" HorizontalScrollBarVisibility="Visible" EnableRowVirtualization="True" VirtualizingPanel.VirtualizationMode="Recycling" AutomationProperties.Name="Dropbox Rewind effect preview">
+            <DataGrid.Columns><DataGridTextColumn Header="Path" Binding="{Binding Path}" Width="*" /><DataGridTextColumn Header="State" Binding="{Binding Status}" Width="130" /><DataGridTextColumn Header="Group" Binding="{Binding Group}" Width="210" /><DataGridTextColumn Header="Proposed Local Effect" Binding="{Binding Effect}" Width="260" /><DataGridTextColumn Header="Post-Checkpoint Local Change" Binding="{Binding LocalChanged}" Width="180" /><DataGridTextColumn Header="Reason" Binding="{Binding Reason}" Width="2*" /></DataGrid.Columns>
+          </DataGrid>
+        </Grid>
+      </Border>
+
+      <Border x:Name="ConnectionsPage" Visibility="Collapsed">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel HorizontalAlignment="Stretch">
+            <TextBlock Text="Connections" FontSize="24" FontWeight="SemiBold" />
+            <TextBlock Text="Accounts are retained as stable provider connections so future Dropbox accounts and storage providers can be added without rebinding this interface." Foreground="{DynamicResource MutedInk}" Margin="0,4,0,16" TextWrapping="Wrap" />
+            <Border Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="9" Padding="18">
+              <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="190" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                <TextBlock Grid.ColumnSpan="2" Text="{Binding ProviderPresentation.Name, RelativeSource={RelativeSource AncestorType={x:Type Window}}}" FontSize="17" FontWeight="SemiBold" Margin="0,0,0,16" />
+                <TextBlock Grid.Row="1" Text="Provider" /><TextBlock x:Name="ConnectionProviderText" Grid.Row="1" Grid.Column="1" Text="Dropbox" FontWeight="SemiBold" />
+                <TextBlock Grid.Row="2" Text="Account" Margin="0,9,0,0" /><TextBlock x:Name="ConnectionNameText" Grid.Row="2" Grid.Column="1" Text="Checking account…" FontWeight="SemiBold" Margin="0,9,0,0" />
+                <TextBlock Grid.Row="3" Text="Email" Margin="0,9,0,0" /><TextBlock x:Name="ConnectionEmailText" Grid.Row="3" Grid.Column="1" Text="—" Margin="0,9,0,0" />
+                <TextBlock Grid.Row="4" Text="Plan" Margin="0,9,0,0" /><TextBlock x:Name="ConnectionTypeText" Grid.Row="4" Grid.Column="1" Text="—" Margin="0,9,0,0" />
+                <TextBlock Grid.Row="5" Text="Access" Margin="0,9,0,0" /><TextBlock x:Name="ConnectionAccessText" Grid.Row="5" Grid.Column="1" Text="Full Dropbox" Margin="0,9,0,0" />
+                <TextBlock Grid.Row="6" Text="Health" Margin="0,9,0,0" /><TextBlock x:Name="ConnectionHealthText" Grid.Row="6" Grid.Column="1" Text="Checking connection…" Margin="0,9,0,0" />
+                <TextBlock Grid.Row="7" Text="Last verified" Margin="0,9,0,0" /><TextBlock x:Name="ConnectionVerifiedText" Grid.Row="7" Grid.Column="1" Text="—" Margin="0,9,0,0" />
+                <TextBlock Grid.Row="8" Text="Last successful sync" Margin="0,9,0,0" /><TextBlock x:Name="ConnectionLastSyncText" Grid.Row="8" Grid.Column="1" Text="—" Margin="0,9,0,0" />
+                <TextBlock Grid.Row="9" Text="Dependent pairs" Margin="0,9,0,0" /><TextBlock x:Name="ConnectionPairsText" Grid.Row="9" Grid.Column="1" Text="0" Margin="0,9,0,0" />
+                <TextBlock Grid.Row="10" Text="Connection ID" Margin="0,9,0,0" /><TextBlock x:Name="ConnectionIdText" Grid.Row="10" Grid.Column="1" Text="—" Foreground="{DynamicResource MutedInk}" TextTrimming="CharacterEllipsis" Margin="0,9,0,0" />
+                <StackPanel Grid.Row="11" Grid.Column="1" Orientation="Horizontal" Margin="0,18,0,0">
+                  <Button x:Name="ConnectionConnectButton" Style="{StaticResource PrimaryButton}" Content="Connect Dropbox" Click="Connect_Click" IsEnabled="False" Visibility="Collapsed" />
+                  <Button x:Name="ConnectionReauthorizeButton" Content="Reconnect" Click="Reconnect_Click" IsEnabled="False" ToolTip="Renew authorization for this exact Dropbox application and account connection." />
+                  <Button x:Name="ConnectionManageButton" Content="Manage on Dropbox" Click="ManageDropbox_Click" IsEnabled="False" />
+                  <Button x:Name="ConnectionDisconnectButton" Content="Disconnect" Click="Disconnect_Click" IsEnabled="False" ToolTip="Stops live sync and removes the protected Dropbox credential. Pair definitions and recovery data are retained." />
+                </StackPanel>
+              </Grid>
+            </Border>
+            <TextBlock Margin="2,12,0,0" Text="Disconnecting never deletes pair definitions, synchronized content, baselines, or Recovery. Those pairs remain paused until the matching account is reconnected." Foreground="{DynamicResource MutedInk}" TextWrapping="Wrap" />
+          </StackPanel>
+        </ScrollViewer>
+      </Border>
+
+      <Border x:Name="SettingsPage" Visibility="Collapsed">
+        <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel HorizontalAlignment="Stretch">
+          <TextBlock Text="Settings" FontSize="24" FontWeight="SemiBold" /><TextBlock Text="Choose how Sync Shark appears. System follows Windows; AMOLED uses black primary surfaces." Foreground="{DynamicResource MutedInk}" Margin="0,4,0,20" TextWrapping="Wrap" />
+          <Border Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="9" Padding="18">
+            <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="190" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+              <TextBlock Text="Appearance" FontSize="17" FontWeight="SemiBold" Grid.ColumnSpan="2" Margin="0,0,0,16" />
+              <TextBlock Grid.Row="1" Text="Theme" VerticalAlignment="Center" /><StackPanel x:Name="ThemeChoices" Grid.Row="1" Grid.Column="1" Orientation="Horizontal" AutomationProperties.Name="Sync Shark theme"><RadioButton x:Name="SystemThemeChoice" Style="{StaticResource ThemeChoice}" Content="System" Tag="System" Checked="ThemeChoice_Checked" /><RadioButton x:Name="LightThemeChoice" Style="{StaticResource ThemeChoice}" Content="Light" Tag="Light" Checked="ThemeChoice_Checked" /><RadioButton x:Name="AmoledThemeChoice" Style="{StaticResource ThemeChoice}" Content="AMOLED black" Tag="AMOLED" Checked="ThemeChoice_Checked" /></StackPanel>
+            </Grid>
+          </Border>
+          <TextBlock x:Name="ThemeStatus" Margin="2,12,0,20" Foreground="{DynamicResource MutedInk}" Text="Theme preference is stored with protected product state." />
+          <Border Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="9" Padding="18">
+            <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="190" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+              <TextBlock Text="Live Sync" FontSize="17" FontWeight="SemiBold" Grid.ColumnSpan="2" Margin="0,0,0,16" />
+              <TextBlock Grid.Row="1" Text="All pairs" VerticalAlignment="Center" /><CheckBox x:Name="AutomationEnabledBox" Grid.Row="1" Grid.Column="1" Content="Live sync for enabled pairs" ToolTip="Turns live sync on or off for every enabled pair. Individual pairs can still be paused." AutomationProperties.Name="Live sync for all enabled pairs" />
+              <TextBlock x:Name="AutomationIntervalLabel" Grid.Row="2" Text="Full safety check" VerticalAlignment="Center" Margin="0,10,0,0" /><StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,10,0,0"><TextBox x:Name="AutomationIntervalBox" Text="15" Width="70" AutomationProperties.LabeledBy="{Binding ElementName=AutomationIntervalLabel}" /><TextBlock Text="minutes" Margin="8,0,0,0" VerticalAlignment="Center" /><TextBlock Text="Checks for changes that were not reported promptly" Foreground="{DynamicResource MutedInk}" Margin="16,0,0,0" VerticalAlignment="Center" /></StackPanel>
+              <TextBlock Grid.Row="3" Text="Windows" VerticalAlignment="Center" Margin="0,10,0,0" /><CheckBox x:Name="StartWithWindowsBox" Grid.Row="3" Grid.Column="1" Content="Start Sync Shark with Windows in the notification area" Margin="0,10,0,0" AutomationProperties.Name="Start Sync Shark with Windows" />
+              <Button Grid.Row="4" Grid.Column="1" Style="{StaticResource PrimaryButton}" Content="Save live sync" Click="SaveAutomation_Click" HorizontalAlignment="Left" Margin="0,16,0,0" />
+            </Grid>
+          </Border>
+          <TextBlock x:Name="AutomationStatus" Margin="2,12,0,20" Foreground="{DynamicResource MutedInk}" Text="Live sync is off. Sync now remains available." TextWrapping="Wrap" />
+          <Border x:Name="TransferSettingsPanel" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="9" Padding="18">
+            <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="190" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+              <TextBlock Text="Transfer controls" FontSize="17" FontWeight="SemiBold" Grid.ColumnSpan="2" Margin="0,0,0,16" />
+              <TextBlock x:Name="ConcurrentPairsLabel" Grid.Row="1" Text="Concurrent pairs" VerticalAlignment="Center" /><TextBox x:Name="ConcurrentPairsBox" Grid.Row="1" Grid.Column="1" Text="2" Width="90" HorizontalAlignment="Left" ToolTip="Maximum number of pairs that may reconcile at the same time (1–8). File effects inside each pair remain durably ordered." AutomationProperties.LabeledBy="{Binding ElementName=ConcurrentPairsLabel}" />
+              <TextBlock x:Name="UploadLimitLabel" Grid.Row="2" Text="Upload limit" VerticalAlignment="Center" Margin="0,10,0,0" /><StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,10,0,0"><TextBox x:Name="UploadLimitBox" Text="0" Width="90" ToolTip="Upload bandwidth in KiB/s. Use 0 for unlimited." AutomationProperties.LabeledBy="{Binding ElementName=UploadLimitLabel}" /><TextBlock Text="KiB/s (0 = unlimited)" Margin="8,0,0,0" VerticalAlignment="Center" Foreground="{DynamicResource MutedInk}" /></StackPanel>
+              <TextBlock x:Name="DownloadLimitLabel" Grid.Row="3" Text="Download limit" VerticalAlignment="Center" Margin="0,10,0,0" /><StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal" Margin="0,10,0,0"><TextBox x:Name="DownloadLimitBox" Text="0" Width="90" ToolTip="Download bandwidth in KiB/s. Use 0 for unlimited." AutomationProperties.LabeledBy="{Binding ElementName=DownloadLimitLabel}" /><TextBlock Text="KiB/s (0 = unlimited)" Margin="8,0,0,0" VerticalAlignment="Center" Foreground="{DynamicResource MutedInk}" /></StackPanel>
+              <Button x:Name="SaveTransferSettingsButton" Grid.Row="4" Grid.Column="1" Style="{StaticResource PrimaryButton}" Content="Save transfer controls" Click="SaveTransferSettings_Click" HorizontalAlignment="Left" Margin="0,16,0,0" />
+            </Grid>
+          </Border>
+          <TextBlock x:Name="TransferSettingsStatus" Margin="2,12,0,0" Foreground="{DynamicResource MutedInk}" Text="Two pairs may run concurrently; bandwidth is unlimited." TextWrapping="Wrap" />
+        </StackPanel></ScrollViewer>
+      </Border>
+    </Grid>
+
+    <!-- UI29 remainder: the one local Create Folder dialog. It owns no permanent form field, it only
+         appears while the pair editor is open, and its Create action calls the same shared
+         LocalFolderActions the CLI uses. -->
+    <Border x:Name="CreateLocalFolderDialogHost" Grid.RowSpan="2" Grid.ColumnSpan="2" Panel.ZIndex="40" Visibility="Collapsed" Background="#99000000" KeyboardNavigation.TabNavigation="Cycle" KeyboardNavigation.ControlTabNavigation="Cycle" PreviewKeyDown="CreateLocalFolder_KeyDown">
+      <Border Width="470" MaxWidth="620" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="10" Padding="22">
+        <StackPanel>
+          <TextBlock Text="Create folder" FontSize="19" FontWeight="SemiBold" />
+          <TextBlock Text="The new folder is created inside the existing folder below. Nothing is ticked for sync, and no pair, account or sync state changes." Foreground="{DynamicResource MutedInk}" TextWrapping="Wrap" Margin="0,6,0,0" />
+          <TextBlock x:Name="CreateLocalFolderParentText" Margin="0,12,0,0" FontWeight="SemiBold" TextWrapping="Wrap" AutomationProperties.Name="Folder that will contain the new folder" />
+          <TextBlock x:Name="CreateLocalFolderNameLabel" Text="Folder name:" Margin="0,14,0,5" />
+          <TextBox x:Name="CreateLocalFolderNameBox" MaxLength="255" AutomationProperties.LabeledBy="{Binding ElementName=CreateLocalFolderNameLabel}" />
+          <TextBlock x:Name="CreateLocalFolderErrorText" Margin="0,8,0,0" Foreground="{DynamicResource ErrorBrush}" TextWrapping="Wrap" Visibility="Collapsed" AutomationProperties.LiveSetting="Polite" />
+          <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0">
+            <Button x:Name="CreateLocalFolderCancelButton" Content="Cancel" Click="CreateLocalFolderCancel_Click" AutomationProperties.Name="Cancel the new folder" />
+            <Button x:Name="CreateLocalFolderConfirmButton" Style="{StaticResource PrimaryButton}" Content="Create" Click="CreateLocalFolderConfirm_Click" Margin="10,0,0,0" AutomationProperties.Name="Create the new folder" />
+          </StackPanel>
+        </StackPanel>
+      </Border>
+    </Border>
+  </Grid>
+</Window>
