@@ -2,7 +2,13 @@ using System.Text.Json;
 
 namespace Massdex.SyncShark.V2;
 
-public sealed record DateRepairExample(string Path, DateTimeOffset OldUtc, DateTimeOffset NewUtc, string Outcome);
+public sealed record DateRepairExample(string Path, DateTimeOffset OldUtc, DateTimeOffset NewUtc, string Outcome)
+{
+    public string? Hash { get; init; }
+    public string? ObjectId { get; init; }
+    public string? ObjectKey { get; init; }
+    public long Size { get; init; }
+}
 public sealed record DateRepairReport(string PairId, bool DryRun, long Examined, long Eligible, long Changed,
     long Skipped, string ReportFile, IReadOnlyList<DateRepairExample> Examples)
 {
@@ -13,7 +19,7 @@ public sealed record DateRepairReport(string PairId, bool DryRun, long Examined,
 }
 
 /// <summary>Metadata-only repair. No writer or upload API is accepted by this service.</summary>
-internal static class DateRepair
+internal static partial class DateRepair
 {
     internal static (long Start, long End) UtcRange(DateOnly? localDate, DateRepairBound? from, DateRepairBound? to,
         TimeZoneInfo zone)
@@ -48,11 +54,12 @@ internal static class DateRepair
         IReadOnlyList<string> productOwned, CancellationToken ct, DateOnly? localDate = null, string afterKey = "",
         Func<Func<Task>, Task>? withPageLock = null,
         Func<IReadOnlyList<string>, Action<string, Exception>, CancellationToken, Task<IReadOnlyDictionary<string, ItemState?>>>? remotePage = null,
-        DateRepairBound? from = null, DateRepairBound? to = null, string? excludeList = null, bool reportMismatch = false)
+        DateRepairBound? from = null, DateRepairBound? to = null, string? excludeList = null, bool reportMismatch = false,
+        IReadOnlyList<DateProvenanceSource>? provenanceSources = null)
     {
         _ = UtcRange(localDate, from, to, TimeZoneInfo.Local);
         store.PrepareDateRepairExclusions(excludeList);
-        store.PrepareDateWriteEvidence(pair.PairId);
+        store.PrepareDateWriteEvidence(pair.PairId, provenanceSources);
         var side = pair.A.Provider == SyncProviders.Local ? Side.A : Side.B;
         var localRoot = side == Side.A ? pair.A : pair.B;
         var cloudRoot = side == Side.A ? pair.B : pair.A;
@@ -77,6 +84,8 @@ internal static class DateRepair
         {
             lock (logGate) { log.WriteLine(JsonSerializer.Serialize(row)); }
         }
+        Record(new { Outcome = "header", PairId = pair.PairId, RootId = localRoot.RootId, RootObjectId = localRoot.RootObjectId });
+        logFile.Flush(true);
         long examined = 0, eligible = 0, changed = 0, skipped = 0, missingHistory = 0, notWritten = 0, mismatches = 0;
         var examples = new List<DateRepairExample>(10);
         var after = afterKey;
@@ -216,13 +225,13 @@ internal static class DateRepair
                         provenance = store.DateWriteSkipReason(side, local with { Mtime = old }, verifiedHash);
                         if (reportMismatch)
                         {
-                            if (provenance is null) return;
                             if ((old - current.Mtime).Duration() < TimeSpan.FromDays(1)) return;
                             if (provenance == "reliable Sync Shark local write history unavailable") Interlocked.Increment(ref missingHistory);
-                            else Interlocked.Increment(ref notWritten);
+                            else if (provenance is not null) Interlocked.Increment(ref notWritten);
                             Interlocked.Increment(ref mismatches);
+                            var evidence = store.DateLogCorrelated(local with { Mtime = old }) ? "log-correlated" : "no evidence";
                             lock (logGate) csv!.WriteLine(string.Join(",", Cell(local.Path), Cell(old.ToString("O")),
-                                Cell(current.Mtime.ToString("O")), Cell(provenance)));
+                                Cell(current.Mtime.ToString("O")), Cell(evidence)));
                             Record(new { Path = local.Path, OldUtc = old, NewUtc = current.Mtime, Outcome = "mismatch", Reason = provenance });
                             return;
                         }
@@ -230,7 +239,8 @@ internal static class DateRepair
                         // date was proven above. A genuinely changed date remains protected by the held-file checks.
                         if (provenance is not null && old != current.Mtime) throw new IOException(provenance);
                         Interlocked.Increment(ref eligible);
-                        var example = new DateRepairExample(local.Path, old, current.Mtime, dryRun ? "would-repair" : "intent");
+                        var example = new DateRepairExample(local.Path, old, current.Mtime, dryRun ? "would-repair" : "intent")
+                        { Hash = verifiedHash, ObjectId = objectId, ObjectKey = baseline.ObjectKey, Size = file.Length };
                         Record(example);
                         // Persist the actual held-handle OldUtc, including a crash survivor whose inventory is stale.
                         lock (logGate) logFile.Flush(true);
@@ -279,6 +289,7 @@ internal static class DateRepair
                         (from is { } first ? $" --from {first}" : "") +
                         (to is { } last ? $" --to {last}" : "") +
                         (excludeList is not null ? $" --exclude-list \"{Path.GetFullPath(excludeList)}\"" : "") +
+                        string.Concat((provenanceSources ?? []).Select(source => $" --provenance-log \"{source.File}\" --provenance-prefix \"{(source.Prefix.Length == 0 ? "." : source.Prefix)}\"")) +
                         (pageStart.Length > 0 ? $" --after \"{pageStart}\"" : "") });
                 logFile.Flush(true);
                 Console.Error.WriteLine($"Date repair stopped: {error.Message}. Resume instructions and page cursor are in {reportPath}");

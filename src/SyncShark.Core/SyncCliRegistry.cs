@@ -31,7 +31,7 @@ public static class SyncCliRegistry
         , "--description", "--choices", "--group", "--filter", "--seconds", "--side",
         "--categories", "--severity", "--entity", "--run", "--order", "--type", "--since", "--after", "--before",
         "--source", "--destination", "--bytes", "--sha256", "--local-root", "--source-sha256", "--draft",
-        "--keep", "--token", "--archive", "--local-date", "--from", "--to", "--exclude-list",
+        "--keep", "--token", "--archive", "--local-date", "--from", "--to", "--exclude-list", "--audit-log", "--provenance-log", "--provenance-prefix",
         RepeatableExclude,
         ..DropboxCliCatalog.ValueOptions
     ];
@@ -117,14 +117,19 @@ public static class SyncCliRegistry
             "no local or remote file is touched",
             "the product state and the exclusive product lock", "direct", "--pair,--archive,--drop-unfinished,--yes",
             Mutating: true, RequiresYes: true, RequiresPair: true),
-        new("dates repair", "dates repair --pair <exact-id> [--dry-run] [--yes] [--local-date yyyy-MM-dd | --from <local-date-or-time> --to <local-date-or-time>] [--exclude-list <file>] [--after <key>]", SyncCliRequestKind.State, "yes",
+        new("dates repair", "dates repair --pair <exact-id> [--dry-run] [--yes] [--local-date yyyy-MM-dd | --from <local-date-or-time> --to <local-date-or-time>] [--exclude-list <file>] [--after <key>] [--provenance-log <file> ...] [--provenance-prefix <relative-prefix> ...]", SyncCliRequestKind.State, "yes",
             "repairs newer local download timestamps only after verifying identical baseline and Dropbox content; " +
-            "logs every date change, never changes content or uploads; --dry-run reports without changing dates",
-            "the v2 store and exclusive product/run locks", "direct", "--pair,--dry-run,--yes,--local-date,--from,--to,--exclude-list,--after",
+            "logs every date change, never changes content or uploads; --dry-run reports without changing dates; " +
+            "--provenance-log is repeatable; --provenance-prefix maps log paths under a relative pair folder (default .); " +
+            "give one prefix for all logs or one per log in matching order",
+            "the v2 store and exclusive product/run locks", "direct", "--pair,--dry-run,--yes,--local-date,--from,--to,--exclude-list,--after,--provenance-log,--provenance-prefix",
             Mutating: true, RequiresPair: true),
-        new("dates report-mismatch", "dates report-mismatch --pair <exact-id> [--local-date yyyy-MM-dd | --from <local-date-or-time> --to <local-date-or-time>] [--exclude-list <file>] [--after <key>]",
+        new("dates restore", "dates restore --audit-log <file> [--dry-run]", SyncCliRequestKind.State, "explicit command",
+            "restores audited original dates only while repaired date, file identity and content still match",
+            "the v2 store and exclusive product/run locks", "direct", "--audit-log,--dry-run", Mutating: true),
+        new("dates report-mismatch", "dates report-mismatch --pair <exact-id> [--local-date yyyy-MM-dd | --from <local-date-or-time> --to <local-date-or-time>] [--exclude-list <file>] [--after <key>] [--provenance-log <file> ...] [--provenance-prefix <relative-prefix> ...]",
             SyncCliRequestKind.State, "none", "read-only date mismatch report; writes a CSV path list, never changes file dates or content; missing write provenance is unknown, not proof of a user edit",
-            "the v2 store and exclusive product/run locks", "direct", "--pair,--local-date,--from,--to,--exclude-list,--after", RequiresPair: true),
+            "the v2 store and exclusive product/run locks", "direct", "--pair,--local-date,--from,--to,--exclude-list,--after,--provenance-log,--provenance-prefix", RequiresPair: true),
         new("pairs rescan", "pairs rescan --pair <exact-id> [--side a|b|both] --yes", SyncCliRequestKind.State, "yes",
             "forgets the pair's stored scan cursors for the chosen side(s) so its next run re-reads those roots in " +
             "full; baselines, live rows and tombstones are untouched and no file is changed",
@@ -695,6 +700,8 @@ public static class SyncCliRegistry
             : row.Options.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         var options = new Dictionary<string, string?>(StringComparer.Ordinal);
         var excludes = new List<string>();
+        var provenanceLogs = new List<string>();
+        var provenancePrefixes = new List<string>();
         while (next < tokens.Count)
         {
             var option = tokens[next++];
@@ -706,6 +713,13 @@ public static class SyncCliRegistry
                     ? $"The option {option} is not supported by '{command}'."
                     : $"Unknown option '{option}' for '{command}'. Allowed options: " +
                       (allowed.Length == 0 ? "none" : string.Join(", ", allowed)) + ".");
+            if (option is "--provenance-log" or "--provenance-prefix")
+            {
+                if (next >= tokens.Count || tokens[next].StartsWith("--", StringComparison.Ordinal))
+                    throw new SyncCliUsageException($"The option {option} requires a value.");
+                var values = option == "--provenance-log" ? provenanceLogs : provenancePrefixes;
+                values.Add(tokens[next++]); options[option] = values[0]; continue;
+            }
             if (option == RepeatableExclude)
             {
                 if (next >= tokens.Count || tokens[next].StartsWith("--", StringComparison.Ordinal))
@@ -831,8 +845,11 @@ public static class SyncCliRegistry
             exactVersion is null || !System.Text.RegularExpressions.Regex.IsMatch(exactVersion,
                 @"^[0-9]+\.[0-9]+\.[0-9]+$", System.Text.RegularExpressions.RegexOptions.CultureInvariant)))
             throw new SyncCliUsageException("updates apply requires --update <exact-version>, for example 0.3.35.");
+        if (command == "dates restore" && string.IsNullOrWhiteSpace(options.GetValueOrDefault("--audit-log")))
+            throw new SyncCliUsageException("dates restore requires --audit-log <file>.");
         if (command is "dates repair" or "dates report-mismatch")
         {
+            _ = V2.DateProvenanceLog.Sources(provenanceLogs, provenancePrefixes);
             DateOnly? Day(string option)
             {
                 if (!options.TryGetValue(option, out var text)) return null;
@@ -943,7 +960,7 @@ public static class SyncCliRegistry
                 : null,
             options.ContainsKey("--enable"), options.ContainsKey("--disable"),
             options.GetValueOrDefault("--description"), options.GetValueOrDefault("--choices"),
-            options.ContainsKey("--allow-recommended"), excludes, verbose);
+            options.ContainsKey("--allow-recommended"), excludes, verbose, provenanceLogs, provenancePrefixes);
     }
 
     private static string RequireSelector(string? value, string option)
@@ -1038,6 +1055,10 @@ public static class SyncCliRegistry
             case "pairs remove":
                 return await operations.RemovePairAsync(invocation.PairId!, invocation.Value("--archive")!,
                     invocation.Flag("--drop-unfinished"), cancellationToken);
+            case "dates restore":
+                if (runtime is not V2.V2CliRuntime v2Restore)
+                    throw new SyncCliUnsupportedException("Date restore is available in core v2.");
+                return await v2Restore.RestoreDatesAsync(invocation.Value("--audit-log")!, invocation.Flag("--dry-run"), cancellationToken);
             case "dates repair":
             case "dates report-mismatch":
                 if (runtime is not V2.V2CliRuntime v2Dates)
@@ -1046,7 +1067,8 @@ public static class SyncCliRegistry
                     invocation.Value("--local-date") is { } date ? DateOnly.ParseExact(date, "yyyy-MM-dd", CultureInfo.InvariantCulture) : null,
                     invocation.Value("--after") ?? "",
                     V2.DateRepairBound.Parse(invocation.Value("--from")), V2.DateRepairBound.Parse(invocation.Value("--to")),
-                    invocation.Value("--exclude-list"), invocation.Command == "dates report-mismatch");
+                    invocation.Value("--exclude-list"), invocation.Command == "dates report-mismatch",
+                    V2.DateProvenanceLog.Sources(invocation.ProvenanceLogs, invocation.ProvenancePrefixes));
             case "pairs rescan":
                 return await operations.RescanPairAsync(invocation.PairId!, invocation.Value("--side"),
                     cancellationToken);
@@ -1750,7 +1772,7 @@ public static class SyncCliRegistry
                 foreach (var rule in preview.Rules) builder.AppendLine("  " + rule);
                 foreach (var warning in preview.Warnings) builder.AppendLine("  warning: " + warning);
                 foreach (var item in preview.Examples)
-                    builder.AppendLine($"  {item.Recommendation}: {item.RelativePath} — {item.Reason}");
+                    builder.AppendLine($"  {item.Recommendation}: {item.RelativePath} â€” {item.Reason}");
                 builder.AppendLine("  Selection is unchanged. Use folders include --pair " + preview.PairId +
                     " --path \"" + preview.RelativePath + "\" --yes to include it for the next run.");
                 break;
@@ -1864,7 +1886,7 @@ public static class SyncCliRegistry
         foreach (var row in rebuildables)
         {
             builder.AppendLine($"  rebuildable {row.Id}{(row.Chosen ? " (chosen to stop syncing)" : "")}: " +
-                               $"{row.Folders} folder(s), {row.Files} file(s), {row.Bytes} byte(s) — {row.Explanation}" +
+                               $"{row.Folders} folder(s), {row.Files} file(s), {row.Bytes} byte(s) â€” {row.Explanation}" +
                                (row.Examples.Count == 0 ? "" : " e.g. " + string.Join(", ", row.Examples)));
             foreach (var folder in row.Candidates ?? [])
                 builder.AppendLine($"    {folder.Path} (chosen={folder.Chosen.ToString().ToLowerInvariant()})");

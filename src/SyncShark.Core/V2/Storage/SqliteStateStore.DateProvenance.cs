@@ -6,8 +6,19 @@ public sealed partial class SqliteStateStore
     // from a baseline, generation, prepare, Recovery archive (the predecessor), or a pending intent.
     // The retained-version-restored notice is emitted in CommitResults only after a successful restore;
     // its Winner records the actual published identity/hash/mtime. Closed notices remain useful evidence.
-    internal void PrepareDateWriteEvidence(string pairId) => InStore(() =>
+    internal void PrepareDateWriteEvidence(string pairId, IReadOnlyList<DateProvenanceSource>? sources = null) => InStore(() =>
     {
+        StoreSchema.Execute(_connection, null,
+            "CREATE TEMP TABLE IF NOT EXISTS date_log_evidence(path TEXT,written INTEGER,PRIMARY KEY(path,written)) WITHOUT ROWID; DELETE FROM date_log_evidence;");
+        using (var transaction = _connection.BeginTransaction())
+        {
+            foreach (var source in sources ?? [])
+                foreach (var line in File.ReadLines(source.File))
+                    if (DateProvenanceLog.TryParse(line, source.Prefix, out var path, out var occurred))
+                        StoreSchema.Execute(_connection, transaction, "INSERT OR IGNORE INTO date_log_evidence VALUES($path,$time);",
+                            ("$path", RowCodec.Key(path)), ("$time", occurred.UtcTicks));
+            transaction.Commit();
+        }
         StoreSchema.Execute(_connection, null,
             "CREATE TEMP TABLE IF NOT EXISTS date_write_evidence(side INTEGER,path TEXT,object_id TEXT,hash TEXT,size INTEGER,mtime INTEGER,written INTEGER," +
             "PRIMARY KEY(side,path,object_id,mtime)) WITHOUT ROWID; DELETE FROM date_write_evidence;");
@@ -28,8 +39,14 @@ public sealed partial class SqliteStateStore
         }
     });
 
+    internal bool DateLogCorrelated(ItemState local) => InStore(() => StoreSchema.Scalar(_connection, null,
+        "SELECT 1 FROM date_log_evidence WHERE path=$path AND written >= $time AND written <= $end LIMIT 1;",
+        ("$path", RowCodec.Key(local.Path)), ("$time", local.Mtime.UtcTicks),
+        ("$end", Math.Min(DateTime.MaxValue.Ticks, local.Mtime.UtcTicks + TimeSpan.FromSeconds(2).Ticks))) is not null);
+
     internal string? DateWriteSkipReason(Side side, ItemState local, string? hash) => InStore(() =>
     {
+        if (DateLogCorrelated(local)) return null;
         const string missing = "reliable Sync Shark local write history unavailable";
         if (StoreSchema.Scalar(_connection, null,
             "SELECT 1 FROM date_write_evidence WHERE side=$side AND path=$path AND object_id=$id LIMIT 1;",

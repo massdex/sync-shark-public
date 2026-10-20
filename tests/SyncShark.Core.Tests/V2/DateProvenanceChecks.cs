@@ -20,6 +20,7 @@ internal static class DateProvenanceChecks
 
     internal static async Task RunAsync(string root)
     {
+        await DateLogRestoreChecks.RunAsync(Path.Combine(root, "log-restore"));
         Directory.CreateDirectory(root);
         var files = Path.Combine(root, "files"); Directory.CreateDirectory(files);
         var state = Path.Combine(root, "state");
@@ -48,8 +49,8 @@ internal static class DateProvenanceChecks
         Task<ItemState?> Remote(string path, CancellationToken _) => Task.FromResult<ItemState?>(clouds[path]);
         var report = await DateRepair.RunAsync(store, pair, Remote, root, true, [], CancellationToken.None, reportMismatch: true);
         var csv = File.ReadAllText(report.CsvFile!);
-        LocalChecks.Require(report.Mismatches == 2 && report.MissingWriteHistory == 1 && report.LocalDateNotWritten == 1 &&
-            csv.Contains("user-date") && csv.Contains("no-history") && !csv.Contains("\"written\""),
+        LocalChecks.Require(report.Mismatches == 3 && report.MissingWriteHistory == 1 && report.LocalDateNotWritten == 1 &&
+            csv.Contains("user-date") && csv.Contains("no-history") && csv.Contains("\"written\"") && csv.Contains("no evidence"),
             "read-only mismatch CSV distinguishes nonmatching write from missing history");
         LocalChecks.Require(locals.All(item => File.GetLastWriteTimeUtc(Path.Combine(files, item.Path)) == now.UtcDateTime),
             "mismatch reporting changes no dates");

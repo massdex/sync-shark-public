@@ -798,7 +798,7 @@ public sealed record SyncCliInvocation(SyncCliRequestKind Kind, string Command, 
     IReadOnlyDictionary<string, string?>? Options = null, bool RequiresPair = false, int? Minutes = null,
     string? LocalRoot = null, string? Name = null, int? Priority = null, bool Enable = false,
     bool Disable = false, string? Description = null, string? Choices = null, bool AllowRecommended = false,
-    IReadOnlyList<string>? Excludes = null, bool Verbose = false)
+    IReadOnlyList<string>? Excludes = null, bool Verbose = false, IReadOnlyList<string>? ProvenanceLogs = null, IReadOnlyList<string>? ProvenancePrefixes = null)
 {
     public string? Value(string name) =>
         Options is not null && Options.TryGetValue(name, out var value) ? value : null;
