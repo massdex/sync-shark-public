@@ -5,7 +5,7 @@ namespace Massdex.SyncShark.V2;
 /// <summary>Checks the v2 host's mapped, empty ("E"), not-in-v2 ("X") and pass-through members against fakes.</summary>
 internal static class SyncHostChecks
 {
-    private const string ConnectionA = "connection-a7650dcf32d06f72d2d67a83";
+    private const string ConnectionA = "connection-a00000000000000000000000";
     private const string ConnectionB = "connection-b00000000000000000000000";
 
     public static async Task RunAsync()
