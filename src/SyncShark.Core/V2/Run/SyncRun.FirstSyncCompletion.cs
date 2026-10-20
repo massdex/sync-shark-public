@@ -1,0 +1,216 @@
+namespace Massdex.SyncShark.V2;
+
+public sealed partial class SyncRun
+{
+    // The initial review authorizes reconciliation of the state it saw, not ongoing changes.
+    // Keep the compact prepare-time comparison on the item until ordinary planning establishes a baseline.
+    internal Plan DeferPostPreviewChanges(PairDef pair, Plan plan,
+        IReadOnlyDictionary<string, PrepareMatch> matches)
+    {
+        var deferred = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var action in plan.Actions)
+        {
+            if (!matches.TryGetValue(action.Path, out var match)) continue;
+            var a = _store.Live(pair.A.RootId, [action.Path]).FirstOrDefault();
+            var b = _store.Live(pair.B.RootId, [action.Path]).FirstOrDefault();
+            if (a is not null && b is not null && match.Unchanged(Side.A, a) && match.Unchanged(Side.B, b)) continue;
+            deferred.Add(action.Path);
+            if (_store.SyncRetryAt(pair.PairId, action.Path)?.Kind != "decision")
+                _store.SaveSyncRetry(pair.PairId, new(action.Path, "post-preview", 0, "", DateTimeOffset.MinValue, match));
+        }
+        foreach (var held in plan.UnreviewedHeldDeletions)
+            if (_store.SyncRetryAt(pair.PairId, held.Path)?.Kind != "decision")
+                _store.SaveSyncRetry(pair.PairId, new(held.Path, "post-preview", 0, "", DateTimeOffset.MinValue, Held: held));
+        if (deferred.Count == 0) return plan;
+        var guard = ActionPredicates(pair, LeftAlone(pair).WithPending(deferred));
+        return ApplySafetyFilter(pair, guard, plan) with
+        {
+            // A changed file is not an issue merely because it changed after the preview.
+            Notices = plan.Notices.Where(notice => !deferred.Contains(notice.Path)).ToArray()
+        };
+    }
+
+    internal Plan DeferUnreviewedDeletes(PairDef pair, Plan plan, IReadOnlySet<string> reviewed)
+    {
+        var unreviewed = FolderDelete.SplitVictims(_store, pair, plan, reviewed).Guarded;
+        if (unreviewed.Count == 0) return plan;
+        var blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var key in unreviewed)
+        {
+            blocked.Add(key);
+            foreach (var ancestor in PairPath.Ancestors(key[2..])) blocked.Add(key[..2] + ancestor);
+        }
+        var grownChoices = plan.Actions.Where(action => FolderDelete.Expands(action) && action.ChoiceRemove &&
+            reviewed.Contains(FolderDelete.VictimKey(action.Target, action.Path)) &&
+            blocked.Contains(FolderDelete.VictimKey(action.Target, action.Path))).ToArray();
+        var notices = new List<Notice>(plan.Notices);
+        foreach (var choice in grownChoices)
+        {
+            var notice = new Notice(pair.PairId, 40, NoticeKind.UserDecision, choice.Path,
+                "This reviewed folder removal gained an unreviewed child. The whole folder choice was held; nothing under it was deleted." + NoticeChoices.RemovalAttentionHelp,
+                "reviewed-folder-grew");
+            notices.Add(notice);
+            WriteNotices([notice]);
+        }
+        var grownGuard = LinkExclusions.None.WithPending(grownChoices.Select(choice => choice.Path));
+        bool touchesGrowth(string path) => grownGuard.Covers(path) || grownGuard.Contains(path);
+        var actions = new List<SyncAction>(plan.Actions.Count);
+        foreach (var action in plan.Actions)
+        {
+            if (touchesGrowth(action.Path) || action.FromPath is { } from && touchesGrowth(from) ||
+                action.Source is { } source && touchesGrowth(source.Path)) continue;
+            if (action.Kind != ActionKind.Delete || !blocked.Contains(FolderDelete.VictimKey(action.Target, action.Path)))
+            { actions.Add(action); continue; }
+            if (_store.SyncRetryAt(pair.PairId, action.Path)?.Kind != "decision")
+                _store.SaveSyncRetry(pair.PairId, new(action.Path, "post-preview", 0, "", DateTimeOffset.MinValue));
+        }
+        return plan with { Actions = actions, Notices = notices };
+    }
+
+    internal Plan HoldGrownRemoveChoices(PairDef pair, Plan plan, IReadOnlyList<OneSidedChoice> choices,
+        IReadOnlyList<OneSidedChoice> grown)
+    {
+        var normalized = OneSidedChoiceResolver.Normalize(choices);
+        var changed = grown.ToHashSet();
+        bool affected(Side side, string path) => OneSidedChoiceResolver.Resolve(normalized, side, path) is { } owner && changed.Contains(owner);
+        var paths = plan.Actions.Where(action => action.ChoiceRemove && affected(action.Target, action.Path))
+            .Select(action => action.Path).Concat(plan.HeldDeletions.Where(item => affected(item.Local, item.Path)).Select(item => item.Path))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var filtered = ApplySafetyFilter(pair, ActionPredicates(pair, LeftAlone(pair).WithPending(paths)), plan);
+        return filtered with
+        {
+            HeldDeletions = filtered.HeldDeletions.Where(item => !paths.Contains(item.Path)).ToArray(),
+            Notices = filtered.Notices.Concat(paths.Select(path => new Notice(pair.PairId, 40, NoticeKind.UserDecision, path,
+                "This reviewed removal now covers more content than was approved, so it was held without deleting anything." +
+                NoticeChoices.RemovalAttentionHelp, "reviewed-folder-grew"))).ToArray()
+        };
+    }
+
+    private void UpdateRetryWork(PairDef pair, Plan plan, Tally tally, IReadOnlyList<SyncRetry> previous,
+        IReadOnlyList<string> pending, Func<string, bool> evaluated, bool scanComplete)
+    {
+        var byPath = previous.ToDictionary(item => item.Path, StringComparer.OrdinalIgnoreCase);
+        var leftAlone = LeftAlone(pair);
+        var includes = BuildPredicates(pair, PairInclude.ForAction);
+        var ignoreRules = PairInclude.IgnoreRules(pair);
+        var decisions = _store.OpenNotices(pair.PairId).Where(notice => notice.Kind == NoticeKind.UserDecision)
+            .Select(notice => notice.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var uncertain = OutstandingFootprints(pair.PairId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var reasons = FailureReasons(plan, tally);
+        var notices = _store.OpenNotices(pair.PairId).Where(notice => notice.ReasonKey is "sync-retry" or "deletion-history-unavailable")
+            .ToLookup(notice => notice.Path, StringComparer.OrdinalIgnoreCase);
+        var remaining = pending.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var failed = plan.Actions.Where(action => action.Kind != ActionKind.Hold && !tally.WasSettled(action.ActionId))
+            .Select(action => action.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        remaining.UnionWith(failed);
+        remaining.UnionWith(plan.Notices.Where(notice => notice.ReasonKey == PlanNotices.ContentUnconfirmed.Key || notice.ReasonKey == "sync-retry").Select(notice => notice.Path));
+        var settled = plan.Actions.Where(action => tally.WasSettled(action.ActionId))
+            .SelectMany(action => action.Kind == ActionKind.Move && action.FromPath is not null
+                ? new[] { action.Path, action.FromPath } : new[] { action.Path })
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in previous)
+        {
+            // Read-stage debt is owned by RecordScanRetries, never by action/equality settlement.
+            if (plan.RecoveryPending.Contains(item.Path, StringComparer.OrdinalIgnoreCase))
+            { remaining.Remove(item.Path); continue; }
+            if (item.Kind == "scan" || item.ReadRoots is { Count: > 0 } ||
+                _store.SyncRetryAt(pair.PairId, item.Path)?.PendingNotice is not null)
+            { remaining.Remove(item.Path); continue; }
+            if (item.Kind == "deletion-evidence" && _store.SyncRetryAt(pair.PairId, item.Path)?.Kind == "post-preview")
+            { remaining.Remove(item.Path); continue; } // Recreated remote: immediate ordinary re-evaluation, not another failed evidence attempt.
+            if (_store.SyncRetryAt(pair.PairId, item.Path)?.Kind == "decision")
+            { remaining.Remove(item.Path); continue; }
+            var rebuildable = item.ReviewedActions?.Any(action => action.RebuildableRemove) == true;
+            var excluded = !rebuildable && (pair.Excluded.Any(path => PairPath.IsSelfOrUnder(item.Path, path)) ||
+                !includes.A(item.Path) || !includes.B(item.Path) || leftAlone.Covers(item.Path));
+            var a = _store.Live(pair.A.RootId, [item.Path]).FirstOrDefault();
+            var b = _store.Live(pair.B.RootId, [item.Path]).FirstOrDefault();
+            var ignored = SyncIgnorePolicy.IsIgnored(item.Path, (a ?? b)?.Kind == ItemKind.Folder, ignoreRules);
+            var refused = (a?.Flags.HasFlag(ItemFlags.ProviderNameRefused) ?? false) ||
+                (b?.Flags.HasFlag(ItemFlags.ProviderNameRefused) ?? false);
+            var absent = scanComplete && a is null && b is null && !uncertain.Contains(item.Path);
+            var equal = evaluated(item.Path) && a is not null && b is not null && Content.SameContent(a, b) == true;
+            if (excluded || ignored || decisions.Contains(item.Path) || refused || absent || !remaining.Contains(item.Path) && (settled.Contains(item.Path) || equal ||
+                item.Held is not null && !pending.Contains(item.Path, StringComparer.OrdinalIgnoreCase)))
+            {
+                remaining.Remove(item.Path);
+                _store.ClearSyncRetry(pair.PairId, item.Path);
+                if (item.Held is { } held)
+                    _store.RemoveDeletionEvidence(pair.PairId, held.Local == Side.A ? pair.B.RootId : pair.A.RootId, [item.Path]);
+                foreach (var notice in notices[item.Path])
+                    if (notice.NoticeId is not null) _store.CloseNotice(notice.NoticeId, excluded ? "exclude" : "resolved");
+            }
+            else remaining.Add(item.Path); // Back off unresolved no-action rows too; they cannot monopolize a bounded batch.
+        }
+        foreach (var path in remaining)
+        {
+            var old = _store.SyncRetryAt(pair.PairId, path) ?? byPath.GetValueOrDefault(path);
+            SaveFailedRetry(pair, path, reasons.GetValueOrDefault(path), old);
+        }
+    }
+
+    private void SaveFailedRetry(PairDef pair, string path, string? reason, SyncRetry? old)
+    {
+        if (old?.Kind == "decision") return;
+        var attempts = (old?.Attempts ?? 0) + 1;
+        var retry = (old ?? new SyncRetry(path, "sync", 0, "", DateTimeOffset.MinValue)) with
+        {
+            Attempts = attempts,
+            LastError = reason ?? (old?.LastError is { Length: > 0 } previous ? previous : "The item could not be confirmed or applied."),
+            RetryAfter = _time.GetUtcNow().AddSeconds(Math.Min(300, 10 * Math.Pow(2, Math.Min(attempts - 1, 5))))
+        };
+        _store.SaveSyncRetry(pair.PairId, retry);
+        if (attempts >= 1 && retry.Kind is not ("planning" or "recovery"))
+            WriteNotices([new Notice(pair.PairId, 40, NoticeKind.Info, path,
+                $"Sync will retry this item later ({attempts} attempts): {retry.LastError}. Options: retry now / exclude / ignore.", "sync-retry")]);
+    }
+
+    private static Dictionary<string, string> FailureReasons(Plan plan, Tally tally)
+    {
+        var failed = tally.Failures.GroupBy(result => result.ActionId).ToDictionary(group => group.Key, group => group.Last().Reason);
+        var reasons = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var action in plan.Actions)
+            if (failed.GetValueOrDefault(action.ActionId) is { } reason) reasons[action.Path] = reason;
+        return reasons;
+    }
+
+    private void ParkFirstSyncWork(PairDef pair, Plan plan, Tally tally, IEnumerable<string> pending,
+        IEnumerable<string> unconfirmed, IEnumerable<string> blocked)
+    {
+        var held = plan.HeldDeletions.ToDictionary(item => item.Path, StringComparer.OrdinalIgnoreCase);
+        var reviewed = plan.Actions.Concat(_store.UnresolvedIntents(pair.PairId))
+            .Where(action => action.Kind != ActionKind.Hold && !tally.WasSettled(action.ActionId))
+            .GroupBy(action => action.ActionId).Select(group => group.Last())
+            .ToLookup(action => action.Path, StringComparer.OrdinalIgnoreCase);
+        var reasons = FailureReasons(plan, tally);
+        foreach (var path in pending.Concat(unconfirmed).Concat(blocked)
+            .Concat(plan.Actions.Where(action => action.Kind != ActionKind.Hold && !tally.WasSettled(action.ActionId))
+                .Select(action => action.Path)).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            // Recovery holds already retained exact reviewed authority before filtering effects.
+            if (plan.RecoveryPending.Contains(path, StringComparer.OrdinalIgnoreCase)) continue;
+            // A decision supersedes prepare authority. Preserve its proposal and dormant scheduling.
+            if (_store.SyncRetryAt(pair.PairId, path)?.Kind is "decision" or "reviewed-removal" or "reviewed-choice") continue;
+            if (_store.Live(pair.A.RootId, [path]).Concat(_store.Live(pair.B.RootId, [path]))
+                .Any(item => item.Flags.HasFlag(ItemFlags.ProviderNameRefused)))
+            { _store.ClearSyncRetry(pair.PairId, path); continue; }
+            // A durable effect remains owned by pending_effect. This row owns the path's retry input,
+            // including pre-effect failures and unresolved deletion evidence that have no intent yet.
+            if (reviewed[path].Any() && reviewed[path].All(action => tally.WasSkipped(action.ActionId)) &&
+                !reviewed[path].Any(action => action.RebuildableRemove))
+            {
+                _store.SaveSyncRetry(pair.PairId, new(path, "post-preview", 0, "", DateTimeOffset.MinValue));
+                continue; // A changed precondition is ordinary work, not a new issue by itself.
+            }
+            var reason = reasons.GetValueOrDefault(path) ?? _store.SyncRetryAt(pair.PairId, path)?.LastError ??
+                "The reviewed effect could not be completed in this run.";
+            _store.SaveSyncRetry(pair.PairId, new(path, "first-sync", 1, reason, DateTimeOffset.MinValue,
+                Held: held.GetValueOrDefault(path), ReviewedActions: reviewed[path].ToArray(),
+                HeldReviewed: held.ContainsKey(path), HeldExpected: held.TryGetValue(path, out var heldItem)
+                    ? _store.Live(heldItem.Local == Side.A ? pair.A.RootId : pair.B.RootId, [path]).FirstOrDefault() : null,
+                PendingNotice: _store.SyncRetryAt(pair.PairId, path)?.PendingNotice));
+            WriteNotices([new Notice(pair.PairId, 40, NoticeKind.Info, path,
+                reason + " First sync is complete; this item will be retried. Options: retry now / exclude / ignore.", "sync-retry")]);
+        }
+    }
+}
