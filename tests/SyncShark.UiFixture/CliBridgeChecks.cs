@@ -515,7 +515,7 @@ internal static class CliBridgeChecks
             Console.WriteLine((queuedSeeded ? "EVIDENCE " : "UNEXECUTED ") +
                 "the retained queued operation before the boundary: " + queuedSeedDetail);
 
-            var activeRunId = "command-8b1d7c40e29f4a5d9c3e6b7a10f2d4e8";
+            var activeRunId = "command-f00d000000000000000000000000001c";
             File.WriteAllText(Path.Combine(hostRoot, "start-active-run"), activeRunId);
             var runDeadline = DateTime.UtcNow.AddSeconds(30);
             while (!File.Exists(Path.Combine(hostRoot, "active-run-id")) && DateTime.UtcNow < runDeadline)
@@ -1006,11 +1006,11 @@ internal static class CliBridgeChecks
     // the real authority API - never hand-written rows. The queued operation is reseeded only when the
     // parent explicitly asks for it, and it is never dispatched, so its pending effect never executes.
 
-    private const string RetainedOperationId = "operation-9d2f6c1a4b8e4703a5c9e1f7b3d80642";
-    private const string RetainedOperationKey = "idempotency-cli-retention-9d2f6c1a4b8e4703";
-    private const string RetainedObjectId = "object-5e8b2d7f4a1c4936b8e2f0d9a7c31485";
-    private const string RetainedMemberId = "member-3a7c1e5f9b2d4806a1c3e5f7b9d02468";
-    private const string RetainedRootBinding = "root-binding-fixture-4c8e1a6f2b9d3705";
+    private const string RetainedOperationId = "operation-f00d0000000000000000000000000026";
+    private const string RetainedOperationKey = "idempotency-cli-retention-f00d000000000008";
+    private const string RetainedObjectId = "object-f00d0000000000000000000000000016";
+    private const string RetainedMemberId = "member-f00d0000000000000000000000000005";
+    private const string RetainedRootBinding = "root-binding-fixture-f00d00000000001e";
 
 
     private static void SeedRetainedHistory(SyncAuthorityRuntimeHost host, string root)
