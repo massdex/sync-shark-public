@@ -57,11 +57,11 @@ internal static class NativeExplorerChecks
         if (string.IsNullOrEmpty(sid)) throw new IOException("The current fixture owner cannot be identified.");
         var fixtures = new Dictionary<string, string>
         {
-            ["0f13d2fa2f724e21afef6536fec88631"] = "d3e4b915e2904896a4e7f7e7330fa7c0",
-            ["43a03e565d504ff5b516983a3acee66e"] = "543134011b1d4d6ca028069391318619",
-            ["53769dcacbb6454a9b654923d507d6bb"] = "1e0daba4c55544fdafb56fcc0a2cd30c",
-            ["af221d682aa641b89d28a146d78e52fc"] = "aab7840b41934409bf33179168508a0a",
-            ["e7668994926e4b1c95d5b9e189c3dff0"] = "1e6901205d6f4297825a6af45c5401f5"
+            ["f00d0000000000000000000000000009"] = "f00d000000000000000000000000000e",
+            ["f00d000000000000000000000000001a"] = "f00d0000000000000000000000000017",
+            ["f00d0000000000000000000000000015"] = "f00d000000000000000000000000000d",
+            ["f00d0000000000000000000000000021"] = "f00d0000000000000000000000000004",
+            ["f00d0000000000000000000000000020"] = "f00d000000000000000000000000000f"
         };
         const string registryRoot = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\SyncRootManager\";
         foreach (var fixture in fixtures)

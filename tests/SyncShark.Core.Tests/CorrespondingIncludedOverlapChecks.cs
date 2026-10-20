@@ -252,7 +252,7 @@ internal static class CorrespondingIncludedOverlapChecks
                 "a"), OverlapMessage);
             // An unrelated child path shares no physical object and stays admissible.
             await fixture.CreatePathOperationAsync("op-child-z", ChildPair, ChildLeftRoot, "z");
-            Require(true, "OV637-3 an unrelated child path is not over-fenced by the alias projection");
+
             Require(historyLookups == 0,
                 "path-descriptive overlapping pairs retain both reservation outcomes without searching opaque hierarchy history per file");
             Require(candidateSnapshots > 0,
@@ -343,7 +343,7 @@ internal static class CorrespondingIncludedOverlapChecks
         // corrected projection must not over-fence it.
         await fixture.CreatePathOperationAsync("op-swap-child-other", SwappedFixture.ChildPairId,
             SwappedFixture.ChildLeftRoot, "a");
-        Require(true, "OV637-5 the swapped-endpoint projection fences exactly the crossed physical root");
+
     }
 
     // --------------------------------------------------------------------------------------------
@@ -360,7 +360,6 @@ internal static class CorrespondingIncludedOverlapChecks
             TimeSpan.FromMinutes(5));
         await RefuseAsync(() => fixture.CreatePathOperationAsync("op-issued-child", ChildPair, ChildLeftRoot,
             "a"), OverlapMessage);
-        Require(true, "OV637-3 an issued aliased reservation is fenced across the translation");
 
         // A FRESH database instance on the same retained file must re-derive the same alias fence.
         var reopened = new SyncAuthorityDatabase(fixture.DatabasePath);
@@ -373,7 +372,6 @@ internal static class CorrespondingIncludedOverlapChecks
             reopened);
         await RefuseAsync(() => fixture.CreatePathOperationAsync("op-restart-child2", ChildPair, ChildLeftRoot,
             "r2", reopened), OverlapMessage);
-        Require(true, "OV637-3 the aliased reservation fence is re-derived in both orders after a restart");
 
         // The ancestor/subtree fence across the alias also survives the restart, on its own retained file so
         // the subtree reservation cannot collide with the earlier exact-path reservations.
@@ -385,7 +383,7 @@ internal static class CorrespondingIncludedOverlapChecks
         await subtreeReopened.InitializeAsync(Installation, Profile, "ov637", "{}");
         await RefuseAsync(() => subtreeFixture.CreatePathOperationAsync("op-subtree-child", ChildPair,
             ChildLeftRoot, "r3", subtreeReopened), OverlapMessage);
-        Require(true, "OV637-3 the aliased ancestor/subtree fence is re-derived after a restart");
+
     }
 
     // --------------------------------------------------------------------------------------------
@@ -427,7 +425,8 @@ internal static class CorrespondingIncludedOverlapChecks
         // nesting, so the opaque alias fence is exercised here through the SAME two production decision
         // entries the projection uses, with the same independently bound proofs (see OPAQUE-FENCE-OPEN in the
         // result ledger). Real reservations on both retained cloud roots stay available for the fence itself.
-        await RefuseAsync(() => fixture.RegisterLocalPlanningRootAsync());
+        await RefuseAsync(() => fixture.RegisterLocalPlanningRootAsync(),
+            "The root overlaps another active pair or recovery authority boundary.");
         await fixture.RetainRootObservationsAsync();
         Require(await fixture.ActiveRootCountAsync() == 4,
             "OV637-4 local planning root requires current bound opaque hierarchy, not display ancestry");
@@ -494,11 +493,22 @@ internal static class CorrespondingIncludedOverlapChecks
         // 2. A SKIPPED HOST: with both pairs published but the bound context stale, the durable reservation
         // writer reached DIRECTLY still refuses the aliased collision instead of treating the missing alias
         // edges as independent roots.
-        await fixture.RetainRootObservationsAsync();
+        await fixture.RetainRootObservationsAsync(registerLocalRoot: false);
         await fixture.Db.RetainPairDefinitionAsync(fixture.Child, select: false);
         await fixture.ExpireRootObservationsAsync();
-        await RefuseAsync(() => fixture.RegisterLocalPlanningRootAsync());
-        Require(true, "OV637-6 stale hierarchy cannot admit even the same local planning root again");
+        Require(await fixture.ActiveRootCountAsync() == 3,
+            "OV637-6 the local planning root has not already been registered");
+        await RefuseAsync(() => fixture.RegisterLocalPlanningRootAsync(),
+            "The root overlaps another active pair or recovery authority boundary.");
+        Require(await fixture.ActiveRootCountAsync() == 3,
+            "OV637-6 stale proof refusal writes no local planning root");
+        await fixture.RestoreRootObservationsAsync();
+        await fixture.RegisterLocalPlanningRootAsync();
+        Require(await fixture.ActiveRootCountAsync() == 4,
+            "OV637-6 the identical local root registration succeeds after proof restoration");
+        // Operations require both endpoints. Stale the observations again only after
+        // establishing that the missing local root is admitted by the restored proof.
+        await fixture.ExpireRootObservationsAsync();
         await fixture.CreateChildGoogleOperationAsync("op-sentinel-child", "z", null);
         await RefuseAsync(() => fixture.CreateParentGoogleOperationAsync("op-sentinel-parent", NestedChildName + "/z"),
             "no bound provider hierarchy context is available");
@@ -508,7 +518,8 @@ internal static class CorrespondingIncludedOverlapChecks
         // admitted exactly as before.
         await fixture.RestoreRootObservationsAsync();
         await fixture.CreateParentGoogleOperationAsync("op-sentinel-control", NestedChildName + "/a");
-        Require(true, "OV637-6 sentinel: a path with no aliased competitor is never refused");
+        Require(await fixture.Db.FindRetainedActionIdAsync("idempotency-op-sentinel-control") is not null,
+            "OV637-6 the unrelated control operation is durably admitted");
     }
     // OV637-4/OV637-6: the retained observation supplies the bound context the opaque load/Retain/Save path
     // needs, and the real durable reservation then fences the aliased object in BOTH creation orders and across
@@ -960,13 +971,13 @@ internal static class CorrespondingIncludedOverlapChecks
         }
 
         /// <summary>D2/OV637-4: retain each published cloud root's own provider-verified observation.</summary>
-        internal async Task RetainRootObservationsAsync()
+        internal async Task RetainRootObservationsAsync(bool registerLocalRoot = true)
         {
             await Db.RetainOpaqueHierarchyObservationAsync(ParentSnapshot, Parent.Id, "dropbox", 1);
             await Db.RetainOpaqueHierarchyObservationAsync(ChildSnapshot, Child.Id, "dropbox", 1);
             // Planning requires both endpoints. Admit the local endpoint only after the
             // independently bound cloud observations can prove the complete correspondence.
-            await RegisterLocalPlanningRootAsync();
+            if (registerLocalRoot) await RegisterLocalPlanningRootAsync();
         }
 
         internal Task RegisterLocalPlanningRootAsync() =>

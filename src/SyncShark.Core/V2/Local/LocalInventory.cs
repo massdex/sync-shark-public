@@ -125,6 +125,7 @@ public sealed partial class LocalInventory : IInventorySource
         PairPause.Check();
         NtfsUsnJournal.TryReadCheckpoint(_root.RootPath, out var observedCheckpoint, out var journalDeleted);
         var checkpoint = WalkCheckpointForTest is { } read ? read() : observedCheckpoint;
+        if (WalkCheckpointForTest is not null) journalDeleted = false; // the injected read models availability, not deletion
         var sql = _known as SqliteStateStore;
         if (checkpoint is null) { sql?.ForgetLocalWalk(rootId); sql = null; }
         var options = JsonSerializer.Serialize(new { _settings.ReplaceOnlineOnlyStubs,
