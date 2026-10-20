@@ -76,6 +76,7 @@ public sealed partial class SqliteStateStore : IStateStore
             if (fresh) StoreSchema.Create(connection);
             else StoreSchema.Verify(connection);
             StoreSchema.CreateTemporary(connection);
+            SnapshotTemporary.Sweep(connection);
             var store = new SqliteStateStore(connection, settings, clock);
             if (sweepPrepare) store.TrySweepPrepareGenerations(propagateDamage: true);
             return store;

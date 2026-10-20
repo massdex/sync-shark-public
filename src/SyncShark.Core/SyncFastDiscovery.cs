@@ -28,7 +28,7 @@ public sealed partial class SyncAuthorityRuntimeHost
             new PilotDirectoryIdentity(pair.LocalVolumeSerialNumber, pair.LocalRootFileId));
         var started = System.Diagnostics.Stopwatch.StartNew();
         var result = await SyncDiscoveryClient.TryReadAsync(
-            [new(root.Path, root.Identity.VolumeSerialNumber, root.Identity.FileId)], cancellationToken);
+            [new(root.Path, root.Identity.VolumeSerialNumber, root.Identity.FileId)], cancellationToken, userCheck: true);
         root.VerifyBinding();
         stateAuthority.VerifyAuthority();
         return new(pair.Name, result is not null, result?.Roots.Sum(view => view.Items.Count) ?? 0,

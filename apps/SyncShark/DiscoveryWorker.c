@@ -4,6 +4,7 @@
 #include <shellapi.h>
 #include <stdio.h>
 #include <wchar.h>
+#include <strsafe.h>
 
 static const WCHAR worker_path[]=L"C:\\Program Files\\Massdex\\SyncShark\\SyncSharkDiscovery.exe";
 static const WCHAR manifest_path[]=L"C:\\Program Files\\Massdex\\SyncShark\\discovery-manifest.json";
@@ -116,7 +117,51 @@ static DWORD read_request(Worker *w) {
         if(!error)error=ssd_request_add_root(&w->request,i,id,path,units);
         SecureZeroMemory(path,(SIZE_T)units*2);HeapFree(GetProcessHeap(),0,path);if(error)return error;
     }
+    if(w->request.operation==2) {
+        if(w->request.root_count!=1)return ERROR_INVALID_DATA;
+        if((error=io(w->pipe,FALSE,(BYTE*)&w->request.journal_maximum,8,w->deadline)))return error;
+        if(!w->request.journal_maximum || w->request.journal_maximum>8589934592ULL)return ERROR_INVALID_DATA;
+    }
     return ssd_admit_roots(w->request.roots,w->request.root_count,w->client_token,&w->admission);
+}
+/* Root admission is mandatory. Only grow an observed existing journal; an external
+   administrator can race deletion, so verify the journal identity after the change too. */
+static DWORD grow_journal(Worker *w) {
+    WCHAR mount[50],fs[32];DWORD serial=0,component=0,flags=0,bytes=0,error=0;
+    HANDLE volume=CreateFileW(ssd_admission_volume(w->admission),GENERIC_READ|GENERIC_WRITE,
+        FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,NULL,OPEN_EXISTING,0,NULL);
+    if(volume==INVALID_HANDLE_VALUE){error=GetLastError();goto reply;}
+    if(!GetVolumeInformationByHandleW(volume,NULL,0,&serial,&component,&flags,fs,ARRAYSIZE(fs)))
+        {error=GetLastError();goto reply;}
+    if(serial!=w->request.volume_serial || wcscmp(fs,L"NTFS")){error=ERROR_NOT_SUPPORTED;goto reply;}
+    /* The admitted GUID, not an elevated-token drive-letter mapping. */
+    if(FAILED(StringCchCopyW(mount,ARRAYSIZE(mount),ssd_admission_volume(w->admission))) ||
+        FAILED(StringCchCatW(mount,ARRAYSIZE(mount),L"\\"))){error=ERROR_INVALID_DRIVE;goto reply;}
+    ULARGE_INTEGER free_bytes;
+    if(!GetDiskFreeSpaceExW(mount,&free_bytes,NULL,NULL)){error=GetLastError();goto reply;}
+    USN_JOURNAL_DATA current={0};
+    if(!DeviceIoControl(volume,FSCTL_QUERY_USN_JOURNAL,NULL,0,&current,sizeof(current),&bytes,NULL))error=GetLastError();
+    else {
+        ULONGLONG delta=current.AllocationDelta>134217728ULL?current.AllocationDelta:134217728ULL;
+        ULONGLONG target=0;
+        error=ssd_journal_target(w->request.journal_maximum,current.MaximumSize,current.AllocationDelta,free_bytes.QuadPart,&target);
+        if(!error) {
+            CREATE_USN_JOURNAL_DATA request={0};request.MaximumSize=target;request.AllocationDelta=delta;
+            if(!DeviceIoControl(volume,FSCTL_CREATE_USN_JOURNAL,&request,sizeof(request),NULL,0,&bytes,NULL))error=GetLastError();
+            else {
+                USN_JOURNAL_DATA after={0};
+                if(!DeviceIoControl(volume,FSCTL_QUERY_USN_JOURNAL,NULL,0,&after,sizeof(after),&bytes,NULL))error=GetLastError();
+                else if(after.UsnJournalID!=current.UsnJournalID)error=ERROR_JOURNAL_ENTRY_DELETED;
+            }
+        }
+    }
+reply:
+    if(volume!=INVALID_HANDLE_VALUE)CloseHandle(volume);
+    BYTE reply[16]={0};DWORD length=12,kind=5;
+    memcpy(reply,&length,4);memcpy(reply+4,&kind,4);memcpy(reply+8,&error,4);
+    DWORD transport=io(w->pipe,TRUE,reply,sizeof(reply),w->deadline);if(transport)return transport;
+    BYTE ack=0;transport=io(w->pipe,FALSE,&ack,1,w->deadline);
+    return transport?transport:(ack==0xa5?0:ERROR_INVALID_DATA);
 }
 static DWORD WINAPI watch_client(void *context) {
     Worker *w=context;
@@ -165,6 +210,7 @@ static DWORD run(Worker *w) {
     if((error=ssd_hash_file(self,hash)))return error;
     if(memcmp(hash,w->manifest.worker_sha256,32))return ERROR_INVALID_IMAGE_HASH;
     if((error=ssd_verify_product_signature(worker_path,self)) || (error=connect_client(w)) || (error=read_request(w)))return error;
+    if(w->request.operation==2)return grow_journal(w);
     // The longer scan allowance starts only after authenticated, bounded root
     // admission. It does not extend the original request/handshake timeout.
     w->deadline=GetTickCount64()+SSD_MAX_DURATION_MS;

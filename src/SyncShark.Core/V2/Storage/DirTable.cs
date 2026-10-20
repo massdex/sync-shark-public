@@ -22,13 +22,14 @@ internal sealed class DirTable
     public long Intern(string dirPath, SqliteTransaction? transaction = null)
     {
         if (_cache.TryGetValue(dirPath, out var cached)) return cached;
+        if (Find(dirPath, transaction) is { } existing) return existing;
         StoreSchema.Execute(_connection, transaction,
             "INSERT INTO dir(path, path_key, mapped_key) VALUES($p, $k, $m) ON CONFLICT(path) DO NOTHING;",
             ("$p", dirPath), ("$k", RowCodec.Key(dirPath)),
             ("$m", DropboxNameMapping.Map(dirPath) is var mapped && mapped != dirPath ? RowCodec.Key(mapped) : null));
         var dirNo = ReadNumber(dirPath, transaction)
             ?? throw new InvalidOperationException($"Folder '{dirPath}' vanished after insert.");
-        _cache[dirPath] = dirNo;
+        Cache(dirPath, dirNo);
         return dirNo;
     }
 
@@ -37,7 +38,7 @@ internal sealed class DirTable
     {
         if (_cache.TryGetValue(dirPath, out var cached)) return cached;
         var dirNo = ReadNumber(dirPath, transaction);
-        if (dirNo is not null) _cache[dirPath] = dirNo.Value;
+        if (dirNo is not null) Cache(dirPath, dirNo.Value);
         return dirNo;
     }
 
@@ -88,6 +89,12 @@ internal sealed class DirTable
         command.Parameters.AddWithValue("$k", key);
         command.Parameters.AddWithValue("$lo", key + "/");
         command.Parameters.AddWithValue("$hi", key + "0");
+    }
+
+    private void Cache(string path, long number)
+    {
+        if (_cache.Count >= 1024) _cache.Clear();
+        _cache[path] = number;
     }
 
     private long? ReadNumber(string dirPath, SqliteTransaction? transaction) =>

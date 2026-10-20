@@ -95,7 +95,7 @@ internal static partial class RunChecks
             var gen = store.BeginGeneration(fx.Pair.A.RootId, "test");
             var archive = Path.Combine(root, "baseline.recovery");
             await File.WriteAllTextAsync(archive, "alpha\nbeta\ngamma\n", new System.Text.UTF8Encoding(false));
-            var prior = new SyncAction("before-conflict", 4, ActionKind.Update, Side.A, a.Path, null, a, oldA, true, null);
+            var prior = new SyncAction("before-conflict", 4, ActionKind.Update, Side.A, a.Path, null, a, oldA, true, "shared");
             if (mode != "missing") store.CommitResult(fx.Pair.PairId, gen, prior,
                 new(prior.ActionId, Outcome.Done, a, oldB, new RecoveryRef(Side.A, archive, null, oldA.Hash!, oldA.Size), null));
             fx.Provider.AddWriter(fx.Pair.A, new NoticeArchiveWriter(fx.WriterA, root));

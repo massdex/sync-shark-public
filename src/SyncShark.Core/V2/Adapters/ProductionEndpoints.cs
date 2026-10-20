@@ -225,7 +225,7 @@ public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatc
             return (dropbox, new DropboxWriter(root, side, client, _paths.Spool, _settings, PairInclude.IgnoreRules(pair)));
         }
         var recovery = checkedSide.Recovery!;
-        var inventory = new LocalInventory(root, side, _store, OwnedInside(root, recovery), _settings, _time, new DefenderHistory())
+        var inventory = new LocalInventory(root, side, _store, OwnedInside(root, recovery), _settings, _time, new DefenderHistory(), pair.PairId)
         { GapWorker = _gapWorker, GapIo = _gapIo };
         // Direct downloads use a target-volume partial, with no product-spool demand.
         var writer = await OpenLocalWriterAsync(_store, root, side, pair, checkedSide.Installation!, recovery, ct,

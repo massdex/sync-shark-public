@@ -88,7 +88,7 @@ public static class NoticeChoices
     public static bool IsExplicitNoticeChoice(string choice)
     {
         var name = choice.Split('=', 2)[0].ToLowerInvariant();
-        return IsRetainedVersionChoice(name) || IsRetryChoice(name) || IsQuarantineChoice(name) ||
+        return JournalSizing.IsChoice(name) || IsRetainedVersionChoice(name) || IsRetryChoice(name) || IsQuarantineChoice(name) ||
             name is Compare or Merge or KeepA or KeepB or KeepBoth or RenameIncoming or ReplaceExisting or RestoreExisting or RestoreAsCopy;
     }
 
@@ -98,7 +98,9 @@ public static class NoticeChoices
     public const string RebindPending = "pending: rebind arrives with the central registry (B-191)";
 
     public static IReadOnlyList<SyncNoticeOption> Options(Notice notice) =>
-        notice.DefenderHistory is { Cause: DefenderReview.SharedReleaseCause, SharedRelease: { } shared }
+        JournalSizing.IsNotice(notice)
+            ? [new(JournalSizing.Enlarge, "Enlarge (UAC)"), new(JournalSizing.NotNow, "Not now"), new(JournalSizing.Never, "Never")]
+            : notice.DefenderHistory is { Cause: DefenderReview.SharedReleaseCause, SharedRelease: { } shared }
             ? [new(DefenderReleaseAllPairs, "Release in all pairs (also held by: " + (shared.OtherPairNames.Length == 0 ? "no other pairs" : shared.OtherPairNames) + ")"),
                new(DefenderKeepShared, "Keep held")]
             : notice.DefenderHistory is { Cause: DefenderReview.HeldCause }
@@ -168,6 +170,9 @@ public static class NoticeChoices
         ReviewRemoval or ReviewRemovalA or ReviewRemovalB => "Frozen removal review saved. Inspect its counts and pages in notices; nothing was deleted.",
         ConfirmRemoval => "Removal confirmation processed. Refresh notices for completion or held changes; protected content stays.",
         RemovalNextPage or RemovalPreviousPage => "Review page shown (at a boundary, the current page stays); nothing was deleted.",
+        JournalSizing.Enlarge => "Windows change-history resize completed; sync continues.",
+        JournalSizing.NotNow => "Deferred for seven days; sync continues with safe full-scan fallback.",
+        JournalSizing.Never => "Automatic resize notices disabled for this volume; sync continues.",
         OpenFolderSettings => "Open this pair's folder settings to inspect selection and ignore rules. The notice remains open; no files changed.",
         RetryNow => "Retry requested. Existing evidence and deletion safeguards remain in force.",
         Exclude => "Excluded from future sync on both sides; no files were deleted.",

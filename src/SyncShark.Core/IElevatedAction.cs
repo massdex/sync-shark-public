@@ -12,6 +12,7 @@ public interface IElevatedAction
 
 public sealed class AttendedElevatedAction : IElevatedAction
 {
+    public const string JournalGrow = "journal-grow";
     public const string DefenderExclude = "defender-exclude";
     public const string DefenderVerify = "defender-verify";
     public const int ExclusionsConfirmedAbsent = 23;
@@ -39,6 +40,7 @@ public sealed class AttendedElevatedAction : IElevatedAction
     // Only base64 DATA enters the fixed program. Encoding the whole program is not a quoting defence.
     internal static string Command(string verb, IReadOnlyList<string> args)
     {
+        if (verb == JournalGrow) return JournalCommand(args);
         if (verb is not (DefenderExclude or DefenderVerify) || args.Count != (verb == DefenderVerify ? 3 : 2) || !Path.IsPathFullyQualified(args[0]) || !Path.IsPathFullyQualified(args[1]))
             throw new ArgumentException("Unsupported elevated action or missing root boundary.");
         var root = Path.GetFullPath(args[0]);
@@ -68,6 +70,29 @@ public sealed class AttendedElevatedAction : IElevatedAction
             "if (-not ($actual | Where-Object { $_ -eq $p }) -or -not ($actual | Where-Object { $_ -eq $stage })) { exit 2 }; exit 0";
     }
 
+    internal static string JournalCommand(IReadOnlyList<string> args)
+    {
+        if (args.Count != 3) throw new ArgumentException("Expected volume, serial and maximum bytes.");
+        var volume = SyncSharkJournalNative.Volume(args[0]);
+        if (!uint.TryParse(args[1], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var serial) ||
+            !long.TryParse(args[2], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var maximum) ||
+            maximum <= 0 || maximum > V2.JournalSizing.Maximum) throw new ArgumentException("Invalid journal bounds.");
+        using var stream = typeof(AttendedElevatedAction).Assembly.GetManifestResourceStream("SyncShark.JournalNative.cs")!;
+        using var reader = new StreamReader(stream);
+        using var compressed = new MemoryStream();
+        using (var gzip = new System.IO.Compression.GZipStream(compressed, System.IO.Compression.CompressionLevel.SmallestSize, true))
+        {
+            var bytes = Encoding.UTF8.GetBytes(reader.ReadToEnd().Replace("#nullable disable", ""));
+            gzip.Write(bytes);
+        }
+        var source = Convert.ToBase64String(compressed.ToArray());
+        // Embedded source and canonical bounded numeric data only, never a user-selected executable or script.
+        return "$ErrorActionPreference='Stop'; $m=[IO.MemoryStream]::new([Convert]::FromBase64String('" + source +
+            "')); $z=[IO.Compression.GZipStream]::new($m,[IO.Compression.CompressionMode]::Decompress); " +
+            "$r=[IO.StreamReader]::new($z); Add-Type -TypeDefinition $r.ReadToEnd(); $r.Dispose(); $m.Dispose(); [SyncSharkJournalNative]::Grow('" + volume + "'," + serial.ToString(System.Globalization.CultureInfo.InvariantCulture) + "," +
+            maximum.ToString(System.Globalization.CultureInfo.InvariantCulture) + ",$false); exit 0";
+    }
+
     public async Task<int> RunAsync(string verb, IReadOnlyList<string> args, CancellationToken cancellationToken)
     {
         var command = Command(verb, args);
@@ -78,7 +103,7 @@ public sealed class AttendedElevatedAction : IElevatedAction
             Arguments = "-NoProfile -NonInteractive -EncodedCommand " + Convert.ToBase64String(Encoding.Unicode.GetBytes(command)),
             UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Normal
         }) ?? throw new IOException("The elevation request did not start. The item remains held.");
-        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+        await process.WaitForExitAsync(verb == JournalGrow ? CancellationToken.None : cancellationToken).ConfigureAwait(false);
         return process.ExitCode;
     }
 }

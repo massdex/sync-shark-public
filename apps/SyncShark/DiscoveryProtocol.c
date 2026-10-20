@@ -6,9 +6,9 @@ static DWORD u32(const BYTE *p){DWORD n;memcpy(&n,p,4);return n;}
 static void put32(BYTE *p,DWORD n){memcpy(p,&n,4);}
 static void put64(BYTE *p,ULONGLONG n){memcpy(p,&n,8);}
 DWORD ssd_request_header(SsdRequest *r,const BYTE *header,DWORD length) {
-    if(!r || !header || length!=SSD_WIRE_HEADER_BYTES || memcmp(header,magic,8) || u32(header+8)!=1 ||
+    if(!r || !header || length!=SSD_WIRE_HEADER_BYTES || memcmp(header,magic,8) || (u32(header+8)!=1 && u32(header+8)!=2) ||
         !u32(header+44) || u32(header+44)>128)return ERROR_INVALID_DATA;
-    memset(r,0,sizeof(*r));memcpy(r->nonce,header+12,32);r->root_count=u32(header+44);r->volume_serial=u32(header+48);return 0;
+    memset(r,0,sizeof(*r));memcpy(r->nonce,header+12,32);r->operation=u32(header+8);r->root_count=u32(header+44);r->volume_serial=u32(header+48);return 0;
 }
 DWORD ssd_request_add_root(SsdRequest *r,DWORD index,ULONGLONG id,const BYTE *utf16,DWORD units) {
     if(!r || index>=r->root_count || !id || !utf16 || units<3 || units>32760-512 || r->roots[index].path)return ERROR_INVALID_DATA;
@@ -65,4 +65,18 @@ DWORD ssd_reply_end(DWORD count,const USN_JOURNAL_DATA *before,const USN_JOURNAL
         put64(p+16,(ULONGLONG)points[i]->NextUsn);put64(p+24,(ULONGLONG)points[i]->LowestValidUsn);
     }
     return 76;
+}
+
+/* Pure grow-only sizing policy, including the allocation overhead in both caps. */
+DWORD ssd_journal_target(ULONGLONG requested,ULONGLONG current_max,ULONGLONG current_delta,ULONGLONG free_bytes,ULONGLONG *target) {
+    if(!target || !requested || requested>8589934592ULL)return ERROR_INVALID_PARAMETER;
+    *target=current_max;
+    if(requested<=current_max)return ERROR_ALREADY_EXISTS;
+    ULONGLONG cap=free_bytes/20;
+    if(cap>8589934592ULL)cap=8589934592ULL;
+    ULONGLONG delta=current_delta>134217728ULL?current_delta:134217728ULL;
+    cap=cap>delta?cap-delta:0;
+    if(cap<=current_max)return ERROR_DISK_FULL;
+    *target=requested<cap?requested:cap;
+    return ERROR_SUCCESS;
 }

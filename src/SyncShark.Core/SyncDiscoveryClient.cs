@@ -8,7 +8,7 @@ using Microsoft.Win32.SafeHandles;
 
 namespace Massdex.SyncShark;
 
-internal static class SyncDiscoveryClient
+internal static partial class SyncDiscoveryClient
 {
     internal const string WorkerPath = @"C:\Program Files\Massdex\SyncShark\SyncSharkDiscovery.exe";
     internal const string ManifestPath = @"C:\Program Files\Massdex\SyncShark\discovery-manifest.json";
@@ -20,15 +20,16 @@ internal static class SyncDiscoveryClient
     internal static async Task ResetAfterSetupAsync()
     {
         await Gate.WaitAsync();
-        try { _retryAfter = DateTimeOffset.MinValue; Status = IsInstalled ? "Set Up; Checked Automatically When Needed" : "Not Set Up; Ordinary Scanning Is Active"; }
+        try { _journalRetryAfter = DateTimeOffset.MinValue; _retryAfter = DateTimeOffset.MinValue; Status = IsInstalled ? "Set Up; Checked Automatically When Needed" : "Not Set Up; Ordinary Scanning Is Active"; }
         finally { Gate.Release(); }
     }
 
     internal static async Task<SyncDiscoveryResult?> TryReadAsync(IReadOnlyList<SyncDiscoveryRoot> roots, CancellationToken cancellationToken,
-        Func<SyncDiscoveryProgress, Task>? onProgress = null)
+        Func<SyncDiscoveryProgress, Task>? onProgress = null, bool userCheck = false)
     {
         if (!OperatingSystem.IsWindows() || !IsInstalled || DateTimeOffset.UtcNow < _retryAfter) return null;
-        await Gate.WaitAsync(cancellationToken);
+        // Maintenance must not delay a sync: use ordinary scanning while the fixed worker is busy.
+        if (!await EnterDiscoveryGateAsync(Gate, userCheck, cancellationToken)) return null;
         try
         {
             if (DateTimeOffset.UtcNow < _retryAfter) return null;
@@ -47,6 +48,17 @@ internal static class SyncDiscoveryClient
             Microsoft.CSharp.RuntimeBinder.RuntimeBinderException)
         { Status = "Discovery Is Unavailable; Ordinary Scanning Is Active"; _retryAfter = DateTimeOffset.UtcNow.AddMinutes(5); return null; }
         finally { Gate.Release(); }
+    }
+
+    internal static async Task<bool> EnterDiscoveryGateAsync(SemaphoreSlim gate, bool userCheck, CancellationToken ct,
+        TimeSpan? wait = null)
+    {
+        if (await gate.WaitAsync(0, ct).ConfigureAwait(false)) return true;
+        if (!userCheck) return false;
+        Status = "Discovery Is Busy; Retrying Shortly. Ordinary Scanning Is Active";
+        if (await gate.WaitAsync(wait ?? TimeSpan.FromSeconds(20), ct).ConfigureAwait(false)) return true;
+        Status = "Discovery Is Busy With Background Work; Retry Check Shortly. Ordinary Scanning Is Active";
+        return false;
     }
 
     // The live client and deterministic clock checks use the same timer wiring.

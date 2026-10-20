@@ -68,7 +68,7 @@ internal static class RowCodec
     public static ItemState CarryHash(ItemState incoming, ItemState live)
     {
         // The name, not the content, was refused. A rename (including case-only) starts unmarked.
-        if (string.Equals(incoming.Path, live.Path, StringComparison.Ordinal))
+        if ((live.Flags & (ItemFlags.ProviderNameRefused | ItemFlags.Quarantined)) != 0 && string.Equals(incoming.Path, live.Path, StringComparison.Ordinal))
             incoming = incoming with { Flags = incoming.Flags | (live.Flags & (ItemFlags.ProviderNameRefused | ItemFlags.Quarantined)) };
         if (incoming.ObjectId == live.ObjectId && (live.Flags & ItemFlags.NeedsRehash) != 0)
             return incoming with { Hash = null, Flags = incoming.Flags | ItemFlags.NeedsRehash };

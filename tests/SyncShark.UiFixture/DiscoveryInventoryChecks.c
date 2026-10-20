@@ -83,7 +83,18 @@ static DWORD typed_pages(SsdCatalog *c,DWORD total,ULONGLONG parent,DWORD attrs)
 static DWORD file_pages(SsdCatalog *c,DWORD total,ULONGLONG parent) {
     return typed_pages(c,total,parent,FILE_ATTRIBUTE_NORMAL);
 }
+static void journal_sizing_checks(void) {
+    ULONGLONG target=0,gb=1073741824ULL,delta=134217728ULL;
+    check(ssd_journal_target(gb,gb,delta,100*gb,&target)==ERROR_ALREADY_EXISTS && target==gb,"Journal already large enough");
+    check(ssd_journal_target(2*gb,gb,delta,20*gb,&target)==ERROR_DISK_FULL && target==gb,"Journal cap includes allocation delta");
+    check(!ssd_journal_target(2*gb,gb,delta,20*(2*gb+delta),&target) && target==2*gb,"Journal target exactly at cap");
+    check(!ssd_journal_target(8*gb,gb,delta,1000*gb,&target) && target==8*gb-delta,"Journal absolute cap includes delta");
+    check(ssd_journal_target(2*gb,gb,8*gb,100*gb,&target)==ERROR_DISK_FULL,"Oversized delta cannot underflow");
+    check(!ssd_journal_target(2*gb,gb,2*delta,20*(2*gb+delta),&target) && target==2*gb-delta,"Existing allocation delta retained");
+}
 int wmain(int argc,WCHAR **argv) {
+    journal_sizing_checks();
+    if(argc==2 && !wcscmp(argv[1],L"--journal-sizing-only")){printf("%lu journal sizing assertions passed.\n",passes);return 0;}
     if(argc!=2 || wcslen(argv[1])>1800)return 2;
     /* The caller allocates one fresh directory inside its registered build root.
        No raw volume, pipe, task, protected install, provider or user file is touched. */
@@ -212,6 +223,15 @@ int wmain(int argc,WCHAR **argv) {
     BYTE wire_buffer[256];DWORD wire_length=ssd_reply_header(&request,wire_buffer,sizeof(wire_buffer)),written;
     check(wire_length==SSD_WIRE_HEADER_BYTES&&WriteFile(wire_request,wire_buffer,wire_length,&written,NULL)&&written==wire_length,"Native request header uses the exact shared format");
     SsdRequest decoded={0};check(!ssd_request_header(&decoded,wire_buffer,wire_length),"Native request header decoder binds both roots");
+    check(decoded.operation==1,"Inventory operation is recorded");
+    DWORD operation=2;memcpy(wire_buffer+8,&operation,4);
+    check(!ssd_request_header(&decoded,wire_buffer,wire_length)&&decoded.operation==2,"Grow operation is accepted and recorded");
+    operation=0;memcpy(wire_buffer+8,&operation,4);
+    check(ssd_request_header(&decoded,wire_buffer,wire_length)==ERROR_INVALID_DATA,"Operation zero is refused");
+    operation=3;memcpy(wire_buffer+8,&operation,4);
+    check(ssd_request_header(&decoded,wire_buffer,wire_length)==ERROR_INVALID_DATA,"Unknown operation is refused");
+    operation=1;memcpy(wire_buffer+8,&operation,4);
+    check(!ssd_request_header(&decoded,wire_buffer,wire_length),"Restore inventory header for projection checks");
     for(DWORD i=0;i<2;i++) {
         DWORD units=(DWORD)wcslen(roots[i].path);ULONGLONG root_id=roots[i].file_id;
         check(WriteFile(wire_request,&root_id,8,&written,NULL)&&written==8&&WriteFile(wire_request,&units,4,&written,NULL)&&written==4&&

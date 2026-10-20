@@ -8,6 +8,7 @@ public sealed partial class LocalInventory : IInventorySource
 {
     private readonly RootDef _root;
     private readonly IDefenderHistory? _history;
+    private readonly string? _pairId;
     private readonly Side _side;
     private readonly IStateStore _known;
     private readonly IReadOnlySet<string> _productOwnedPaths;
@@ -24,11 +25,12 @@ public sealed partial class LocalInventory : IInventorySource
 
     /// <summary>Binds one local root; the saved root object id must parse into its NTFS identity.</summary>
     public LocalInventory(RootDef root, Side side, IStateStore known,
-        IReadOnlySet<string> productOwnedPaths, V2Settings settings, TimeProvider clock, IDefenderHistory? history = null)
+        IReadOnlySet<string> productOwnedPaths, V2Settings settings, TimeProvider clock, IDefenderHistory? history = null, string? pairId = null)
     {
         _root = root ?? throw new ArgumentNullException(nameof(root));
         _side = side;
         _history = history;
+        _pairId = pairId;
         _known = known ?? throw new ArgumentNullException(nameof(known));
         _productOwnedPaths = productOwnedPaths ?? throw new ArgumentNullException(nameof(productOwnedPaths));
         // The relative form the shared exclusion test needs; the scanner keeps the absolute set for enumeration.
@@ -119,6 +121,7 @@ public sealed partial class LocalInventory : IInventorySource
     private async Task<Snapshot> FullCoreAsync(long gen, Func<string, bool> include, IProgress<string> p, CancellationToken ct)
     {
         var rootId = _root.RootId;
+        if (_pairId is not null) JournalSizing.TryObserve(_known, _pairId, _root.RootPath, _volume, _rootFileId, null, _clock.GetUtcNow());
         PairPause.Check();
         NtfsUsnJournal.TryReadCheckpoint(_root.RootPath, out var observedCheckpoint, out var journalDeleted);
         var checkpoint = WalkCheckpointForTest is { } read ? read() : observedCheckpoint;
@@ -126,7 +129,7 @@ public sealed partial class LocalInventory : IInventorySource
         if (checkpoint is null) { sql?.ForgetLocalWalk(rootId); sql = null; }
         var options = JsonSerializer.Serialize(new { _settings.ReplaceOnlineOnlyStubs,
             ProductOwned = _productOwnedPaths.OrderBy(path => path, StringComparer.Ordinal).ToArray() });
-        var cursor = sql?.BeginLocalWalk(_root, options, checkpoint) ?? checkpoint?.Cursor ?? string.Empty;
+        var cursor = sql?.BeginLocalWalk(_root, options, checkpoint) ?? checkpoint?.Cursor ?? _known.Cursor(rootId) ?? string.Empty;
         BeginFullGap(rootId, cursor, journalDeleted);
         PilotDirectoryLease lease;
         try
@@ -175,6 +178,7 @@ public sealed partial class LocalInventory : IInventorySource
         var rootId = _root.RootId;
         if (_known is SqliteStateStore sql && sql.HasLocalWalk(rootId))
             return Invalid(gen, rootId, cursor, "unfinished local full walk takes precedence");
+        if (_pairId is not null) JournalSizing.TryObserve(_known, _pairId, _root.RootPath, _volume, _rootFileId, cursor, _clock.GetUtcNow());
         if (!NtfsUsnCheckpoint.TryParseCursor(cursor, out var journalId, out var next)) return Invalid(gen, rootId, cursor, "saved cursor cannot be parsed");
         PilotDirectoryLease lease;
         try
@@ -544,7 +548,8 @@ public sealed partial class LocalInventory : IInventorySource
         // A handled quarantine is not a run-wide incomplete scan, but its unobserved subtree
         // must remain untouched in storage until an explicit retry obtains fresh evidence.
         return new Snapshot(rootId, _side, gen, cursor, items, scan.Complete ? DecisionPaths(scan, include) : [string.Empty])
-            { IncludesPath = path => include(path) && !UnderAny(path, heldPaths), IncompleteReasons = DecisionReasons(scan, include) };
+            { IncludesPath = path => include(path) && !UnderAny(path, heldPaths), IncompleteReasons = DecisionReasons(scan, include),
+                VerifyAbsence = item => LocalFileAbsence.Check(_root.RootPath, _rootIdentity, item) };
     }
 
     internal Delta BuildDelta(long gen, string rootId, string cursor, string throughCursor, PilotLocalScan scan,
@@ -556,7 +561,8 @@ public sealed partial class LocalInventory : IInventorySource
         var changes = new List<Change>();
         foreach (var entry in scan.Entries.Values)
         {
-            if (!include(entry.RelativePath) || LocalItems.IsExcluded(entry.RelativePath, _productOwnedRelative)) continue;
+            if (!include(entry.RelativePath) || LocalItems.IsExcluded(entry.RelativePath, _productOwnedRelative) ||
+                LocalItems.InsideAny(entry.RelativePath, decisionPaths)) continue;
             var state = LocalItems.FromScan(entry);
             changes.Add(new Change(ChangeKind.Upsert, state.ObjectId, state.Path, state, null));
         }
@@ -568,12 +574,14 @@ public sealed partial class LocalInventory : IInventorySource
             changes.Add(new Change(ChangeKind.Upsert, held.ObjectId, held.Path, held, null));
         }
         var incompletePaths = decisionPaths.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var absence = new Snapshot(rootId, _side, gen, throughCursor, [], decisionPaths)
+            { VerifyAbsence = item => LocalFileAbsence.Check(_root.RootPath, _rootIdentity, item) };
         changes.AddRange(LocalDeletes.Build(_known, rootId, paths, scan,
             path => include(path) && !LocalItems.IsExcluded(path, _productOwnedRelative) &&
                 !UnderAny(path, heldPaths) && !UnderAny(path, incompletePaths),
-            scanTime));
+            scanTime, absence.CanCloseAbsent));
         return new Delta(rootId, _side, gen, cursor, throughCursor, changes, false, decisionPaths)
-            { IncludesPath = include, IncompleteReasons = DecisionReasons(scan, include) };
+            { IncludesPath = include, IncompleteReasons = DecisionReasons(scan, include), PendingDeletionEvidence = absence.PendingDeletionEvidence };
     }
 
     private static IReadOnlyDictionary<string, string> DecisionReasons(PilotLocalScan scan, Func<string, bool> include) =>

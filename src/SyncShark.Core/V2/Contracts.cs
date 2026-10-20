@@ -36,6 +36,22 @@ public sealed record Snapshot(string RootId, Side Side, long Gen, string CursorA
     IReadOnlyList<ItemState> Items, IReadOnlyList<string> IncompleteSubtrees)
 {
     public IReadOnlyDictionary<string, string> IncompleteReasons { get; init; } = new Dictionary<string, string>();
+    internal Func<ItemState, FileAbsence>? VerifyAbsence { get; init; }
+    internal Dictionary<string, string> PendingDeletionEvidence { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    internal bool CanCloseAbsent(ItemState item)
+    {
+        if (IncompleteSubtrees.Count == 0) return true;
+        var evidence = FileAbsence.Unknown;
+        try { evidence = VerifyAbsence?.Invoke(item) ?? FileAbsence.Unknown; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        if (evidence == FileAbsence.Gone) return true;
+        PendingDeletionEvidence[item.Path] = evidence == FileAbsence.Present
+            ? "The file identity still exists, possibly moved into an unscanned folder. Kept; restore folder access and Retry, or Ignore."
+            : "Absence could not be verified by file identity after a partial scan. Kept; restore access and Retry, or Ignore.";
+        return false;
+    }
+
     /// <summary>The scanned scope. Outside it, omission is not absence; excluded rows stay untouched.</summary>
     public Func<string, bool>? IncludesPath { get; init; }
 }
@@ -298,7 +314,7 @@ public sealed record Plan(string PairId, long Gen, IReadOnlyList<SyncAction> Act
     internal string? InventoryScope { get; init; }
 }
 
-/// <summary>One path seen on both sides at a prepare, with each side's state at that moment.</summary>
+/// <summary>One path seen on both sides at a prepare, referencing each side's observed state without allocating eager stamps.</summary>
 public sealed record MatchedPair(string Path, ItemState A, ItemState B);
 
 /// <summary>

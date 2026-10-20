@@ -721,6 +721,8 @@ public abstract partial class SyncCliOperationsBase : ISyncCliOperations
     {
         var pair = accountId is null ? RequirePair(await Host.LoadPairsAsync(cancellationToken), pairId)
             : await RequireBoundPairAsync(pairId, accountId, null, cancellationToken);
+        if (V2.JournalSizing.IsChoice(choice.ToLowerInvariant()))
+            throw new SyncCliUsageException("Use the direct core v2 CLI or the core v2 app notice buttons for journal actions. This legacy host changed no files.");
         if (V2.NoticeChoices.IsRetainedVersionChoice(choice.ToLowerInvariant()))
             throw new SyncCliUsageException("Use the direct core v2 CLI or the core v2 app notice buttons for retained-version actions. This legacy host changed no files.");
         if (!Enum.TryParse<SyncAuthorityConflictResolutionKind>(choice, ignoreCase: true, out var kind) || !Enum.IsDefined(kind))

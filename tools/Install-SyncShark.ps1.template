@@ -182,6 +182,25 @@ Invoke-SyncSharkJournalStep $journal $journalPath 'publish-runtime' $CrashAfter 
             } else {Copy-Item -LiteralPath $updaterSource -Destination $updaterRetained}
         } finally {$updaterHeld.Dispose()}
     }
+    # Read saved roots in the existing UNELEVATED app, before entering the existing setup boundary.
+    # Best effort only: absent state on a fresh install has no volumes to configure yet.
+    try {
+        $pairsText=& (Join-Path $previousTarget 'SyncShark.exe') --cli pairs list --json
+        if($LASTEXITCODE -eq 0) {
+            $pairsEnvelope=($pairsText -join "`n")|ConvertFrom-Json
+            $roots=@(foreach($pair in $pairsEnvelope.data.pairs) {
+                if($null -ne $pair.endpointDocument) {
+                    foreach($endpoint in @($pair.endpointDocument.left,$pair.endpointDocument.right)) {
+                        if($endpoint.localPath){[string]$endpoint.localPath}
+                    }
+                } elseif($pair.localRoot) {[string]$pair.localRoot}
+            }) | Where-Object {$_ -cmatch '^[A-Za-z]:\\[^\r\n]*$'} | Sort-Object -Unique
+            $rootText=$roots -join "`n"
+            if([Text.Encoding]::UTF8.GetByteCount($rootText) -le 65535) {
+                [IO.File]::WriteAllText((Join-Path $transactionRoot 'journal-roots.txt'),($rootText+"`n"),[Text.UTF8Encoding]::new($false))
+            }
+        }
+    } catch { Write-Warning 'Journal setup will be offered by Sync Shark when its configured volumes are available.' }
     Invoke-SyncSharkProtectedRuntime $sourceTarget RuntimeInstall
 } {
     & $assertPackage $target

@@ -10,17 +10,15 @@ internal sealed class PathOrder : IComparer<string>
 
     public int Compare(string? x, string? y)
     {
-        if (ReferenceEquals(x, y)) return 0;
+        if (string.Equals(x, y, StringComparison.Ordinal)) return 0;
         if (x is null) return -1;
         if (y is null) return 1;
-        var left = Encoding.UTF8.GetBytes(x);
-        var right = Encoding.UTF8.GetBytes(y);
-        var shared = Math.Min(left.Length, right.Length);
-        for (var i = 0; i < shared; i++)
-        {
-            var diff = left[i].CompareTo(right[i]);
-            if (diff != 0) return diff;
-        }
-        return left.Length.CompareTo(right.Length);
+        var leftLength = Encoding.UTF8.GetByteCount(x);
+        var rightLength = Encoding.UTF8.GetByteCount(y);
+        Span<byte> left = leftLength <= 1024 ? stackalloc byte[leftLength] : new byte[leftLength];
+        Span<byte> right = rightLength <= 1024 ? stackalloc byte[rightLength] : new byte[rightLength];
+        Encoding.UTF8.GetBytes(x, left);
+        Encoding.UTF8.GetBytes(y, right);
+        return left.SequenceCompareTo(right);
     }
 }

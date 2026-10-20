@@ -2358,6 +2358,12 @@ internal static partial class CliChecks
                 Require(SyncCliRegistry.Rows.Single(row => row.Command == command).Usage.Contains("--timeout-seconds") &&
                         SyncCliRegistry.Rows.Single(row => row.Command == command).Options.Contains("--timeout-seconds"),
                     "Explicit conflict resolution supports the shared bounded deadline: " + command);
+            foreach (var choice in new[] { Massdex.SyncShark.V2.JournalSizing.Enlarge, Massdex.SyncShark.V2.JournalSizing.NotNow, Massdex.SyncShark.V2.JournalSizing.Never })
+            {
+                var journal = SyncCliRegistry.Parse(["--cli", "conflicts", "resolve", "--pair", "p1", "--path", "C:",
+                    "--key", "n1", "--generation", "0", "--choice", choice, "--yes"]);
+                Require(journal.Choice == choice && journal.Generation == 0 && journal.Path == "C:", "Journal choices preserve exact target and notice guard");
+            }
             // Structural inventory parity: the runtime blocked set must equal the registry's blocked set, no
             // implemented command may appear as not implemented, and every blocked entry must be published.
             var notImplemented = capabilityData["notImplemented"]!.AsArray();

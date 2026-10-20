@@ -17,6 +17,8 @@
     <EmbeddedResource Include="Dropbox\dropbox-routes.json" LogicalName="SyncShark.DropboxRoutes.json" />
     <EmbeddedResource Include="DropboxCli\dropbox-cli.json" LogicalName="SyncShark.DropboxCli.json" />
     <EmbeddedResource Include="V2\Adapters\edge-messages.json" LogicalName="SyncShark.EdgeMessages.json" />
+    <Compile Include="../../tools/SyncShark.JournalNative.cs" Link="JournalNative.cs" />
+    <EmbeddedResource Include="../../tools/SyncShark.JournalNative.cs" LogicalName="SyncShark.JournalNative.cs" />
     <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="10.0.11" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
   </ItemGroup>

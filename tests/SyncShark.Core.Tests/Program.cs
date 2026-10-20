@@ -105,6 +105,25 @@ var inheritedTestProductRoot = args switch
 };
 using var isolatedProductRuntime = new IsolatedTestProductRuntime(inheritedTestProductRoot);
 
+if (args is ["--v2-snapshot-production-million-checks", var snapshotBenchmarkRoot])
+{
+    await Massdex.SyncShark.V2.StorageChecks.SnapshotProductionMillionAsync(snapshotBenchmarkRoot);
+    return 0;
+}
+
+if (args is ["--v2-snapshot-streaming-checks", var snapshotStreamingRoot])
+{
+    Directory.CreateDirectory(snapshotStreamingRoot);
+    Massdex.SyncShark.V2.StorageChecks.SnapshotStreamingChecks(snapshotStreamingRoot);
+    return 0;
+}
+
+if (args is ["--v2-snapshot-million-memory-checks", var snapshotMemoryRoot])
+{
+    await Massdex.SyncShark.V2.StorageChecks.SnapshotMillionMemoryAsync(snapshotMemoryRoot);
+    return 0;
+}
+
 if (args is ["--v2-million-memory-checks"])
 {
     await Massdex.SyncShark.V2.RunChecks.MillionItemPrepareMemoryAsync();
@@ -1108,9 +1127,22 @@ if (args is ["--v2-host-checks"])
     return 0;
 }
 
+if (args is ["--v2-journal-sizing-checks", var sizingRoot])
+{
+    await Massdex.SyncShark.V2.JournalSizingChecks.RunAsync(Path.GetFullPath(sizingRoot));
+    return 0;
+}
+
 if (args is ["--v2-dates-checks", var datesRoot])
 {
     await Massdex.SyncShark.V2.DateRepairChecks.RunAsync(Path.GetFullPath(datesRoot));
+    return 0;
+}
+
+if (args is ["--v2-gap-checks", var gapRoot])
+{
+    await Massdex.SyncShark.V2.LocalJournalChecks.RegressionAsync("gap-store", Path.Combine(gapRoot, "store"));
+    await Massdex.SyncShark.V2.LocalJournalChecks.RegressionAsync("protection-index", Path.Combine(gapRoot, "protection"));
     return 0;
 }
 

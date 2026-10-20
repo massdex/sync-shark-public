@@ -80,6 +80,9 @@ internal static partial class StorageChecks
         store.WriteSnapshot(new Snapshot("ra", Side.A, gen, "c", live, []));
         var partial = store.BeginGeneration("ra", "snapshot");
         store.WriteSnapshot(new Snapshot("ra", Side.A, partial, "c", [], ["DOCS"]));
+        RequireLive(store, "ra", live);
+        store.WriteSnapshot(new Snapshot("ra", Side.A, partial, "c", [], ["DOCS"])
+            { VerifyAbsence = _ => FileAbsence.Gone });
         RequireLive(store, "ra", live[0], live[1]);
         var whole = store.BeginGeneration("ra", "snapshot");
         store.WriteSnapshot(new Snapshot("ra", Side.A, whole, "c", [], [""]));

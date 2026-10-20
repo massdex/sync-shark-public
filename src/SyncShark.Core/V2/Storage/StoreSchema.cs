@@ -7,8 +7,8 @@ internal static class StoreSchema
 {
     /// <summary>The schema version written to and required by <c>PRAGMA user_version</c>; any schema change bumps it.</summary>
     // Coordinated additive slots: v12 retry, v13 quarantine, v14 gap verification,
-    // v15 listing/pair pause, v16 local walk, v17 explicit conflict choices, v18 removal review.
-    public const int Version = 18;
+    // v15 listing/pair pause, v16 local walk, v17 explicit conflict choices, v18 removal review, v19 journal sizing.
+    public const int Version = 19;
 
     /// <summary>The state database path relative to the app data root.</summary>
     public const string DatabaseRelativePath = @"v2\state.db";
@@ -18,6 +18,8 @@ internal static class StoreSchema
 
     /// <summary>SQLITE_NOTADB.</summary>
     public const int NotADatabaseCode = 26;
+
+    private const string JournalDdl = "CREATE TABLE IF NOT EXISTS journal_volume(serial INTEGER PRIMARY KEY, volume TEXT NOT NULL, state_json TEXT NOT NULL);";
 
     private const string Ddl = """
         -- *_key columns hold PathKey.Of: equal exactly when equal under .NET OrdinalIgnoreCase (owner decision 50).
@@ -290,6 +292,7 @@ internal static class StoreSchema
         Step(16, tx => Execute(connection, tx, LocalWalkDdl));
         Step(17, tx => Execute(connection, tx, ChoiceVictimDdl));
         Step(18, tx => Execute(connection, tx, RemovalReviewDdl));
+        Step(19, tx => Execute(connection, tx, JournalDdl));
 
         void Step(int version, Action<SqliteTransaction>? create)
         {
@@ -330,7 +333,7 @@ internal static class StoreSchema
 
     private static readonly string[] ExpectedNames =
     [
-        "dir", "root", "pair", "generation", "file_state", "tombstone", "sync_point", "pending_effect", "sync_retry", "sync_retry_due", "recovery",
+        "journal_volume", "dir", "root", "pair", "generation", "file_state", "tombstone", "sync_point", "pending_effect", "sync_retry", "sync_retry_due", "recovery",
         "notice", "local_gap", "local_gap_item", "gap_ready", "gap_failed", "gap_waiting", "gap_results", "local_rehash", "rehash_retry", "deletion_evidence", "dir_key", "dir_mapped_key", "fs_obj", "fs_flagged", "fs_refused", "sp_a_obj", "sp_b_obj", "sp_a_dir", "sp_b_dir",
 
         "removal_review", "pe_unresolved", "rc_pair", "nt_open", "prepare_header", "prepare_row", "prepare_lookup", "prepare_cursor",
@@ -410,6 +413,7 @@ internal static class StoreSchema
     {
         using var transaction = connection.BeginTransaction();
         Execute(connection, transaction, Ddl);
+        Execute(connection, transaction, JournalDdl);
         Execute(connection, transaction, RehashDdl);
         Execute(connection, transaction, RetryDdl);
         EnsureGapSchema(connection, transaction);

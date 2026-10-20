@@ -132,6 +132,15 @@ jobs:
           - suite: conflict-choices
             flag: --v2-conflict-choice-checks
             takes-root: false
+          - suite: gap-verification
+            flag: --v2-gap-checks
+            takes-root: true
+          - suite: snapshot-memory
+            flag: --v2-snapshot-million-memory-checks
+            takes-root: true
+          - suite: prepare-memory
+            flag: --v2-million-memory-checks
+            takes-root: false
           - suite: storage
             flag: --v2-storage-checks
             takes-root: true

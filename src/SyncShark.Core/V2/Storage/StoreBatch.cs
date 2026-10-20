@@ -9,6 +9,7 @@ internal sealed class StoreBatch : IDisposable
     private readonly int _limit;
     private SqliteTransaction _transaction;
     private int _pending;
+    private readonly Dictionary<string, SqliteCommand> _commands = new(StringComparer.Ordinal);
 
     public StoreBatch(SqliteConnection connection, int limit)
     {
@@ -37,5 +38,24 @@ internal sealed class StoreBatch : IDisposable
         _pending = 0;
     }
 
-    public void Dispose() => _transaction.Dispose();
+    /// <summary>Reuses prepared DML shapes across rows and transaction boundaries.</summary>
+    internal int Execute(string sql, params (string Name, object? Value)[] arguments)
+    {
+        if (!_commands.TryGetValue(sql, out var command))
+        {
+            command = StoreSchema.Command(_connection, _transaction, sql);
+            foreach (var (name, value) in arguments) command.Parameters.AddWithValue(name, value ?? DBNull.Value);
+            command.Prepare();
+            _commands.Add(sql, command);
+        }
+        command.Transaction = _transaction;
+        foreach (var (name, value) in arguments) command.Parameters[name].Value = value ?? DBNull.Value;
+        return command.ExecuteNonQuery();
+    }
+
+    public void Dispose()
+    {
+        foreach (var command in _commands.Values) command.Dispose();
+        _transaction.Dispose();
+    }
 }

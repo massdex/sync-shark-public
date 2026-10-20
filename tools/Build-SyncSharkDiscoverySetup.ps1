@@ -26,7 +26,7 @@ try {
     # The framework compiler predates nullable annotations, including in excluded
     # preprocessor branches. Remove only that non-semantic directive; both callers
     # otherwise compile the same transaction and native source.
-    $sourceNames=@('SyncShark.DiscoverySetupNative.cs','SyncShark.DiscoveryTransaction.cs','SyncShark.SignerIdentity.cs')
+    $sourceNames=@('SyncShark.JournalNative.cs','SyncShark.JournalSetup.cs','SyncShark.DiscoverySetupNative.cs','SyncShark.DiscoveryTransaction.cs','SyncShark.SignerIdentity.cs')
     $sourceNames+=@('SyncShark.UpdaterContract.cs','SyncShark.UpdaterData.cs','SyncShark.UpdaterSignature.cs','SyncShark.UpdaterTask.cs','SyncShark.UpdaterFiles.cs','SyncShark.UpdaterWindows.cs','SyncShark.UpdaterManifest.cs')
     $sourceNames+='SyncShark.UpdaterDiscovery.cs'
     if($Kind -eq 'Updater'){$sourceNames+='SyncShark.UpdaterSession.cs'}else{$sourceNames+='SyncShark.UpdaterSetup.cs'}

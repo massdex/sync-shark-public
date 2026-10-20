@@ -602,6 +602,7 @@ function Invoke-SyncSharkProtectedRuntimeSetup {
                 [SyncSharkDiscoverySetupNative]::RequireProductSignature($retainedWorker)
             }
         }
+        if($Mode -eq 'RuntimeInstall') { [SyncSharkJournalSetup]::Install($transaction) }
         if($Mode -eq 'RuntimeRemove') {
             if(-not $discoveryCompleted -and [IO.File]::Exists([IO.Path]::Combine($protected,'SyncSharkDiscovery.exe'))) {
                 Invoke-SyncSharkDiscoverySetup -Mode Remove -ParentProcessId $ParentProcessId -AppDirectory $contract.protectedRuntimeRoot -RuntimeReleaseValidated

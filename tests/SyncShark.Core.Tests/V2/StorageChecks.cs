@@ -15,11 +15,13 @@ internal static partial class StorageChecks
         if (Directory.Exists(root)) Directory.Delete(root, true);
         Directory.CreateDirectory(root);
         IntegratedSchemaChecks(root);
+        await JournalSizingChecks.RunAsync(root);
         OpenFreshReopen(root);
         OpenDamagedRoots(root);
         PrepareStorageChecks(root);
         Both(root, "round-trip", SnapshotRoundTrip);
         SnapshotUnchangedWritesNothing(root);
+        SnapshotStreamingChecks(root);
         Both(root, "absent-close", SnapshotAbsentClosed);
         Both(root, "excluded-snapshot", SnapshotExcludedRowsSurvive);
         Both(root, "excluded-delta", DeltaExcludedRowsSurvive);

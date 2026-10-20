@@ -6,7 +6,7 @@ namespace Massdex.SyncShark.V2;
 internal sealed class FileStateReader
 {
     private const string Columns =
-        "f.dir_no, d.path, f.name, f.kind, f.object_id, f.version_id, f.hash, f.size, f.mtime, f.flags, f.identity_json";
+        "f.dir_no, d.path, f.name, f.kind, f.object_id, f.version_id, f.hash, f.size, f.mtime, f.flags, f.identity_json, f.name_key";
 
     // Every live row at one path ignoring case the folder spellings through dir_key, then the
     // primary key (root_no, dir_no, name_key, ...) down to the leaf key.
@@ -47,7 +47,7 @@ internal sealed class FileStateReader
             : sql;
 
     private static string BatchedPathsSql(string values) =>
-        $"WITH requested(i,pk,nk) AS (VALUES {values}) SELECT {Columns}, q.i " +
+        $"WITH requested(i,pk,nk) AS (VALUES {values}) SELECT {Columns}, q.i AS requested_index " +
         "FROM requested q CROSS JOIN file_state f JOIN dir d ON d.dir_no=f.dir_no " +
         "WHERE f.root_no=$r AND f.dir_no IN (SELECT dir_no FROM dir WHERE path_key=q.pk) AND f.name_key=q.nk;";
 
@@ -122,10 +122,11 @@ internal sealed class FileStateReader
             }
             var selected = new Entry?[batch.Length];
             using var reader = command.ExecuteReader();
+            var requestedIndex = reader.GetOrdinal("requested_index");
             while (reader.Read())
             {
                 var entry = Decode(reader);
-                var i = reader.GetInt32(11);
+                var i = reader.GetInt32(requestedIndex);
                 if (selected[i] is null || string.Equals(entry.Item.Path, batch[i], StringComparison.Ordinal))
                     selected[i] = entry;
             }
@@ -232,6 +233,13 @@ internal sealed class FileStateReader
         Query($"SELECT {Columns} FROM file_state f JOIN dir d ON d.dir_no = f.dir_no " +
             "WHERE f.root_no=$r ORDER BY d.path, f.name;", [("$r", rootNo)]);
 
+    internal const string SnapshotStreamSql =
+        $"SELECT {Columns} FROM file_state f JOIN dir d ON d.dir_no=f.dir_no " +
+        "WHERE f.root_no=$r ORDER BY f.dir_no,f.name_key,f.name;";
+
+    internal IEnumerable<Entry> SnapshotEntries(long rootNo, Func<SqliteTransaction> transaction) =>
+        SnapshotRows.Read(_connection, transaction(), SnapshotStreamSql, Decode, rootNo);
+
     /// <summary>The keys of live rows carrying one object id (its old path after a move).</summary>
     public List<(long DirNo, string Name, string Path)> ReadObject(long rootNo, string objectId, SqliteTransaction? transaction)
     {
@@ -292,7 +300,7 @@ internal sealed class FileStateReader
     }
 
     private static Entry Decode(SqliteDataReader reader) => Entry.Of(
-        reader.GetString(1), reader.GetString(2), DecodeItem(reader), reader.GetInt64(0));
+        reader.GetString(1), reader.GetString(2), DecodeItem(reader), reader.GetInt64(0)) with { NameKey = reader.GetString(11) };
 
     private static ItemState DecodeItem(SqliteDataReader reader) => new(
             RowCodec.Join(reader.GetString(1), reader.GetString(2)),
@@ -308,6 +316,8 @@ internal sealed class FileStateReader
     /// <summary>One live row: its key, its parent path and its decoded state.</summary>
     public readonly record struct Entry(string Parent, string Name, ItemState Item, long DirNo)
     {
+        public string NameKey { get; init; } = RowCodec.Key(Name);
+
         /// <summary>Builds an entry for an incoming item (its folder number is assigned on insert).</summary>
         public static Entry Of(string parent, string name, ItemState item, long dirNo = 0) => new(parent, name, item, dirNo);
 

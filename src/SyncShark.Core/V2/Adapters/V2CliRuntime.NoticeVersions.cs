@@ -16,6 +16,14 @@ public sealed partial class V2CliRuntime
             throw new SyncCliUsageException("Use the exact --key and --generation 0 from conflicts list.");
         if (accountId is not null && !string.Equals(pair.B.AccountId, accountId, StringComparison.Ordinal))
             throw new SyncCliUsageException("The selected notice is not in this account.");
+        if (JournalSizing.IsChoice(choice))
+        {
+            var journalNotice = _store.OpenNotices(pairId).FirstOrDefault(item => item.NoticeId == conflictId &&
+                PairPath.Same(item.Path, relativePath) && JournalSizing.IsNotice(item))
+                ?? throw new SyncCliReviewException("Refresh the journal notice; it is no longer open.");
+            await JournalSizing.ApplyAsync(_store, journalNotice, choice, new AttendedElevatedAction(), cancellationToken);
+            return new SyncCliRunData(pairId, pair.Name, 0, 0, 0, 0, 0, false);
+        }
         await WaitForDataLockAsync(_runGate, Console.Error.WriteLine, cancellationToken);
         try
         {
