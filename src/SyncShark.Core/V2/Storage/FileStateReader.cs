@@ -179,6 +179,34 @@ internal sealed class FileStateReader
             "ORDER BY f.dir_no,f.name_key,f.name LIMIT $limit OFFSET $offset;",
             [("$r", rootNo), ("$pk", RowCodec.Key(directory)), ("$limit", limit), ("$offset", offset)]);
 
+    /// <summary>Bounded name-filtered folder paths under one prefix; the LIMIT is applied before any row is decoded.</summary>
+    public IReadOnlyList<string> RebuildableFoldersUnder(long rootNo, string prefix, IReadOnlyList<string> names,
+        int offset, int limit)
+    {
+        var prefixKey = RowCodec.Key(prefix);
+        var nameFilter = names.Count == 0 ? "1" :
+            "f.name_key IN (" + string.Join(",", names.Select((_, i) => "$n" + i)) + ")";
+        var parameters = new List<(string, object?)>
+        {
+            ("$r", rootNo), ("$kind", RowCodec.KindCode(ItemKind.Folder)),
+            ("$empty", prefix.Length == 0 ? 1 : 0), ("$prefix", prefixKey), ("$plen", prefixKey.Length),
+            ("$limit", limit), ("$offset", offset)
+        };
+        for (var i = 0; i < names.Count; i++) parameters.Add(("$n" + i, RowCodec.Key(names[i])));
+        var rows = new List<string>(limit);
+        using var command = StoreSchema.Command(_connection, null,
+            "SELECT d.path, f.name FROM file_state f JOIN dir d ON d.dir_no=f.dir_no " +
+            "WHERE f.root_no=$r AND f.kind=$kind AND " + nameFilter + " AND ($empty=1 " +
+            "OR d.path_key=$prefix " +
+            "OR (length(d.path_key)>$plen AND substr(d.path_key,1,$plen)=$prefix AND substr(d.path_key,$plen+1,1)='/') " +
+            "OR ((CASE WHEN d.path_key='' THEN '' ELSE d.path_key || '/' END) || f.name_key)=$prefix) " +
+            "ORDER BY d.path,f.name LIMIT $limit OFFSET $offset;");
+        foreach (var (name, value) in parameters) command.Parameters.AddWithValue(name, value ?? DBNull.Value);
+        using var reader = command.ExecuteReader();
+        while (reader.Read()) rows.Add(RowCodec.Join(reader.GetString(0), reader.GetString(1)));
+        return rows;
+    }
+
     public IReadOnlyList<ItemState> LiveFlaggedPage(long rootNo, ItemFlags flags, ItemState? after, int limit,
         long? afterDirNo = null, SqliteTransaction? transaction = null)
     {

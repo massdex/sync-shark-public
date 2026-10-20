@@ -93,9 +93,9 @@ internal static partial class RunChecks
         Console.WriteLine("PASS HeldIntentBoundaries");
     }
 
-    // A temporary hold keeps the intent unresolved and reports it as Held/PendingVerification, never as an
-    // unconfirmed or failed effect. The summary notice counts the holds, never holds a path itself, is backed
-    // by the keyset page, updates its count, and closes when the last hold is released.
+    // M3: the held count merges into the EXISTING local-rehash-pending summary. Both counts are shown, Show remaining
+    // lists the parked changes, the notice closes only when both counts are zero, and it never holds a path. A legacy
+    // held-intents summary is closed and never raised again.
     private static async Task HeldIntentSummaryAsync()
     {
         using var store = SqliteStateStore.Open(
@@ -104,79 +104,109 @@ internal static partial class RunChecks
         var fx = Build(suppliedStore: store);
         store.MarkFirstSyncDone(fx.Pair.PairId);
         var one = fx.A.Seed("hold/one.txt", "one");
+        fx.B.Seed(one.Path, "one");
         var two = fx.A.Seed("hold/two.txt", "two");
-        // A typed subtree hold protects the paths without an exclusion, so these intents are held, not settled.
-        store.AddNotices([new Notice(fx.Pair.PairId, 30, NoticeKind.UserDecision, "hold", "subtree hold",
-            QuarantineFailure.NoticeKey, Quarantine: new(Side.A, null, one, true))]);
+        fx.B.Seed(two.Path, "two");
+        var three = fx.A.Seed("hold/three.txt", "three");
+        fx.B.Seed(three.Path, "three");
+        var run = fx.Run();
+        // Populate stored rows from the endpoints before creating verification debt.
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        var baselinesBefore = store.Baselines(fx.Pair.PairId).Count;
+        var oneLive = store.Live(fx.Pair.A.RootId, [one.Path]).Single();
+        var twoLive = store.Live(fx.Pair.A.RootId, [two.Path]).Single();
+        var threeLive = store.Live(fx.Pair.A.RootId, [three.Path]).Single();
+        var oneHash = one.Hash!;
+        var twoHash = two.Hash!;
+        var threeHash = three.Hash!;
+        store.RequireRehash(fx.Pair.A.RootId, oneLive, "journal lost");
+        store.RequireRehash(fx.Pair.A.RootId, twoLive, "journal lost");
         store.RecordIntents(fx.Pair.PairId,
         [
-            new SyncAction("held-one", 1, ActionKind.CopyNew, Side.B, one.Path, null, one, null, false, "held-1"),
-            new SyncAction("held-two", 1, ActionKind.CopyNew, Side.B, two.Path, null, two, null, false, "held-2"),
+            new SyncAction("held-one", 1, ActionKind.CopyNew, Side.B, one.Path, null,
+                oneLive with { Hash = oneHash }, null, false, "held-1"),
+            new SyncAction("held-two", 1, ActionKind.CopyNew, Side.B, two.Path, null,
+                twoLive with { Hash = twoHash }, null, false, "held-2"),
         ]);
-        var run = fx.Run();
+        // A summary written by the previous build is superseded, never left beside the combined one.
+        store.AddNotices([new Notice(fx.Pair.PairId, 0, NoticeKind.Info, string.Empty,
+            "2 changes are waiting for background verification", "held-intents")]);
 
         var first = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
         Require(store.CountHeldIntents(fx.Pair.PairId) == 2 && store.CountUnresolvedIntents(fx.Pair.PairId) == 2 &&
             store.IsIntentHeld(fx.Pair.PairId, "held-one") && store.IsIntentHeld(fx.Pair.PairId, "held-two"),
-            "temporary holds keep both intents unresolved and durably held");
-        var held = store.OpenNotices(fx.Pair.PairId).Where(notice => notice.ReasonKey == "held-intents").ToArray();
-        Require(held.Length == 1 && held[0].Path.Length == 0 && !PlanNotices.HasPathScope(held[0]),
-            "one summary notice reports the holds and never holds a path");
-        Require(held[0].Detail.Contains("2 changes are waiting"),
-            "the summary counts the currently held intents");
-        Require(NoticeChoices.IsRetryNotice(held[0]) &&
-            NoticeChoices.Options(held[0]).Select(option => option.Choice).SequenceEqual([NoticeChoices.ShowRemaining]),
-            "the summary offers Show remaining only");
+            "verification debt keeps both intents unresolved and durably held");
+        Require(store.StreamUnresolvedIntentRows(fx.Pair.PairId).All(row => row.State == "held"),
+            "the streamed page returns each intent's state without a per-row point lookup");
+        var summary = store.OpenNotices(fx.Pair.PairId)
+            .Where(notice => notice.ReasonKey == RehashProtection.Reason).ToArray();
+        Require(summary.Length == 1 && summary[0].Rule == RehashProtection.Rule &&
+            summary[0].Path.Length == 0 && !PlanNotices.HasPathScope(summary[0]),
+            "one combined background-verification summary reports the holds and never holds a path");
+        Require(summary[0].Detail.Contains("2 files awaiting content verification") &&
+            summary[0].Detail.Contains("2 changes are waiting for background verification"),
+            "the combined summary carries both counts");
+        Require(store.OpenNotices(fx.Pair.PairId).All(notice => notice.ReasonKey != "held-intents"),
+            "the legacy held-intents summary is closed, not duplicated");
+        Require(NoticeChoices.IsRetryNotice(summary[0]) &&
+            NoticeChoices.Options(summary[0]).Select(option => option.Choice).SequenceEqual([NoticeChoices.ShowRemaining]),
+            "the combined summary offers Show remaining only");
         Require(first.PendingVerification == 2 && first.Held == first.PendingVerification && first.Uncertain == 0 &&
             first.Failures.Count == 0,
             "temporary holds are reported as held and pending, never as unconfirmed or failed effects");
         Require(fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0 &&
-            await fx.B.ObserveAsync(one.Path, default) is null && await fx.B.ObserveAsync(two.Path, default) is null,
+            await fx.B.ObserveAsync(one.Path, default) is { } oneOnB && oneOnB.Hash == one.Hash &&
+            await fx.B.ObserveAsync(two.Path, default) is { } twoOnB && twoOnB.Hash == two.Hash,
             "held intents perform no endpoint effect");
-        Require(store.Baselines(fx.Pair.PairId).Count == 0,
-            "no synced baseline exists while the intents are still held");
+        Require(store.Baselines(fx.Pair.PairId).Count == baselinesBefore,
+            "held intents add no synced baseline");
 
-        // Show remaining is the summary's only action and is backed by the keyset page; offsets and invalid
-        // cursors are explained without changing any hold.
-        var shown = await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, held[0].NoticeId!,
+        // Show remaining is backed by the keyset page; offsets and invalid cursors are explained without changing holds.
+        var shown = await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, summary[0].NoticeId!,
             NoticeChoices.ShowRemaining, CancellationToken.None);
         Require(shown.Contains(one.Path) && shown.Contains(two.Path) && shown.Contains("pending verification; not synced"),
             "Show remaining lists the held items from the page API");
-        var offset = await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, held[0].NoticeId!,
+        var offset = await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, summary[0].NoticeId!,
             NoticeChoices.ShowRemaining, CancellationToken.None, input: new(Offset: 50));
         Require(offset.Contains("next cursor (--name)") && store.CountHeldIntents(fx.Pair.PairId) == 2,
             "an offset is refused in favor of the keyset cursor without modifying holds");
-        var invalid = await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, held[0].NoticeId!,
+        var invalid = await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, summary[0].NoticeId!,
             NoticeChoices.ShowRemaining, CancellationToken.None, input: new(Name: "not-a-cursor"));
         Require(invalid.Contains("cursor is invalid") && store.CountHeldIntents(fx.Pair.PairId) == 2,
             "an invalid cursor is explained without modifying holds");
 
-        // A newly held intent updates the same summary instead of adding a second one.
-        var three = fx.A.Seed("hold/three.txt", "three");
+        // A newly held intent updates the same combined summary instead of adding a second one.
+        store.RequireRehash(fx.Pair.A.RootId, threeLive, "journal lost");
         store.RecordIntent(fx.Pair.PairId,
-            new SyncAction("held-three", 1, ActionKind.CopyNew, Side.B, three.Path, null, three, null, false, "held-3"));
+            new SyncAction("held-three", 1, ActionKind.CopyNew, Side.B, three.Path, null,
+                threeLive with { Hash = threeHash }, null, false, "held-3"));
         var updatedReport = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
-        var updated = store.OpenNotices(fx.Pair.PairId).Single(notice => notice.ReasonKey == "held-intents");
-        Require(updated.NoticeId == held[0].NoticeId && updated.Detail.Contains("3 changes are waiting"),
-            "each reconciliation updates the same summary with the current count");
+        var updated = store.OpenNotices(fx.Pair.PairId).Single(notice => notice.ReasonKey == RehashProtection.Reason);
+        Require(updated.NoticeId == summary[0].NoticeId && updated.Detail.Contains("3 changes are waiting for background verification") &&
+            updated.Detail.Contains("3 files awaiting content verification"),
+            "each reconciliation updates the same combined summary with the current counts");
         Require(updatedReport.PendingVerification == 3 && updatedReport.Held == updatedReport.PendingVerification &&
             updatedReport.Uncertain == 0,
-            "the updated report counts every temporary hold");
+            "the updated report counts every verification hold");
 
-        // Release: the summary closes at zero and the released intents are processed normally.
-        foreach (var notice in store.OpenNotices(fx.Pair.PairId)
-                     .Where(notice => notice.ReasonKey == QuarantineFailure.NoticeKey))
-            store.CloseNotice(notice.NoticeId!, "released");
+        // M4: already-held rows are not written again on a run that changes nothing.
+        var writesBefore = store.IntentHoldWrites;
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        Require(store.IntentHoldWrites == writesBefore,
+            "a run skips hold-state writes for intents already held");
+
+        // Release: only when BOTH counts are zero does the combined summary close; the released intents then sync.
+        Require(store.CompleteRehash(fx.Pair.A.RootId, store.Live(fx.Pair.A.RootId, [one.Path]).Single(), oneHash) &&
+            store.CompleteRehash(fx.Pair.A.RootId, store.Live(fx.Pair.A.RootId, [two.Path]).Single(), twoHash) &&
+            store.CompleteRehash(fx.Pair.A.RootId, store.Live(fx.Pair.A.RootId, [three.Path]).Single(), threeHash),
+            "content verification settles the flagged rows");
         var released = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
         Require(store.CountHeldIntents(fx.Pair.PairId) == 0 &&
-            store.OpenNotices(fx.Pair.PairId).All(notice => notice.ReasonKey != "held-intents"),
-            "releasing every hold closes the summary notice");
-        Require(released.PendingVerification == 0 && released.Uncertain == 0 && released.Failures.Count == 0,
-            "a released run reports no remaining pending verification");
-        Require((await fx.B.ObserveAsync(one.Path, default))?.Hash == one.Hash &&
-            (await fx.B.ObserveAsync(two.Path, default))?.Hash == two.Hash &&
-            (await fx.B.ObserveAsync(three.Path, default))?.Hash == three.Hash,
-            "released intents are re-planned and applied normally");
+            store.OpenNotices(fx.Pair.PairId).All(notice => notice.ReasonKey != RehashProtection.Reason),
+            "releasing every hold and clearing every rehash closes the combined summary");
+        Require(store.UnresolvedIntents(fx.Pair.PairId).Count == 0 && released.PendingVerification == 0 &&
+            released.Uncertain == 0 && released.Failures.Count == 0,
+            "released intents reconcile to Done rather than staying parked");
         Require(store.Baselines(fx.Pair.PairId).Any(row => row.A.Path == one.Path),
             "the synced baseline appears only after release");
         Console.WriteLine("PASS HeldIntentSummary");
@@ -193,17 +223,20 @@ internal static partial class RunChecks
         var fx = Build(suppliedStore: store);
         store.MarkFirstSyncDone(fx.Pair.PairId);
         var source = fx.A.Seed("hold/retry.txt", "retry content");
-        store.AddNotices([new Notice(fx.Pair.PairId, 30, NoticeKind.UserDecision, "hold", "subtree hold",
-            QuarantineFailure.NoticeKey, Quarantine: new(Side.A, null, source, true))]);
+        fx.B.Seed(source.Path, "retry content");
+        var run = fx.Run();
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        var live = store.Live(fx.Pair.A.RootId, [source.Path]).Single();
+        store.RequireRehash(fx.Pair.A.RootId, live, "journal lost");
         store.SaveSyncRetry(fx.Pair.PairId,
             new(source.Path, "sync", 6, "earlier failure", DateTimeOffset.UtcNow.AddMinutes(5)));
         store.RecordIntent(fx.Pair.PairId,
-            new SyncAction("held-retry", 1, ActionKind.CopyNew, Side.B, source.Path, null, source, null, false, "held-retry-key"));
-        var run = fx.Run();
+            new SyncAction("held-retry", 1, ActionKind.CopyNew, Side.B, source.Path, null,
+                live with { Hash = source.Hash }, null, false, "held-retry-key"));
 
         var heldReport = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
         Require(store.IsIntentHeld(fx.Pair.PairId, "held-retry") && store.CountHeldIntents(fx.Pair.PairId) == 1,
-            "the protected intent is held rather than reported as uncertain debt");
+            "the verification-protected intent is held rather than reported as uncertain debt");
         var parked = store.SyncRetryAt(fx.Pair.PairId, source.Path);
         Require(parked is { Kind: "sync", Attempts: 6, LastError: "earlier failure", RetryAfter: var parkedDeadline } &&
             parkedDeadline == DateTimeOffset.MaxValue,
@@ -213,24 +246,305 @@ internal static partial class RunChecks
         Require(heldReport.PendingVerification == 1 && heldReport.Held == heldReport.PendingVerification &&
             heldReport.Uncertain == 0 && heldReport.Failures.Count == 0,
             "hold-only reporting stays normal even with prior ordinary retry debt");
-        Require(store.Baselines(fx.Pair.PairId).Count == 0,
-            "no synced baseline exists before release");
 
-        foreach (var notice in store.OpenNotices(fx.Pair.PairId)
-                     .Where(notice => notice.ReasonKey == QuarantineFailure.NoticeKey))
-            store.CloseNotice(notice.NoticeId!, "released");
+        Require(store.CompleteRehash(fx.Pair.A.RootId, store.Live(fx.Pair.A.RootId, [source.Path]).Single(), source.Hash!),
+            "verification settles the protected row");
         var released = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
         // Release unparked the deadline before the held->uncertain transition, so this run reconciled the
         // intent, re-planned and applied it; successful evaluation then settled the ordinary retry debt.
         Require(store.SyncRetryAt(fx.Pair.PairId, source.Path) is null,
             "release retries the effect and successful evaluation clears the ordinary retry that was parked");
-        Require((await fx.B.ObserveAsync(source.Path, default))?.Hash == source.Hash,
-            "the released intent is retried and its effect is applied");
         Require(store.Baselines(fx.Pair.PairId).Any(row => row.A.Path == source.Path),
             "the baseline is written by the released effect, not by the hold");
         Require(released.PendingVerification == 0 && released.Held == 0 && released.Uncertain == 0 &&
             released.Failures.Count == 0,
             "the released run reports no held or unconfirmed work");
         Console.WriteLine("PASS HeldIntentRetryParks");
+    }
+
+    // M1 regression: the two outside writers (CommitResult, RecordIntent) overwrite state='held' without unparking.
+    // The unpark must therefore key on the retry row alone. After an outside commit to Uncertain and a released
+    // protection, the next run reconciles the effect (Done) instead of sleeping behind the old parked deadline.
+    private static async Task HeldIntentUnparkAfterOutsideCommitAsync()
+    {
+        using var store = SqliteStateStore.Open(
+            Path.Combine(Path.GetTempPath(), "held-unpark-" + Guid.NewGuid().ToString("N")),
+            Settings, TimeProvider.System);
+        var fx = Build(suppliedStore: store);
+        store.MarkFirstSyncDone(fx.Pair.PairId);
+        var source = fx.A.Seed("hold/outside.txt", "outside content");
+        fx.B.Seed(source.Path, "outside content");
+        var run = fx.Run();
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        var live = store.Live(fx.Pair.A.RootId, [source.Path]).Single();
+        store.RequireRehash(fx.Pair.A.RootId, live, "journal lost");
+        store.SaveSyncRetry(fx.Pair.PairId,
+            new(source.Path, "sync", 4, "older failure", DateTimeOffset.UtcNow.AddMinutes(5)));
+        var action = new SyncAction("held-outside", 1, ActionKind.CopyNew, Side.B, source.Path, null,
+            live with { Hash = source.Hash }, null, false, "held-outside-key");
+        store.RecordIntent(fx.Pair.PairId, action);
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        Require(store.IsIntentHeld(fx.Pair.PairId, action.ActionId) &&
+            store.SyncRetryAt(fx.Pair.PairId, source.Path) is { RetryAfter: var parked } && parked == DateTimeOffset.MaxValue,
+            "setup: the intent is held and its retry parked");
+
+        // Outside reconcile (quarantine/choice paths do this): commit Uncertain, overwriting 'held'.
+        store.CommitResult(fx.Pair.PairId, store.BeginGeneration(fx.Pair.A.RootId, "outside"),
+            action, new ActionResult(action.ActionId, Outcome.Uncertain, null, null, null, "outside observation"));
+        Require(!store.IsIntentHeld(fx.Pair.PairId, action.ActionId) &&
+            store.SyncRetryAt(fx.Pair.PairId, source.Path) is { RetryAfter: var stillParked } &&
+            stillParked == DateTimeOffset.MaxValue,
+            "an outside commit leaves the state uncertain but the retry row still parked (the M1 leak)");
+
+        Require(store.CompleteRehash(fx.Pair.A.RootId, store.Live(fx.Pair.A.RootId, [source.Path]).Single(), source.Hash!),
+            "verification settles the protected row");
+        var report = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        Require(store.SyncRetryAt(fx.Pair.PairId, source.Path) is null && report.Outcome == RunOutcomes.Complete &&
+            report.Uncertain == 0 && report.Failures.Count == 0 && report.PendingVerification == 0,
+            "the unpark keys on the retry row alone: the intent reconciles instead of sleeping and reporting Partial");
+        Require(store.Baselines(fx.Pair.PairId).Any(row => row.A.Path == source.Path),
+            "the reconciled copy commits its baseline rather than staying blocked");
+        Console.WriteLine("PASS HeldIntentUnparkAfterOutsideCommit");
+    }
+
+    // M2: links and left-alone stubs never clear by themselves, so their intents retire under the EXISTING link or
+    // stubs summary; no new notice is raised, nothing is applied, and no verification hold or retry debt is created.
+    private static async Task HeldIntentLinkAndStubRetireAsync()
+    {
+        foreach (var kind in new[] { ItemFlags.Link, ItemFlags.Placeholder })
+        {
+            var label = kind == ItemFlags.Link ? "link" : "stub";
+            using var store = SqliteStateStore.Open(
+                Path.Combine(Path.GetTempPath(), "held-" + label + "-" + Guid.NewGuid().ToString("N")),
+                Settings, TimeProvider.System);
+            var fx = Build(suppliedStore: store);
+            store.MarkFirstSyncDone(fx.Pair.PairId);
+            var item = fx.A.Seed("protected/item.txt", "target content");
+            fx.Provider.AddInventory(fx.Pair.A, new FlaggedInventory(fx.A, item.Path, kind));
+            var settings = kind == ItemFlags.Placeholder
+                ? (Settings with { ReplaceOnlineOnlyStubs = false }) : Settings;
+            var run = new SyncRun(store, fx.Executor, fx.Provider, settings, TimeProvider.System);
+            // First run stores the link/stub row and raises its standing summary.
+            await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+            var summaryKey = kind == ItemFlags.Link
+                ? LinkExclusions.Reason.Key : LinkExclusions.StubReason.Key;
+            var before = store.OpenNotices(fx.Pair.PairId).Where(notice => notice.ReasonKey == summaryKey).ToArray();
+            Require(before.Length == 1, label + ": the existing standing summary explains the protected path");
+
+            store.SaveSyncRetry(fx.Pair.PairId,
+                new(item.Path, "sync", 2, "earlier failure", DateTimeOffset.UtcNow.AddMinutes(5)));
+            store.RecordIntent(fx.Pair.PairId,
+                new SyncAction("protected", 1, ActionKind.CopyNew, Side.B, item.Path, null, item, null, false, "protected-key"));
+            var report = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+
+            Require(store.UnresolvedIntents(fx.Pair.PairId).Count == 0 && store.CountHeldIntents(fx.Pair.PairId) == 0,
+                label + ": the protected intent retires instead of becoming a verification hold");
+            Require(report.PendingVerification == 0 && report.Uncertain == 0 && report.Failures.Count == 0,
+                label + ": retirement is neither background verification nor a retry reason");
+            var after = store.OpenNotices(fx.Pair.PairId).ToArray();
+            Require(after.Where(notice => notice.ReasonKey == summaryKey).Select(notice => notice.NoticeId)
+                    .SequenceEqual(before.Select(notice => notice.NoticeId)) &&
+                after.All(notice => notice.ReasonKey != RehashProtection.Reason &&
+                    notice.ReasonKey is not ("held-intents" or "permanent-boundary")),
+                label + ": retirement raises no new notice; the existing standing summary stays the only explanation");
+            Require(store.SyncRetryAt(fx.Pair.PairId, item.Path) is null && fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0,
+                label + ": retirement clears the ordinary retry and performs no endpoint effect");
+        }
+        Console.WriteLine("PASS HeldIntentLinkAndStubRetire");
+    }
+
+    // M2: quarantine, Defender and pair-wide decision holds stay pending and unsynced under their own notice. They
+    // are outside the verification summary and must not become retry or scheduling debt or a Partial run. Each cause
+    // is exercised independently; the baseline count proves the hold never syncs the item.
+    private static async Task HeldIntentPendingStaysUnsyncedAsync()
+    {
+        foreach (var mode in new[] { "quarantine", "defender", "decision" })
+        {
+            using var store = SqliteStateStore.Open(
+                Path.Combine(Path.GetTempPath(), "held-pending-" + mode + "-" + Guid.NewGuid().ToString("N")),
+                Settings, TimeProvider.System);
+            var fx = Build(suppliedStore: store);
+            store.MarkFirstSyncDone(fx.Pair.PairId);
+            var source = fx.A.Seed("hold/pending.txt", "pending content");
+            fx.B.Seed(source.Path, "pending content");
+            var run = fx.Run();
+            await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+            var baselinesBefore = store.Baselines(fx.Pair.PairId).Count;
+            DefenderGrant? grant = null;
+            switch (mode)
+            {
+                case "quarantine":
+                    store.AddNotices([new Notice(fx.Pair.PairId, 30, NoticeKind.UserDecision, "hold",
+                        "typed subtree hold", QuarantineFailure.NoticeKey,
+                        Quarantine: new(Side.A, null, source, ScanOnly: true))]);
+                    break;
+                case "defender":
+                    var fullPath = Path.GetFullPath(Path.Combine(fx.Pair.A.RootPath, "hold", "pending.txt"));
+                    grant = new DefenderGrant("grant-1", "owner-object", null, "another-local-object",
+                        fullPath, fullPath + ".stage");
+                    store.StoreDefenderGrant(grant);
+                    Require(store.DefenderGrantHoldPaths(fx.Pair.A.RootId).Contains(source.Path),
+                        "setup: the recorded Defender exclusion holds the item");
+                    break;
+                default:
+                    // A pair-wide decision hold covers every intent in the pair, exactly like HasRootDecisionHold.
+                    store.SaveSyncRetry(fx.Pair.PairId,
+                        new(string.Empty, "decision", 2, "pair-wide decision pending", DateTimeOffset.UtcNow.AddHours(1)));
+                    break;
+            }
+            store.SaveSyncRetry(fx.Pair.PairId,
+                new(source.Path, "sync", 3, "ordinary failure", DateTimeOffset.UtcNow.AddMinutes(5)));
+            var action = new SyncAction("held-pending", 1, ActionKind.CopyNew, Side.B, source.Path, null, source, null, false, "pending-key");
+            store.RecordIntent(fx.Pair.PairId, action);
+
+            var report = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+            Require(store.IntentById(fx.Pair.PairId, action.ActionId) is not null && store.CountHeldIntents(fx.Pair.PairId) == 0,
+                mode + ": a pending-evidence hold stays unresolved but is not counted as background verification");
+            Require(store.OpenNotices(fx.Pair.PairId).All(notice => notice.ReasonKey != RehashProtection.Reason) &&
+                report.PendingVerification == 0,
+                mode + ": pending evidence is outside the combined verification summary");
+            Require(report.Uncertain == 0 && report.Failures.Count == 0 && report.Outcome == RunOutcomes.Complete &&
+                report.Deferred == 0,
+                mode + ": a pending hold is not a retry reason, schedules no AutoSync retry and does not make the run Partial");
+            Require(store.Baselines(fx.Pair.PairId).Count == baselinesBefore,
+                mode + ": a pending hold never writes a synced baseline");
+            Require(store.SyncRetryAt(fx.Pair.PairId, source.Path) is { Kind: "sync", RetryAfter: var parked } &&
+                parked == DateTimeOffset.MaxValue && store.CountSyncRetries(fx.Pair.PairId) == 0,
+                mode + ": the item's ordinary retry is parked and the indefinite hold is not scheduling debt");
+            Require(fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0,
+                mode + ": the pending intent performs no endpoint effect");
+
+            // Clearing the hold releases ordinary planning; the retained intent reconciles to Done.
+            switch (mode)
+            {
+                case "quarantine":
+                    foreach (var notice in store.OpenNotices(fx.Pair.PairId)
+                                 .Where(notice => notice.ReasonKey == QuarantineFailure.NoticeKey))
+                        store.CloseNotice(notice.NoticeId!, "released");
+                    break;
+                case "defender":
+                    Require(store.RetireDefenderGrant(grant!), "setup: the Defender grant retires");
+                    break;
+                default:
+                    store.ClearSyncRetry(fx.Pair.PairId, string.Empty);
+                    break;
+            }
+            var released = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+            Require(store.IntentById(fx.Pair.PairId, action.ActionId) is null && released.Uncertain == 0 &&
+                released.PendingVerification == 0 && released.Deferred == 0,
+                mode + ": when the hold clears, the retained intent reconciles normally");
+            Require(store.Baselines(fx.Pair.PairId).Any(row => row.A.Path == source.Path),
+                mode + ": the baseline is written only by the released effect");
+        }
+        Console.WriteLine("PASS HeldIntentPendingStaysUnsynced");
+    }
+
+    // Owner-requested M1 regression through the actual quarantine choice dispatcher: a quarantine retry first
+    // reconciles the recorded pending intent (Done here), which resolves it and clears the parked retry atomically.
+    private static async Task HeldIntentQuarantineChoiceReconcilesAsync()
+    {
+        using var store = SqliteStateStore.Open(
+            Path.Combine(Path.GetTempPath(), "held-quarantine-choice-" + Guid.NewGuid().ToString("N")),
+            Settings, TimeProvider.System);
+        var fx = Build(suppliedStore: store);
+        store.MarkFirstSyncDone(fx.Pair.PairId);
+        var source = fx.A.Seed("hold/choice.txt", "choice content");
+        fx.B.Seed(source.Path, "choice content");
+        var run = fx.Run();
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        var localItem = store.Live(fx.Pair.A.RootId, [source.Path]).Single();
+        var targetItem = store.Live(fx.Pair.B.RootId, [source.Path]).Single();
+        store.RequireRehash(fx.Pair.A.RootId, localItem, "journal lost");
+        store.SaveSyncRetry(fx.Pair.PairId,
+            new(source.Path, "sync", 5, "earlier failure", DateTimeOffset.UtcNow.AddMinutes(5)));
+        var action = new SyncAction("held-choice", 1, ActionKind.CopyNew, Side.B, source.Path, null,
+            localItem with { Hash = source.Hash }, targetItem, false, "choice-key");
+        store.RecordIntent(fx.Pair.PairId, action);
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        Require(store.IsIntentHeld(fx.Pair.PairId, action.ActionId) &&
+            store.SyncRetryAt(fx.Pair.PairId, source.Path) is { RetryAfter: var parked } && parked == DateTimeOffset.MaxValue,
+            "setup: the intent is held and its retry parked");
+
+        // A reviewed quarantine notice names that still-pending effect; the choice reconciles it before any retry.
+        store.AddNotices([new Notice(fx.Pair.PairId, 30, NoticeKind.UserDecision, source.Path,
+            "review the quarantined item", QuarantineFailure.NoticeKey,
+            Quarantine: new QuarantineNotice(Side.B, localItem, targetItem, PendingActionId: action.ActionId))]);
+        var review = store.OpenNotices(fx.Pair.PairId).Single(notice => notice.Quarantine is not null);
+        var result = await run.ResolveQuarantineAsync(fx.Pair.PairId, review.NoticeId!,
+            NoticeChoices.QuarantineRetry, CancellationToken.None);
+        Require(result.Outcome == Outcome.Done,
+            "the quarantine choice reconciled the pending intent instead of resubmitting it");
+        Require(store.IntentById(fx.Pair.PairId, action.ActionId) is null &&
+            store.SyncRetryAt(fx.Pair.PairId, source.Path) is null && store.CountHeldIntents(fx.Pair.PairId) == 0,
+            "the reconciled intent resolves and its parked retry is cleared without a later run");
+        Require(fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0,
+            "reconciling an already-applied effect performs no endpoint write");
+        Console.WriteLine("PASS HeldIntentQuarantineChoiceReconciles");
+    }
+
+    // M3 apply regression: the reviewed first-sync plan carries the preview's combined summary. Classification at
+    // apply can resolve every hold, so the apply must write the post-classification summary (none), never refresh the
+    // stored notice back to the preview's stale count after closing it at zero.
+    private static async Task HeldIntentApplySummaryUsesPostClassificationAsync()
+    {
+        using var store = SqliteStateStore.Open(
+            Path.Combine(Path.GetTempPath(), "held-apply-summary-" + Guid.NewGuid().ToString("N")),
+            Settings, TimeProvider.System);
+        var fx = Build(suppliedStore: store);
+        var one = fx.A.Seed("hold/one.txt", "one");
+        var two = fx.A.Seed("hold/two.txt", "two");
+        // Seed stored rows before the preview so verification debt exists when its reconciliation classifies.
+        store.WriteSnapshot(new(fx.Pair.A.RootId, Side.A, store.BeginGeneration(fx.Pair.A.RootId, "seed"), "",
+            [one, two], []));
+        store.RequireRehash(fx.Pair.A.RootId, one, "journal lost");
+        store.RequireRehash(fx.Pair.A.RootId, two, "journal lost");
+        var first = new SyncAction("held-one", 1, ActionKind.CopyNew, Side.B, one.Path, null, one, null, false, "held-1");
+        var second = new SyncAction("held-two", 1, ActionKind.CopyNew, Side.B, two.Path, null, two, null, false, "held-2");
+        store.RecordIntents(fx.Pair.PairId, [first, second]);
+        var run = fx.Run();
+
+        var plan = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        Require(plan.Notices.Any(notice => notice.ReasonKey == RehashProtection.Reason &&
+                notice.Detail.Contains("2 changes are waiting for background verification")),
+            "the reviewed plan carries the preview's combined verification summary");
+
+        // Both verification holds resolve between review and apply. The apply's own reconciliation must decide the
+        // stored summary, not the plan's stale copy.
+        var oneLive = store.Live(fx.Pair.A.RootId, [one.Path]).Single();
+        var twoLive = store.Live(fx.Pair.A.RootId, [two.Path]).Single();
+        Require(store.CompleteRehash(fx.Pair.A.RootId, oneLive, oneLive.Hash ?? one.Hash!) &&
+            store.CompleteRehash(fx.Pair.A.RootId, twoLive, twoLive.Hash ?? two.Hash!),
+            "setup: both verification holds settle between review and apply");
+        store.CommitResult(fx.Pair.PairId, store.BeginGeneration(fx.Pair.A.RootId, "outside"), first,
+            new ActionResult(first.ActionId, Outcome.Done, null, null, null, null));
+        var report = await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), CancellationToken.None);
+        Require(store.CountHeldIntents(fx.Pair.PairId) == 0 && report.PendingVerification == 0,
+            "apply resolved every verification hold");
+        Require(store.OpenNotices(fx.Pair.PairId).All(notice => notice.ReasonKey != RehashProtection.Reason),
+            "apply never reopens the combined summary from the reviewed plan's stale count");
+        Console.WriteLine("PASS HeldIntentApplySummaryUsesPostClassification");
+    }
+
+    /// <summary>An inventory that reports one path with a chosen flag, as the real scanners do for links/stubs.</summary>
+    private sealed class FlaggedInventory(FakeEndpoint inner, string path, ItemFlags flags) : IInventorySource
+    {
+        public async Task<Snapshot> FullAsync(long gen, Func<string, bool> include, IProgress<string> p,
+            CancellationToken ct)
+        {
+            var snapshot = await inner.FullAsync(gen, include, p, ct);
+            return snapshot with
+            {
+                Items = snapshot.Items.Select(item => item.Path == path ? item with { Flags = flags } : item).ToArray()
+            };
+        }
+
+        public Task<Delta> ChangesSinceAsync(string cursor, long gen, Func<string, bool> include, CancellationToken ct) =>
+            inner.ChangesSinceAsync(cursor, gen, include, ct);
+
+        public Task<IReadOnlyDictionary<string, string>> HashAsync(IReadOnlyList<string> paths, CancellationToken ct) =>
+            inner.HashAsync(paths, ct);
+
+        public Task<IReadOnlyDictionary<string, DateTimeOffset>> DeletionTimesAsync(IReadOnlyList<string> paths,
+            CancellationToken ct) => inner.DeletionTimesAsync(paths, ct);
     }
 }

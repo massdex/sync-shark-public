@@ -15,14 +15,31 @@ internal sealed class InMemoryStateStore : IStateStore
     { lock (_gate) return _retries.GetValueOrDefault((pairId, path.ToUpperInvariant())); }
     public IReadOnlyList<SyncRetry> DueSyncRetries(string pairId, DateTimeOffset now, int limit) =>
         ReadSyncRetries(pairId).Where(item => item.RetryAfter <= now).OrderBy(item => item.RetryAfter).Take(Math.Clamp(limit, 1, 256)).ToArray();
-    public int CountSyncRetries(string pairId) => ReadSyncRetries(pairId).Count(item => item.RetryAfter < DateTimeOffset.MaxValue);
-    public bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants) =>
-        ReadSyncRetries(pairId).Any(item => !active.Contains(item.Path) && (descendants
+    // An indefinite pair-wide decision hold (Kind decision at the root path) is not scheduling debt.
+    public int CountSyncRetries(string pairId) => ReadSyncRetries(pairId).Count(item =>
+        item.RetryAfter < DateTimeOffset.MaxValue && !(item.Path.Length == 0 && item.Kind == "decision"));
+    public bool HasActiveRestoredRetries(string pairId) =>
+        ReadSyncRetries(pairId).Any(item => item.ReprobeEvidence && item.RetryAfter < DateTimeOffset.MaxValue);
+    public bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants, bool restoredOnly = false) =>
+        ReadSyncRetries(pairId).Any(item => (!restoredOnly || item.ReprobeEvidence) &&
+            !(item.ReprobeEvidence && item.RetryAfter == DateTimeOffset.MaxValue) && !active.Contains(item.Path) && (descendants
             ? PairPath.IsSelfOrUnder(item.Path, path) : PairPath.IsSelfOrUnder(path, item.Path)));
     public void SaveSyncRetry(string pairId, SyncRetry retry)
     { lock (_gate) _retries[(pairId, retry.Path.ToUpperInvariant())] = retry; }
     public void ClearSyncRetry(string pairId, string path)
     { lock (_gate) _retries.Remove((pairId, path.ToUpperInvariant())); }
+
+    public void SuspendHeldRetry(string pairId, SyncRetry retry)
+    {
+        lock (_gate)
+        {
+            SaveSyncRetry(pairId, new(retry.Path, "deletion-evidence", 0, retry.LastError,
+                DateTimeOffset.MaxValue, Held: retry.Held, ReprobeEvidence: true));
+            foreach (var notice in _notices.Where(n => n.PairId == pairId && PairPath.Same(n.Path, retry.Path) &&
+                n.ReasonKey is "sync-retry" or "deletion-evidence-pending"))
+                _closedNotices[notice.NoticeId!] = NoticeChoices.Exclude;
+        }
+    }
 
     private const long LiveToGen = long.MaxValue;
 
@@ -362,6 +379,24 @@ internal sealed class InMemoryStateStore : IStateStore
                 if (_deletionEvidence.TryGetValue(previous.PairId + "\n" + root, out var evidence))
                     foreach (var path in evidence.Keys.Where(item => paths.Any(prefix =>
                         PairPath.IsSelfOrUnder(item, prefix))).ToArray()) evidence.Remove(path);
+            var heldRows = ReadSyncRetries(previous.PairId).Where(retry => retry.Held is not null)
+                .ToDictionary(retry => retry.Path, StringComparer.OrdinalIgnoreCase);
+            if (RebuildableSelection.Sides(included) is { } sides)
+                foreach (var notice in _notices.Where(notice => notice.PairId == previous.PairId && notice.ReasonKey == "deletion-evidence-pending" &&
+                    notice.NoticeId is not null && _closedNotices.TryGetValue(notice.NoticeId, out var choice) &&
+                    choice is NoticeChoices.Ignore or NoticeChoices.Exclude))
+                    heldRows.TryAdd(notice.Path, new(notice.Path, "deletion-evidence", 0, "", DateTimeOffset.MinValue,
+                        Held: new HeldDeletion(notice.Path, sides.Local)));
+            foreach (var retry in heldRows.Values.Where(retry => paths.Any(prefix => PairPath.IsSelfOrUnder(retry.Path, prefix)) &&
+                !included.Excluded.Any(retained => PairPath.IsSelfOrUnder(retry.Path, retained))))
+                SaveSyncRetry(previous.PairId, new(retry.Path, "deletion-evidence", 0, "", DateTimeOffset.MinValue,
+                    Held: retry.Held, ReprobeEvidence: true));
+            // Mirror SavePairIncluded: removing an exclusion reverses its Ignore, so a fresh problem at the path
+            // may raise its notice again.
+            foreach (var notice in _notices.Where(item => item.PairId == previous.PairId && item.NoticeId is not null &&
+                         paths.Any(prefix => PairPath.IsSelfOrUnder(item.Path, prefix))).ToArray())
+                if (_closedNotices.TryGetValue(notice.NoticeId!, out var choice) && choice is NoticeChoices.Ignore or NoticeChoices.Exclude)
+                    _closedNotices[notice.NoticeId!] = null;
             var affected = UnresolvedIntents(previous.PairId).Where(action =>
                 new[] { action.Path, action.FromPath, action.Source?.Path, action.ExpectedTarget?.Path }
                     .OfType<string>().Any(footprint => paths.Any(path =>
@@ -423,7 +458,14 @@ internal sealed class InMemoryStateStore : IStateStore
             // Any other outcome overwrites held, so a committer never leaves a stale hold behind.
             var intents = IntentsFor(pairId);
             var intentRow = intents.TryGetValue(a.ActionId, out var knownIntent) ? knownIntent.RowId : ++_nextIntentRowId;
-            if (r.Outcome is Outcome.Done or Outcome.Skipped) intents.Remove(a.ActionId);
+            if (r.Outcome is Outcome.Done or Outcome.Skipped)
+            {
+                intents.Remove(a.ActionId);
+                // M1: a resolved or retired intent never leaves a parked verification retry behind.
+                var parkedKey = (pairId, a.Path.ToUpperInvariant());
+                if (_retries.GetValueOrDefault(parkedKey) is { Kind: "sync", Held: null } parked &&
+                    parked.RetryAfter == DateTimeOffset.MaxValue) _retries.Remove(parkedKey);
+            }
             else intents[a.ActionId] = new IntentRecord(a, r.Outcome.ToString().ToLowerInvariant(), ++_intentUpdated, intentRow);
 
             if (r.Recovery is { } recovery)
@@ -534,21 +576,31 @@ internal sealed class InMemoryStateStore : IStateStore
     {
         lock (_gate)
         {
-            // Ownership matches SQLite's primary-key rule: an id already owned by another pair is rejected.
-            if (_intents.Any(entry => !string.Equals(entry.Key, pairId, StringComparison.Ordinal) &&
-                    entry.Value.ContainsKey(actionId)))
-                throw new InvalidOperationException($"Intent {actionId} belongs to another pair.");
-            // A missing id is a no-op, never a reinsert.
-            if (!_intents.TryGetValue(pairId, out var map) || !map.TryGetValue(actionId, out var record)) return;
-            if (held)
-            {
-                if (record.State != "held") map[actionId] = record with { State = "held" };
-            }
-            else if (record.State == "held")
-            {
-                // Rollback returns a hold to uncertain; attempts and the update stamp stay untouched.
-                map[actionId] = record with { State = "uncertain" };
-            }
+            RequireIntentOwner(pairId, actionId);
+            ApplyHeld(pairId, actionId, held);
+        }
+    }
+
+    // Ownership matches SQLite's primary-key rule: an id already owned by another pair is rejected.
+    private void RequireIntentOwner(string pairId, string actionId)
+    {
+        if (_intents.Any(entry => !string.Equals(entry.Key, pairId, StringComparison.Ordinal) &&
+                entry.Value.ContainsKey(actionId)))
+            throw new InvalidOperationException($"Intent {actionId} belongs to another pair.");
+    }
+
+    // A missing id is a no-op, never a reinsert; an unchanged state is not rewritten.
+    private void ApplyHeld(string pairId, string actionId, bool held)
+    {
+        if (!_intents.TryGetValue(pairId, out var map) || !map.TryGetValue(actionId, out var record)) return;
+        if (held)
+        {
+            if (record.State != "held") map[actionId] = record with { State = "held" };
+        }
+        else if (record.State == "held")
+        {
+            // Rollback returns a hold to uncertain; attempts and the update stamp stay untouched.
+            map[actionId] = record with { State = "uncertain" };
         }
     }
 
@@ -562,6 +614,56 @@ internal sealed class InMemoryStateStore : IStateStore
     {
         lock (_gate) return _intents.TryGetValue(pairId, out var map) &&
             map.TryGetValue(actionId, out var record) && record.State == "held";
+    }
+
+    public void SetIntentsHeld(string pairId, IReadOnlyList<string> actionIds, bool held)
+    {
+        ArgumentNullException.ThrowIfNull(actionIds);
+        // Mirror SQLite exactly: one 256-id transaction per chunk. Validate every ownership first so a later
+        // foreign id rolls the whole chunk back, while earlier committed chunks stay committed.
+        for (var offset = 0; offset < actionIds.Count; offset += 256)
+        {
+            var end = Math.Min(offset + 256, actionIds.Count);
+            lock (_gate)
+            {
+                for (var index = offset; index < end; index++) RequireIntentOwner(pairId, actionIds[index]);
+                for (var index = offset; index < end; index++) ApplyHeld(pairId, actionIds[index], held);
+            }
+        }
+    }
+
+    // Mirrors SQLite: a fixed rowid horizon captured once, then bounded pages in rowid order. Rows whose state
+    // becomes resolved after the horizon was captured simply drop out of the matching set; rowids never move.
+    public IEnumerable<IntentRow> StreamUnresolvedIntentRows(string pairId)
+    {
+        long through;
+        lock (_gate)
+            through = _intents.TryGetValue(pairId, out var map) && map.Count > 0
+                ? map.Values.Max(intent => intent.RowId) : 0;
+        long after = 0;
+        while (after < through)
+        {
+            List<(IntentRow Row, long RowId)> page;
+            lock (_gate)
+                page = _intents.TryGetValue(pairId, out var map)
+                    ? map.Values.Where(intent => IsUnresolved(intent) && intent.RowId > after && intent.RowId <= through)
+                        .OrderBy(intent => intent.RowId).Take(201)
+                        .Select(intent => (new IntentRow(intent.Action, intent.State), intent.RowId)).ToList()
+                    : new List<(IntentRow Row, long RowId)>();
+            if (page.Count == 0) yield break;
+            foreach (var row in page.Take(200)) yield return row.Row;
+            if (page.Count <= 200) yield break;
+            after = page[199].RowId;
+        }
+    }
+
+    public IEnumerable<SyncAction> StreamUnresolvedIntents(string pairId) =>
+        StreamUnresolvedIntentRows(pairId).Select(row => row.Action);
+
+    public string? PairForIntent(string actionId)
+    {
+        lock (_gate)
+            return _intents.FirstOrDefault(entry => entry.Value.ContainsKey(actionId)).Key;
     }
 
     public IntentPage HeldIntentsPage(string pairId, string? cursor, int limit)
@@ -600,9 +702,10 @@ internal sealed class InMemoryStateStore : IStateStore
                     known.RetainedVersion?.ActionId == notice.RetainedVersion?.ActionId);
                 if (same is not null)
                 {
+                    // Mirror NoticeTable.Add: an ignored retry notice stays closed; every other repeated notice
+                    // reopens, and a retry notice refreshes its display text without changing problem identity.
                     if (NoticeChoices.IsRetryNotice(notice) && _closedNotices.GetValueOrDefault(same.NoticeId!) == "ignore") continue;
                     if (notice.RetainedVersion is null) _closedNotices.Remove(same.NoticeId!);
-                    // Mirror NoticeTable.Add: a retry notice refreshes its display text without changing problem identity.
                     if (NoticeChoices.IsRetryNotice(notice) || notice.FreeSpace is not null ||
                         (notice.Kind == NoticeKind.UserDecision && notice.Detail.Contains(ProviderNameRefusedException.Detail, StringComparison.Ordinal)) ||
                         notice.ReasonKey == ProviderNameRefusedException.NoticeKey)

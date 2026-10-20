@@ -36,7 +36,11 @@ internal sealed partial class NoticeTable
             // A generic planner observation must not erase a more specific executor diagnosis.
             if (notice.ReasonKey == "content-unconfirmed" && retryOpen) return;
         }
-        var noticeId = Id(notice);
+        var noticeId = notice.RebuildableRule is { } rule ? ShortId.Make("n", notice.PairId,
+            notice.Rule.ToString(CultureInfo.InvariantCulture), notice.ReasonKey,
+            rule.Category.ToLowerInvariant(), RowCodec.Key(rule.Prefix)) : Id(notice);
+        // Keep dismisses one rule until that rule itself changes (its category or prefix changes the id).
+        if (notice.RebuildableRule is not null && IsKeptRule(transaction, pairNo, noticeId)) return;
         MigrateLegacyRepair(transaction, pairNo, noticeId, notice);
         StoreSchema.Execute(_connection, transaction,
             "INSERT INTO notice(notice_id, pair_no, rule, kind, path, detail, reason_key, state, choice, created) " +
@@ -102,10 +106,12 @@ internal sealed partial class NoticeTable
             notice = notice.ReasonKey == "link-item"
                 ? notice with { Repair = notice.Repair with { Destination = captured.Destination, RetainedStaging = notice.Repair.RetainedStaging ?? captured.RetainedStaging }, Detail = prior.Detail }
                 : notice with { Repair = captured };
+        // A moved repair can keep identical detail (including a captured destination); its display path
+        // must still follow the current observation, including immediately after folding a legacy row.
         StoreSchema.Execute(_connection, transaction,
             "UPDATE notice SET state='open', choice=NULL, kind=$kind, path=$path, detail=$detail " +
             "WHERE notice_id=$id AND NOT ($retry=1 AND COALESCE(choice,'')='ignore') " +
-            "AND (state <> 'open' OR ($refresh=1 AND detail <> $detail));",
+            "AND (state <> 'open' OR ($refresh=1 AND (detail <> $detail OR path <> $path)));",
             ("$retry", NoticeChoices.IsRetryNotice(notice) && notice.UploadSuspended is null ? 1 : 0),
             ("$refresh", JournalSizing.IsNotice(notice) || notice.Quarantine is not null || notice.DefenderHistory is not null || NoticeChoices.IsRetryNotice(notice) || notice.FreeSpace is not null || (notice.Kind == NoticeKind.UserDecision && notice.Detail.Contains(ProviderNameRefusedException.Detail, StringComparison.Ordinal)) || notice.ReasonKey == ProviderNameRefusedException.NoticeKey ? 1 : 0),
             ("$id", noticeId), ("$kind", notice.Kind.ToString()), ("$path", notice.Path), ("$detail", NoticeDetailCodec.Encode(notice)));
@@ -259,6 +265,16 @@ internal sealed partial class NoticeTable
             "UPDATE notice SET state='closed',choice=$choice WHERE notice_id=$id AND pair_no=$p;",
             ("$id", noticeId), ("$p", pairNo), ("$choice", choice));
 
+    // A kept rebuildable rule is dismissed for that exact rule identity; changing the rule changes the id.
+    private bool IsKeptRule(SqliteTransaction transaction, long pairNo, string noticeId)
+    {
+        using var command = StoreSchema.Command(_connection, transaction,
+            "SELECT choice FROM notice WHERE pair_no=$p AND notice_id=$id AND state='closed';");
+        command.Parameters.AddWithValue("$p", pairNo);
+        command.Parameters.AddWithValue("$id", noticeId);
+        return command.ExecuteScalar() is string choice && string.Equals(choice, NoticeChoices.KeepRule, StringComparison.Ordinal);
+    }
+
     private bool IsSameProblem(SqliteTransaction transaction, string noticeId, long pairNo, Notice notice)
     {
         using var command = StoreSchema.Command(_connection, transaction,
@@ -271,7 +287,10 @@ internal sealed partial class NoticeTable
         return reader.GetInt64(0) == pairNo && reader.GetInt64(1) == notice.Rule &&
             (notice.Repair is { } repair
                 ? saved.Repair is { } prior && prior.Side == repair.Side && prior.Item.ObjectId == repair.Item.ObjectId
-                : string.Equals(RowCodec.Key(reader.GetString(2)), RowCodec.Key(notice.Path), StringComparison.Ordinal)) &&
+                : notice.RebuildableRule is { } rule
+                    ? saved.RebuildableRule is { } savedRule && string.Equals(savedRule.Category, rule.Category, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(RowCodec.Key(savedRule.Prefix), RowCodec.Key(rule.Prefix), StringComparison.Ordinal)
+                    : string.Equals(RowCodec.Key(reader.GetString(2)), RowCodec.Key(notice.Path), StringComparison.Ordinal)) &&
             string.Equals(reader.GetString(3), notice.ReasonKey, StringComparison.Ordinal) &&
             saved.RetainedVersion?.ActionId == notice.RetainedVersion?.ActionId;
     }

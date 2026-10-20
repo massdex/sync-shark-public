@@ -76,7 +76,8 @@ public sealed partial class V2CliRuntime
                         if (result.Outcome == Outcome.Done && action.ExpectedTarget?.Kind == ItemKind.File) removed++;
                         if (result.Outcome == Outcome.Failed) removalFailures++;
                         if (result.Outcome == Outcome.Uncertain) removalUncertain++;
-                    }, new RunProgressForwarder(Console.Error.WriteLine), acceptedExclusion: acceptedExclusion, input: input);
+                    }, new RunProgressForwarder(Console.Error.WriteLine), acceptedExclusion: acceptedExclusion, input: input,
+                    updateRebuildableRule: (currentPair, current, replacement) => UpdateRebuildableRule(currentPair, current, replacement));
                 Console.Error.WriteLine(message);
                 if (NoticeChoices.IsPairRetryNotice(notice))
                     return new SyncCliRunData(pairId, pair.Name, 0, 0, 0, 0, 0, false);

@@ -137,9 +137,8 @@ public sealed partial class DropboxWriter : IEndpointWriter, ISyncTransferResour
         try
         {
             var download = await _client.DownloadAsync(DropboxItems.ToEntry(s), spool, ct);
-            if (!string.Equals(download.Revision, s.VersionId, StringComparison.Ordinal) ||
-                !string.Equals(download.ContentHash, s.Hash, StringComparison.OrdinalIgnoreCase))
-                throw new ExpectedTargetMismatchException($"Dropbox '{s.Path}' changed since planning.");
+            RequireDownloadIdentity(s, download);
+            if (spool.Length != s.Size) throw new ExpectedTargetMismatchException("Dropbox download length differs from the planned file.");
             spool.Position = 0;
             keep = true;
             return spool;
@@ -167,12 +166,18 @@ public sealed partial class DropboxWriter : IEndpointWriter, ISyncTransferResour
                 throw new InvalidDataException("A direct Dropbox download requires a planned file revision and hash.");
             var download = await _client.DownloadAsync(DropboxItems.ToEntry(s), destination, ct)
                 .ConfigureAwait(false);
-            if (!string.Equals(download.Revision, s.VersionId, StringComparison.Ordinal) ||
-                download.Size != s.Size ||
-                !string.Equals(download.ContentHash, s.Hash, StringComparison.OrdinalIgnoreCase))
-                throw new ExpectedTargetMismatchException($"Dropbox '{s.Path}' changed since planning.");
+            RequireDownloadIdentity(s, download);
             return download;
         });
+
+    internal static void RequireDownloadIdentity(ItemState expected, SyncDownloadResult actual)
+    {
+        if (!string.Equals(actual.FileId, expected.ObjectId, StringComparison.Ordinal) ||
+            !string.Equals(actual.Revision, expected.VersionId, StringComparison.Ordinal) ||
+            actual.Size != expected.Size ||
+            !string.Equals(actual.ContentHash, expected.Hash, StringComparison.OrdinalIgnoreCase))
+            throw new ExpectedTargetMismatchException("Dropbox download identity or size differs from the planned file.");
+    }
 
     private FileStream NewSpool()
     {

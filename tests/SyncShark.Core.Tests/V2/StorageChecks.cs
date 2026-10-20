@@ -81,8 +81,9 @@ internal static partial class StorageChecks
         Both(root, "held-upsert", IntentHolds_RecordIntentsUpsert);
         Both(root, "held-batch", IntentHolds_BatchClassification);
         Both(root, "held-ownership", IntentHolds_OwnershipEnforced);
+        Both(root, "held-batch-rollback", IntentHolds_BatchOwnershipRollsBack);
         IntentOrderIndex_RecreatedOnOpen(root);
-        IntentStream_RowidHorizonIsMutationStable(root);
+        Both(root, "intent-stream-horizon", IntentStream_RowidHorizonIsMutationStable);
         Notices_OnePerProblem(root);
         FreeSpacePresentationRoundTrip(root);
         NoticeVersionChecks(root);

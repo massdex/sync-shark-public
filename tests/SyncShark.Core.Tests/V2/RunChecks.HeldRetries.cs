@@ -90,6 +90,7 @@ internal static partial class RunChecks
             var fx = Build(suppliedStore: store);
             await FirstSyncAsync(fx.Run(), fx);
             var path = scenario == "rebuildable" ? "junction/gone" : "folder";
+            var evidence = new DeletionEvidenceRecord(path, DateTimeOffset.FromUnixTimeSeconds(1_700_000_000));
             if (scenario == "rebuildable")
             {
                 fx.A.Seed("junction", "", ItemKind.Folder);
@@ -102,13 +103,47 @@ internal static partial class RunChecks
             IReadOnlyList<SyncAction>? reviewed = scenario == "rebuildable"
                 ? [new SyncAction("reviewed", 2, ActionKind.Hold, Side.B, path, null, null, null, false, null) { RebuildableRemove = true }]
                 : null;
-            if (scenario == "excluded") fx.Provider.AddInventory(fx.Pair.B, new RecoveryEvidenceInventory(fx.B));
+            HeldDeletion? held = scenario == "excluded" ? new(path, Side.A) : null;
             if (scenario == "excluded")
-                store.StoreDeletionEvidence(fx.Pair.PairId, fx.Pair.B.RootId, [new(path, DateTimeOffset.FromUnixTimeSeconds(1_700_000_000))]);
+            {
+                fx.Provider.AddInventory(fx.Pair.B, new RecoveryEvidenceInventory(fx.B));
+                store.StoreDeletionEvidence(fx.Pair.PairId, fx.Pair.B.RootId, [evidence]);
+            }
             store.SaveSyncRetry(fx.Pair.PairId, new(path, "sync", 1, "pending", DateTimeOffset.MinValue,
-                Held: scenario == "excluded" ? new(path, Side.A) : null, ReviewedActions: reviewed));
+                Held: held, ReviewedActions: reviewed));
             store.AddNotices([new(fx.Pair.PairId, 40, NoticeKind.Info, path, "pending", "sync-retry")]);
             await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            if (scenario == "excluded")
+            {
+                // RQ-052: an excluded hold is suspended, not settled. Its provenance and the exact stored
+                // deletion evidence are retained while excluded; re-inclusion reprobes from fresh evidence.
+                var suspended = store.SyncRetryAt(fx.Pair.PairId, path);
+                Require(suspended is { Kind: "deletion-evidence", ReprobeEvidence: true, RetryAfter: var dormantDue } &&
+                    suspended.Held == held && dormantDue == DateTimeOffset.MaxValue,
+                    "excluded hold is suspended with its provenance and no due time");
+                var rows = store.DeletionEvidenceRows(fx.Pair.PairId, fx.Pair.B.RootId);
+                Require(rows.Count == 1 && rows[0] == evidence, "excluded hold keeps its exact deletion evidence");
+                Require(!store.OpenNotices(fx.Pair.PairId).Any(n => n.ReasonKey == "sync-retry"),
+                    "exclusion closes the retry notice without resolving the hold");
+                Require(fx.WriterA.Deletes == 0 && fx.WriterB.Deletes == 0,
+                    "excluded hold cannot execute a delete");
+                await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+                var again = store.SyncRetryAt(fx.Pair.PairId, path);
+                var againRows = store.DeletionEvidenceRows(fx.Pair.PairId, fx.Pair.B.RootId);
+                Require(again == suspended && againRows.Count == 1 && againRows[0] == evidence &&
+                    !store.OpenNotices(fx.Pair.PairId).Any(n => n.ReasonKey == "sync-retry") &&
+                    fx.WriterA.Deletes == 0 && fx.WriterB.Deletes == 0,
+                    "repeated excluded run keeps the same suspended hold, evidence and closed notice without a delete");
+                var current = store.Pair(fx.Pair.PairId)!;
+                store.SavePairIncluded(current, current with { Excluded = [] });
+                var restored = store.SyncRetryAt(fx.Pair.PairId, path);
+                Require(restored is { Kind: "deletion-evidence", ReprobeEvidence: true, RetryAfter: var restoredDue } &&
+                    restored.Held == held && restoredDue == DateTimeOffset.MinValue,
+                    "re-inclusion restores the same hold as an immediately due re-probe");
+                Require(store.DueSyncRetries(fx.Pair.PairId, DateTimeOffset.UtcNow, 256).Any(row => row.Path == path),
+                    "restored hold appears on the due retry page");
+                continue;
+            }
             Require(store.SyncRetryAt(fx.Pair.PairId, path) is null &&
                 !store.OpenNotices(fx.Pair.PairId).Any(n => n.ReasonKey == "sync-retry"),
                 scenario + ": real exclusion or successful absence evaluation retires retry and notice");

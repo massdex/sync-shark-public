@@ -19,14 +19,19 @@ internal static partial class RunChecks
         { HydratePlaceholderForTest = (_, item, _) => { hydrations++; hydratedPath = item.Path; return Task.CompletedTask; } };
         store.AddNotices([new(fx.Pair.PairId, LinkExclusions.StubRule, NoticeKind.Info, "", "online-only files", "stubs-left-alone")]);
         var summary = store.OpenNotices(fx.Pair.PairId).Single();
-        await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, summary.NoticeId!, NoticeChoices.ShowRemaining, default);
+        var pageText = await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, summary.NoticeId!, NoticeChoices.ShowRemaining, default);
         var first = store.OpenNotices(fx.Pair.PairId).Where(n => n.ReasonKey == "online-only-item").ToArray();
         Require(first.Length == 50 && hydrations == 0, "online-only listing publishes a bounded page without hydration");
         await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, summary.NoticeId!, NoticeChoices.ShowRemaining, default);
         Require(store.OpenNotices(fx.Pair.PairId).Count(n => n.ReasonKey == "online-only-item") == 50,
             "repeated online-only page remains deduplicated");
-        await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, summary.NoticeId!, NoticeChoices.ShowRemaining, default, input: new(null, 50));
-        Require(store.OpenNotices(fx.Pair.PairId).Count(n => n.ReasonKey == "online-only-item") == 57,
+        foreach (var left in first.Skip(40))
+            await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, left.NoticeId!, NoticeChoices.Ignore, default);
+        var token = pageText.Split("Next page token: ")[1].Trim();
+        var nextPage = await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, summary.NoticeId!, NoticeChoices.ShowRemaining, default, input: new(PageToken: token));
+        Require(Enumerable.Range(50, 7).All(i => nextPage.Contains($"stub-{i:D3}.txt", StringComparison.Ordinal)),
+            "keyset page reaches all seven remaining stubs after ten earlier items are ignored");
+        Require(store.OpenNotices(fx.Pair.PairId).Count(n => n.ReasonKey == "online-only-item") == 47,
             "next page reaches the remaining online-only files");
         var chosen = first[0];
         await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, chosen.NoticeId!, NoticeChoices.MakeAvailableOffline, default);
@@ -39,7 +44,7 @@ internal static partial class RunChecks
             "Leave online-only excludes without writes or deletion");
         store.AddNotices([ignored]);
         Require(store.NoticeById(fx.Pair.PairId, ignored.NoticeId!) is { Closed: true }, "Leave online-only does not spam when re-observed");
-        foreach (var invalid in new[] { items[0] with { Size = OnlineOnlyHydration.MaximumBytes + 1 },
+        foreach (var invalid in new[] { items[0] with { Size = -1 },
             items[0] with { Kind = ItemKind.Folder }, items[0] with { Flags = ItemFlags.Link | ItemFlags.Placeholder },
             items[0] with { Path = "../escape" } })
         {
@@ -53,9 +58,13 @@ internal static partial class RunChecks
             store.NoticeById(fx.Pair.PairId, first[2].NoticeId!)?.Notice.Detail.Contains("provider unavailable", StringComparison.Ordinal) == true,
             "hydration failure remains one actionable notice");
         await LinkActionChecksAsync();
+        await HydrationReviewChecksAsync();
+        await DeletionIgnoreReincludeChecksAsync();
+        await RestoredHoldReviewChecksAsync();
         await ExportBlockerChecksAsync();
         LegacyRepairNoticeChecks();
         await BlockerGuidanceChecksAsync();
+        await RebuildableRuleBlockerChecksAsync();
     }
 
     private static async Task BlockerGuidanceChecksAsync()
@@ -114,9 +123,19 @@ internal static partial class RunChecks
         Require(store.OpenNotices(fx.Pair.PairId).Count == 1, "legacy migration replay never duplicates notices");
     }
 
+    // C6: run the export-notice checks on the in-memory double and on the real SQLite table.
     private static async Task ExportBlockerChecksAsync()
     {
-        var fx = Build();
+        await ExportBlockerChecksAsync(null);
+        var folder = Path.Combine(Path.GetTempPath(), "export-blockers-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+        await ExportBlockerChecksAsync(store);
+    }
+
+    private static async Task ExportBlockerChecksAsync(IStateStore? supplied)
+    {
+        var fx = Build(suppliedStore: supplied);
         var paper = fx.B.Seed("Document.paper", "cloud-native") with { Flags = ItemFlags.RequiresExport | ItemFlags.Unreadable };
         fx.Provider.AddWriter(fx.Pair.B, new SignalingWriter(fx.WriterB)
         { AfterObserve = item => item?.Path == paper.Path ? item with { Flags = paper.Flags } : item });

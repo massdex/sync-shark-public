@@ -159,12 +159,37 @@ internal static partial class StorageChecks
             "repeated and missing ids inside a batch stay idempotent no-ops");
     }
 
-    // The stream fixes a rowid horizon, so an intent whose updated value moves forward mid-stream (re-record or
-    // commit) can never be revisited, and an intent inserted after the horizon is never pulled in.
-    private static void IntentStream_RowidHorizonIsMutationStable(string root)
+    // A chunk's ownership failure rolls back only that chunk: earlier committed chunks stay held, and no row in the
+    // failing chunk is changed. Both real and in-memory stores must agree.
+    private static void IntentHolds_BatchOwnershipRollsBack(IStateStore store)
     {
-        var clock = new TestClock();
-        using var store = SqliteStateStore.Open(Fresh(root, "stream-mutation"), Fast, clock);
+        store.SavePair(Pair("p1"));
+        store.SavePair(Pair("p2"));
+        var actions = Enumerable.Range(0, 300)
+            .Select(index => IntentFor($"b{index:000}", $"f{index}.txt")).ToArray();
+        store.RecordIntents("p1", actions);
+        store.RecordIntent("p2", IntentFor("foreign"));
+
+        // Same chunk: the foreign id follows a valid one, so the whole chunk must roll back.
+        ExpectThrows<InvalidOperationException>(() => store.SetIntentsHeld("p1", ["b000", "foreign"], true));
+        Require(!store.IsIntentHeld("p1", "b000") && store.CountHeldIntents("p1") == 0,
+            "a same-chunk ownership failure rolls back every row in that chunk");
+
+        // Across the 256-id bound: chunk one commits, the failing second chunk changes nothing.
+        var ids = actions.Select(action => action.ActionId).Append("foreign").ToArray();
+        ExpectThrows<InvalidOperationException>(() => store.SetIntentsHeld("p1", ids, true));
+        Require(store.CountHeldIntents("p1") == 256 && store.IsIntentHeld("p1", "b000") &&
+            store.IsIntentHeld("p1", "b255"),
+            "a committed chunk before the failing chunk stays held");
+        Require(Enumerable.Range(256, 44).All(index => !store.IsIntentHeld("p1", $"b{index:000}")),
+            "the failing chunk rolls back every row, including the valid ids before the foreign id");
+    }
+
+    // The stream fixes a rowid horizon, so an intent whose updated value moves forward mid-stream (re-record or
+    // commit) can never be revisited, and an intent inserted after the horizon is never pulled in. The in-memory
+    // double must mirror the real store's bounded rowid horizon.
+    private static void IntentStream_RowidHorizonIsMutationStable(IStateStore store)
+    {
         store.SavePair(Pair("p1"));
         var actions = Enumerable.Range(0, 450)
             .Select(index => IntentFor($"s{index:000}", $"f{index}.txt")).ToArray();
@@ -178,7 +203,6 @@ internal static partial class StorageChecks
             if (seen.Count != 200) continue;
             // Between the first and second pages: move an already-visited intent's updated forward, reclassify a
             // later one, resolve another already-visited one, and insert a new intent beyond the horizon.
-            clock.UtcNow = clock.UtcNow.AddSeconds(1);
             store.RecordIntent("p1", IntentFor("s000", "rewritten.txt"));
             store.SetIntentHeld("p1", "s250", true);
             store.CommitResult("p1", 1, IntentFor("s001", "f1.txt"),
@@ -190,6 +214,10 @@ internal static partial class StorageChecks
             $"a rowid-horizon stream visits each pre-existing intent exactly once despite mid-stream updates ({seen.Count})");
         Require(!seen.Contains("late"),
             "an intent recorded after the horizon is not pulled into the current stream");
+        Require(store.StreamUnresolvedIntentRows("p1").All(row => row.State.Length > 0),
+            "each streamed row carries its stored state without a per-row point lookup");
+        Require(store.StreamUnresolvedIntentRows("p1").Single(row => row.Action.ActionId == "s250").State == "held",
+            "the state streamed for a mid-stream hold is the current held classification");
     }
 
     private static SyncAction IntentFor(string actionId, string path = "x.txt") =>

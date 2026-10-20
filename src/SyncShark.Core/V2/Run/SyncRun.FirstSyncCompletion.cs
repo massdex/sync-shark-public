@@ -19,7 +19,8 @@ public sealed partial class SyncRun
                 _store.SaveSyncRetry(pair.PairId, new(action.Path, "post-preview", 0, "", DateTimeOffset.MinValue, match));
         }
         foreach (var held in plan.UnreviewedHeldDeletions)
-            if (_store.SyncRetryAt(pair.PairId, held.Path)?.Kind != "decision")
+            if (_store.SyncRetryAt(pair.PairId, held.Path) is not { ReprobeEvidence: true } &&
+                _store.SyncRetryAt(pair.PairId, held.Path)?.Kind != "decision")
                 _store.SaveSyncRetry(pair.PairId, new(held.Path, "post-preview", 0, "", DateTimeOffset.MinValue, Held: held));
         if (deferred.Count == 0) return plan;
         var guard = ActionPredicates(pair, LeftAlone(pair).WithPending(deferred));
@@ -147,8 +148,12 @@ public sealed partial class SyncRun
                 item.Held is not null && !pending.Contains(item.Path, StringComparer.OrdinalIgnoreCase)))
             {
                 remaining.Remove(item.Path);
-                _store.ClearSyncRetry(pair.PairId, item.Path);
-                if (item.Held is { } held)
+                if (excluded && item.Held is not null) _store.SuspendHeldRetry(pair.PairId, item);
+                else _store.ClearSyncRetry(pair.PairId, item.Path);
+                // RQ-052: an excluded held item is suspended, not settled. Keep its stored evidence while it
+                // is excluded; re-inclusion starts a fresh probe (SavePairIncluded invalidates cached evidence
+                // first), so an exclusion never destroys the deletion history.
+                if (!excluded && item.Held is { } held)
                     _store.RemoveDeletionEvidence(pair.PairId, held.Local == Side.A ? pair.B.RootId : pair.A.RootId, [item.Path]);
                 foreach (var notice in notices[item.Path])
                     if (notice.NoticeId is not null) _store.CloseNotice(notice.NoticeId, excluded ? "exclude" : "resolved");
@@ -165,7 +170,9 @@ public sealed partial class SyncRun
     private void SaveFailedRetry(PairDef pair, string path, string? reason, SyncRetry? old)
     {
         if (old?.Kind == "decision") return;
-        var attempts = (old?.Attempts ?? 0) + 1;
+        // The evidence probe owns the attempt counter for restored (reprobe) rows; counting again here
+        // would halve the owner's three-run release budget.
+        var attempts = old is { ReprobeEvidence: true } ? old.Attempts : (old?.Attempts ?? 0) + 1;
         var retry = (old ?? new SyncRetry(path, "sync", 0, "", DateTimeOffset.MinValue)) with
         {
             Attempts = attempts,
@@ -173,7 +180,7 @@ public sealed partial class SyncRun
             RetryAfter = _time.GetUtcNow().AddSeconds(Math.Min(300, 10 * Math.Pow(2, Math.Min(attempts - 1, 5))))
         };
         _store.SaveSyncRetry(pair.PairId, retry);
-        if (retry.LastError != DropboxQuota.Detail && attempts >= 1 && retry.Kind is not ("planning" or "recovery"))
+        if (!retry.ReprobeEvidence && retry.LastError != DropboxQuota.Detail && attempts >= 1 && retry.Kind is not ("planning" or "recovery"))
             WriteNotices([new Notice(pair.PairId, 40, NoticeKind.Info, path,
                 $"Sync will retry this item later ({attempts} attempts): {retry.LastError}. Options: retry now / exclude / ignore.", "sync-retry",
                 FolderInspection: _store.Live(pair.A.RootId, [path]).Concat(_store.Live(pair.B.RootId, [path]))
@@ -203,6 +210,7 @@ public sealed partial class SyncRun
             .Concat(plan.Actions.Where(action => action.Kind != ActionKind.Hold && !tally.WasSettled(action.ActionId))
                 .Select(action => action.Path)).Distinct(StringComparer.OrdinalIgnoreCase))
         {
+            if (_store.SyncRetryAt(pair.PairId, path) is { ReprobeEvidence: true }) continue;
             // Recovery holds already retained exact reviewed authority before filtering effects.
             if (plan.RecoveryPending.Contains(path, StringComparer.OrdinalIgnoreCase)) continue;
             // A decision supersedes prepare authority. Preserve its proposal and dormant scheduling.

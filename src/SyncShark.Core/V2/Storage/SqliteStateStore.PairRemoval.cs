@@ -148,6 +148,9 @@ public sealed partial class SqliteStateStore
                 "DELETE FROM choice_merge WHERE notice_id IN (SELECT notice_id FROM notice WHERE pair_no=$p);", ("$p", pairNo));
             foreach (var table in pairTables)
                 StoreSchema.Execute(_connection, transaction, $"DELETE FROM {table} WHERE pair_no=$p;", ("$p", pairNo));
+            // Operational metadata, not user data: never archived, but a removed pair must not leave a marker behind
+            // for a reused pair number.
+            StoreSchema.Execute(_connection, transaction, "DELETE FROM notice_legacy_fold WHERE pair_no=$p;", ("$p", pairNo));
             StoreSchema.Execute(_connection, transaction, "DELETE FROM pair WHERE pair_no=$p;", ("$p", pairNo));
             // These transient journals belong to roots, not pairs: retain shared-root work.
             foreach (var rootId in orphaned)

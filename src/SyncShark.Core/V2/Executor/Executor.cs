@@ -458,17 +458,11 @@ public sealed partial class Executor : IExecutor
         return byObject;
     }
 
-    private async Task<string?> PairForAsync(SyncAction intent, CancellationToken ct)
-    {
-        var pairs = await GateAsync(() => _store.Pairs(), ct).ConfigureAwait(false);
-        foreach (var pair in pairs)
-        {
-            var intents = await GateAsync(() => _store.UnresolvedIntents(pair.PairId), ct).ConfigureAwait(false);
-            if (intents.Any(i => string.Equals(i.ActionId, intent.ActionId, StringComparison.Ordinal)))
-                return pair.PairId;
-        }
-        return null;
-    }
+    // One indexed point lookup per reconciled intent (action_id is the pending_effect primary key). The previous
+    // implementation materialized every unresolved intent of every pair once per intent: at ~1M rows that was
+    // gigabytes and tens of minutes for a 256-intent reconcile page.
+    private async Task<string?> PairForAsync(SyncAction intent, CancellationToken ct) =>
+        await GateAsync(() => _store.PairForIntent(intent.ActionId), ct).ConfigureAwait(false);
 
     private async Task StoreAsync(Action work, CancellationToken ct)
     {

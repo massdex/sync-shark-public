@@ -13,6 +13,9 @@ internal sealed class IntentTable
 
     public IntentTable(SqliteConnection connection) => _connection = connection;
 
+    /// <summary>How many hold-state UPDATEs this process issued; a run skips rows already in the wanted state.</summary>
+    internal long HoldWrites { get; private set; }
+
     /// <summary>Records an intent as started in the caller's transaction, rejecting an id owned by another pair.</summary>
     public void Record(SqliteTransaction transaction, long pairNo, SyncAction action, long now)
     {
@@ -53,6 +56,7 @@ internal sealed class IntentTable
     public void SetHeld(SqliteTransaction transaction, long pairNo, string actionId, bool held)
     {
         RequireOwner(transaction, actionId, pairNo);
+        HoldWrites++;
         StoreSchema.Execute(_connection, transaction, held
                 ? "UPDATE pending_effect SET state='held' WHERE pair_no=$p AND action_id=$id AND state<>'held';"
                 : "UPDATE pending_effect SET state='uncertain' WHERE pair_no=$p AND action_id=$id AND state='held';",
@@ -98,13 +102,14 @@ internal sealed class IntentTable
         ("$p", pairNo))!;
 
     /// <summary>
-    /// One bounded page of unresolved intents in rowid order within a captured horizon. Rowid never changes on
-    /// re-record or state reclassification, so a mid-stream commit cannot move a row behind or ahead of the cursor.
+    /// One bounded page of unresolved intent rows (with their stored state) in rowid order within a captured
+    /// horizon. Rowid never changes on re-record or state reclassification, so a mid-stream commit cannot move a
+    /// row behind or ahead of the cursor.
     /// </summary>
-    public IntentPage UnresolvedPage(long pairNo, long afterRowId, long throughRowId, int limit)
+    public IntentRowsPage UnresolvedRowsPage(long pairNo, long afterRowId, long throughRowId, int limit)
     {
-        if (throughRowId <= afterRowId) return new IntentPage([], null);
-        var sql = "SELECT action_json, rowid FROM pending_effect INDEXED BY pe_intent_order " +
+        if (throughRowId <= afterRowId) return new IntentRowsPage([], null);
+        var sql = "SELECT action_json, state, rowid FROM pending_effect INDEXED BY pe_intent_order " +
             "WHERE pair_no=$p AND rowid>$after AND rowid<=$through AND state IN (" + UnresolvedStateSql + ") " +
             "ORDER BY rowid LIMIT $n;";
         using var command = StoreSchema.Command(_connection, null, sql);
@@ -112,15 +117,15 @@ internal sealed class IntentTable
         command.Parameters.AddWithValue("$after", afterRowId);
         command.Parameters.AddWithValue("$through", throughRowId);
         command.Parameters.AddWithValue("$n", limit + 1);
-        var rows = new List<(SyncAction Action, long RowId)>();
+        var rows = new List<(IntentRow Row, long RowId)>();
         using (var reader = command.ExecuteReader())
             while (reader.Read())
-                rows.Add((JsonSerializer.Deserialize<SyncAction>(reader.GetString(0), RowCodec.Json)!,
-                    reader.GetInt64(1)));
-        var items = rows.Take(limit).Select(row => row.Action).ToArray();
+                rows.Add((new IntentRow(JsonSerializer.Deserialize<SyncAction>(reader.GetString(0), RowCodec.Json)!,
+                    reader.GetString(1)), reader.GetInt64(2)));
+        var items = rows.Take(limit).Select(row => row.Row).ToArray();
         // The rowid-only cursor reuses the shared cursor shape; the updated component stays zero.
         var next = rows.Count > limit ? IntentPageCursor.Encode(0, rows[limit - 1].RowId) : null;
-        return new IntentPage(items, next);
+        return new IntentRowsPage(items, next);
     }
 
     // pe_unresolved (pair_no, state, updated) serves the held page; its implicit rowid is the final key, so a

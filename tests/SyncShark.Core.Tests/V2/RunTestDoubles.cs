@@ -311,13 +311,19 @@ internal sealed class RecordingStore : IStateStore
     public IReadOnlyList<SyncRetry> DueSyncRetries(string pairId, DateTimeOffset now, int limit) => _inner.DueSyncRetries(pairId, now, limit);
     public int CountSyncRetries(string pairId) => _inner.CountSyncRetries(pairId);
     public int RetryProtectionCalls { get; private set; }
-    public bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants)
+    public bool HasActiveRestoredRetries(string pairId) => _inner.HasActiveRestoredRetries(pairId);
+    public bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants, bool restoredOnly = false)
     {
         RetryProtectionCalls++;
-        return _inner.RetryProtected(pairId, path, active, descendants);
+        if (restoredOnly) Interlocked.Increment(ref _restoredProtectionReads);
+        return _inner.RetryProtected(pairId, path, active, descendants, restoredOnly);
     }
+    private int _restoredProtectionReads;
+    /// <summary>Per-item restored-hold protection lookups this run made; zero when no restored hold exists.</summary>
+    public int RestoredProtectionReads => Volatile.Read(ref _restoredProtectionReads);
     public void SaveSyncRetry(string pairId, SyncRetry retry) => _inner.SaveSyncRetry(pairId, retry);
     public void ClearSyncRetry(string pairId, string path) => _inner.ClearSyncRetry(pairId, path);
+    public void SuspendHeldRetry(string pairId, SyncRetry retry) => _inner.SuspendHeldRetry(pairId, retry);
     public void RequireRehash(string rootId, ItemState item, string reason) => _inner.RequireRehash(rootId, item, reason);
     public void RequireRehashBatch(string rootId, IEnumerable<ItemState> items, string reason) => _inner.RequireRehashBatch(rootId, items, reason);
     public bool CompleteRehash(string rootId, ItemState item, string hash) => _inner.CompleteRehash(rootId, item, hash);
@@ -456,6 +462,9 @@ internal sealed class RecordingStore : IStateStore
     public IntentPage HeldIntentsPage(string pairId, string? cursor, int limit) =>
         _inner.HeldIntentsPage(pairId, cursor, limit);
     public IEnumerable<SyncAction> StreamUnresolvedIntents(string pairId) => _inner.StreamUnresolvedIntents(pairId);
+    public IEnumerable<IntentRow> StreamUnresolvedIntentRows(string pairId) =>
+        _inner.StreamUnresolvedIntentRows(pairId);
+    public string? PairForIntent(string actionId) => _inner.PairForIntent(actionId);
 
     public Exception? RefusalRefreshError { get; set; }
     public void RefreshProviderNameNotices(PairDef pair)

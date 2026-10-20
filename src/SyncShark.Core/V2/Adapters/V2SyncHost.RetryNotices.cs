@@ -14,7 +14,9 @@ public sealed partial class V2SyncHost
             message = await engine.ApplyRetryNoticeChoiceAsync(notice.PairId, notice.NoticeId!, choice, ct,
                 Composition is { } composition ? (previous, updated) =>
                     V2CliRuntime.SaveNarrowerPair(_store, engine, composition.Paths.ProductRoot, previous, updated) : null,
-                progress: new RemovalReviewProgress(pair, _time.GetUtcNow(), _time, delivery), input: input);
+                progress: new RemovalReviewProgress(pair, _time.GetUtcNow(), _time, delivery), input: input,
+                updateRebuildableRule: Composition is { } rules ? (currentPair, current, replacement) =>
+                    V2CliRuntime.UpdateRebuildableRule(rules.Paths.ProductRoot, currentPair, _store, current, replacement) : null);
         }
         finally
         {

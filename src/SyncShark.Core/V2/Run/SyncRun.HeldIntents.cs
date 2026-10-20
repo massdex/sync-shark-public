@@ -2,7 +2,13 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SyncRun
 {
+    // Legacy summary from the first held-intents build; the combined verification summary (RehashProtection.Reason)
+    // now carries both counts. The key is still recognized so an older open notice can be dismissed/read.
     private const string HeldIntentsKey = "held-intents";
+    private const string LinkRetiredReason =
+        "Under a link (junction/symlink) that is not followed; the pending effect was retired without applying it. See the links notice.";
+    private const string StubRetiredReason =
+        "A left-alone online-only placeholder; the pending effect was retired without applying it. See the stubs notice.";
 
     private static string? PermanentIntentBoundary(PairDef pair, SyncAction action,
         IReadOnlyList<PairDef> pairs, IReadOnlyList<string> owned)
@@ -32,19 +38,22 @@ public sealed partial class SyncRun
             _store.ClearSyncRetry(pair.PairId, action.Path);
     }
 
+    // Retires an intent whose path can never sync while a link or left-alone stub sits at or above it. The standing
+    // link/stub summary already explains the cause, so no new notice is raised; only the pending effect is retired.
+    private void RetireProtectedIntent(PairDef pair, SyncAction action, long generation, string reason)
+    {
+        _store.CommitResult(pair.PairId, generation, action,
+            new ActionResult(action.ActionId, Outcome.Skipped, null, null, null, reason));
+        if (_store.SyncRetryAt(pair.PairId, action.Path) is { Kind: "sync", Held: null })
+            _store.ClearSyncRetry(pair.PairId, action.Path);
+    }
+
+    // M3: the held count merges into the existing local-rehash-pending summary, which the run raises/refreshes later
+    // from the post-classification store count. Any legacy held-intents summary is superseded and closed here.
     private int RefreshHeldIntentSummary(PairDef pair)
     {
-        var count = _store.CountHeldIntents(pair.PairId);
-        if (count == 0)
-            _store.CloseNoticeFamily(pair.PairId, HeldIntentsKey);
-        else
-            _store.AddNotices([new Notice(pair.PairId, 0, NoticeKind.Info, string.Empty,
-                $"{count} changes are waiting for background verification or protected evidence. " +
-                "After the change journal is lost, background verification must confirm affected items before they can sync. " +
-                "Leave background verification running; for quarantine or evidence holds, follow the existing item notice. " +
-                "Show remaining lists the pending changes. They are not marked synced; other changes complete normally, and these are checked again on the normal interval.",
-                HeldIntentsKey)]);
-        return count;
+        _store.CloseNoticeFamily(pair.PairId, HeldIntentsKey);
+        return _store.CountHeldIntents(pair.PairId);
     }
 
     private string ShowHeldIntentItems(PairDef pair, NoticeActionInput? input)
