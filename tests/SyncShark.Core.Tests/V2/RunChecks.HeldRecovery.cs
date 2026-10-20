@@ -26,7 +26,7 @@ internal static partial class RunChecks
         var fx = Build();
         fx.A.Seed("held.txt", "local");
         fx.B.Seed("ordinary.txt", "cloud");
-        fx.Provider.AddInventory(fx.Pair.B, new DeferredInventory(fx.B) { Fail = true });
+        fx.Provider.AddInventory(fx.Pair.B, new DeferredInventory(fx.B) { ProviderOutage = true });
         var run = fx.Run();
         var root = Path.Combine(Path.GetTempPath(), "evidence-retry-" + Guid.NewGuid().ToString("N"));
         var runtime = new V2CliRuntime(null, fx.Store, run, new EndpointRootProbe(fx.Provider), root);
@@ -54,15 +54,12 @@ internal static partial class RunChecks
             null, source, null, false, null)
         { ProviderEffect = new ProviderEffectCheckpoint("upload-commit", "s1", DateTimeOffset.UtcNow) };
         fx.Store.RecordIntent(fx.Pair.PairId, action);
-        try
-        {
-            await fx.Run().PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), default);
-            throw new InvalidOperationException("pending upload must delay first-sync preview");
-        }
-        catch (SyncRunPendingVerificationException pending)
-        {
-            Require(pending.RetryAfterSeconds is > 0 and <= 900, "preview preserves bounded remaining grace");
-        }
+        var plan = await fx.Run().PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        Require(plan.Actions.All(item => item.Path != source.Path), "pending upload footprint stays protected while preview continues");
+        Require(fx.Store.UnresolvedIntents(fx.Pair.PairId).Single().ProviderEffect == action.ProviderEffect,
+            "preview retains uncertain submission authority without replay");
+        Require(fx.WriterA.Deletes == 0 && fx.WriterB.Deletes == 0 && fx.WriterB.Puts == 0,
+            "preview never deletes or resubmits the pending upload");
         Console.WriteLine("PASS HeldRecovery_PendingPreview");
     }
 
@@ -108,14 +105,20 @@ internal static partial class RunChecks
         var first = await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), CancellationToken.None,
             ReviewedHeld(plan));
         Require(first.UnreviewedPending == 1, "unreviewed held folder remains explicitly counted");
-        Require(first.Deferred > 0 && await fx.A.ObserveAsync("folder/file.txt", CancellationToken.None) is null,
-            "child finishes while its empty parent remains incomplete");
+        Require(first.Deferred == 0 && store.FirstSyncDone(fx.Pair.PairId) && await fx.A.ObserveAsync("folder/file.txt", CancellationToken.None) is null,
+            "child finishes and first sync completes while the unreviewed empty parent remains held");
         store.Dispose();
         using var reopened = SqliteStateStore.Open(root, Settings, TimeProvider.System);
         var restarted = new SyncRun(reopened, NewExecutor(reopened), fx.Provider, Settings, TimeProvider.System);
-        var next = await restarted.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
-        var result = await restarted.ApplyAsync(fx.Pair.PairId, next, new RecordingProgress(), CancellationToken.None,
-            ReviewedHeld(next));
+        var result = await restarted.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        if (tombstone)
+        {
+            Require(await fx.A.ObserveAsync("folder", default) is not null,
+                "unreviewed folder remains until an explicit notice choice after restart");
+            var decision = reopened.OpenNotices(fx.Pair.PairId).Single(notice => notice.Path == "folder" && notice.ReasonKey == "deletion-review");
+            await restarted.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, decision.NoticeId!, NoticeChoices.DeleteReviewed, default);
+            result = await restarted.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        }
         Require(result.Deferred == 0 && reopened.FirstSyncDone(fx.Pair.PairId), "rerun finishes without prior in-memory delete proof");
         Require((await fx.A.ObserveAsync("folder", CancellationToken.None) is null) == tombstone,
             "only an exact current tombstone removes the empty folder on rerun");
@@ -197,8 +200,8 @@ internal static partial class RunChecks
         fx.A.Seed("new.txt", "not reviewed");
         var result = await runtime.ApplyFirstSyncAsync(fx.Pair.PairId, choices, false, null, _ => { }, default);
         Require(result is { UnreviewedPending: 1, ReviewedDeletionEvidencePendingCount: 0,
-                DeletionEvidencePendingCount: 1, FirstSyncComplete: false } &&
-            result.DeletionEvidencePendingExamples.SequenceEqual(["new.txt"]),
+                DeletionEvidencePendingCount: 0, FirstSyncComplete: true } &&
+            result.DeletionEvidencePendingExamples.Count == 0,
             "newly held remove stays unreviewed instead of refusing the whole apply for budget growth");
         Require(result.ChoiceEffects!.Single() is { Files: 1, Bytes: 7 } && fx.WriterA.Deletes == 1 &&
             fx.WriterA.Puts == 1 && await fx.A.ObserveAsync("new.txt", default) is not null &&
@@ -218,7 +221,7 @@ internal static partial class RunChecks
         // the reviewed partition, not subtraction of record counts from distinct path counts.
         plan = plan with { UnreviewedHeldDeletions = [new HeldDeletion("new.txt", Side.A), new HeldDeletion("NEW.txt", Side.A)] };
         var report = await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), default, ReviewedHeld(plan));
-        Require(report.DeletionEvidencePending.Count == 2 && report.UnreviewedPending == 2 &&
+        Require(report.DeletionEvidencePending.Count == 1 && report.UnreviewedPending == 2 &&
             report.ReviewedDeletionEvidencePendingCount == 1,
             "reviewed pending count is measured directly even when unreviewed records share a pending path");
         Console.WriteLine("PASS HeldRecovery_ReviewedPendingCount");
@@ -237,7 +240,7 @@ internal static partial class RunChecks
         var runtime = new V2CliRuntime(null, fx.Store, fx.Run(), new EndpointRootProbe(fx.Provider), root);
         await runtime.PrepareFirstSyncAsync(fx.Pair.PairId, _ => { }, default);
         var result = await runtime.ApplyFirstSyncAsync(fx.Pair.PairId, null, true, null, _ => { }, default);
-        Require(result is { ContentUnconfirmedCount: 55, Deferred: 55, FirstSyncComplete: false,
+        Require(result is { ContentUnconfirmedCount: 55, Deferred: 0, FirstSyncComplete: true,
                 DeletionEvidencePendingCount: 0 } && result.ContentUnconfirmedExamples.SequenceEqual(paths.Take(50)),
             "CLI exposes full content-unconfirmed count and only fifty deterministic example paths");
         var human = SyncCli.RenderHuman(result);
@@ -258,10 +261,10 @@ internal static partial class RunChecks
         var plan = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
         Require(plan.Actions.All(action => action.Path != "bad.txt"), "unhashable executable row was dropped");
         var report = await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), CancellationToken.None);
-        Require(report.Deferred == 1 && report.DeletionEvidencePending.Count == 0 &&
+        Require(report.Deferred == 0 && report.DeletionEvidencePending.Count == 0 &&
             report.ContentUnconfirmedCount == 1 && report.ContentUnconfirmedExamples.SequenceEqual(["bad.txt"]) &&
-            !fx.Store.FirstSyncDone(fx.Pair.PairId),
-            "content-unconfirmed remains incomplete without being mislabeled deletion evidence");
+            fx.Store.FirstSyncDone(fx.Pair.PairId) && fx.Store.SyncRetryAt(fx.Pair.PairId, "bad.txt") is not null,
+            "content-unconfirmed completes with durable retry input without being mislabeled deletion evidence");
         Console.WriteLine("PASS HeldRecovery_UnconfirmedBlocksCompletion");
     }
 
@@ -285,7 +288,8 @@ internal static partial class RunChecks
             var plan = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
             var report = await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), CancellationToken.None,
                 ReviewedHeld(plan));
-            Require(report.Deferred == deferred && fx.WriterA.Deletes == deletes && fx.WriterA.Preserves == 0, message);
+            Require(report.Deferred == 0 && fx.Store.FirstSyncDone(fx.Pair.PairId) &&
+                report.DeletionEvidencePending.Count == deferred && fx.WriterA.Deletes == deletes && fx.WriterA.Preserves == 0, message);
             Require(fx.WriterB.Puts == (restored ? 1 : 0) &&
                 fx.Store.OpenNotices(fx.Pair.PairId).Any(n => n.Kind == NoticeKind.EditBeatsDelete) == restored,
                 "only a differing known hash restores with an EditBeatsDelete notice");

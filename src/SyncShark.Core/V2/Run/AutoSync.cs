@@ -99,6 +99,11 @@ public sealed class AutoSync
     private void Publish(PairAutoState state)
     {
         _states[state.PairId] = state;
-        Changed?.Invoke(state);
+        if (Changed is not { } changed) return;
+        foreach (Action<PairAutoState> subscriber in changed.GetInvocationList())
+        {
+            try { subscriber(state); }
+            catch (Exception) { /* A display subscriber must not terminate the pair loop or skip other subscribers. */ }
+        }
     }
 }

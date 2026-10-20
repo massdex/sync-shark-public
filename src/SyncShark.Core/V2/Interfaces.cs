@@ -156,6 +156,14 @@ public interface IStateStore : IDisposable
     void CommitResult(string pairId, long gen, SyncAction a, ActionResult r);
     void RecordIntent(string pairId, SyncAction a);
 
+    IEnumerable<SyncRetry> ReadSyncRetries(string pairId);
+    void SaveSyncRetry(string pairId, SyncRetry retry);
+    void ClearSyncRetry(string pairId, string path);
+    SyncRetry? SyncRetryAt(string pairId, string path);
+    IReadOnlyList<SyncRetry> DueSyncRetries(string pairId, DateTimeOffset now, int limit);
+    int CountSyncRetries(string pairId);
+    bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants);
+
     /// <summary>Several results in one transaction (the Executor's group commit, B-124); the default commits each.</summary>
     void CommitResults(string pairId, long gen, IReadOnlyList<(SyncAction Action, ActionResult Result)> results)
     {

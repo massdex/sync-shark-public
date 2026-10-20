@@ -99,6 +99,11 @@ public sealed partial class V2SyncHost
             cancellationToken.ThrowIfCancellationRequested();
             // Apply first, acknowledge second. A failed operation keeps the notice retryable.
             // Pause is idempotent if interrupted between these two durable writes.
+            if (NoticeChoices.IsRetryNotice(notice))
+            {
+                await ApplyRetryNoticeChoiceAsync(notice, choice, cancellationToken);
+                continue;
+            }
             if (choice is NoticeChoices.UseOtherVersion or NoticeChoices.SaveOtherVersionAsCopy)
             {
                 if (_run is not SyncRun engine)

@@ -43,7 +43,8 @@ internal static partial class DropboxChecks
                 "only exact disallowed_name results persist as item flags");
             Require(report.Failed == 0 && report.Skipped == 26 && report.Uploaded == 0,
                 "25 provider refusals and one ordinary rejection report skipped, never successful transfers");
-            Require(!store.FirstSyncDone("p1"), "an ordinary retryable rejection still blocks first sync");
+            Require(store.FirstSyncDone("p1") && store.SyncRetryAt("p1", "ordinary.txt") is not null,
+                "decision 85: an ordinary retryable rejection is retained without blocking first sync");
             Require(store.Baselines("p1").All(b => !b.A.Path.StartsWith("folder/refused-")),
                 "refused names never fabricate a synced baseline");
             var notice = store.OpenNotices("p1").Single(n => n.ReasonKey == ProviderNameRefusedException.NoticeKey);
@@ -64,14 +65,13 @@ internal static partial class DropboxChecks
         {
             // Real Dropbox replays our own successful writes after the pre-apply cursor.
             // This wire scripts feeds explicitly: apply 1 created only the folder, not any file.
-            var observed = store.ReadInventoryObservation(pair.B)?.Cursor
-                ?? throw new InvalidOperationException("Expected retained first-sync observation cursor.");
+            var observed = store.Cursor(pair.B.RootId)
+                ?? throw new InvalidOperationException("Expected promoted first-sync cursor.");
             h.Wire.SeedChangePage(observed, [h.Wire.ChangeOf("folder")], false, observed + "-own-folder");
             var run = MakeRun(store);
-            var plan = await run.PreviewFirstSyncAsync("p1", new RecordingProgress(), CancellationToken.None);
-            Require(!plan.Actions.Any(action => action.Path.StartsWith("folder/refused-")),
-                "reopened full scan and content changes do not retry refused names");
-            var report = await run.ApplyAsync("p1", plan, new RecordingProgress(), CancellationToken.None);
+            var report = await run.IncrementalAsync("p1", new RecordingProgress(), CancellationToken.None);
+            Require(originals.All(item => h.Wire.AttemptedWritePaths.Count(path => path == item.Path) == 1),
+                "reopened ordinary sync and content changes do not retry refused names");
             Require(report.Failed == 0 && report.Skipped == 0 && report.Uploaded == 1 && store.FirstSyncDone("p1"),
                 "ordinary file retries successfully and refused items do not block FirstSyncComplete");
             Require(h.Wire.AttemptedWritePaths.Count(path => path == "ordinary.txt") == 2 &&

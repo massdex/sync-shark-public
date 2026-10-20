@@ -41,6 +41,7 @@ internal static partial class RunChecks
         await CliRuntime_CreatePairAwaitsRootObservationAsync();
         await Incremental_OneSidedEditAsync();
         await Incremental_DeletedIdenticalSkipsRecoveryAsync();
+        await Incremental_LocalLocalDeleteCreatesRecoveryAsync();
         await Incremental_NoChanges_WritesNothingAsync();
         await Incremental_FullRescanAfterForgetCursorAsync();
         await RequestRescan_WaitsForRunningScanAsync();
@@ -588,14 +589,18 @@ internal static partial class RunChecks
         var plan = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
         fx.A.Seed("changed.txt", "different bytes");
         var report = await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), CancellationToken.None);
-        Require(report.Skipped == 1 && report.Deferred == 1 && report.Done == 0 && report.Failed == 0,
-            "a changed source is counted as skipped and deferred, not silently omitted");
-        Require(report.Outcome == RunOutcomes.Partial && !fx.Store.FirstSyncDone(fx.Pair.PairId),
-            "skipped effects do not mark the run or first sync complete");
+        Require(report.Skipped == 1 && report.Deferred == 0 && report.Done == 0 && report.Failed == 0,
+            "a changed source is counted as skipped, but no longer blocks first-sync completion");
+        Require(report.Outcome == RunOutcomes.Partial && fx.Store.FirstSyncDone(fx.Pair.PairId) &&
+            fx.Store.OpenNotices(fx.Pair.PairId).All(notice => notice.ReasonKey != "sync-retry"),
+            "decision 85: changed preconditions hand off to ordinary sync without a problem notice");
         Require(report.Diagnostics is { } diagnostics && diagnostics.FailureReasons.Count == 0 &&
             diagnostics.SkipReasons.Values.Sum() == 1 &&
             diagnostics.SkipReasons.Keys.Single().Contains("changed", StringComparison.OrdinalIgnoreCase),
             "skipped effects retain their precondition reason in the separate skip histogram, not as failures");
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        Require((await MapAsync(fx.B))["changed.txt"] == Hash("different bytes"),
+            "ordinary sync transfers current content after the skipped reviewed source");
         Console.WriteLine("PASS FirstSync_SkippedReasonReported");
     }
 
@@ -633,12 +638,14 @@ internal static partial class RunChecks
     {
         var fx = Build();
         fx.A.Seed("a.txt", "1");
-        var run = fx.Run();
+        var clock = new CompletionClock();
+        var run = new SyncRun(fx.Store, fx.Executor, fx.Provider, Settings, clock);
         await FirstSyncAsync(run, fx);
         fx.A.Seed("a.txt", "2");
         fx.B.FailNextWrites = 1;
         var first = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
         Require(first.Failed == 1, "the failed effect is reported");
+        clock.Now += TimeSpan.FromMinutes(6);
         var second = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
         Require(second.Done == 1, "the next run retries and finishes the copy");
         await MirrorAsync(fx);
@@ -671,8 +678,8 @@ internal static partial class RunChecks
         Console.WriteLine("PASS Incremental_FolderDeleteChildFailureCounted");
     }
 
-    // Recovery completion rule: unconfirmed content keeps first sync open. Repeated prepare/apply
-    // retries re-hash it and its notice closes once the row resolves (decision 26).
+    // Decision 85: unconfirmed items survive completion as durable retries, never overwrite authority.
+    // Ordinary retries re-hash them and close the notice once the row resolves.
     private static async Task Incremental_UnconfirmedContentReplannedAsync()
     {
         var fx = Build();
@@ -683,13 +690,20 @@ internal static partial class RunChecks
         fx.Provider.AddInventory(fx.Pair.A, listingA).AddInventory(fx.Pair.B, listingB);
         var run = fx.Run();
         var applied = await FirstSyncAsync(run, fx);
-        Require(applied.Done == 0 && !fx.Store.FirstSyncDone(fx.Pair.PairId) && OpenUnconfirmed(fx) == 1,
-            "unconfirmed content keeps the first sync open under the recovery completion rule");
-        await FirstSyncAsync(run, fx);
-        await FirstSyncAsync(run, fx);
+        Require(applied.Done == 0 && fx.Store.FirstSyncDone(fx.Pair.PairId) && OpenUnconfirmed(fx) == 1 &&
+            fx.Store.SyncRetryAt(fx.Pair.PairId, "x.txt") is { Attempts: 1 },
+            "decision 85: unconfirmed content completes first sync with a durable retry and visible notice");
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        Require(fx.Store.SyncRetryAt(fx.Pair.PairId, "x.txt") is { Attempts: 2 },
+            "unconfirmed item is retried on the next ordinary run");
+        Require(fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0 &&
+            (await MapAsync(fx.A))["x.txt"] == Hash("same") && (await MapAsync(fx.B))["x.txt"] == Hash("same"),
+            "unconfirmed content is never overwritten or deleted on either side");
         Require(OpenUnconfirmed(fx) == 1, "failed retries keep one open notice for the same problem");
         listingA.FailHashes = listingB.FailHashes = false;
-        var report = await FirstSyncAsync(run, fx);
+        var retry = fx.Store.SyncRetryAt(fx.Pair.PairId, "x.txt")!;
+        fx.Store.SaveSyncRetry(fx.Pair.PairId, retry with { RetryAfter = DateTimeOffset.MinValue });
+        var report = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
         Require(report.Done == 1 && fx.Store.Baselines(fx.Pair.PairId).Count == 1,
             "a run with no changes re-hashes the unconfirmed row and adopts it");
         Require(OpenUnconfirmed(fx) == 0, "the content-not-confirmed notice closes once the row resolves");
@@ -766,18 +780,37 @@ internal static partial class RunChecks
 
     private static async Task Reconcile_Uncertain_StopsBeforeInventoryAsync()
     {
+        // Decision 85 supersedes the pair-wide stop: protect the uncertain item's footprint only.
         var fx = Build();
         fx.Store.MarkFirstSyncDone(fx.Pair.PairId);
-        fx.WriterB.ObserveFails = true;
+        fx.WriterB.OnRead = path => { if (path == "x.txt") throw new IOException("permanent item failure"); };
         fx.Store.RecordIntent(fx.Pair.PairId, new SyncAction("pend", 2, ActionKind.Update, Side.B, "x.txt", null, null,
             null, false, "k"));
+        for (var index = 0; index < 1000; index++) fx.A.Seed($"sibling-{index}.txt", "safe content");
         var run = fx.Run();
         var report = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
-        Require(report.Outcome == RunOutcomes.Failed && report.Failures.Count == 1,
-            "an unverifiable effect fails the run");
-        Require(fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0, "no new effects are attempted");
-        Require(fx.Store.Cursor(fx.Pair.A.RootId) is null, "the cursors stay untouched");
-        Console.WriteLine("PASS Reconcile_Uncertain_StopsBeforeInventory");
+        Require(report.Outcome == RunOutcomes.Partial && report.Uncertain == 1,
+            "one unresolved effect remains explicit without aborting the run");
+        Require(report.Done == 1000 && fx.WriterA.Calls == 0, "all 1000 independent copies complete");
+        Require(fx.Store.Cursor(fx.Pair.A.RootId) is not null && fx.Store.Cursor(fx.Pair.B.RootId) is not null,
+            "safe cursor checkpoints advance despite the protected uncertain item");
+        Require(fx.Store.UnresolvedIntents(fx.Pair.PairId).Single().ActionId == "pend",
+            "the uncertain effect is retained, never converted to deletion permission");
+        var outage = Build();
+        outage.Store.MarkFirstSyncDone(outage.Pair.PairId);
+        var original = outage.A.Seed("protected/x.txt", "never delete");
+        outage.B.Seed("protected/x.txt", "never delete");
+        outage.WriterB.ObserveFails = true;
+        outage.Store.RecordIntent(outage.Pair.PairId, new SyncAction("outage", 2, ActionKind.Update, Side.B,
+            original.Path, null, original, original, false, "outage-key"));
+        var unavailable = await outage.Run().IncrementalAsync(outage.Pair.PairId, new RecordingProgress(), default);
+        Require(unavailable.Uncertain > 0 && outage.Store.UnresolvedIntents(outage.Pair.PairId).Count == 1,
+            "endpoint-wide observation outage retains uncertain submission authority");
+        Require(outage.WriterA.Deletes == 0 && outage.WriterB.Deletes == 0 && outage.WriterA.Puts == 0 && outage.WriterB.Puts == 0,
+            "endpoint-wide uncertainty never overwrites or deletes its protected footprint");
+        Require(await outage.A.ObserveAsync(original.Path, default) is not null &&
+            await outage.B.ObserveAsync(original.Path, default) is not null, "both survivors remain during observation outage");
+        Console.WriteLine("PASS Reconcile_Uncertain_IndependentProgress");
     }
 
     // Every uncertain intent is an independent observation. They must overlap (bounded), still all resolve, persist
@@ -1529,6 +1562,9 @@ internal static partial class RunChecks
         Require(await TextAsync(fx.A, "f.txt") == "local edit" && await TextAsync(fx.B, "f.txt") == "a much longer cloud edit",
             "both edits are untouched");
         fx.A.Unhashable.Clear();
+        // Decision 85: retry timing is durable; explicitly make the recovered item due.
+        var retry = fx.Store.SyncRetryAt(fx.Pair.PairId, "f.txt")!;
+        fx.Store.SaveSyncRetry(fx.Pair.PairId, retry with { RetryAfter = DateTimeOffset.MinValue });
         var retried = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
         Require(retried.Failed == 0 && retried.KeptBoth == 2,
             $"once hashable, the next run keeps both versions (kept both {retried.KeptBoth}, failed {retried.Failed}, " +
@@ -1681,7 +1717,7 @@ internal static partial class RunChecks
 
     private static Executor NewExecutor(IStateStore store) => new(store, Settings, ExecutorChecks.Admission());
 
-    private static Fixture Build(bool enabled = true, bool record = false, string pairId = "p1", IStateStore? suppliedStore = null)
+    private static Fixture Build(bool enabled = true, bool record = false, string pairId = "p1", IStateStore? suppliedStore = null, bool localLocal = false)
     {
         var inner = suppliedStore ?? new InMemoryStateStore();
         var recorder = record ? new RecordingStore(inner) : null;
@@ -1692,7 +1728,8 @@ internal static partial class RunChecks
         var writerB = new CountingWriter(b);
         var pair = new PairDef(pairId, pairId,
             new RootDef("ra", SyncProviders.Local, null, "C:\\a", "id:ra"),
-            new RootDef("rb", SyncProviders.Dropbox, "acc", "/b", "id:rb"),
+            new RootDef("rb", localLocal ? SyncProviders.Local : SyncProviders.Dropbox,
+                localLocal ? null : "acc", localLocal ? @"C:\b" : "/b", "id:rb"),
             [], [], enabled);
         store.SavePair(pair);
         var provider = new FakeEndpointProvider()

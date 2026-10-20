@@ -58,16 +58,16 @@ internal sealed class ProgressThrottle
             _phaseOpen = true;
             _last = _lastText = now;
             _started = true;
-            _progress?.Report(Current());
+            Publish(Current());
             return;
         }
         var longPhase = now - _phaseStart >= LongPhase;
         if (now - _last < _interval) return;
         _last = now;
-        _progress?.Report(!longPhase && _total == 0
+        Publish(!longPhase && _total == 0
             ? Current() with { Message = $"{_phase}: {_done:N0} so far{ExtraText()}" } : Current());
         if (longPhase && now - _lastText >= LongPhase)
-        { _lastText = now; _progress?.Report(Rich(now)); }
+        { _lastText = now; Publish(Rich(now)); }
     }
 
     /// <summary>
@@ -81,7 +81,7 @@ internal sealed class ProgressThrottle
     {
         if (!_started) return;
         var now = _time.GetUtcNow();
-        _progress?.Report(Current());
+        Publish(Current());
         EndPhase(now, failed);
     }
 
@@ -91,7 +91,7 @@ internal sealed class ProgressThrottle
         if (!_phaseOpen || _phase is null) return;
         _phaseOpen = false;
         var counts = _total > 0 ? $": {_done:N0}/{_total:N0}" : _done > 0 ? $": {_done:N0}" : string.Empty;
-        _progress?.Report(new RunProgress(_phase, null, _done, _total)
+        Publish(new RunProgress(_phase, null, _done, _total)
         {
             Extra = _extra,
             Message = failed ? _phase + " failed after " + Describe(now - _phaseStart)
@@ -133,6 +133,12 @@ internal sealed class ProgressThrottle
 
     // Finished results outside the phase's total (a folder delete's expanded child deletes), never added to it.
     private string ExtraText() => _extra > 0 ? $" (+{_extra:N0} files inside deleted folders)" : string.Empty;
+
+    private void Publish(RunProgress value)
+    {
+        try { _progress?.Report(value); }
+        catch (Exception) { /* Display failures cannot fail inventory, evidence, or effects. */ }
+    }
 
     private RunProgress Current() => new(_phase!, _path, _done, _total)
     {

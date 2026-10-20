@@ -48,7 +48,7 @@ internal static partial class StorageChecks
             "both roots of the removed pair are reported as orphaned when no other pair uses them");
         RequireRowCounts(result.RowCounts, ("pair", 1), ("root", 2), ("file_state", 6), ("generation", 3),
             ("tombstone", 1), ("dir", 3), ("sync_point", 2), ("pending_effect", 2), ("notice", 1),
-            ("recovery", 1), ("deletion_evidence", 1),
+            ("recovery", 1), ("deletion_evidence", 1), ("sync_retry", 0),
             ("prepare_header", 0), ("prepare_row", 0), ("prepare_cursor", 0));
 
         RequireArchive(result.ArchivePath, result.RowCounts);

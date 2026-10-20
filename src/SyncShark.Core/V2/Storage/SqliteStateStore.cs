@@ -322,7 +322,8 @@ public sealed partial class SqliteStateStore : IStateStore
                 "FROM pending_effect WHERE pair_no=$p AND action_id=$id;",
                 ("$p", pairNo), ("$id", action.ActionId)) is long flag && flag != 0;
             var retainedAction = suppressBaseline ? action with { SuppressReconciledBaseline = true } : action;
-            _intents.Commit(transaction, pairNo, retainedAction, result.ProviderNameRefused ? Outcome.Skipped : result.Outcome, now);
+            _intents.Commit(transaction, pairNo, retainedAction,
+                result.ProviderNameRefused ? Outcome.Skipped : result.Outcome, now);
             if (SyncDirectDownloadCheckpoint.NoticeFor(pairId, action, result) is { } notice)
                 _notices.Add(transaction, pairNo, notice, now);
             if (result.Outcome == Outcome.Skipped && result.ForgetAbsentDownloadBaseline)

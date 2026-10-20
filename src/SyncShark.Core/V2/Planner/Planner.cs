@@ -14,14 +14,16 @@ public static partial class Planner
             throw new ArgumentException("Planner: a label rule is required.", nameof(o));
 
         var ctx = BuildDraft(pairId, rows, o);
-        var actions = ctx.Draft
-            .Select(d => d.Action with
-            {
-                ActionId = PlanIds.ActionId(pairId, gen, d.Action.Rule, d.Action.Kind, d.Action.Target, d.Action.Path),
-                OppositeAbsent = d.Action.Kind == ActionKind.Delete && Cur(d.Row, Opposite(d.Action.Target)) is null
-            })
-            .ToList();
-        actions.Sort(CompareActions);
+        ctx.Draft.Sort((left, right) => CompareActions(left.Action, right.Action));
+        var actions = new List<SyncAction>(ctx.Draft.Count);
+        foreach (var (row, action) in ctx.Draft)
+        {
+            // Draft-owned actions have not escaped. Finalize only after all id-indexed post-passes,
+            // without allocating a second record for every effect in a million-item plan.
+            action.FinalizeDraft(PlanIds.ActionId(pairId, gen, action.Rule, action.Kind, action.Target, action.Path),
+                action.Kind == ActionKind.Delete && Cur(row, Opposite(action.Target)) is null);
+            actions.Add(action);
+        }
         // Link only surviving effects, after post-passes and final action IDs. Recovery is keyed
         // to this exact effect, never to whichever version happens to occupy the path later.
         var retained = new Dictionary<string, RetainedNoticeVersion>(StringComparer.OrdinalIgnoreCase);
@@ -125,7 +127,7 @@ public static partial class Planner
     /// </summary>
     private static Draft BlockHeldFolderDeletes(Context ctx)
     {
-        if (ctx.Options.HeldPaths is not { Count: > 0 }) return ctx.Draft;
+        if (ctx.Options.HeldPaths is not { Count: > 0 } && ctx.Options.ProtectedDescendants is null) return ctx.Draft;
         for (var index = 0; index < ctx.Draft.Count; index++)
         {
             var (row, action) = ctx.Draft[index];
@@ -143,8 +145,9 @@ public static partial class Planner
     /// never collapsed over, so its ordinary child deletes are kept) and <see cref="BlockHeldFolderDeletes"/>.
     /// </summary>
     private static bool HeldUnder(Context ctx, SyncAction delete) =>
-        !delete.FirstSyncChoice && ctx.Options.HeldPaths is { Count: > 0 } held &&
-        held.Any(path => PairPath.IsUnder(path, delete.Path));
+        !delete.FirstSyncChoice &&
+        (ctx.Options.ProtectedDescendants?.Invoke(delete.Path) == true ||
+         ctx.Options.HeldPaths is { Count: > 0 } held && held.Any(path => PairPath.IsUnder(path, delete.Path)));
 
     // ---- shared emissions ----------------------------------------------------
 

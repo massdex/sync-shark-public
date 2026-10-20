@@ -2445,6 +2445,10 @@ internal static class ExcludedNestedPairPartitionChecks
         var databasePath = IOPath.Combine(root, "authority.db");
         var database = new SyncAuthorityDatabase(databasePath);
         await database.InitializeAsync(Installation, ProfileId, SourceRevision, CapabilityJson);
+        // The product aggregate and the authority database describe the same installation.
+        // Saving a connection otherwise creates an unrelated default installation identity.
+        var product = new SyncProductStateStore(instance.StateAuthority);
+        await product.UpdateAsync(current => current with { InstallationId = Installation });
         var connections = new DropboxConnectionStore(instance.StateAuthority);
         var connection = new DropboxConnectionBinding(DropboxProviderConfiguration.RegisteredClientId, AccountId,
             "ns-nested-431", "ns-nested-431", DropboxProviderConfiguration.ContentAccess,

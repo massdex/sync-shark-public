@@ -37,6 +37,40 @@ internal sealed class RunScope
     public Scope LoadFull(PairDef pair) => Prepare(pair, _store.Live(pair.A.RootId), _store.Live(pair.B.RootId),
         _store.Baselines(pair.PairId), [], []);
 
+    // Hashing updates only content evidence. Keep normalized mapping identities and scope-only flags,
+    // and read only the requested paths rather than decoding both roots and all baselines again.
+    public Scope RefreshHashes(PairDef pair, Scope scope, HashRequest request) => scope with
+    {
+        A = Refresh(pair, Side.A, scope.A, request.PathsA),
+        B = Refresh(pair, Side.B, scope.B, request.PathsB)
+    };
+
+    private IReadOnlyList<ItemState> Refresh(PairDef pair, Side side, IReadOnlyList<ItemState> items,
+        IReadOnlyList<string> paths)
+    {
+        if (paths.Count == 0) return items;
+        var root = side == Side.A ? pair.A.RootId : pair.B.RootId;
+        var current = new Dictionary<string, ItemState>(StringComparer.Ordinal);
+        foreach (var stored in _store.Live(root, paths))
+            current.TryAdd(stored.Path, NormalizeItem(pair, side, stored));
+        List<ItemState>? updated = null;
+        for (var index = 0; index < items.Count; index++)
+        {
+            var item = items[index];
+            if (current.TryGetValue(item.Path, out var stored) && stored.ObjectId == item.ObjectId)
+            {
+                const ItemFlags evidenceFlags = ItemFlags.NeedsRehash | ItemFlags.Unreadable;
+                var flags = (item.Flags & ~evidenceFlags) | (stored.Flags & evidenceFlags);
+                if (item.Hash != stored.Hash || item.Flags != flags)
+                {
+                    updated ??= items.ToList();
+                    updated[index] = item with { Hash = stored.Hash, Flags = flags };
+                }
+            }
+        }
+        return updated is null ? items : updated;
+    }
+
 
     public Scope LoadTouched(PairDef pair, IReadOnlyCollection<string> touched,
         IReadOnlyCollection<string> changeIdsA, IReadOnlyCollection<string> changeIdsB)

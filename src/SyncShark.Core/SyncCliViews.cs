@@ -255,6 +255,9 @@ public sealed record SyncCliFirstSyncResultData(string PairId, string PairName, 
     /// stays incomplete and each path is left to ordinary planning.
     /// </summary>
     public IReadOnlyList<string> BlockedRebuildables { get; init; } = [];
+
+    /// <summary>Durable open notices by reason; completion does not imply every item succeeded.</summary>
+    public IReadOnlyDictionary<string, int> OpenIssues { get; init; } = new Dictionary<string, int>();
 }
 
 public sealed record SyncCliControlData(string Action, bool Accepted, string Result, int? PendingCount = null)

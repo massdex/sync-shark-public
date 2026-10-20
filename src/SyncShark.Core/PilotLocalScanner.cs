@@ -76,7 +76,8 @@ public sealed class PilotLocalScanner
             var elapsed = stopwatch.Elapsed;
             if (elapsed - lastProgressReport < TimeSpan.FromSeconds(1)) return;
             lastProgressReport = elapsed;
-            await onInventory(path, found);
+            try { await onInventory(path, found); }
+            catch (Exception) { /* Display failures must not affect local inventory completeness. */ }
         }
         rootLease.VerifyBinding();
         var entries = new Dictionary<string, PilotLocalEntry>(StringComparer.OrdinalIgnoreCase);
@@ -488,7 +489,8 @@ public sealed class PilotLocalScanner
         }
 
         await DrainAsync();
-        if (onInventory is not null) await onInventory(lastProgressPath, entriesFound);
+        try { if (onInventory is not null) await onInventory(lastProgressPath, entriesFound); }
+        catch (Exception) { /* Reporting does not change the completed scan. */ }
         rootLease.VerifyBinding();
         stopwatch.Stop();
         return new PilotLocalScan(entries, decisions, totalBytes, filesHashed,

@@ -194,7 +194,7 @@ internal static partial class PlannerChecks
         AssertActions(plan,
             new Exp(ActionKind.MkDir, Side.A, "F", null, false, 24, "F", "k1"),
             new Exp(ActionKind.CopyNew, Side.A, "F/c", null, false, 7, "F/c", "k2"),
-            new Exp(ActionKind.Delete, Side.B, "F/o", null, false, 6, null, "k3"));
+            new Exp(ActionKind.Delete, Side.B, "F/o", null, true, 6, null, "k3"));
         AssertNotices(plan, new NExp(7, NoticeKind.EditBeatsDelete, "F/c"), new NExp(24, NoticeKind.EditBeatsDelete, "F"));
     }
 
@@ -221,7 +221,7 @@ internal static partial class PlannerChecks
         var plan = Decide(false, folder, unhashed, other);
         AssertActions(plan,
             new Exp(ActionKind.MkDir, Side.A, "F", null, false, 24, "F", "k1"),
-            new Exp(ActionKind.Delete, Side.B, "F/o", null, false, 6, null, "k3"));
+            new Exp(ActionKind.Delete, Side.B, "F/o", null, true, 6, null, "k3"));
         AssertNotices(plan, new NExp(30, NoticeKind.Info, "F/c"), new NExp(24, NoticeKind.EditBeatsDelete, "F"));
     }
 
@@ -235,7 +235,7 @@ internal static partial class PlannerChecks
         var plan = Decide(false, folder, movedChild, deletedChild);
         AssertActions(plan,
             new Exp(ActionKind.Move, Side.B, "G", "F", false, 25, "G", "k1"),
-            new Exp(ActionKind.Delete, Side.B, "G/e", null, false, 6, null, "k3"));
+            new Exp(ActionKind.Delete, Side.B, "G/e", null, true, 6, null, "k3"));
         AssertEmptyNotices(plan);
     }
 
@@ -279,7 +279,7 @@ internal static partial class PlannerChecks
         AssertActions(plan,
             new Exp(ActionKind.CopyNew, Side.B, "G/n", null, false, 18, "G/n", NK(Side.A, "idAn")),
             new Exp(ActionKind.Move, Side.B, label, "F", false, 14, "G", "k1"),
-            new Exp(ActionKind.Delete, Side.B, label + "/e", null, false, 6, null, "k3"));
+            new Exp(ActionKind.Delete, Side.B, label + "/e", null, true, 6, null, "k3"));
         Require(plan.Actions.Single(a => a.ObjectKey == "k3").ExpectedTarget!.Path == label + "/e", "Rule25d child victim");
         AssertNotices(plan, new NExp(14, NoticeKind.KeepBoth, label));
     }

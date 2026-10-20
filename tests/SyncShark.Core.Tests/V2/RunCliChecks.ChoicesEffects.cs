@@ -9,7 +9,8 @@ internal static partial class RunCliChecks
         await Cli_Prepare_CountsCollapsedFolderOnceAsync();
         await Cli_Prepare_KeptFolderFollowsCopiedChildAsync();
         await Cli_Prepare_ChargesOnlyChoiceRemovesAsync();
-        await Cli_Prepare_MixedFolderDeleteKeepsChoiceChildAsync();
+        await Cli_Prepare_MixedFolderDeleteKeepsChoiceChildAsync(false);
+        await Cli_Prepare_MixedFolderDeleteKeepsChoiceChildAsync(true);
         await Cli_Apply_MixedFolderReplacementLandsAsync();
     }
 
@@ -53,10 +54,11 @@ internal static partial class RunCliChecks
     }
 
     // A winner's folder replace (untagged) over a choice-removed child does not collapse, so the child stays charged;
-    // a further Local-only child added after prepare is then refused by apply before any effect.
-    private static async Task Cli_Prepare_MixedFolderDeleteKeepsChoiceChildAsync()
+    // post-preview children must survive without preventing independent reviewed work.
+    private static async Task Cli_Prepare_MixedFolderDeleteKeepsChoiceChildAsync(bool childOnBothSides)
     {
         var fx = Build();
+        var independent = fx.A.Seed("independent.txt", "safe");
         fx.A.Seed("a", "", ItemKind.Folder);
         fx.A.Seed("a/x.txt", "hi");
         fx.B.Seed("a", "remote");
@@ -75,11 +77,28 @@ internal static partial class RunCliChecks
             var data = await runtime.PrepareFirstSyncAsync(fx.Pair.PairId, _ => { }, CancellationToken.None, choices);
             Require(data.ChoiceEffects!.Single() is { Files: 1, Folders: 0, Bytes: 2 },
                 "the choice-removed child under an untagged folder delete is charged");
-            fx.A.Seed("a/y.txt", "new");
-            var refused = await ApplyRefusalAsync(runtime, fx, choices);
-            Require(refused?.Contains("run prepare again", StringComparison.Ordinal) == true &&
-                fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0,
-                "a choice-removed child added after prepare is refused before any effect");
+            var newChild = fx.A.Seed("a/y.txt", "new");
+            var remoteBefore = await fx.B.ObserveAsync("a", default);
+            if (childOnBothSides)
+            {
+                fx.B.Seed("a", "", ItemKind.Folder);
+                fx.B.Seed("a/y.txt", "new");
+            }
+            var result = await runtime.ApplyFirstSyncAsync(fx.Pair.PairId, choices, false, null, _ => { }, default);
+            Require(result.FirstSyncComplete && result.Failed == 0,
+                "decision 85: post-preview child changes do not refuse the whole run");
+            Require((await fx.A.ObserveAsync("a/y.txt", default))?.Hash == newChild.Hash &&
+                (await fx.A.ObserveAsync("a", default))?.Kind == ItemKind.Folder,
+                "new unreviewed child survives; reviewed folder replacement cannot remove it");
+            if (childOnBothSides)
+                Require((await fx.B.ObserveAsync("a/y.txt", default))?.Hash == newChild.Hash &&
+                    (await fx.B.ObserveAsync("a", default))?.Kind == ItemKind.Folder,
+                    "post-preview child and containing folder also survive on the remote side");
+            else
+                Require((await fx.B.ObserveAsync("a", default))?.Hash == remoteBefore!.Hash,
+                    "unchanged remote winner survives the protected local folder replacement");
+            Require((await fx.B.ObserveAsync("independent.txt", default))?.Hash == independent.Hash,
+                "independent reviewed work proceeds while the changed folder is protected");
         }
         finally
         {

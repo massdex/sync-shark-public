@@ -117,7 +117,15 @@ public sealed partial class V2SyncHost
         }
     }
 
-    private void OnAutoSyncChanged(PairAutoState state) => AutoSyncChanged?.Invoke(state);
+    private void OnAutoSyncChanged(PairAutoState state)
+    {
+        if (AutoSyncChanged is not { } changed) return;
+        foreach (Action<PairAutoState> subscriber in changed.GetInvocationList())
+        {
+            try { subscriber(state); }
+            catch (Exception) { /* Display subscribers cannot stop AutoSync or one another. */ }
+        }
+    }
 
     // The pause rule the edge supplies to AutoSync: the global pause or either side's account pause, read fresh
     // each time so a resume takes effect without a restart. A host with no pause source is never paused.

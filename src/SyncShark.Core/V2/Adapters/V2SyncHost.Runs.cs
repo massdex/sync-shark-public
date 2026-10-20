@@ -80,7 +80,9 @@ public sealed partial class V2SyncHost
                 var pairDef = _store.Pair(pair.Id) ??
                     throw new InvalidDataException("The folder pair " + pair.Id + " is no longer available.");
                 items.Add(RunResultMapping.ToItem(pair, pairDef, report, observation.Take()));
-                admissionProgress?.Invoke(Summary(pair, report));
+                var summary = Summary(pair, report);
+                try { admissionProgress?.Invoke(summary); }
+                catch (Exception) { /* Reporting a completed pair cannot fail it or skip later pairs. */ }
                 if (string.Equals(report.Outcome, RunOutcomes.Stopped, StringComparison.Ordinal)) stopped = true;
             }
             return new SyncAuthorityBatchResult(items, stopped);

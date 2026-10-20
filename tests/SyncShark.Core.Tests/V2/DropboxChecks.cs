@@ -330,9 +330,9 @@ internal static partial class DropboxChecks
                 h.Wire.Calls.Count(call => call == "/2/files/list_revisions") > 1,
                 "transport timeout retries within budget and exhausts as transient unknown evidence");
             var delta = await h.Inventory.ChangesSinceAsync("t1", 6, _ => true, CancellationToken.None);
-            Require(!delta.CursorInvalid && delta.Changes.Count == 0 &&
-                delta.PendingDeletionEvidence.ContainsKey("lost.txt"),
-                "a failed deletion-time lookup stays pending, never becoming a deletion at now");
+            Require(!delta.CursorInvalid && delta.Changes.Single() is { Kind: ChangeKind.Delete, DeletedUtc: null } &&
+                delta.PendingDeletionEvidence.ContainsKey("lost.txt") && h.Known.SyncRetryAt("p1", "lost.txt")?.Held is not null,
+                "remote tombstone is observed with no invented deletion time; durable evidence hold prevents endpoint effects");
         }
     }
 
@@ -766,6 +766,36 @@ internal static partial class DropboxChecks
             await SyncByteProgressStream.ReportThrottleAsync("read", TimeSpan.FromSeconds(1));
         }
         Require(progressCalls == 4, "pacer and throttle reports tolerate synchronous and asynchronous sink failures");
+
+        foreach (var synchronous in new[] { true, false })
+        {
+            var processCalls = 0;
+            using var scope = SyncByteProgressStream.Begin("process-check", _ =>
+            {
+                processCalls++;
+                var error = new InvalidOperationException("scripted process sink failure");
+                if (synchronous) throw error;
+                return Task.FromException(error);
+            });
+            await SyncByteProgressStream.ReportProcessAsync("Evidence", "gone.txt", "read");
+            await SyncByteProgressStream.ReportCurrentProcessAsync("Evidence", "read");
+            Require(processCalls == 2, "process and ambient reports tolerate synchronous and asynchronous sink failures");
+            using var bytes = new MemoryStream(new byte[] { 1, 2, 3 });
+            await using (var stream = new SyncByteProgressStream(bytes, "download"))
+            {
+                await stream.StartedAsync();
+                var buffer = new byte[3];
+                Require(await stream.ReadAsync(buffer.AsMemory()) == 3 && buffer.SequenceEqual(new byte[] { 1, 2, 3 }),
+                    "throwing byte progress never changes bytes returned by the underlying stream");
+            }
+            Require(processCalls >= 4, "stream start and byte reports actually invoked the throwing sink");
+            using var h = new Harness();
+            h.Wire.SeedDeletedEntry("gone.txt");
+            var evidence = await h.Inventory.DeletionTimesAsync(new[] { "gone.txt" }, CancellationToken.None);
+            Require(evidence.TryGetValue("gone.txt", out var deletion) &&
+                deletion == new DateTimeOffset(2026, 10, 12, 8, 0, 0, TimeSpan.Zero),
+                "throwing process sink preserves deletion evidence without a forced pacer wait");
+        }
 
         var limiter = new SyncTransferRateLimiter(new SyncTransferSettings());
         using (var h = new Harness(limiter: limiter))

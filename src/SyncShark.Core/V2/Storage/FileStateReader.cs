@@ -43,6 +43,11 @@ internal sealed class FileStateReader
             .Replace("f.flags != 0 AND (f.flags & $f) != 0", "(f.flags & 64) != 0 AND (f.flags & $f) != 0")
         : sql;
 
+    private static string BatchedPathsSql(string values) =>
+        $"WITH requested(i,pk,nk) AS (VALUES {values}) SELECT {Columns}, q.i " +
+        "FROM requested q CROSS JOIN file_state f JOIN dir d ON d.dir_no=f.dir_no " +
+        "WHERE f.root_no=$r AND f.dir_no IN (SELECT dir_no FROM dir WHERE path_key=q.pk) AND f.name_key=q.nk;";
+
     private readonly SqliteConnection _connection;
     private readonly DirTable _dir;
 
@@ -60,10 +65,30 @@ internal sealed class FileStateReader
                 "WHERE f.root_no=$r ORDER BY d.path, f.name;", [("$r", rootNo)]);
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var result = new List<Entry>();
-        foreach (var path in paths)
+        // Bounded indexed batches, retaining Lookup's exact-spelling preference and first-request semantics.
+        foreach (var batch in paths.Where(path => path.Length != 0 && seen.Add(path)).Chunk(128))
         {
-            if (path.Length == 0 || !seen.Add(path)) continue;
-            if (Lookup(rootNo, path) is { } entry) result.Add(entry);
+            var values = string.Join(",", batch.Select((_, i) => $"({i},$p{i},$n{i})"));
+            using var command = StoreSchema.Command(_connection, null,
+                BatchedPathsSql(values));
+            command.Parameters.AddWithValue("$r", rootNo);
+            for (var i = 0; i < batch.Length; i++)
+            {
+                var (parent, name) = RowCodec.Split(batch[i]);
+                command.Parameters.AddWithValue($"$p{i}", RowCodec.Key(parent));
+                command.Parameters.AddWithValue($"$n{i}", RowCodec.Key(name));
+            }
+            var selected = new Entry?[batch.Length];
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                var entry = Decode(reader);
+                var i = reader.GetInt32(11);
+                if (selected[i] is null || string.Equals(entry.Item.Path, batch[i], StringComparison.Ordinal))
+                    selected[i] = entry;
+            }
+            foreach (var entry in selected)
+                if (entry is { } found) result.Add(found);
         }
         result.Sort(Entry.CompareByKey);
         return result.Select(entry => entry.Item).ToArray();
@@ -136,6 +161,8 @@ internal sealed class FileStateReader
     /// <summary>The query plans behind indexed Live(paths), LiveUnder and LiveFlagged reads.</summary>
     public IReadOnlyList<string> Plans() =>
         StoreSchema.QueryPlan(_connection, "Live", AtKeySql, "$r", "$pk", "$nk")
+            .Concat(StoreSchema.QueryPlan(_connection, "LiveBatch", BatchedPathsSql("(0,$p0,$n0),(1,$p1,$n1)"),
+                "$r", "$p0", "$n0", "$p1", "$n1"))
             .Concat(StoreSchema.QueryPlan(_connection, "LiveUnder", LiveUnderSql, "$r"))
             .Concat(StoreSchema.QueryPlan(_connection, "LiveFlagged", LiveFlaggedSql, "$r", "$f"))
             .Concat(StoreSchema.QueryPlan(_connection, "LiveFlaggedCount", FlaggedSql(LiveFlaggedCountSql, ItemFlags.ProviderNameRefused), "$r", "$f"))

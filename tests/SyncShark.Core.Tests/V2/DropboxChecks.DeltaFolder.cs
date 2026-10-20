@@ -79,10 +79,10 @@ internal static partial class DropboxChecks
         local.Seed("independent.txt", "keep moving");
         var first = await run.IncrementalAsync("p1", new Progress<RunProgress>(), CancellationToken.None);
         Require(first.Failed == 0 && first.DeletionEvidencePending.Contains("gone.txt") &&
-            h.Known.Cursor(RootId) == before &&
+            h.Known.Cursor(RootId) == "file-after" &&
             await local.ObserveAsync("gone.txt", CancellationToken.None) is not null &&
             await local.ObserveAsync("finished-folder", CancellationToken.None) is null &&
-            h.Known.Live(RootId, ["gone.txt"]).Count == 1 &&
+            h.Known.Live(RootId, ["gone.txt"]).Count == 0 && h.Known.SyncRetryAt("p1", "gone.txt") is not null &&
             await h.Writer().ObserveAsync("independent.txt", CancellationToken.None) is not null &&
             h.Known.OpenNotices("p1").Any(n => n.Path == "gone.txt" &&
                 n.ReasonKey == PlanNotices.DeletionEvidencePending.Key),
@@ -90,17 +90,35 @@ internal static partial class DropboxChecks
         Require(delays.Count > 0 &&
             h.Wire.Calls.Count(call => call == "/2/files/list_revisions") > probesBeforeTimeout + 1 &&
             h.Known.DeletionEvidenceRows("p1", RootId).Single(row => row.Path == "gone.txt").Failure is
-                { Attempts: 1, Released: false },
-            "timeout retries before exhaustion and remains a transient, unreleased history failure");
+                { Attempts: 1, Released: true },
+            "timeout retries before exhaustion, then releases the cursor with one durable evidence hold");
+        h.Wire.SeedChangePage("file-after", [], false, "file-after");
+        var localWrites = local.WriteCalls;
+        int CloudWrites() => h.Wire.Calls.Count(call => call.Contains("/upload", StringComparison.Ordinal) ||
+            call.Contains("/delete", StringComparison.Ordinal) || call.Contains("/restore", StringComparison.Ordinal));
+        var cloudWrites = CloudWrites();
+        await run.IncrementalAsync("p1", new Progress<RunProgress>(), default);
+        Require(local.WriteCalls == localWrites && CloudWrites() == cloudWrites &&
+            await local.ObserveAsync("gone.txt", default) is not null && await h.Writer().ObserveAsync("gone.txt", default) is null,
+            "ordinary follow-up neither deletes the held local survivor nor resurrects the cloud tombstone");
         h.Wire.OnRevisionAsync = null;
+        h.Known.SaveSyncRetry("p1", h.Known.SyncRetryAt("p1", "gone.txt")! with { RetryAfter = DateTimeOffset.MinValue });
         var probesBeforeRetry = h.Wire.Calls.Count(call => call == "/2/files/list_revisions");
         provider.AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, h.Known, "p1"));
         var second = await run.IncrementalAsync("p1", new Progress<RunProgress>(), CancellationToken.None);
         Require(second.Failed == 0 && h.Known.Cursor(RootId) == "file-after" &&
-            await local.ObserveAsync("gone.txt", CancellationToken.None) is null &&
-            h.Wire.Calls.Count(call => call == "/2/files/list_revisions") == probesBeforeRetry + 1 &&
-            !h.Known.OpenNotices("p1").Any(n => n.Path == "gone.txt" &&
-                n.ReasonKey == PlanNotices.DeletionEvidencePending.Key),
-            "retry uses file revision evidence, propagates deletion and advances cursor");
+            await local.ObserveAsync("gone.txt", CancellationToken.None) is not null &&
+            h.Wire.Calls.Count(call => call == "/2/files/list_revisions") == probesBeforeRetry &&
+            h.Known.OpenNotices("p1").Any(n => n.Path == "gone.txt" && n.ReasonKey == "deletion-review") &&
+            local.WriteCalls == localWrites && CloudWrites() == cloudWrites,
+            "released evidence asks for a decision without another history probe; no delete or resurrection without explicit choice");
+        await run.IncrementalAsync("p1", new Progress<RunProgress>(), default);
+        Require(local.WriteCalls == localWrites && CloudWrites() == cloudWrites &&
+            await local.ObserveAsync("gone.txt", default) is not null, "decision hold remains inert across later runs");
+        var decision = h.Known.OpenNotices("p1").Single(n => n.Path == "gone.txt" && n.ReasonKey == "deletion-review");
+        await run.ApplyRetryNoticeChoiceAsync("p1", decision.NoticeId!, NoticeChoices.DeleteReviewed, default);
+        await run.IncrementalAsync("p1", new Progress<RunProgress>(), default);
+        Require(await local.ObserveAsync("gone.txt", default) is null && CloudWrites() == cloudWrites,
+            "only the explicit reviewed choice deletes the unchanged local survivor under OppositeAbsent");
     }
 }

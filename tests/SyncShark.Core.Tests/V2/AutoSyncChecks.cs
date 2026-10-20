@@ -148,8 +148,14 @@ internal static partial class AutoSyncChecks
             await Until(() => rig.Status("p1") == AutoStatus.Held, "the pair is held");
             Require(rig.State("p1").Reason?.Key == reason.Key, "held with reason " + reason.Key);
             rig.Clock.Advance(SafetyPoll * 3);
+            if (error is SyncRunRefusedException)
+            {
+                await Until(() => rig.Run.Runs("p1") == 2, "ordinary refusal is re-evaluated on the safety poll");
+                await rig.ParkedAsync(AutoStatus.Idle);
+                continue;
+            }
             rig.WatchA.Signal();
-            Require(rig.Run.Runs("p1") == 1, "a held pair is not retried and ignores signals");
+            Require(rig.Run.Runs("p1") == 1, "an account-access hold is not retried and ignores signals");
             rig.Auto.Kick("p1");
             await rig.ParkedAsync(AutoStatus.Waiting);
             rig.Clock.Advance(Settings.ChangeQuietWindow);
@@ -249,6 +255,17 @@ internal static partial class AutoSyncChecks
             await held.StartAsync();
             await held.ParkedAsync(AutoStatus.Idle);
             Require(held.State("p1").RetryAt is null, "a partial run whose only leftover is held rows is not retried");
+        }
+        await using (var deferred = new Rig(["p1"]))
+        {
+            var observed = 0;
+            deferred.Auto.Changed += _ => throw new InvalidOperationException("scripted display failure");
+            deferred.Auto.Changed += _ => Interlocked.Increment(ref observed);
+            deferred.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Partial) with { Deferred = 1 });
+            await deferred.StartAsync();
+            await deferred.ParkedAsync(AutoStatus.Waiting);
+            Require(deferred.State("p1").RetryAt is not null && observed > 0,
+                "deferred item schedules a later run despite a throwing status subscriber; other subscribers still run");
         }
         Pass("Partial_RetriesOnlyWithFailures");
     }

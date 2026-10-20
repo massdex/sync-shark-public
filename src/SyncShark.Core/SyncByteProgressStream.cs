@@ -37,10 +37,14 @@ internal sealed class SyncByteProgressStream : Stream
         return new Scope(() => Current.Value = previous);
     }
 
-    public static Task ReportProcessAsync(string phase, string path, string detail, ProcessMessageKind kind = ProcessMessageKind.Progress)
+    public static async Task ReportProcessAsync(string phase, string path, string detail, ProcessMessageKind kind = ProcessMessageKind.Progress)
     {
-        var now = DateTimeOffset.UtcNow;
-        return Current.Value?.Report(new(phase, path, 0, null, now, now, detail, 0, null, kind)) ?? Task.CompletedTask;
+        try
+        {
+            var now = DateTimeOffset.UtcNow;
+            await (Current.Value?.Report(new(phase, path, 0, null, now, now, detail, 0, null, kind)) ?? Task.CompletedTask).ConfigureAwait(false);
+        }
+        catch (Exception) { /* Display failures must not change a sync or evidence result. */ }
     }
 
     internal static async Task ReportThrottleAsync(string route, TimeSpan wait)
@@ -99,8 +103,12 @@ internal sealed class SyncByteProgressStream : Stream
         var detail = $"{_phase}: {_bytes:N0}" + (_total is { } total ? $" of {total:N0}" : "") + " bytes processed";
         if (_phase.Contains("upload", StringComparison.OrdinalIgnoreCase))
             detail += "; bytes read for the request, not yet confirmed by the destination";
-        await _context.Report(new(_phase, _path, _bytes, _total, _started, DateTimeOffset.UtcNow, detail,
-            tick - _startedTick)).ConfigureAwait(false);
+        try
+        {
+            await _context.Report(new(_phase, _path, _bytes, _total, _started, DateTimeOffset.UtcNow, detail,
+                tick - _startedTick)).ConfigureAwait(false);
+        }
+        catch (Exception) { /* Guard only reporting: underlying stream failures still propagate. */ }
     }
 
     public override bool CanRead => _inner.CanRead;

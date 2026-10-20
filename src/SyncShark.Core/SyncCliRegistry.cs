@@ -578,7 +578,9 @@ public static class SyncCliRegistry
         };
 
     private static readonly string[] ChoiceNames = [.. Enum.GetNames<SyncAuthorityConflictResolutionKind>(),
-        V2.NoticeChoices.UseOtherVersion, V2.NoticeChoices.SaveOtherVersionAsCopy, V2.NoticeChoices.Dismiss];
+        V2.NoticeChoices.UseOtherVersion, V2.NoticeChoices.SaveOtherVersionAsCopy, V2.NoticeChoices.Dismiss,
+        V2.NoticeChoices.RetryNow, V2.NoticeChoices.Exclude, V2.NoticeChoices.Ignore,
+        V2.NoticeChoices.DeleteReviewed, V2.NoticeChoices.KeepRestore];
 
     public static SyncCliCapabilityData Capabilities() => new("Sync Shark", ProductVersion(),
         BuildIdentity.SourceRevision,
@@ -890,7 +892,9 @@ public static class SyncCliRegistry
         {
             var retainedNoticeChoice = command == "conflicts resolve" &&
                 options.GetValueOrDefault("--choice") is V2.NoticeChoices.UseOtherVersion or
-                    V2.NoticeChoices.SaveOtherVersionAsCopy or V2.NoticeChoices.Dismiss;
+                    V2.NoticeChoices.SaveOtherVersionAsCopy or V2.NoticeChoices.Dismiss or
+                    V2.NoticeChoices.RetryNow or V2.NoticeChoices.Exclude or V2.NoticeChoices.Ignore or
+                    V2.NoticeChoices.DeleteReviewed or V2.NoticeChoices.KeepRestore;
             if (!long.TryParse(generationValue, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed) ||
                 parsed < (retainedNoticeChoice ? 0 : 1))
                 throw new SyncCliUsageException(retainedNoticeChoice
@@ -1651,7 +1655,9 @@ public static class SyncCliRegistry
                 }
                 if (first.Incomplete is { } incomplete) builder.AppendLine("  " + incomplete);
                 if (first.FirstSyncComplete)
-                    builder.AppendLine("  Reviewed choices completed; first-sync approval saved. Later changes and unresolved conflicts are handled by ordinary sync, not by reopening this review.");
+                    builder.AppendLine("  First sync complete. Reviewed work was applied or saved as an issue. Later changes are handled by ordinary sync, not by reopening this review.");
+                foreach (var issue in first.OpenIssues.OrderBy(item => item.Key, StringComparer.Ordinal))
+                    builder.AppendLine($"  open issue: {issue.Key}={issue.Value}");
                 if (first.RunId is not null) builder.AppendLine($"  retained run={first.RunId}");
                 if (first.HasMore) builder.AppendLine($"  {first.Returned} of {first.TotalFiles} file results included. Read the complete retained log with activity list --log --run {first.RunId}.");
                 break;

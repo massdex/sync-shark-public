@@ -12,6 +12,28 @@ public static class NoticeChoices
     public const string UseOtherVersion = "use-other-version";
     public const string SaveOtherVersionAsCopy = "save-other-version-as-copy";
     public const string Dismiss = "dismiss";
+    public const string RetryNow = "retry-now";
+    public const string Exclude = "exclude";
+    public const string OpenFolderSettings = "open-folder-settings";
+    public static bool IsRemovalAttention(Notice notice) => notice.ReasonKey is "reviewed-folder-grew" or "reviewed-removal-skipped";
+    public const string RemovalAttentionHelp = " Open folder settings to inspect selection and ignore rules, or dismiss this notice. You can remove the unwanted copy yourself or adjust the ignore rules. Ordinary sync carries deletions with its usual Recovery safeguards only when the path is included and no protection holds it; excluded paths remain untouched.";
+
+    public const string DeleteReviewed = "delete";
+    public const string KeepRestore = "keep-restore";
+
+    /// <summary>A deletion-review notice whose survivor may be deleted with Recovery, kept/restored, or ignored.</summary>
+    public const int DeletionReviewRule = 40;
+
+    /// <summary>
+    /// A deletion-review notice whose survivor is a folder or is flagged: neither may be given deletion
+    /// authority automatically, so only keep/restore and ignore are offered. The ordinary safety guards
+    /// still hold any restore that would write over protected content.
+    /// </summary>
+    public const int DeletionReviewRestoreOnlyRule = 41;
+
+    public static bool IsRetryNotice(Notice notice) => notice.ReasonKey is "sync-retry" or "deletion-review" || IsRemovalAttention(notice);
+
+    public static bool IsRetryChoice(string choice) => choice is RetryNow or Exclude or Ignore or DeleteReviewed or KeepRestore or OpenFolderSettings or Dismiss;
 
     public static bool IsRetainedVersionChoice(string choice) =>
         choice is UseOtherVersion or SaveOtherVersionAsCopy or Dismiss;
@@ -28,10 +50,22 @@ public static class NoticeChoices
             : notice.Rule == 38 && notice.ReasonKey == PlanNotices.CloudFilesBindingNeedsReview.Key
             ? [new(ReviewRebind, "Review / rebind to verified new path"),
                new(PausePair, "Pause the pair"), new(LeaveAsIs, "Leave as is")]
+            : IsRemovalAttention(notice)
+            ? [new(OpenFolderSettings, "Open folder settings"), new(Dismiss, "Dismiss")]
+            : notice.ReasonKey == "deletion-review" && notice.Rule == DeletionReviewRestoreOnlyRule
+            ? [new(KeepRestore, "Keep / restore"), new(Ignore, "Ignore; exclude this path from sync")]
+            : notice.ReasonKey == "deletion-review"
+            ? [new(DeleteReviewed, "Delete with recovery"), new(KeepRestore, "Keep / restore"), new(Ignore, "Ignore; exclude this path from sync")]
+            : IsRetryNotice(notice)
+            ? [new(RetryNow, "Retry now"), new(Exclude, "Exclude from sync"), new(Ignore, "Ignore; exclude this path from sync")]
             : [];
 
     public static string Result(string choice) => choice switch
     {
+        OpenFolderSettings => "Open this pair's folder settings to inspect selection and ignore rules. The notice remains open; no files changed.",
+        RetryNow => "Retry requested. Existing evidence and deletion safeguards remain in force.",
+        Exclude => "Excluded from future sync on both sides; no files were deleted.",
+        Ignore => "Excluded this path from future sync on both sides; no files were changed or deleted.",
         UseOtherVersion => "Restored the other version; the displaced current version remains recoverable.",
         SaveOtherVersionAsCopy => "Saved the other version as a separate copy at your request.",
         Dismiss => "Dismissed; no files changed.",

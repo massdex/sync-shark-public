@@ -67,21 +67,21 @@ internal static partial class DropboxChecks
             local.FailNextWrites = 1;
             var (runtime, _) = PrepareCursorRuntime(h, local, pair, store, product);
             var failed = await runtime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { }, CancellationToken.None);
-            Require(failed.Failed == 1 && !store.FirstSyncDone(pair.PairId) &&
-                FirstSyncChoicesState.Load(product, pair.PairId, store)!.InventoryCursors.Any(c => c.Cursor == "held-failed"),
-                "interrupted apply preserves the refreshed pending cursor with one unresolved held file");
+            Require(failed.Failed == 1 && store.FirstSyncDone(pair.PairId) &&
+                store.Cursor(pair.B.RootId) == "held-failed" && store.SyncRetryAt(pair.PairId, "held.txt") is not null,
+                "item failures complete first sync with the refreshed safe cursor and durable held input");
         }
         h.Wire.SeedChangePage("held-failed", [], false, "held-resumed");
         using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System))
         {
-            var (runtime, _) = PrepareCursorRuntime(h, local, pair, store, product);
-            var resumed = await runtime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { }, CancellationToken.None);
-            Require(resumed.Failed == 0 && resumed.Deferred > 0 && !store.FirstSyncDone(pair.PairId) &&
+            var (_, run) = PrepareCursorRuntime(h, local, pair, store, product);
+            var resumed = await run.IncrementalAsync(pair.PairId, new Progress<RunProgress>(), CancellationToken.None);
+            Require(resumed.Failed == 0 && resumed.Deferred > 0 && store.FirstSyncDone(pair.PairId) &&
                 h.Wire.ListRequests.Count == lists &&
                 await local.ObserveAsync("download.txt", CancellationToken.None) is not null &&
                 await local.ObserveAsync("held.txt", CancellationToken.None) is not null &&
-                FirstSyncChoicesState.Load(product, pair.PairId, store)!.InventoryCursors.Any(c => c.Cursor == "held-resumed"),
-                "reopened apply resumes one pending item without any full listing, finishes ordinary work, and preserves D78c hold");
+                store.Cursor(pair.B.RootId) == "held-resumed",
+                "reopened ordinary sync resumes pending work without a full listing and preserves the D78c hold");
             Require(store.Baselines(pair.PairId).All(row => row.A.Path != "held.txt") &&
                 !h.Wire.Calls.Any(call => call.Contains("/delete", StringComparison.Ordinal) || call.Contains("/upload", StringComparison.Ordinal)),
                 "unknown held hash never authorizes a delete, upload, or successful held baseline");
