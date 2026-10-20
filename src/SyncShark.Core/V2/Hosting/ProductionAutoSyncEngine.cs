@@ -12,6 +12,7 @@ public sealed class ProductionAutoSyncEngine : IAutoSyncHostEngine
     private readonly HttpClient _http;
     private readonly HostNoticeChoiceQueue _choices;
     private readonly CloudFilesLifetime _cloudFiles;
+    private readonly StorageSettlementService _settlement;
 
     public ProductionAutoSyncEngine(PilotInstanceLock authority, string root)
     {
@@ -37,6 +38,8 @@ public sealed class ProductionAutoSyncEngine : IAutoSyncHostEngine
             _choices = new HostNoticeChoiceQueue(_composition.Store, ExecuteCliAsync);
             _auto = _composition.StartAutoSync(Paused,
                 () => TimeSpan.FromMinutes(_automation.Load().IntervalMinutes));
+            _settlement = new StorageSettlementService((SqliteStateStore)_composition.Store, _cloudFiles);
+            _settlement.Start();
         }
         catch { _cloudFiles?.Dispose(); _composition?.Dispose(); _http.Dispose(); throw; }
     }
@@ -159,11 +162,11 @@ public sealed class ProductionAutoSyncEngine : IAutoSyncHostEngine
 
     public Task StopAsync() => _choices.StopAsync(() => _auto.StopAsync());
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
+        await _settlement.DisposeAsync().ConfigureAwait(false);
         _cloudFiles.Dispose();
         _composition.Dispose();
         _http.Dispose();
-        return ValueTask.CompletedTask;
     }
 }

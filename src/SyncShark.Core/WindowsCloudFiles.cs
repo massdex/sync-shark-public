@@ -589,7 +589,8 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
     }
 
     public async Task<WindowsCloudPlaceholderInfo> ConvertVerifiedSyncedFileAsync(PilotRemoteEntry remote,
-        CancellationToken cancellationToken = default, bool? dehydrateOverride = null)
+        CancellationToken cancellationToken = default, bool? dehydrateOverride = null,
+        PilotDirectoryIdentity? expectedLocalIdentity = null, Action? revalidate = null)
     {
         ThrowIfDisposed();
         if (remote.Kind != PilotEntryKind.File || string.IsNullOrWhiteSpace(remote.ContentHash))
@@ -606,7 +607,15 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
             if (dehydrate && SameIdentity(existing.Identity, identity) &&
                 existing.State.Availability == SyncCloudFileAvailability.OnlineOnly &&
                 existing.State.IsInSync)
+            {
+                using var held = OpenAttributes(target, writeDac: false, exclusive: true);
+                VerifySettlementIdentity(held.Handle, expectedLocalIdentity);
+                if (ReadStubState(held.Handle) is not { FullyDehydrated: true })
+                    throw new IOException("The placeholder changed before settlement acknowledgement. Retry conversion.");
+                cancellationToken.ThrowIfCancellationRequested();
+                revalidate?.Invoke();
                 return existing;
+            }
 
             BeforeDehydrateForTest?.Invoke(target);
             await using var localPlaceholder = SyncLocalFileAuthority.OpenExistingExclusive(target);
@@ -616,6 +625,9 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
             var placeholderHash = await SyncContentIdentity.ComputeAsync(_pair.Provider, localPlaceholder.Stream, cancellationToken);
             if (!string.Equals(placeholderHash, remote.ContentHash, StringComparison.OrdinalIgnoreCase))
                 throw new IOException("The local file changed after upload and remains available offline.");
+            VerifySettlementIdentity(localPlaceholder.Handle, expectedLocalIdentity);
+            cancellationToken.ThrowIfCancellationRequested();
+            revalidate?.Invoke();
             var placeholderIdentity = identity.Serialize();
             var placeholderIdentityHandle = GCHandle.Alloc(placeholderIdentity, GCHandleType.Pinned);
             try
@@ -647,6 +659,9 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
             var hash = await SyncContentIdentity.ComputeAsync(_pair.Provider, local.Stream, cancellationToken);
             if (!string.Equals(hash, remote.ContentHash, StringComparison.OrdinalIgnoreCase))
                 throw new IOException("The local file changed after upload and remains available offline.");
+            VerifySettlementIdentity(local.Handle, expectedLocalIdentity);
+            cancellationToken.ThrowIfCancellationRequested();
+            revalidate?.Invoke();
             var bytes = identity.Serialize();
             var pinned = GCHandle.Alloc(bytes, GCHandleType.Pinned);
             try
@@ -665,6 +680,15 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
             !SameIdentity(result.Identity, identity) || !result.State.IsInSync)
             throw new IOException("The online-only file did not retain its verified Dropbox identity.");
         return result;
+    }
+
+    private static void VerifySettlementIdentity(SafeFileHandle handle, PilotDirectoryIdentity? expected)
+    {
+        if (expected is null) return;
+        if (!PilotDirectoryLease.GetFileInformationByHandle(handle, out var info) ||
+            new PilotDirectoryIdentity(info.VolumeSerialNumber,
+                ((ulong)info.FileIndexHigh << 32) | info.FileIndexLow) != expected)
+            throw new IOException("The uploaded local identity was replaced. Keep the file and retry after syncing it.");
     }
 
     public async Task<SyncCloudAvailabilityResult> SetAvailabilityAsync(string relativePath, bool keepOnDevice,

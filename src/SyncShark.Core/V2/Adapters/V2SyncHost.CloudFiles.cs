@@ -85,6 +85,17 @@ internal sealed class CloudFilesLifetime(
         }
     }
 
+    internal WindowsCloudFilesProvider RequireProvider(PairDef pair, CancellationToken ct)
+    {
+        Open(pair, true, false, SyncDirectoryStorage.AlwaysAvailable, ct);
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            return _open[pair.PairId].Connection as WindowsCloudFilesProvider
+                ?? throw new InvalidOperationException("This connection cannot settle files.");
+        }
+    }
+
     public void Dispose()
     {
         lock (_gate)

@@ -165,6 +165,11 @@ public sealed partial class SqliteStateStore
         return (IReadOnlyList<StorageSettlement>)result;
     });
 
+    internal bool IsCurrentStorageSettlement(StorageSettlement job) => InStore(() =>
+        StoreSchema.Scalar(_connection, null,
+            "SELECT 1 FROM storage_settlement WHERE job_id=$id AND remote_json=$j AND state='pending';",
+            ("$id", job.JobId), ("$j", JsonSerializer.Serialize(job.Remote))) is not null);
+
     public void CompleteStorageSettlement(StorageSettlement job, StorageObserved observed) => InStore(() =>
     {
         using var tx = _connection.BeginTransaction();

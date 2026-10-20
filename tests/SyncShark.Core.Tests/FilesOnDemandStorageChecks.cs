@@ -85,6 +85,15 @@ internal static class FilesOnDemandStorageChecks
         using (var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System))
         {
             Require(store.StorageSettlementPage().Count == 1, "receipt survives restart before conversion");
+            var skippedConversions = 0;
+            var skipped = new FilesOnDemandSettlement(store, (_, _) =>
+            {
+                Interlocked.Increment(ref skippedConversions);
+                return Task.FromResult(new StorageObserved("OnlineOnly", false, true));
+            }, (_, _) => throw new InvalidOperationException("Ineligible jobs should not fail."), _ => false);
+            await skipped.RunPageAsync(0, CancellationToken.None);
+            Require(skippedConversions == 0 && store.StorageSettlementPage().Count == 1,
+                "offline policy retains receipt without converting");
             var failures = 0;
             var worker = new FilesOnDemandSettlement(store, (_, _) => throw new IOException("edited after upload"), (_, _) => failures++);
             await worker.RunPageAsync(0, CancellationToken.None);
@@ -100,6 +109,21 @@ internal static class FilesOnDemandStorageChecks
             var first = store.StorageSettlementPage();
             var second = store.StorageSettlementPage(first[^1].JobId);
             Require(first.Count == 128 && second.Count == 128 && first[^1].JobId < second[0].JobId, "keyset pages bounded and disjoint");
+            var concurrent = 0;
+            var arrivals = 0;
+            var fourStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            worker = new FilesOnDemandSettlement(store, async (_, token) =>
+            {
+                var active = Interlocked.Increment(ref concurrent);
+                if (active > 4) throw new InvalidOperationException("Settlement exceeded its worker bound.");
+                if (Interlocked.Increment(ref arrivals) == 4) fourStarted.TrySetResult();
+                await fourStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), token);
+                Interlocked.Decrement(ref concurrent);
+                return new StorageObserved("OnlineOnly", false, true);
+            }, (_, error) => throw new InvalidOperationException("Concurrent settlement failed.", error));
+            await worker.RunPageAsync(0, CancellationToken.None);
+            Require(arrivals == 128 && store.StorageSettlementPage().Count == 128,
+                "settlement runs independent items concurrently within one bounded page");
         }
         Console.WriteLine("PASS storage CLI syntax/intent, SQL list at 10000 files, default/inheritance, receipt deduplication, restart, failed conversion, stale completion and bounded settlement pages (fake upload response loss and production reconciliation/store path; no live provider upload exercised)");
     }

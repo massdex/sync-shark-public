@@ -220,6 +220,7 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
         try
         {
             var report = await _run.IncrementalAsync(pairId, new RunProgressForwarder(sink), ct);
+            await SettleAfterRunAsync(ct).ConfigureAwait(false);
             return new SyncCliRunData(report.PairId, pair.Name, report.Uploaded, report.Downloaded, 0,
                 report.KeptBoth, report.Held,
                 string.Equals(report.Outcome, RunOutcomes.Stopped, StringComparison.Ordinal))
@@ -425,6 +426,7 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
             // The reviewed set goes into the apply path as well: the run re-checks it at execution time under its own
             // gate, so a scan that interleaved after this preview still cannot delete a victim the prepare never showed.
             var report = await _run.ApplyAsync(pairId, plan, forwarder, ct, reviewed, rebuildableResolution);
+            await SettleAfterRunAsync(ct).ConfigureAwait(false);
             // The record only authorizes a first sync, so once that is done the record goes. The exclusions were
             // already saved by the run, inside the same completion step that marked the first sync done.
             if (_store.FirstSyncDone(pairId)) FirstSyncChoicesState.Clear(_productRoot, pairId, _store);
@@ -711,6 +713,7 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
     public async ValueTask DisposeAsync()
     {
         if (_borrowed) return; // The host, not a disconnected client, owns the engine and authority lease.
+        _storageConnections?.Dispose();
         if (_composition is not null) _composition.Dispose();
         else _store.Dispose();
         _dropboxHttp?.Dispose();

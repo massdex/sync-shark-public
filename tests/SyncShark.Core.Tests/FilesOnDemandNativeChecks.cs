@@ -66,7 +66,28 @@ internal static class FilesOnDemandNativeChecks
             if (!rejectedEdit || !(await File.ReadAllBytesAsync(path)).SequenceEqual(new byte[content.Length]))
                 throw new IOException("An edit at conversion was not retained safely.");
             await File.WriteAllBytesAsync(path, content); // restore only this synthetic fixture
-            var converted = await provider.ConvertVerifiedSyncedFileAsync(remote, dehydrateOverride: true);
+            PilotDirectoryIdentity uploadedIdentity;
+            using (var file = SyncLocalFileAuthority.OpenExisting(path)) uploadedIdentity = file.ReadIdentity();
+            var rejectedReplacement = false;
+            try
+            {
+                await provider.ConvertVerifiedSyncedFileAsync(remote, dehydrateOverride: true,
+                    expectedLocalIdentity: uploadedIdentity with { FileId = uploadedIdentity.FileId + 1 });
+            }
+            catch (IOException) { rejectedReplacement = true; }
+            if (!rejectedReplacement || WindowsCloudFilesProvider.TryReadOwnedPlaceholder(path, out _))
+                throw new IOException("A mismatched uploaded identity authorized conversion.");
+            var rejectedPolicy = false;
+            try
+            {
+                await provider.ConvertVerifiedSyncedFileAsync(remote, dehydrateOverride: true,
+                    expectedLocalIdentity: uploadedIdentity, revalidate: () => throw new IOException("Policy changed."));
+            }
+            catch (IOException) { rejectedPolicy = true; }
+            if (!rejectedPolicy || WindowsCloudFilesProvider.TryReadOwnedPlaceholder(path, out _))
+                throw new IOException("A changed policy authorized conversion.");
+            var converted = await provider.ConvertVerifiedSyncedFileAsync(remote, dehydrateOverride: true,
+                expectedLocalIdentity: uploadedIdentity);
             if (!converted.State.IsInSync || converted.State.Availability != SyncCloudFileAvailability.OnlineOnly)
                 throw new IOException("Verified conversion did not dehydrate and mark in sync.");
             if (source.Reads != 0) throw new IOException("Conversion unexpectedly fetched bytes.");
