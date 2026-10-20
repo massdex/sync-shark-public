@@ -289,10 +289,10 @@ internal sealed class HydrationNoticeWriter : IDisposable
                 queued |= EnqueueLocked(NoticeKind.Success, pairId, path, null, null, resolve, localObjectId);
             }
             else if (!_incompletePairs.Contains(pairId) && !_pairHydrationCauses.Contains(pairId) &&
-                     !_pendingEvents.ContainsKey((pairId, key)) && !_inFlight.ContainsKey((pairId, key)) &&
+                     !_pendingEvents.ContainsKey((pairId, key)) && !_inFlight.Contains((pairId, key)) &&
                      !_open.ContainsKey((pairId, key)) &&
                      !_pendingEvents.ContainsKey((pairId, "path:" + path)) &&
-                     !_inFlight.ContainsKey((pairId, "path:" + path)) &&
+                     !_inFlight.Contains((pairId, "path:" + path)) &&
                      !_open.ContainsKey((pairId, "path:" + path)))
             {
                 // First success per process still needs one bounded close of a prior-process pair cause.
@@ -632,9 +632,9 @@ internal sealed class HydrationNoticeWriter : IDisposable
             StorageNotices.Report(_store, pair, path, notice, error);
             PersistedFailures++;
         }
-        catch (Exception error)
+        catch (Exception persistError)
         {
-            RecordPersistenceError(error);
+            RecordPersistenceError(persistError);
             // The item is still unchanged; a later failed read queues the notice again.
         }
     }
