@@ -191,8 +191,10 @@ internal static partial class RunChecks
             Repair: new NoticeRepair(Side.A, item));
         store.AddNotices([moved]);
         var open = store.OpenNotices(fx.Pair.PairId);
-        Require(open.Count == 1 && open[0].NoticeId == canonical && open[0].Path == item.Path,
+        Require(open.Count == 1 && open[0].NoticeId == canonical,
             "a moved item's legacy notice folds into one canonical notice, never a duplicate");
+        Require(open[0].Path == item.Path,
+            "the folded notice displays the current path even when its detail is unchanged");
         var alias = store.NoticeById(fx.Pair.PairId, legacy);
         Require(alias?.Notice.NoticeId == canonical && alias?.Notice.Repair?.Destination == "chosen.txt",
             "the legacy id resolves to the canonical identity and keeps its pending rename destination");
@@ -202,6 +204,13 @@ internal static partial class RunChecks
         Require(after.Count == 1 && after[0].NoticeId == canonical && after[0].Path == "moved/again.txt" &&
             after[0].Repair?.Destination == "chosen.txt",
             "a second move refreshes one canonical notice without dropping the pending destination");
+        var pathOnly = after[0] with { Path = "moved/path-only.txt" };
+        store.AddNotices([pathOnly]);
+        var refreshed = store.OpenNotices(fx.Pair.PairId);
+        Require(refreshed.Count == 1 && refreshed[0].NoticeId == canonical && refreshed[0].Path == pathOnly.Path &&
+            NoticeDetailCodec.Encode(refreshed[0]) == NoticeDetailCodec.Encode(after[0]) &&
+            store.NoticeById(fx.Pair.PairId, legacy)?.Notice.Path == pathOnly.Path,
+            "a path-only refresh keeps one notice, unchanged repair evidence, and the legacy alias");
 
         // Both rows already open: the canonical row and the legacy row for the same object. The migration must
         // keep exactly one notice and carry the pending destination.
@@ -219,7 +228,8 @@ internal static partial class RunChecks
         Require(bothStore.OpenNotices(both.Pair.PairId).Count == 2, "the both-rows fixture starts with two open notices");
         bothStore.AddNotices([bothNotice with { Repair = new NoticeRepair(Side.A, bothItem) }]);
         var folded = bothStore.OpenNotices(both.Pair.PairId);
-        Require(folded.Count == 1 && folded[0].NoticeId == bothCanonical && folded[0].Repair?.Destination == "chosen.txt",
+        Require(folded.Count == 1 && folded[0].NoticeId == bothCanonical && folded[0].Path == bothItem.Path &&
+            folded[0].Repair?.Destination == "chosen.txt",
             "an existing canonical row plus a legacy row fold to one notice without losing the destination");
         Require(bothStore.NoticeById(both.Pair.PairId, bothLegacy)?.Notice.NoticeId == bothCanonical,
             "the legacy id still resolves to the canonical identity after both-rows migration");

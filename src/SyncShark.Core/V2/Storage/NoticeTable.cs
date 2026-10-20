@@ -55,10 +55,12 @@ internal sealed partial class NoticeTable
         // Fresh observations refresh revision evidence, but never erase an already-recorded effect intent.
         if (notice.Repair is { Destination: null } && ById(pairNo, noticeId, transaction)?.Notice.Repair is { Destination: not null } captured)
             notice = notice with { Repair = captured };
+        // A moved repair can keep identical detail (including a captured destination); its display path
+        // must still follow the current observation, including immediately after folding a legacy row.
         StoreSchema.Execute(_connection, transaction,
             "UPDATE notice SET state='open', choice=NULL, kind=$kind, path=$path, detail=$detail " +
             "WHERE notice_id=$id AND NOT ($retry=1 AND COALESCE(choice,'')='ignore') " +
-            "AND (state <> 'open' OR ($refresh=1 AND detail <> $detail));",
+            "AND (state <> 'open' OR ($refresh=1 AND (detail <> $detail OR path <> $path)));",
             ("$retry", NoticeChoices.IsRetryNotice(notice) && notice.UploadSuspended is null ? 1 : 0),
             ("$refresh", NoticeChoices.IsRetryNotice(notice) || notice.FreeSpace is not null || (notice.Kind == NoticeKind.UserDecision && notice.Detail.Contains(ProviderNameRefusedException.Detail, StringComparison.Ordinal)) || notice.ReasonKey == ProviderNameRefusedException.NoticeKey ? 1 : 0),
             ("$id", noticeId), ("$kind", notice.Kind.ToString()), ("$path", notice.Path), ("$detail", NoticeDetailCodec.Encode(notice)));
