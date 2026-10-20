@@ -5,7 +5,7 @@ namespace Massdex.SyncShark.V2;
 
 internal static partial class LocalJournalChecks
 {
-    // Reuses the retained, test-owned 1M SQLite fixture; no journal or physical file writes.
+    // Creates or reuses a test-owned 1M SQLite fixture; no journal or physical file writes.
     private static async Task ProtectionIndexAsync(string folder)
     {
         using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
@@ -13,6 +13,24 @@ internal static partial class LocalJournalChecks
         { DataSource = Path.Combine(folder, "store", "v2", "state.db") }.ToString());
         connection.Open();
         using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM file_state;";
+        if ((long)command.ExecuteScalar()! == 0)
+        {
+            var seed = new ItemState("edit.txt", ItemKind.File, "benchmark-edit", null,
+                new string('a', 64), 1, DateTimeOffset.UnixEpoch, ItemFlags.None);
+            var gen = store.BeginGeneration("root-local", "fixture");
+            store.WriteSnapshot(new Snapshot("root-local", Side.A, gen, "", [seed], []));
+            store.CompleteGeneration(gen, "", true);
+            command.CommandText = """
+                WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<999999),
+                seed AS MATERIALIZED (SELECT * FROM file_state WHERE object_id='benchmark-edit')
+                INSERT INTO file_state(root_no,dir_no,name_key,name,kind,object_id,version_id,hash,size,mtime,flags,identity_json)
+                SELECT f.root_no,f.dir_no,printf('SYNTHETIC-%07d',n.x),printf('synthetic-%07d',n.x),
+                  f.kind,printf('synthetic-%07d',n.x),NULL,f.hash,f.size,f.mtime,0,NULL
+                FROM n CROSS JOIN seed f;
+                """;
+            command.ExecuteNonQuery();
+        }
         command.CommandText = "SELECT COUNT(*) FROM file_state;";
         LocalChecks.Require((long)command.ExecuteScalar()! >= 1_000_000, "index benchmark has 1M database rows");
         // Reset only synthetic benchmark holds left by an earlier invocation; retain all fixture rows.

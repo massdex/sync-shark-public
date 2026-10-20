@@ -55,8 +55,7 @@ internal sealed class FileStateTable
         var version = StoreSchema.Scalar(_connection, null, "PRAGMA data_version;");
         // A partially enumerated subtree can contain observations from before the failure. Do not
         // let even a replacement close a row there, or let an ignored observation suppress a move.
-        Func<string, bool>? include = snapshot.IncompleteSubtrees.Count == 0 ? snapshot.IncludesPath
-            : path => (snapshot.IncludesPath?.Invoke(path) ?? true) && !InsideIncomplete(path, snapshot.IncompleteSubtrees);
+        var include = snapshot.IncludesPath;
         // One deferred read snapshot covers directory lookup and comparison. Per-folder autocommit
         // reads otherwise repeatedly acquire WAL read marks; this never takes the live write lock.
         using var reading = _connection.BeginTransaction(deferred: true);
@@ -70,7 +69,17 @@ internal sealed class FileStateTable
             AfterSnapshotCompared?.Invoke();
             return Equals(version, StoreSchema.Scalar(_connection, null, "PRAGMA data_version;"));
         }
-        using var incoming = SnapshotInput.Create(_connection, _dir, input, include, reading);
+        var hasQuarantine = snapshot.IncompleteSubtrees.Count > 0 && StoreSchema.Scalar(_connection, reading,
+            "SELECT 1 FROM file_state INDEXED BY fs_quarantine WHERE root_no=$r AND (flags & 128)!=0 LIMIT 1;",
+            ("$r", rootNo)) is not null;
+        bool Observed(ItemState item) => !InsideIncomplete(item.Path, snapshot.IncompleteSubtrees) ||
+            (hasQuarantine && StoreSchema.Scalar(_connection, reading,
+                "SELECT 1 FROM file_state INDEXED BY fs_obj WHERE root_no=$r AND object_id=$o AND (flags & 128)!=0 LIMIT 1;",
+                ("$r", rootNo), ("$o", item.ObjectId)) is not null);
+        // Positively observed held identities keep their new aliases even inside an incomplete
+        // scope. This never proves absence or authorizes replacement of another identity there.
+        using var incoming = SnapshotInput.Create(_connection, _dir,
+            snapshot.IncompleteSubtrees.Count == 0 ? input : input.Where(Observed), include, reading);
         if (snapshot.IncompleteSubtrees.Count > 0 || StoreSchema.Scalar(_connection, reading,
             "SELECT 1 FROM file_state INDEXED BY fs_quarantine WHERE root_no=$r AND (flags & 128)!=0 LIMIT 1;",
             ("$r", rootNo)) is not null) incoming.PrepareObjectLookup();
@@ -93,8 +102,10 @@ internal sealed class FileStateTable
                 var merged = RowCodec.CarryHash(left.Current.Item, right.Current.Item);
                 var movingHold = right.Current.Item.Flags.HasFlag(ItemFlags.Quarantined) &&
                     right.Current.Item.ObjectId != merged.ObjectId && suppressed(right.Current.Item.ObjectId);
-                if (movingHold) heldMoves.Add(right.Current, left.Current.Item, wasLive: true);
-                if (!movingHold && !RowCodec.Same(merged, right.Current.Item))
+                var protectedReplacement = InsideIncomplete(merged.Path, snapshot.IncompleteSubtrees) &&
+                    merged.ObjectId != right.Current.Item.ObjectId;
+                if (movingHold && !protectedReplacement) heldMoves.Add(right.Current, left.Current.Item, wasLive: true);
+                if (!movingHold && !protectedReplacement && !RowCodec.Same(merged, right.Current.Item))
                     changes.Add(right.Current, merged, wasLive: true);
                 hasLeft = left.MoveNext();
                 hasRight = right.MoveNext();
