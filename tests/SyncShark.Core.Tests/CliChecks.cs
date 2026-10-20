@@ -1175,6 +1175,14 @@ internal static partial class CliChecks
             "--path", "Folder/Item", "--choice", Massdex.SyncShark.V2.NoticeChoices.RepairHelp,
             "--key", "notice-a", "--generation", "0", "--yes"]);
         Require(repair.Command == "conflicts resolve", "repair help uses the shared conflicts action with exact notice identity");
+        var rename = SyncCliRegistry.Parse(["--cli", "conflicts", "resolve", "--pair", "pair-a",
+            "--path", "Folder/Item", "--choice", Massdex.SyncShark.V2.NoticeChoices.Rename,
+            "--name", "Safe.txt", "--key", "notice-a", "--generation", "0", "--yes"]);
+        Require(rename.Name == "Safe.txt", "rename carries the user supplied name through the registry");
+        var children = SyncCliRegistry.Parse(["--cli", "conflicts", "resolve", "--pair", "pair-a",
+            "--path", "Folder", "--choice", Massdex.SyncShark.V2.NoticeChoices.ShowRemaining,
+            "--offset", "50", "--key", "notice-a", "--generation", "0", "--yes"]);
+        Require(children.Offset == 50, "child inspection carries its bounded page offset");
         await LocalPathArgumentChecksAsync();
         var ordinaryReplyWait = TimeSpan.FromMinutes(30);
         foreach (var seconds in new[] { "1800", "4500", "86400" })

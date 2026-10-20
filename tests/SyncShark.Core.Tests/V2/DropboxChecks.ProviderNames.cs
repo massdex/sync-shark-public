@@ -41,16 +41,16 @@ internal static partial class DropboxChecks
             var report = await run.ApplyAsync("p1", plan, new RecordingProgress(), CancellationToken.None);
             Require(store.Live("ra").Count(item => item.Flags.HasFlag(ItemFlags.ProviderNameRefused)) == 25,
                 "only exact disallowed_name results persist as item flags");
-            Require(report.Failed == 0 && report.Skipped == 26 && report.Uploaded == 0,
-                "25 provider refusals and one ordinary rejection report skipped, never successful transfers");
+            Require(report.Failed == 1 && report.Skipped == 25 && report.Uploaded == 0,
+                "25 name refusals are skipped; a typed quota rejection remains a failed retry, never a successful transfer");
             Require(store.FirstSyncDone("p1") && store.SyncRetryAt("p1", "ordinary.txt") is not null,
                 "decision 85: an ordinary retryable rejection is retained without blocking first sync");
             Require(store.Baselines("p1").All(b => !b.A.Path.StartsWith("folder/refused-")),
                 "refused names never fabricate a synced baseline");
-            var notice = store.OpenNotices("p1").Single(n => n.ReasonKey == ProviderNameRefusedException.NoticeKey);
-            Require(notice.Detail.Contains("25 name(s)") && notice.Detail.Contains("showing 20 of 25") &&
-                originals.Count(item => notice.Detail.Contains(item.Path, StringComparison.Ordinal)) == 20,
-                "one aggregated notice counts all refused names and caps path examples");
+            var notices = store.OpenNotices("p1").Where(n => n.ReasonKey == ProviderNameRefusedException.NoticeKey).ToArray();
+            Require(notices.Length == 25 && notices.All(n => n.Repair is not null &&
+                NoticeChoices.Options(n).Any(option => option.Choice == NoticeChoices.Rename)),
+                "each refused entity gets one identity-bound actionable notice");
             Require(writerA.Calls == 0 && h.Wire.WholeFolderDeletes == 0 &&
                 !h.Wire.Calls.Any(call => call.Contains("delete") || call.Contains("move")),
                 "name handling never writes, moves or deletes the local source or deletes Dropbox content");
@@ -77,8 +77,8 @@ internal static partial class DropboxChecks
             Require(h.Wire.AttemptedWritePaths.Count(path => path == "ordinary.txt") == 2 &&
                 originals.All(item => h.Wire.AttemptedWritePaths.Count(path => path == item.Path) == 1),
                 "another run retries only the ordinary failure");
-            Require(store.OpenNotices("p1").Count(n => n.ReasonKey == ProviderNameRefusedException.NoticeKey) == 1,
-                "one refusal summary remains visible without duplicate notices");
+            Require(store.OpenNotices("p1").Count(n => n.ReasonKey == ProviderNameRefusedException.NoticeKey) == 25,
+                "one notice per refused entity remains visible without duplicates");
             Require(report.Deleted == 0 && writerA.Calls == 0 &&
                 !store.OpenNotices("p1").Any(n => n.ReasonKey == "folder-delete-carried-ignored"),
                 "resumed inventory never deletes or writes locally or proposes carrying refused children away");
@@ -163,6 +163,16 @@ internal static partial class DropboxChecks
             Side.B, "refused", "old", old with { Path = "refused" }, old, false, null), CancellationToken.None));
         Require(await h.Writer().ObserveAsync("old", CancellationToken.None) == old,
             "a refused move retains the original Dropbox item");
+        var movesBefore = h.Wire.Calls.Count(call => call.Contains("move", StringComparison.Ordinal));
+        try
+        {
+            await h.Writer().MoveAsync(new SyncAction("repair", 31, ActionKind.Move, Side.B, "safe", "old",
+                null, old with { VersionId = "stale-revision" }, false, null) { RequireMoveRevision = true }, default);
+            throw new InvalidOperationException("Expected stale revision rejection");
+        }
+        catch (ExpectedTargetMismatchException) { }
+        Require(h.Wire.Calls.Count(call => call.Contains("move", StringComparison.Ordinal)) == movesBefore,
+            "explicit repair checks revision before sending a provider move");
         using var stream = new MemoryStream(Encoding.UTF8.GetBytes("keep"));
         try
         {

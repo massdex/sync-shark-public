@@ -38,7 +38,7 @@ internal static partial class RunChecks
             ordinaryAttempts == 2 && refusedAttempts == 30,
             "transient failure retries, refused items never retry, and first sync finishes");
         Require(fx.WriterA.Calls == 0, "parallel refusal handling performs no local effects");
-        Require(store.OpenNotices("p1").Count(n => n.ReasonKey == ProviderNameRefusedException.NoticeKey) == 1,
-            "parallel refusals have one bounded summary");
+        Require(store.OpenNotices("p1").Count(n => n.ReasonKey == ProviderNameRefusedException.NoticeKey) == 30,
+            "parallel refusals have one actionable notice per entity");
     }
 }

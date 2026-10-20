@@ -1723,7 +1723,7 @@ internal static partial class RunChecks
 
     private static Executor NewExecutor(IStateStore store) => new(store, Settings, ExecutorChecks.Admission());
 
-    private static Fixture Build(bool enabled = true, bool record = false, string pairId = "p1", IStateStore? suppliedStore = null, bool localLocal = false)
+    private static Fixture Build(bool enabled = true, bool record = false, string pairId = "p1", IStateStore? suppliedStore = null, bool localLocal = false, bool displayRoot = false)
     {
         var inner = suppliedStore ?? new InMemoryStateStore();
         var recorder = record ? new RecordingStore(inner) : null;
@@ -1733,7 +1733,7 @@ internal static partial class RunChecks
         var writerA = new CountingWriter(a);
         var writerB = new CountingWriter(b);
         var pair = new PairDef(pairId, pairId,
-            new RootDef("ra", SyncProviders.Local, null, "C:\\a", "id:ra"),
+            new RootDef("ra", SyncProviders.Local, null, "C:\\a", displayRoot ? "id:local:00000001:0000000000000001" : "id:ra"),
             new RootDef("rb", localLocal ? SyncProviders.Local : SyncProviders.Dropbox,
                 localLocal ? null : "acc", localLocal ? @"C:\b" : "/b", "id:rb"),
             [], [], enabled);

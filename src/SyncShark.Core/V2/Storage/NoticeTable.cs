@@ -31,6 +31,8 @@ internal sealed class NoticeTable
             if (notice.ReasonKey == "content-unconfirmed" && retryOpen) return;
         }
         var noticeId = notice.RetainedVersion is { } retained ? RetainedId(notice.PairId, retained.ActionId) :
+            notice.Repair is { } repair ? ShortId.Make("n", notice.PairId, notice.Rule.ToString(CultureInfo.InvariantCulture),
+                RowCodec.Key(notice.Path), notice.ReasonKey, repair.Side.ToString(), repair.Item.ObjectId) :
             ShortId.Make("n", notice.PairId, notice.Rule.ToString(CultureInfo.InvariantCulture),
                 RowCodec.Key(notice.Path), notice.ReasonKey);
         StoreSchema.Execute(_connection, transaction,
@@ -44,6 +46,10 @@ internal sealed class NoticeTable
         // A version-specific notice is immutable after publication; replay must not reopen a
         // completed choice or replace its committed target identity with a planned source stamp.
         if (notice.RetainedVersion is not null) return;
+        // Generation-zero notice commands must never silently rebind a displayed Rename button to
+        // a newer identity/revision. Refresh display text, but retain the originally published evidence.
+        if (notice.Repair is { Destination: null } && ById(pairNo, noticeId, transaction)?.Notice.Repair is { } captured)
+            notice = notice with { Repair = captured };
         StoreSchema.Execute(_connection, transaction,
             "UPDATE notice SET state='open', choice=NULL, kind=$kind, path=$path, detail=$detail " +
             "WHERE notice_id=$id AND NOT ($retry=1 AND COALESCE(choice,'')='ignore') " +

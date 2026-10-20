@@ -66,7 +66,8 @@ public sealed partial class V2SyncHost
         ArgumentNullException.ThrowIfNull(requests);
         cancellationToken.ThrowIfCancellationRequested();
         // Validate every target first and close nothing on failure: a stale selection must change nothing.
-        var targets = new List<(Notice Notice, string Choice)>();
+        var targets = new List<(Notice Notice, string Choice, NoticeActionInput? Input)>();
+        var messages = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var request in requests)
         {
             var notice = _store.OpenNotices(request.Conflict.PairId).FirstOrDefault(item =>
@@ -82,7 +83,7 @@ public sealed partial class V2SyncHost
             {
                 if (!options.Any(option => option.Choice == choice))
                     throw new InvalidOperationException("This option is no longer available. Refresh notices and choose again.");
-                targets.Add((notice, choice));
+                targets.Add((notice, choice, request.NoticeInput));
                 continue;
             }
             if (options.Count > 0)
@@ -92,16 +93,16 @@ public sealed partial class V2SyncHost
                 throw EdgeMessages.NotInV2("applyingChoice");
             if (notice.Kind == NoticeKind.UserDecision)
                 throw new InvalidOperationException(EdgeMessages.Text("decisionNeeded"));
-            targets.Add((notice, NoticeChoices.Accept));
+            targets.Add((notice, NoticeChoices.Accept, null));
         }
-        foreach (var (notice, choice) in targets)
+        foreach (var (notice, choice, input) in targets)
         {
             cancellationToken.ThrowIfCancellationRequested();
             // Apply first, acknowledge second. A failed operation keeps the notice retryable.
             // Pause is idempotent if interrupted between these two durable writes.
             if (NoticeChoices.IsRetryNotice(notice))
             {
-                await ApplyRetryNoticeChoiceAsync(notice, choice, cancellationToken);
+                messages[notice.NoticeId!] = await ApplyRetryNoticeChoiceAsync(notice, choice, cancellationToken, input);
                 continue;
             }
             if (choice is NoticeChoices.UseOtherVersion or NoticeChoices.SaveOtherVersionAsCopy)
@@ -124,7 +125,7 @@ public sealed partial class V2SyncHost
         {
             var pairDef = _store.Pair(group.Key)
                 ?? throw new InvalidDataException("This folder pair is no longer available.");
-            var decisions = group.Select(target => new SyncDecision(target.Notice.Path, SyncDecisionKind.Recovered, NoticeChoices.Result(target.Choice, target.Notice)))
+            var decisions = group.Select(target => new SyncDecision(target.Notice.Path, SyncDecisionKind.Recovered, messages.GetValueOrDefault(target.Notice.NoticeId!) ?? NoticeChoices.Result(target.Choice, target.Notice)))
                 .ToArray();
             items.Add(new SyncAuthorityBatchItemResult(Mapped(pairDef), new SyncRunResult(group.Key, decisions), null, null));
         }

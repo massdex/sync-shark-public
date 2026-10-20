@@ -140,6 +140,9 @@ jobs:
           - suite: notices
             flag: --v2-notice-restore-checks
             takes-root: false
+          - suite: blockers
+            flag: --blocker-checks
+            takes-root: false
           - suite: local-offline
             flag: --v2-local-offline-checks
             takes-root: true

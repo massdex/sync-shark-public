@@ -34,7 +34,7 @@ internal static partial class RunChecks
 
         var root = Path.Combine(Path.GetTempPath(), "blocker-check-" + Guid.NewGuid().ToString("N"));
         using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
-        var fx = Build(suppliedStore: store);
+        var fx = Build(suppliedStore: store, displayRoot: true);
         var pair = fx.Pair.PairId;
         store.AddNotices([new(pair, 30, NoticeKind.Info, "changing.txt", "content not confirmed", "content-unconfirmed")]);
         store.AddNotices([new(pair, 40, NoticeKind.Info, "changing.txt", "exact executor failure", "sync-retry")]);

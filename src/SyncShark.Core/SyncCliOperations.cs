@@ -71,6 +71,9 @@ public interface ISyncCliOperations : ISyncCliRuntime
     Task<SyncCliRunData> ResolveConflictAsync(string pairId, string relativePath, string choice, string? conflictId,
         long? generation, string? accountId, CancellationToken cancellationToken, Action<string>? progress) =>
         ResolveConflictAsync(pairId, relativePath, choice, conflictId, generation, accountId, cancellationToken);
+    Task<SyncCliRunData> ResolveNoticeAsync(string pairId, string relativePath, string choice, string? conflictId,
+        long? generation, string? accountId, CancellationToken cancellationToken, NoticeActionInput input) =>
+        throw new SyncCliUsageException("Use the direct v2 CLI for parameterized notice actions.");
     Task<SyncCliRecoveryListData> LoadRecoveryAsync(string pairId, string? search, int limit,
         CancellationToken cancellationToken);
     Task<SyncCliRecoveryActionData> RestoreRecoveryAsync(string pairId, string key, bool asCopy,

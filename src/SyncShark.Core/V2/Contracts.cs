@@ -96,6 +96,9 @@ public sealed record SyncAction(string ActionId, int Rule, ActionKind Kind, Side
     /// <summary>Re-include retired this intent's old history. Verify its effect, but never restore a baseline from it.</summary>
     public bool SuppressReconciledBaseline { get; init; }
 
+    /// <summary>Explicit blocker repair requires the observed revision as well as the stable identity.</summary>
+    public bool RequireMoveRevision { get; init; }
+
     /// <summary>Close this same-pair notice atomically only when its explicit restore effect commits Done.</summary>
     public string? ResolvedNoticeId { get; init; }
 
@@ -164,7 +167,10 @@ public enum NoticeKind { Info, KeepBoth, EditBeatsDelete, AutoConflict, UserDeci
 /// </summary>
 public sealed record Notice(string PairId, int Rule, NoticeKind Kind, string Path, string Detail, string ReasonKey,
     string? NoticeId = null, FreeSpaceNoticeMetadata? FreeSpace = null,
-    RetainedNoticeVersion? RetainedVersion = null);
+    RetainedNoticeVersion? RetainedVersion = null, NoticeRepair? Repair = null, bool FolderInspection = false);
+
+/// <summary>Identity-bound repair evidence, stored in the existing notice detail payload.</summary>
+public sealed record NoticeRepair(Side Side, ItemState Item, string? Destination = null);
 
 /// <summary>Exact per-item provenance for explicitly recovering a newest-wins loser, never a path-based guess.</summary>
 public sealed record RetainedNoticeVersion(string ActionId, Side Side, ItemState Loser, ItemState Winner);

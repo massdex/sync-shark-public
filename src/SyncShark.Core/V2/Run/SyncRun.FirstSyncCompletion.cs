@@ -162,7 +162,9 @@ public sealed partial class SyncRun
         _store.SaveSyncRetry(pair.PairId, retry);
         if (attempts >= 1 && retry.Kind is not ("planning" or "recovery"))
             WriteNotices([new Notice(pair.PairId, 40, NoticeKind.Info, path,
-                $"Sync will retry this item later ({attempts} attempts): {retry.LastError}. Options: retry now / exclude / ignore.", "sync-retry")]);
+                $"Sync will retry this item later ({attempts} attempts): {retry.LastError}. Options: retry now / exclude / ignore.", "sync-retry",
+                FolderInspection: _store.Live(pair.A.RootId, [path]).Concat(_store.Live(pair.B.RootId, [path]))
+                    .Any(item => item.Kind == ItemKind.Folder))]);
     }
 
     private static Dictionary<string, string> FailureReasons(Plan plan, Tally tally)

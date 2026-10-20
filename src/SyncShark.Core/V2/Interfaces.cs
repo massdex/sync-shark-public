@@ -38,6 +38,17 @@ public interface IStateStore : IDisposable
     /// <summary>Direct children only; production uses the directory index, never a subtree inventory.</summary>
     IReadOnlyList<ItemState> LiveChildren(string rootId, string directory);
 
+    /// <summary>Bounded direct-child page. Persistent stores must limit rows before decoding.</summary>
+    IReadOnlyList<ItemState> LiveChildrenPage(string rootId, string directory, int offset, int limit) =>
+        LiveChildren(rootId, directory).OrderBy(item => item.Path, StringComparer.Ordinal).Skip(offset).Take(limit).ToArray();
+
+    /// <summary>Bounded flagged-item page for catalog backfill.</summary>
+    IReadOnlyList<ItemState> LiveFlaggedPage(string rootId, ItemFlags flags, ItemState? after, int limit)
+    {
+        var rows = LiveFlagged(rootId, flags);
+        return (after is null ? rows : rows.SkipWhile(item => item.Path != after.Path).Skip(1)).Take(limit).ToArray();
+    }
+
     /// <summary>Exact directory aliases through indexed keys, never ancestor children or subtrees.</summary>
     IReadOnlyList<string> DirectorySpellings(string rootId, string path);
     /// <summary>Whether a narrowed reviewed folder effect would carry newly protected content.</summary>

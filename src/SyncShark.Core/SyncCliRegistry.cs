@@ -207,10 +207,10 @@ public static class SyncCliRegistry
             SyncCliRequestKind.State, "none", "one conflict's identities, sizes, hashes and retained-text flags",
             "the product state or the running application", "direct|running-application",
             "--pair,--path,--account", RequiresPair: true),
-        new("conflicts resolve", "conflicts resolve --pair <exact-id> --path <relative-path> --choice <decision> --key <conflict-id> --generation <n> --yes [--timeout-seconds <seconds>]",
+        new("conflicts resolve", "conflicts resolve --pair <exact-id> --path <relative-path> --choice <decision> --key <conflict-id> --generation <n> --yes [--name <safe-name>] [--offset <n>] [--timeout-seconds <seconds>]",
             SyncCliRequestKind.State, "yes", "applies exactly one explicit conflict decision with the stale-plan guard",
             "the product state or the running application", "direct|running-application",
-            "--pair,--path,--choice,--key,--generation,--account,--yes,--timeout-seconds", Mutating: true, RequiresYes: true,
+            "--pair,--path,--choice,--key,--generation,--account,--yes,--timeout-seconds,--name,--offset", Mutating: true, RequiresYes: true,
             RequiresPair: true),
         new("recovery list", "recovery list --pair <exact-id> [--account <exact-id>] [--search <text>] [--limit 1..200] [--offset <n>] [--deleted]", SyncCliRequestKind.State,
             "none", "retained recovery catalog and optional deleted cloud items, including Google Trash; partial-listing warnings are retained",
@@ -580,7 +580,7 @@ public static class SyncCliRegistry
     private static readonly string[] ChoiceNames = [.. Enum.GetNames<SyncAuthorityConflictResolutionKind>(),
         V2.NoticeChoices.UseOtherVersion, V2.NoticeChoices.SaveOtherVersionAsCopy, V2.NoticeChoices.Dismiss,
         V2.NoticeChoices.RetryNow, V2.NoticeChoices.Exclude, V2.NoticeChoices.Ignore,
-        V2.NoticeChoices.DeleteReviewed, V2.NoticeChoices.KeepRestore, V2.NoticeChoices.RepairHelp];
+        V2.NoticeChoices.DeleteReviewed, V2.NoticeChoices.KeepRestore, V2.NoticeChoices.RepairHelp, V2.NoticeChoices.Rename, V2.NoticeChoices.ShowRemaining, V2.NoticeChoices.OpenDropbox];
 
     public static SyncCliCapabilityData Capabilities() => new("Sync Shark", ProductVersion(),
         BuildIdentity.SourceRevision,
@@ -894,7 +894,7 @@ public static class SyncCliRegistry
                 options.GetValueOrDefault("--choice") is V2.NoticeChoices.UseOtherVersion or
                     V2.NoticeChoices.SaveOtherVersionAsCopy or V2.NoticeChoices.Dismiss or
                     V2.NoticeChoices.RetryNow or V2.NoticeChoices.Exclude or V2.NoticeChoices.Ignore or
-                    V2.NoticeChoices.DeleteReviewed or V2.NoticeChoices.KeepRestore or V2.NoticeChoices.RepairHelp;
+                    V2.NoticeChoices.DeleteReviewed or V2.NoticeChoices.KeepRestore or V2.NoticeChoices.RepairHelp or V2.NoticeChoices.Rename or V2.NoticeChoices.ShowRemaining or V2.NoticeChoices.OpenDropbox;
             if (!long.TryParse(generationValue, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed) ||
                 parsed < (retainedNoticeChoice ? 0 : 1))
                 throw new SyncCliUsageException(retainedNoticeChoice
@@ -1094,6 +1094,10 @@ public static class SyncCliRegistry
                 return await operations.LoadConflictAsync(invocation.PairId!, RequirePath(invocation),
                     invocation.AccountId, cancellationToken);
             case "conflicts resolve":
+                if (invocation.Name is not null || invocation.Options?.ContainsKey("--offset") == true)
+                    return await operations.ResolveNoticeAsync(invocation.PairId!, RequirePath(invocation),
+                        RequireChoice(invocation), invocation.Key, invocation.Generation, invocation.AccountId,
+                        cancellationToken, new NoticeActionInput(invocation.Name, invocation.Offset));
                 return await operations.ResolveConflictAsync(invocation.PairId!, RequirePath(invocation),
                     RequireChoice(invocation), invocation.Key, invocation.Generation, invocation.AccountId,
                     cancellationToken, Progress);

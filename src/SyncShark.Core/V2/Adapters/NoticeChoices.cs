@@ -14,6 +14,9 @@ public static class NoticeChoices
     public const string Dismiss = "dismiss";
     public const string RetryNow = "retry-now";
     public const string RepairHelp = "repair-help";
+    public const string Rename = "rename";
+    public const string ShowRemaining = "show-remaining-items";
+    public const string OpenDropbox = "open-in-dropbox";
     public const string Exclude = "exclude";
     public const string OpenFolderSettings = "open-folder-settings";
     public const string OpenRecoverySettings = "open-recovery-settings";
@@ -34,11 +37,11 @@ public static class NoticeChoices
     public const int DeletionReviewRestoreOnlyRule = 41;
 
     public static bool IsRetryNotice(Notice notice) => notice.RetainedVersion is null &&
-        (notice.ReasonKey is "sync-retry" or "deletion-review" or "planning-degraded" or "recovery-unavailable" || IsRemovalAttention(notice) ||
+        (notice.Repair is not null || notice.ReasonKey is "folder-not-emptied" or "export-required" or "sync-retry" or "deletion-review" or "planning-degraded" or "recovery-unavailable" || IsRemovalAttention(notice) ||
         notice.Kind == NoticeKind.Info && notice.Path.Length > 0 && notice.Rule is 30 or 40 &&
         !PlanNotices.AwaitsAcknowledgement(notice));
 
-    public static bool IsRetryChoice(string choice) => choice is RepairHelp or RetryNow or Exclude or Ignore or DeleteReviewed or KeepRestore or OpenFolderSettings or OpenRecoverySettings or Dismiss;
+    public static bool IsRetryChoice(string choice) => choice is Rename or ShowRemaining or OpenDropbox or RepairHelp or RetryNow or Exclude or Ignore or DeleteReviewed or KeepRestore or OpenFolderSettings or OpenRecoverySettings or Dismiss;
 
     public static bool IsRetainedVersionChoice(string choice) =>
         choice is UseOtherVersion or SaveOtherVersionAsCopy or Dismiss;
@@ -55,6 +58,15 @@ public static class NoticeChoices
             : notice.Rule == 38 && notice.ReasonKey == PlanNotices.CloudFilesBindingNeedsReview.Key
             ? [new(ReviewRebind, "Review / rebind to verified new path"),
                new(PausePair, "Pause the pair"), new(LeaveAsIs, "Leave as is")]
+            : notice.Repair is not null && notice.ReasonKey is "provider-name-refused" or "windows-name-invalid"
+            ? notice.Repair.Destination is null
+                ? [new(Rename, "Rename…", RequestsName: true), new(Ignore, "Keep excluded"), new(RetryNow, "Retry this item")]
+                : [new(Rename, "Resume / verify rename"), new(RepairHelp, "Rename awaiting sync"), new(RetryNow, "Retry this item"), new(Ignore, "Keep excluded")]
+            : notice.ReasonKey == "export-required"
+            ? [new(OpenDropbox, "Open in Dropbox"), new(RepairHelp, "Why / repair guidance"),
+               new(RetryNow, "Retry this item"), new(Ignore, "Ignore; exclude this path from sync")]
+            : notice.FolderInspection || notice.ReasonKey == "folder-not-emptied"
+            ? [new(ShowRemaining, "Show remaining items"), new(RetryNow, "Review removal again"), new(Ignore, "Keep folder; exclude from sync")]
             : IsRemovalAttention(notice)
             ? [new(OpenFolderSettings, "Open folder settings"), new(Dismiss, "Dismiss")]
             : notice.ReasonKey == "deletion-review" && notice.Rule == DeletionReviewRestoreOnlyRule

@@ -158,7 +158,7 @@ internal static partial class DropboxChecks
         ProviderAssertNotice(fx, 2, ["stay.txt", "new-refusal.txt"], ["rename.txt", "delete.txt"]);
         fx.Reopen();
         fx.ClearEffects();
-        var stale = fx.Store.OpenNotices("p1").Single(n => n.ReasonKey == ProviderNameRefusedException.NoticeKey);
+        var stale = fx.Store.OpenNotices("p1").First(n => n.ReasonKey == ProviderNameRefusedException.NoticeKey && n.Path == "stay.txt");
         fx.Store.AddNotices([stale with { Detail = "stale summary" }]);
         await fx.NextAsync(false);
         Require(fx.WriterA.Effects.Count == 0 && fx.WriterB.Effects.Count == 0,
@@ -177,8 +177,9 @@ internal static partial class DropboxChecks
         await ProviderDeleteAsync(fx.A, "stay.txt");
         await ProviderRenameAsync(fx.A, "new-refusal.txt", "also-accepted.txt");
         await fx.NextAsync(true);
-        Require(fx.Store.OpenNotices("p1").All(n => n.ReasonKey != ProviderNameRefusedException.NoticeKey),
-            "last refused item gone closes the aggregate notice automatically");
+        Require(fx.Store.OpenNotices("p1").Where(n => n.ReasonKey == ProviderNameRefusedException.NoticeKey)
+                .All(n => n.Path is "delete.txt" or "stay.txt"),
+            "synced renamed identities close; vanished unsynced entities remain for explicit Ignore");
     }
 
     private static async Task ProviderRefusalReportAsync(string root)
@@ -258,11 +259,10 @@ internal static partial class DropboxChecks
 
     private static void ProviderAssertNotice(ProviderFollowupFixture fx, int count, string[] present, string[] absent)
     {
-        var notice = fx.Store.OpenNotices("p1").Single(n => n.ReasonKey == ProviderNameRefusedException.NoticeKey);
-        Require(notice.Detail.Contains(count + " name(s)", StringComparison.Ordinal) &&
-            present.All(p => notice.Detail.Contains(p, StringComparison.Ordinal)) &&
-            absent.All(p => !notice.Detail.Contains(p, StringComparison.Ordinal)),
-            "aggregate notice counts current stored refusals, not this run's new failures or stale examples");
+        var notices = fx.Store.OpenNotices("p1").Where(n => n.ReasonKey == ProviderNameRefusedException.NoticeKey).ToArray();
+        Require(present.Length == count && present.All(path => notices.Count(n => n.Path == path && n.Repair is not null) == 1) &&
+            notices.Select(n => n.Path).Distinct().Count() == notices.Length,
+            "current refused entities have one actionable notice each; unsynced vanished entities retain their notices");
     }
 
     private static async Task ProviderRenameAsync(FakeEndpoint endpoint, string from, string to)

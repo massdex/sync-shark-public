@@ -49,8 +49,8 @@ public sealed partial class DropboxWriter : IEndpointWriter, ISyncTransferResour
     {
         if (string.IsNullOrWhiteSpace(a.FromPath) || a.ExpectedTarget is null)
             throw new ArgumentException("A Dropbox move requires a source path and the expected target.");
-        var moved = await _client.MoveAsync(
-            DropboxItems.ToEntry(a.ExpectedTarget with { Path = a.FromPath! }), a.Path, ct);
+        var moved = await _client.MoveRevisionAsync(
+            DropboxItems.ToEntry(a.ExpectedTarget with { Path = a.FromPath! }), a.Path, a.RequireMoveRevision, ct);
         return DropboxItems.ToItem(moved);
     });
 

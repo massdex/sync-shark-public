@@ -130,6 +130,27 @@ internal sealed class FileStateReader
             "WHERE f.root_no=$r AND f.dir_no IN (SELECT dir_no FROM dir WHERE path_key=$pk);",
             [("$r", rootNo), ("$pk", RowCodec.Key(directory))]);
 
+    public IReadOnlyList<ItemState> LiveChildrenPage(long rootNo, string directory, int offset, int limit) =>
+        QueryItems($"SELECT {Columns} FROM file_state f JOIN dir d ON d.dir_no=f.dir_no " +
+            "WHERE f.root_no=$r AND f.dir_no IN (SELECT dir_no FROM dir WHERE path_key=$pk) " +
+            "ORDER BY f.dir_no,f.name_key,f.name LIMIT $limit OFFSET $offset;",
+            [("$r", rootNo), ("$pk", RowCodec.Key(directory)), ("$limit", limit), ("$offset", offset)]);
+
+    public IReadOnlyList<ItemState> LiveFlaggedPage(long rootNo, ItemFlags flags, ItemState? after, int limit)
+    {
+        var (parent, name) = after is null ? ("", "") : RowCodec.Split(after.Path);
+        var dir = after is null ? -1L : (long?)StoreSchema.Scalar(_connection, null,
+            "SELECT dir_no FROM dir WHERE path=$path;", ("$path", parent)) ?? -1L;
+        // fs_refused is ordered by root, kind, then the WITHOUT ROWID primary key. Seek rather
+        // than OFFSET: enumerating a million refusals must not revisit every earlier page.
+        var sql = $"SELECT {Columns} FROM file_state f INDEXED BY fs_flagged JOIN dir d ON d.dir_no=f.dir_no " +
+            "WHERE " + FlaggedPredicate + " AND (f.kind,f.dir_no,f.name_key,f.name)>($kind,$dir,$key,$name) " +
+            "ORDER BY f.kind,f.dir_no,f.name_key,f.name LIMIT $limit;";
+        return QueryItems(FlaggedSql(sql, flags), [("$r", rootNo), ("$f", (long)flags), ("$limit", limit),
+            ("$kind", after is null ? -1L : RowCodec.KindCode(after.Kind)), ("$dir", dir),
+            ("$key", RowCodec.Key(name)), ("$name", name)]);
+    }
+
     /// <summary>Live rows carrying any requested flags, scanning only the root's indexed nonzero-flag rows.</summary>
     public IReadOnlyList<ItemState> LiveFlagged(long rootNo, ItemFlags flags) =>
         QueryItems(FlaggedSql(LiveFlaggedSql, flags), [("$r", rootNo), ("$f", (long)flags)]);

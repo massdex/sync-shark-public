@@ -22,6 +22,7 @@ if (args is ["--v2-local-constituent-checks", var constituentRoot, var constitue
 if (args is ["--blocker-checks"])
 {
     await Massdex.SyncShark.V2.RunChecks.BlockerChecksAsync();
+    await Massdex.SyncShark.V2.RunChecks.BlockerActionChecksAsync();
     return 0;
 }
 

@@ -3,8 +3,12 @@ namespace Massdex.SyncShark.V2;
 public sealed partial class V2CliRuntime
 {
     /// <summary>Explicit notice-only recovery; the general Recovery restore API remains separate.</summary>
-    public async Task<SyncCliRunData> ResolveConflictAsync(string pairId, string relativePath, string choice,
-        string? conflictId, long? generation, string? accountId, CancellationToken cancellationToken)
+    public Task<SyncCliRunData> ResolveConflictAsync(string pairId, string relativePath, string choice,
+        string? conflictId, long? generation, string? accountId, CancellationToken cancellationToken) =>
+        ResolveNoticeAsync(pairId, relativePath, choice, conflictId, generation, accountId, cancellationToken, new());
+
+    public async Task<SyncCliRunData> ResolveNoticeAsync(string pairId, string relativePath, string choice,
+        string? conflictId, long? generation, string? accountId, CancellationToken cancellationToken, NoticeActionInput input)
     {
         var pair = RequirePair(pairId);
         choice = choice.ToLowerInvariant();
@@ -22,9 +26,9 @@ public sealed partial class V2CliRuntime
             if (notice is not null && NoticeChoices.IsRetryNotice(notice) && NoticeChoices.IsRetryChoice(choice))
             {
                 var message = await _run.ApplyRetryNoticeChoiceAsync(pairId, conflictId, choice, cancellationToken,
-                    (previous, updated) => SaveNarrowerPair(previous, updated));
-                if (choice == NoticeChoices.RepairHelp) Console.Error.WriteLine(message);
-                if (choice is not (NoticeChoices.RetryNow or NoticeChoices.DeleteReviewed or NoticeChoices.KeepRestore) || !_store.FirstSyncDone(pairId))
+                    (previous, updated) => SaveNarrowerPair(previous, updated), input);
+                Console.Error.WriteLine(message);
+                if (choice is not (NoticeChoices.Rename or NoticeChoices.RetryNow or NoticeChoices.DeleteReviewed or NoticeChoices.KeepRestore) || !_store.FirstSyncDone(pairId))
                     return new SyncCliRunData(pairId, pair.Name, 0, 0, 0, 0, 0, false);
                 var retryReport = await _run.IncrementalAsync(pairId, new RunProgressForwarder(Console.Error.WriteLine), cancellationToken);
                 return new SyncCliRunData(pairId, pair.Name, retryReport.Uploaded, retryReport.Downloaded, 0,

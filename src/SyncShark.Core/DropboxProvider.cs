@@ -1389,7 +1389,11 @@ public sealed partial class DropboxPilotClient(
     }
 
     public async Task<PilotRemoteEntry> MoveAsync(PilotRemoteEntry expected, string destinationRelativePath,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        await MoveRevisionAsync(expected, destinationRelativePath, false, cancellationToken);
+
+    internal async Task<PilotRemoteEntry> MoveRevisionAsync(PilotRemoteEntry expected, string destinationRelativePath,
+        bool requireRevision, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(expected.Id))
             throw new InvalidDataException("The Dropbox move source has no stable identity.");
@@ -1409,7 +1413,10 @@ public sealed partial class DropboxPilotClient(
         // atomically condition both identity and location, so the narrow interval here is an accepted
         // provider limitation rather than something this client claims to close. No inventory traversal,
         // parent creation or unrelated provider work may be inserted between this read and the move.
-        _ = await RequireMoveSourceAsync(expected, cancellationToken);
+        var moveSource = await RequireMoveSourceAsync(expected, cancellationToken);
+        if (requireRevision && (moveSource.Revision != expected.Revision || moveSource.ContentHash != expected.ContentHash ||
+            moveSource.Size != expected.Size))
+            throw new V2.ExpectedTargetMismatchException("The rename source revision changed. Refresh the notice.");
         using var moved = await PostEffectJsonAsync("https://api.dropboxapi.com/2/files/move_v2", new
         {
             from_path = expected.Id,

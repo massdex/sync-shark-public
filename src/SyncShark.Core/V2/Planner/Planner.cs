@@ -137,6 +137,15 @@ public static partial class Planner
             return;                                                                       // rule 35 (before choices)
         if (sA == RowState.Unreadable || sB == RowState.Unreadable)
         {
+            var invalidName = new[] { (Item: row.A, Side: Side.A), (Item: row.B, Side: Side.B) }
+                .FirstOrDefault(entry => entry.Item is not null && !PilotPath.IsWindowsTransferPath(entry.Item.Path));
+            if (invalidName.Item is { } invalid)
+            {
+                ctx.Notices.Add(new Notice(ctx.PairId, 30, NoticeKind.Info, invalid.Path,
+                    "This name is not supported by Windows. Rename it to sync. Suggested name: " + BlockerNames.Suggest(invalid.Path),
+                    "windows-name-invalid", Repair: new NoticeRepair(invalidName.Side, invalid)));
+                return;
+            }
             var exportRequired = (row.A?.Flags.HasFlag(ItemFlags.RequiresExport) ?? false) ||
                 (row.B?.Flags.HasFlag(ItemFlags.RequiresExport) ?? false);
             AddNotice(ctx, 30, NoticeKind.Info, PrimaryPath(row),

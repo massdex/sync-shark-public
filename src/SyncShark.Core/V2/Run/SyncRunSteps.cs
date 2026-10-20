@@ -884,28 +884,23 @@ public sealed partial class SyncRun
 
     private void AddProviderNameRefusalNotice(PairDef pair)
     {
-        const int exampleLimit = 20;
-        var a = _store.LiveFlaggedSummary(pair.A.RootId, ItemFlags.ProviderNameRefused, exampleLimit);
-        var b = _store.LiveFlaggedSummary(pair.B.RootId, ItemFlags.ProviderNameRefused, exampleLimit - a.Examples.Count);
-        var count = a.Count + b.Count;
-        if (count == 0)
+        foreach (var (root, side) in new[] { (pair.A, Side.A), (pair.B, Side.B) })
         {
-            foreach (var notice in _store.OpenNotices(pair.PairId))
-                if (notice.ReasonKey == ProviderNameRefusedException.NoticeKey && notice.NoticeId is { } id)
-                    _store.CloseNotice(id, "resolved");
-            return;
+            ItemState? after = null;
+            while (true)
+            {
+                var page = _store.LiveFlaggedPage(root.RootId, ItemFlags.ProviderNameRefused, after, 100);
+                foreach (var item in page)
+                    WriteNotices([new Notice(pair.PairId, 31, NoticeKind.Info, item.Path,
+                        ProviderNameRefusedException.Detail + " Suggested name: " + BlockerNames.Suggest(item.Path),
+                        ProviderNameRefusedException.NoticeKey, Repair: new NoticeRepair(side, item))]);
+                if (page.Count < 100) break;
+                after = page[^1];
+            }
         }
-        var examples = a.Examples.Concat(b.Examples).Select(item => item.Path).ToArray();
-        var summary = new Notice(pair.PairId, 31, NoticeKind.Info, string.Empty,
-            $"Dropbox refused {count} name(s); these items and any folder contents are now ignored. " +
-            "Source items were left in place. Refused moves leave the existing Dropbox copy at its old path; " +
-            "no move or upload completed. Dropbox-side changes under the old path are paused until the name is fixed. " +
-            "Rename the refused items to sync them, or leave them ignored. " +
-            "Paths: " + string.Join(", ", examples) +
-            (count > examples.Length ? $" (showing {examples.Length} of {count})" : ""),
-            ProviderNameRefusedException.NoticeKey);
-        if (!_store.OpenNotices(pair.PairId).Any(notice => notice.ReasonKey == summary.ReasonKey && notice.Detail == summary.Detail))
-            WriteNotices([summary]);
+        // Replace the old aggregate with actionable exact-entity notices, never a bulk rename.
+        var summaryId = ShortId.Make("n", pair.PairId, "31", RowCodec.Key(string.Empty), ProviderNameRefusedException.NoticeKey);
+        if (_store.NoticeById(pair.PairId, summaryId) is { Closed: false }) _store.CloseNotice(summaryId, "replaced-by-item-notices");
     }
 
     // a pre-existing notice closes only when its path was re-evaluated in this run, the plan raised
@@ -924,6 +919,13 @@ public sealed partial class SyncRun
             if (action.FromPath is not null) unsettled.Add(action.FromPath);
         }
         foreach (var notice in open)
+        {
+            if (notice.Repair is not null)
+            {
+                if (notice.NoticeId is not null && RepairSynced(notice, plan, evaluated, unsettled))
+                    _store.CloseNotice(notice.NoticeId, "renamed-and-synced");
+                continue;
+            }
             if (notice.NoticeId is not null &&
                 (notice.ReasonKey == "name-mapping-collision" || !PlanNotices.AwaitsAcknowledgement(notice)) &&
                 notice.ReasonKey != ExcludedIntentNoticeKey && notice.ReasonKey != ProviderNameRefusedException.NoticeKey &&
@@ -931,6 +933,7 @@ public sealed partial class SyncRun
                 !(notice.ReasonKey == "sync-retry" && _store.SyncRetryAt(plan.PairId, notice.Path)?.Kind == "scan") &&
                 evaluated(notice.Path) && !unsettled.Contains(notice.Path))
                 _store.CloseNotice(notice.NoticeId, "resolved");
+        }
     }
 
     private void AcknowledgeVerifiedRehash(PairDef pair, BothScan scan, Plan plan, Tally tally,
