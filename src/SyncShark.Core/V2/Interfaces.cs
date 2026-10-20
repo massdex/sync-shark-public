@@ -190,6 +190,10 @@ public interface IStateStore : IDisposable
     int CountSyncRetries(string pairId);
     bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants, bool restoredOnly = false);
 
+    /// <summary>Whether any restored evidence hold is still active (not dormant). One check per run, never per item.</summary>
+    bool HasActiveRestoredRetries(string pairId) =>
+        ReadSyncRetries(pairId).Any(retry => retry.ReprobeEvidence && retry.RetryAfter < DateTimeOffset.MaxValue);
+
     /// <summary>Several results in one transaction (the Executor's group commit, B-124); the default commits each.</summary>
     void CommitResults(string pairId, long gen, IReadOnlyList<(SyncAction Action, ActionResult Result)> results)
     {

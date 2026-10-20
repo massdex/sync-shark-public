@@ -89,6 +89,12 @@ public sealed partial class SqliteStateStore
         return false;
     });
 
+    public bool HasActiveRestoredRetries(string pairId) => InStore(() =>
+        StoreSchema.Scalar(_connection, null,
+            "SELECT 1 FROM sync_retry WHERE pair_no=$p AND retry_after<$held " +
+            "AND json_extract(json,'$.ReprobeEvidence')=1 LIMIT 1;",
+            ("$p", RequirePair(pairId)), ("$held", DateTimeOffset.MaxValue.ToUnixTimeMilliseconds())) is not null);
+
     public void SuspendHeldRetry(string pairId, SyncRetry retry) => InStore(() =>
     {
         using var transaction = _connection.BeginTransaction();
@@ -99,10 +105,15 @@ public sealed partial class SqliteStateStore
             "ON CONFLICT(pair_no,path_key) DO UPDATE SET json=excluded.json,retry_after=excluded.retry_after;",
             ("$p", RequirePair(pairId)), ("$k", RowCodec.Key(retry.Path)),
             ("$j", JsonSerializer.Serialize(dormant, RowCodec.Json)), ("$due", dormant.RetryAfter.ToUnixTimeMilliseconds()));
+        // Close the derived notice ids exactly as ClearSyncRetry does, so the update uses nt_open and
+        // never rewrites the choice of an already-closed notice.
         StoreSchema.Execute(_connection, transaction,
-            "UPDATE notice SET state='closed',choice='exclude' WHERE pair_no=$p AND path=$path COLLATE NOCASE " +
-            "AND reason_key IN ('sync-retry','deletion-evidence-pending');",
-            ("$p", RequirePair(pairId)), ("$path", retry.Path));
+            "UPDATE notice SET state='closed',choice='exclude' WHERE notice_id=$id AND state='open';",
+            ("$id", ShortId.Make("n", pairId, "40", RowCodec.Key(retry.Path), "sync-retry")));
+        foreach (var rule in new[] { "4", "19" })
+            StoreSchema.Execute(_connection, transaction,
+                "UPDATE notice SET state='closed',choice='exclude' WHERE notice_id=$id AND state='open';",
+                ("$id", ShortId.Make("n", pairId, rule, RowCodec.Key(retry.Path), "deletion-evidence-pending")));
         transaction.Commit();
     });
 

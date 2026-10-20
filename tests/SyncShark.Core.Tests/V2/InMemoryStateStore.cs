@@ -16,6 +16,8 @@ internal sealed class InMemoryStateStore : IStateStore
     public IReadOnlyList<SyncRetry> DueSyncRetries(string pairId, DateTimeOffset now, int limit) =>
         ReadSyncRetries(pairId).Where(item => item.RetryAfter <= now).OrderBy(item => item.RetryAfter).Take(Math.Clamp(limit, 1, 256)).ToArray();
     public int CountSyncRetries(string pairId) => ReadSyncRetries(pairId).Count(item => item.RetryAfter < DateTimeOffset.MaxValue);
+    public bool HasActiveRestoredRetries(string pairId) =>
+        ReadSyncRetries(pairId).Any(item => item.ReprobeEvidence && item.RetryAfter < DateTimeOffset.MaxValue);
     public bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants, bool restoredOnly = false) =>
         ReadSyncRetries(pairId).Any(item => (!restoredOnly || item.ReprobeEvidence) &&
             !(item.ReprobeEvidence && item.RetryAfter == DateTimeOffset.MaxValue) && !active.Contains(item.Path) && (descendants

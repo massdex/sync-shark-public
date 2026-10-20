@@ -93,7 +93,10 @@ public sealed partial class SqliteStateStore
                 if (batch.Count == 0) break;
                 afterKey = batch[^1].Key;
                 foreach (var row in batch)
-                    if (row.Retry.Held is not null && !included.Excluded.Any(retained => PairPath.IsSelfOrUnder(row.Retry.Path, retained)))
+                    // N6: a decision row owns the user's open choice and proposal; re-inclusion must not
+                    // overwrite it with generic restored-hold state.
+                    if (row.Retry.Held is not null && row.Retry.Kind != "decision" &&
+                        !included.Excluded.Any(retained => PairPath.IsSelfOrUnder(row.Retry.Path, retained)))
                         RestoreHold(new(row.Retry.Path, "deletion-evidence", 0, "", DateTimeOffset.MinValue,
                             Held: row.Retry.Held, ReprobeEvidence: true));
             }

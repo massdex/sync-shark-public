@@ -154,7 +154,9 @@ public sealed partial class SyncRun
     private void SaveFailedRetry(PairDef pair, string path, string? reason, SyncRetry? old)
     {
         if (old?.Kind == "decision") return;
-        var attempts = (old?.Attempts ?? 0) + 1;
+        // The evidence probe owns the attempt counter for restored (reprobe) rows; counting again here
+        // would halve the owner's three-run release budget.
+        var attempts = old is { ReprobeEvidence: true } ? old.Attempts : (old?.Attempts ?? 0) + 1;
         var retry = (old ?? new SyncRetry(path, "sync", 0, "", DateTimeOffset.MinValue)) with
         {
             Attempts = attempts,

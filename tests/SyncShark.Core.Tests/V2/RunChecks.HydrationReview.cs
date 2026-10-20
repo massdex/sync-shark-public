@@ -189,9 +189,20 @@ internal static partial class RunChecks
             await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
             if (scenario == "released")
             {
+                // N4 (owner decision): one failed re-probe is not enough to flood the user's queue.
+                // Three separate failing runs release the restored hold; the following run raises the decision.
+                for (var failingRun = 1; failingRun < 3; failingRun++)
+                {
+                    var waiting = store.SyncRetryAt(fx.Pair.PairId, item.Path)!;
+                    Require(!waiting.EvidenceReleased &&
+                        !store.OpenNotices(fx.Pair.PairId).Any(n => n.Path == item.Path && n.Kind == NoticeKind.UserDecision),
+                        "restored hold stays pending after failing re-probe run " + failingRun);
+                    store.SaveSyncRetry(fx.Pair.PairId, waiting with { RetryAfter = DateTimeOffset.MinValue });
+                    await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+                }
                 var retry = store.SyncRetryAt(fx.Pair.PairId, item.Path)!;
                 Require(retry.EvidenceReleased && retry.LastError.Contains("probed Dropbox deletion", StringComparison.Ordinal),
-                    "failed fresh probe exhausts its budget and preserves its reason");
+                    "third failed fresh probe exhausts its budget and preserves its reason");
                 var pending = store.OpenNotices(fx.Pair.PairId).Where(n => n.Path == item.Path).ToArray();
                 Require(pending.Length == 1 && pending[0].ReasonKey == "deletion-evidence-pending" && pending[0].Detail.Contains(retry.LastError, StringComparison.Ordinal),
                     "restored pending hold has exactly one notice with its failure reason");
@@ -207,6 +218,10 @@ internal static partial class RunChecks
                 var decision = store.OpenNotices(fx.Pair.PairId).Single(n => n.Path == item.Path && n.Kind == NoticeKind.UserDecision);
                 Require(fx.WriterB.Puts == 0 && fx.WriterA.Deletes == 0,
                     "folder and exhausted evidence both require a decision without effects");
+                if (scenario == "released")
+                    Require(decision.Detail.Contains("UNAVAILABLE", StringComparison.Ordinal) &&
+                        decision.Detail.Contains("probed Dropbox deletion", StringComparison.Ordinal),
+                        "released decision says deletion history was unavailable and carries the failure reason");
                 if (scenario == "folder") Require(NoticeChoices.Options(decision).Select(option => option.Choice).SequenceEqual(
                     new[] { NoticeChoices.KeepRestore, NoticeChoices.Ignore }), "restored folder offers restore or ignore, never delete");
             }
@@ -222,6 +237,21 @@ internal static partial class RunChecks
         Require(paged.ReadSyncRetries(pair.PairId).Count(retry => retry.RetryAfter == DateTimeOffset.MinValue &&
             retry.Held is { Local: Side.B, Rule: "retained-rule" }) == 300,
             "indexed restore crosses 256 rows and retains stored side/rule even on non-Dropbox pairs");
+        // N1: the restored-hold protection is one indexed check per run, never a per-item lookup when
+        // the pair has no restored holds.
+        var quiet = Build(record: true);
+        quiet.A.Seed("ordinary.txt", "ordinary content");
+        await quiet.Run().PreviewFirstSyncAsync(quiet.Pair.PairId, new RecordingProgress(), default);
+        Require(quiet.Recorder!.RestoredProtectionReads == 0,
+            "first-sync preview without restored holds makes no per-item restored protection lookup");
+
+        var restored = Build(record: true);
+        restored.A.Seed("ordinary.txt", "ordinary content");
+        restored.Store.SaveSyncRetry(restored.Pair.PairId, new("held.txt", "deletion-evidence", 0, "history pending",
+            DateTimeOffset.MinValue, Held: new HeldDeletion("held.txt", Side.A), ReprobeEvidence: true));
+        await restored.Run().PreviewFirstSyncAsync(restored.Pair.PairId, new RecordingProgress(), default);
+        Require(restored.Recorder!.RestoredProtectionReads > 0,
+            "first-sync preview with an active restored hold consults the per-item restored protection");
         Console.WriteLine("PASS RestoredHoldReviewChecks");
     }
 

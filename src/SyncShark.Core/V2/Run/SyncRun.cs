@@ -376,8 +376,13 @@ public sealed partial class SyncRun : ISyncRun
             .Where(retry => retry.ReprobeEvidence && retry.Held is not null &&
                 !pair.Excluded.Any(path => PairPath.IsSelfOrUnder(retry.Path, path))).ToArray();
         var noActiveRetries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var links = before.With(current).WithPending(ScanFailures(scan)).WithPending(PendingDecisions(pairId, null))
-            .WithRetryProtection((path, descendants) => _store.RetryProtected(pairId, path, noActiveRetries, descendants, restoredOnly: true));
+        var links = before.With(current).WithPending(ScanFailures(scan)).WithPending(PendingDecisions(pairId, null));
+        // N1: restored-hold protection is a per-item store lookup (the item plus every ancestor, then a
+        // range query). Gate it on one indexed EXISTS for the run, so a pair without restored holds pays
+        // nothing at all.
+        if (_store.HasActiveRestoredRetries(pairId))
+            links = links.WithRetryProtection((path, descendants) =>
+                _store.RetryProtected(pairId, path, noActiveRetries, descendants, restoredOnly: true));
         var predicates = Predicates(pair, links);
         // Resolved once, before the deletion probe: its persisted-snapshot selection is what the report and the
         // plan both read, and it also keeps its rebuildable paths out of the deletion-evidence lookup below.
@@ -467,9 +472,13 @@ public sealed partial class SyncRun : ISyncRun
             ? new RebuildableSelection(reviewedCloud, rebuildablePaths)
             : null;
         var noActiveRetries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var actionPredicates = ActionPredicates(pair, LeftAlone(pair).WithPending(
-            _store.ReadSyncRetries(pairId).Where(retry => retry.Kind == "scan" || retry.ReadRoots is { Count: > 0 }).Select(retry => retry.Path))
-            .WithRetryProtection((path, descendants) => _store.RetryProtected(pairId, path, noActiveRetries, descendants, restoredOnly: true)), reviewedSelection);
+        var applyLinks = LeftAlone(pair).WithPending(
+            _store.ReadSyncRetries(pairId).Where(retry => retry.Kind == "scan" || retry.ReadRoots is { Count: > 0 }).Select(retry => retry.Path));
+        // N1: same one-per-run gate as the preview. No restored holds means no per-item protection lookups.
+        if (_store.HasActiveRestoredRetries(pairId))
+            applyLinks = applyLinks.WithRetryProtection((path, descendants) =>
+                _store.RetryProtected(pairId, path, noActiveRetries, descendants, restoredOnly: true));
+        var actionPredicates = ActionPredicates(pair, applyLinks, reviewedSelection);
         approved = ApplySafetyFilter(pair, actionPredicates, approved);
         // Astra fix 1: a link or stub created on the local side after the preview is not in the store yet. Every
         // destructive effect is re-checked against the local filesystem (its path and ancestors, listing only) and
