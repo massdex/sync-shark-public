@@ -497,6 +497,8 @@ internal static class CorrespondingIncludedOverlapChecks
         await fixture.RetainRootObservationsAsync();
         await fixture.Db.RetainPairDefinitionAsync(fixture.Child, select: false);
         await fixture.ExpireRootObservationsAsync();
+        await RefuseAsync(() => fixture.RegisterLocalPlanningRootAsync());
+        Require(true, "OV637-6 stale hierarchy cannot admit even the same local planning root again");
         await fixture.CreateChildGoogleOperationAsync("op-sentinel-child", "z", null);
         await RefuseAsync(() => fixture.CreateParentGoogleOperationAsync("op-sentinel-parent", NestedChildName + "/z"),
             "no bound provider hierarchy context is available");
@@ -567,7 +569,7 @@ internal static class CorrespondingIncludedOverlapChecks
             // The identical reservation is admitted again once the bound context is current.
             await noContext.RestoreRootObservationsAsync();
             await noContext.CreateParentGoogleOperationAsync("op-nocx-parent-ctx", NestedChildName + "/a");
-            Require(await noContext.ActiveRootCountAsync() == 3,
+            Require(await noContext.ActiveRootCountAsync() == 4,
                 "OV637-5 the refused no-context reservation wrote no authority row");
         }
     }
@@ -583,6 +585,8 @@ internal static class CorrespondingIncludedOverlapChecks
         Directory.CreateDirectory(rigRoot);
         using var instance = PilotInstanceLock.Acquire(Path.Combine(rigRoot, "state", "instance.lock"));
         using var http = new HttpClient(new NoProviderRequests());
+        var product = new SyncProductStateStore(instance.StateAuthority);
+        await product.UpdateAsync(current => current with { InstallationId = "installation-ov637-host" });
         using var host = new SyncAuthorityRuntimeHost(instance.StateAuthority, http);
         await host.Authority.InitializeAsync("installation-ov637-host", Profile, "ov637-host", "{}");
         var parentLocal = Directory.CreateDirectory(Path.Combine(rigRoot, "local")).FullName;

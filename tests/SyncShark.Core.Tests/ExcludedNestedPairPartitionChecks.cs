@@ -449,14 +449,10 @@ internal static class ExcludedNestedPairPartitionChecks
     private static async Task RealStoreRefusesPolicyChangeAsync()
     {
         using var fixture = await FixtureAsync("real-store-policy-change");
-        var (childLeft, _, parentLeft, parentRight) = NestedDirectories(fixture.Root);
-        // Corresponding included overlaps are intentionally supported. Use different relative
-        // child paths so removing this exclusion still exercises an unsafe nested partition.
-        var rightChildName = ChildName + "Mirror";
-        var childRight = Directory.CreateDirectory(IOPath.Combine(parentRight, rightChildName)).FullName;
+        var (childLeft, childRight, parentLeft, parentRight) = NestedDirectories(fixture.Root);
         var child = await BindAsync(fixture, childLeft, childRight, "Child pair", []);
         var ownership = OwnershipRelativeNames(child, parentLeft, parentRight);
-        var rules = new List<SyncSelectionRule> { new(ChildName, false), new(rightChildName, false) };
+        var rules = new List<SyncSelectionRule> { new(ChildName, false) };
         rules.AddRange(ownership.Select(name => new SyncSelectionRule(name, false)));
         var parent = await BindAsync(fixture, parentLeft, parentRight, "Parent pair", rules);
         var store = new SyncPairStore(fixture.Instance.StateAuthority);
@@ -468,22 +464,31 @@ internal static class ExcludedNestedPairPartitionChecks
         var beforeRevision = await ScalarAsync(fixture.DatabasePath,
             "SELECT configuration_revision FROM sync_pair WHERE pair_id='" + parent.Id + "'");
 
+        var includedWithOwnership = retainedParent with
+        {
+            SelectionRules = ownership.Select(name => new SyncSelectionRule(name, false)).ToArray()
+        };
+        Require(SyncPairPartitionPolicy.DecideCorrespondingIncluded(includedWithOwnership, retainedChild) ==
+                SyncPairPartitionRelation.CorrespondingIncluded,
+            "ENP-15 removing only the data exclusion preserves the supported corresponding overlap");
         var noExclusion = retainedParent with
         {
-            SelectionRules = ownership.Select(name => new SyncSelectionRule(name, false)).ToArray(),
+            // Included corresponding overlaps are supported only with private control
+            // ownership still excluded. Removing all exclusions must remain unsafe.
+            SelectionRules = [],
             PolicyRevision = retainedParent.PolicyRevision + 1
         };
         Require(SyncPairPartitionPolicy.Decide(retainedParent, retainedChild) == SyncPairPartitionRelation.NestedAllowed &&
                 SyncPairPartitionPolicy.Decide(noExclusion, retainedChild) == SyncPairPartitionRelation.NestedRefused &&
                 SyncPairPartitionPolicy.DecideCorrespondingIncluded(noExclusion, retainedChild) != SyncPairPartitionRelation.CorrespondingIncluded,
-            "ENP-15 the fixture changes from a valid excluded partition to a non-corresponding unsafe overlap");
+            "ENP-15 the fixture changes from a valid excluded partition to a unsafe overlap with exposed private control ownership");
         var refusedRemoval = await TrySaveAsync(store,
             new SyncPairSet([noExclusion, retainedChild], noExclusion.Id));
         Require(refusedRemoval.Length > 0,
-            "ENP-15 the real Store refuses a saved policy edit that removes the nested child exclusion: " +
+            "ENP-15 the real Store refuses a saved policy edit that removes the child and private control exclusions: " +
             (refusedRemoval.Length == 0 ? "not refused" : refusedRemoval));
 
-        var exceptionRules = new List<SyncSelectionRule> { new(ChildName, false), new(rightChildName, false), new(ChildName + "/Included", true) };
+        var exceptionRules = new List<SyncSelectionRule> { new(ChildName, false), new(ChildName + "/Included", true) };
         exceptionRules.AddRange(ownership.Select(name => new SyncSelectionRule(name, false)));
         var withException = retainedParent with
         {
@@ -995,6 +1000,8 @@ internal static class ExcludedNestedPairPartitionChecks
         var databasePath = IOPath.Combine(root, "authority.db");
         var database = new SyncAuthorityDatabase(databasePath);
         await database.InitializeAsync(Installation, ProfileId, SourceRevision, CapabilityJson);
+        var product = new SyncProductStateStore(instance.StateAuthority);
+        await product.UpdateAsync(current => current with { InstallationId = Installation });
         var connections = new DropboxConnectionStore(instance.StateAuthority);
         await connections.SaveNewAsync(new DropboxConnectionBinding(DropboxProviderConfiguration.RegisteredClientId,
             AccountId, CloudNamespaceId, CloudNamespaceId, DropboxProviderConfiguration.ContentAccess,
