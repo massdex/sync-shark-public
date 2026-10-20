@@ -10,7 +10,7 @@ internal static class GoogleDriveLiveChecks
 {
     // The exact-fixture sharing inspect is an opt-in test harness read only. These are the approved
     // acceptance identities, and the mode refuses anything else before it opens product state.
-    internal const string ApprovedSharingConnectionId = "gdrive-connection-76c78a95e7ce313cff80da45";
+    internal const string ApprovedSharingConnectionId = "gdrive-connection-a00000000000000000000000";
     internal const string ApprovedSharingFolderId = "1AHj7vZxy2f9f2TrJaPA-bsMTgdjZB0Lp";
     internal const string ApprovedSharingFileId = "1BaiZWwgU5gRPofYRkTkfNfSigXc9_LfG";
 
