@@ -135,12 +135,8 @@ public sealed partial class Executor : IExecutor
             }
             ItemState? historicalDeleteSource = null;
             if (pairId is not null && intent.Kind == ActionKind.Delete)
-                await StoreAsync(() =>
-                {
-                    var baseline = intent.ObjectKey is null ? null : _store.Baselines(pairId, [intent.ObjectKey]).SingleOrDefault();
-                    baseline ??= _store.BaselinesAt(pairId, intent.Target, [intent.Path]).SingleOrDefault();
-                    historicalDeleteSource = intent.Target == Side.A ? baseline?.B : baseline?.A;
-                }, token).ConfigureAwait(false);
+                await StoreAsync(() => historicalDeleteSource = StoreCommitter.DeleteSource(_store, pairId, intent),
+                    token).ConfigureAwait(false);
             var result = await EffectResolver.ResolveAsync(intent, target, source, token,
                 _settings.UnknownCommitGracePeriod, jobChecks: jobChecks, materializationBlock: materializationBlock,
                 historicalDeleteSource: historicalDeleteSource).ConfigureAwait(false);
@@ -449,7 +445,8 @@ public sealed partial class Executor : IExecutor
                 .ConfigureAwait(false);
         var children = descendants.Select(item => new SyncAction(folder.ActionId + ":" + item.Path.ToLowerInvariant(),
             folder.Rule, ActionKind.Delete, folder.Target, item.Path, null, null, item,
-            RecoveryFirst: item.Kind == ItemKind.File, keys.GetValueOrDefault(item.ObjectId))).ToList();
+            RecoveryFirst: item.Kind == ItemKind.File, keys.GetValueOrDefault(item.ObjectId))
+            { ChoiceRemove = folder.ChoiceRemove }).ToList();
         children.Add(folder with { RecoveryFirst = false });
         if (whole(folder, descendants.Count)) trees.Add(new WholeFolder(children, descendants));
         else expanded.AddRange(children);

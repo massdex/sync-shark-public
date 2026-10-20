@@ -74,6 +74,15 @@ internal static class InterruptedDeleteChecks
         Require(plan.Actions.All(action => action.Kind != ActionKind.Delete) &&
             plan.Actions.Any(action => action.Kind == ActionKind.CopyNew && action.Target == target),
             "attributed tombstone plans restore, never opposite delete");
+        var repairPaths = InterruptedDeleteRepair.SourcePaths(scope, retries);
+        Require(repairPaths.Contains("File"), "matching original source is excluded from first-sync deletion probes");
+        var firstSyncPlan = Planner.Decide(pair.PairId, 3, protectedRows,
+            new(TimeSpan.Zero, true, new("{name} [{side}]{ext}", "s", TimeSpan.Zero, "A", "B"), 10)
+            { MatchedAtPrepare = InterruptedDeleteRepair.WithoutMatches(
+                new Dictionary<string, PrepareMatch> { ["File"] = new(sa.ObjectId, sb.ObjectId) }, repairPaths) });
+        Require(firstSyncPlan.Actions.All(action => action.Kind != ActionKind.Delete) &&
+            firstSyncPlan.Actions.Any(action => action.Kind == ActionKind.CopyNew && action.Target == target),
+            "first-sync tombstone and retained match also restore rather than delete");
         var executor2 = new Executor(reopened, V2Settings.Default, ExecutorChecks.Admission());
         await foreach (var result in executor2.ApplyAsync(plan, a, b, default))
             Require(result.Outcome == Outcome.Done, "restoration executes successfully: " + result.Reason);
@@ -104,6 +113,9 @@ internal static class InterruptedDeleteChecks
         Require(present.Outcome == Outcome.Skipped && !present.ForgetUnsafeDeleteBaseline,
             "target still present keeps baseline intact");
         await writer.DeleteAsync(action, default);
+        var noIdentity = await EffectResolver.ResolveAsync(action, writer, source, default);
+        Require(noIdentity.Outcome == Outcome.Uncertain && !noIdentity.ForgetUnsafeDeleteBaseline,
+            "absent target without trusted source identity never settles a deletion");
         var pending = action with { ProviderEffect = new("delete-job", "job", DateTimeOffset.UnixEpoch) };
         foreach (var kind in new[] { "delete-job", "delete-submit" })
         {

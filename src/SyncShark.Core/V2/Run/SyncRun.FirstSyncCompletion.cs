@@ -159,6 +159,10 @@ public sealed partial class SyncRun
                     _store.RemoveDeletionEvidence(pair.PairId, held.Local == Side.A ? pair.B.RootId : pair.A.RootId, [item.Path]);
                 foreach (var notice in notices[item.Path])
                     if (notice.NoticeId is not null) _store.CloseNotice(notice.NoticeId, excluded ? "exclude" : "resolved");
+                // A fresh equal/no-op replan can settle the retry without any Done action.
+                var sourceNotice = DeleteSourceGuard.NoticeId(pair.PairId, item.Path);
+                if (!sourceBlocked.Contains(item.Path) && _store.NoticeById(pair.PairId, sourceNotice) is { Closed: false })
+                    _store.CloseNotice(sourceNotice, excluded ? "exclude" : "resolved");
             }
             else remaining.Add(item.Path); // Back off unresolved no-action rows too; they cannot monopolize a bounded batch.
         }

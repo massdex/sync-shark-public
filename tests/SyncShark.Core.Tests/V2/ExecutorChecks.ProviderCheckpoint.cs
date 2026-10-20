@@ -269,17 +269,17 @@ internal static partial class ExecutorChecks
         Require(result.Outcome == Outcome.Uncertain && result.Reason!.Contains("pending"),
             "a job Dropbox reports in progress stays Unverified past grace, never replanned while it may run: " +
             result.Reason);
-        // An unknown/expired/unavailable job falls back to the grace policy.
+        // An unknown/expired delete job lacks terminal proof even after grace.
         result = await EffectResolver.ResolveAsync(action, new PendingJobWriter(b, fail: true), a, default);
-        Require(result.Outcome == Outcome.Skipped && result.Reason == EffectResolver.NotApplied,
-            "an unavailable or expired job permits unchanged observation after grace");
+        Require(result.Outcome == Outcome.Uncertain,
+            "an unavailable or expired delete job stays protected until a terminal result is known");
         result = await EffectResolver.ResolveAsync(action, new PendingJobWriter(b, fail: false, outage: true), a, default);
         Require(result.Outcome == Outcome.Uncertain && result.RetryAfterSeconds == 30,
             "transient job lookup failure never expires the job into replay after grace");
-        // A pending job still permits independent positive observation of the target.
+        // An absent target is not terminal proof: a pending delete could still remove a restored copy.
         result = await EffectResolver.ResolveAsync(action with { Path = "absent" },
             new PendingJobWriter(b, fail: false), a, default);
-        Require(result.Outcome == Outcome.Done, "absent target proves delete despite pending or expired job");
+        Require(result.Outcome == Outcome.Uncertain, "absent target remains protected while the delete job is pending");
     }
 
     // A reconciler double whose job check is definitive: true (applied), false (refused) or null (still running),

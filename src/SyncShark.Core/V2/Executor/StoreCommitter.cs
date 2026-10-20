@@ -33,10 +33,12 @@ internal sealed class StoreCommitter
     internal bool DeleteRestorePending(SyncAction action) =>
         _store.SyncRetryAt(_pairId, action.Path)?.Kind == SqliteStateStore.InterruptedDeleteRestoreKind;
 
-    internal ItemState? DeleteSource(SyncAction action)
+    internal ItemState? DeleteSource(SyncAction action) => DeleteSource(_store, _pairId, action);
+
+    internal static ItemState? DeleteSource(IStateStore store, string pairId, SyncAction action)
     {
-        var baseline = action.ObjectKey is null ? null : _store.Baselines(_pairId, [action.ObjectKey]).SingleOrDefault();
-        baseline ??= _store.BaselinesAt(_pairId, action.Target, [action.Path]).SingleOrDefault();
+        var baseline = action.ObjectKey is null ? null : store.Baselines(pairId, [action.ObjectKey]).SingleOrDefault();
+        baseline ??= store.BaselinesAt(pairId, action.Target, [action.Path]).SingleOrDefault();
         if (baseline is not null) return action.Target == Side.A ? baseline.B : baseline.A;
         return action.DeletionSourceObjectId is { Length: > 0 } id
             ? new ItemState(action.Path, action.ExpectedTarget?.Kind ?? ItemKind.File, id, null, null, 0,

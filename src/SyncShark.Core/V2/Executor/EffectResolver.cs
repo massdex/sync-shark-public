@@ -31,9 +31,8 @@ internal static class EffectResolver
             {
                 var applied = await reconciler.ResolveProviderEffectAsync(x, jobChecks, ct).ConfigureAwait(false);
                 deleteJobTerminal = checkpoint.Kind == "delete-job" && applied is not null;
-                // A delete carries no post-effect state, so a proven job is Done as-is. A proven folder create
-                // must instead fall through to the MkDir observation rule, which reads the created folder's state
-                // back and returns Done with it (leaving the effect unverified when that folder cannot be read).
+                // Proven jobs still fall through to endpoint observation: creates need their new state,
+                // and deletes need confirmation that the original source has not survived/reappeared.
                 // A completed delete still needs both endpoint observations: its source may have
                 // reappeared while the process was down. Never acknowledge absence as a user deletion.
                 if (applied == false && x.Kind != ActionKind.Delete) return Skipped(x, NotApplied);
@@ -96,7 +95,8 @@ internal static class EffectResolver
                 { RetryAfterSeconds = ProviderTransientFailure.VerificationRetrySeconds };
         }
         if (path.Failure is { } failure) return Unverified(x, Describe(failure)) with
-            { RetryAfterSeconds = ProviderTransientFailure.IsTransient(failure, ct) ? ProviderTransientFailure.VerificationRetrySeconds : null };
+            { RetryAfterSeconds = x.Kind == ActionKind.Delete || ProviderTransientFailure.IsTransient(failure, ct)
+                ? ProviderTransientFailure.VerificationRetrySeconds : null };
         var obs = path.State;
         // Even an absent target must not be restored underneath a provider job still running.
         if (x.Kind == ActionKind.Delete && (providerReportsInProgress || providerTemporarilyUnavailable ||
@@ -156,7 +156,7 @@ internal static class EffectResolver
         if (action.Rule is 26 or 32) return await DoneAsync(action, null, target, ct).ConfigureAwait(false);
         try
         {
-            if (source is ISourceAbsenceProbe probe)
+            if (historical is not null && !string.IsNullOrWhiteSpace(historical.ObjectId) && source is ISourceAbsenceProbe probe)
             {
                 if (historical is not null &&
                     await probe.IsHistoricalSourcePresentAsync(historical, ct).ConfigureAwait(false) == true)

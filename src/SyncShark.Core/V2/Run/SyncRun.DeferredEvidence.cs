@@ -39,7 +39,8 @@ public sealed partial class SyncRun
     private sealed record HeldPlanResult(Plan Plan, bool RecoverySkipped);
 
     private async Task<PreparedEvidence> PrepareDeferredEvidenceAsync(PairDef pair, RunScope.Scope scope,
-        IReadOnlyList<string> rebuildables, IReadOnlyDictionary<string, PrepareMatch>? matchedAtPrepare, BothScan scan, CancellationToken ct)
+        IReadOnlyList<string> rebuildables, IReadOnlyDictionary<string, PrepareMatch>? matchedAtPrepare, BothScan scan, CancellationToken ct,
+        IReadOnlySet<string>? interruptedRepairs = null)
     {
         if (RebuildableSelection.Sides(pair) is not { } sides ||
             _endpoints.Inventory(sides.Cloud == Side.A ? pair.A : pair.B) is not IDeferredDeletionEvidence deferred)
@@ -47,9 +48,8 @@ public sealed partial class SyncRun
         var probed = DeletionProbePaths(pair,
             sides.Local == Side.A ? OnlyIn(scope.A, scope.B) : OnlyIn(scope.B, scope.A), rebuildables);
         // finding 2: a prepare-matched path is ordinary planning input, never deletion evidence.
-        var paths = matchedAtPrepare is null
-            ? probed
-            : probed.Where(path => !matchedAtPrepare.ContainsKey(path)).ToArray();
+        var paths = probed.Where(path => !(interruptedRepairs?.Contains(path) ?? false) &&
+            !(matchedAtPrepare?.ContainsKey(path) ?? false)).ToArray();
         var localItems = sides.Local == Side.A ? scope.A : scope.B;
         var candidates = paths.ToHashSet(StringComparer.OrdinalIgnoreCase);
         var folders = localItems.Where(item => item.Kind == ItemKind.Folder && candidates.Contains(item.Path))

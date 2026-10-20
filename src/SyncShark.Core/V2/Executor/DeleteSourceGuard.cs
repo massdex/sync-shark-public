@@ -48,7 +48,7 @@ internal static class DeleteSourceGuard
         string? detail;
         try
         {
-            if (action.Rule is 26 or 32)
+            if (action.Rule == 26 || (action.Rule == 32 && !action.ChoiceRemove))
             {
                 var current = replacement is not null && source is ISourceAbsenceProbe metadata
                     ? await metadata.ObserveSourceMetadataAsync(replacement.Path, ct).ConfigureAwait(false) : null;
@@ -63,7 +63,10 @@ internal static class DeleteSourceGuard
             else
             {
                 var historical = committer.DeleteSource(action);
-                var absent = source is ISourceAbsenceProbe probe
+                // A missing path alone cannot exclude an original that moved elsewhere. This also
+                // holds expanded children without a baseline until trusted per-child identity arrives.
+                var absent = historical is not null && !string.IsNullOrWhiteSpace(historical.ObjectId) &&
+                    source is ISourceAbsenceProbe probe
                     ? await probe.IsSourceAbsentAsync(historical, action.Path, ct).ConfigureAwait(false)
                     : null;
                 if (absent == true) return null;

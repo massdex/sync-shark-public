@@ -467,8 +467,11 @@ public sealed partial class SyncRun : ISyncRun
         // so a cache miss can neither hold nor block their post-prepare propagation.
         // Keep the prepared lookup lazy: a database-backed dictionary must not enumerate all matches.
         RunScope.Scope? inventory = scanner.LoadFull(pair);
+        var interruptedRepairs = _store.DueSyncRetries(pairId, _time.GetUtcNow(), 256);
+        var repairPaths = InterruptedDeleteRepair.SourcePaths(inventory, interruptedRepairs);
+        matchedAtPrepare = InterruptedDeleteRepair.WithoutMatches(matchedAtPrepare, repairPaths);
         var evidence = await PrepareDeferredEvidenceAsync(pair, inventory, rebuildablePaths, matchedAtPrepare,
-            scan, ct);
+            scan, ct, repairPaths);
         evidence = evidence with { Held = evidence.Held.Concat(restored.Select(retry => retry.Held!))
             .DistinctBy(held => held.Path, StringComparer.OrdinalIgnoreCase).ToArray() };
         scan = evidence.Scan;
@@ -484,7 +487,7 @@ public sealed partial class SyncRun : ISyncRun
         var deciding = DecideWithHashedCopiesAsync(pair, scan, rows,
             () => JoinRows(inventory!, scan, true),
             pass => ApplySafetyFilter(pair, ActionPredicates(pair, links, selection), Planner.Decide(pairId,
-                Math.Max(scan.A.Gen, scan.B.Gen), pass,
+                Math.Max(scan.A.Gen, scan.B.Gen), InterruptedDeleteRepair.Protect(pass, interruptedRepairs),
                 Options(pair, true, winners, oneSided, selection, matchedAtPrepare, heldPaths))
                 with { NarrowedIgnoreRules = narrowedIgnoreRules ?? [] }),
             throttle, ct, refresh);

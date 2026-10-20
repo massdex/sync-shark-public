@@ -39,6 +39,7 @@ internal static partial class RunChecks
         await FirstSync_DeletionWinsRepeatablyAsync();
         await FirstSync_DeletionLookupIgnoresCaseAsync();
         await Incremental_UnconfirmedContentReplannedAsync();
+        await Incremental_DeleteSourceNoticeSettlesWithoutActionAsync();
         await Incremental_FreeSpacePendingRetriedAsync();
         await Incremental_ConvergesAfterApplyAsync();
         await NestedPair_OuterCannotMoveContainingFolderAsync();
@@ -849,6 +850,25 @@ internal static partial class RunChecks
             "a run with no changes re-hashes the unconfirmed row and adopts it");
         Require(OpenUnconfirmed(fx) == 0, "the content-not-confirmed notice closes once the row resolves");
         Console.WriteLine("PASS Incremental_UnconfirmedContentReplanned");
+    }
+
+    private static async Task Incremental_DeleteSourceNoticeSettlesWithoutActionAsync()
+    {
+        var fx = Build();
+        fx.A.Seed("x.txt", "same");
+        fx.B.Seed("x.txt", "same");
+        var run = fx.Run();
+        await FirstSyncAsync(run, fx);
+        var noticeId = DeleteSourceGuard.NoticeId(fx.Pair.PairId, "x.txt");
+        fx.Store.SaveSyncRetry(fx.Pair.PairId, new SyncRetry("x.txt", "sync", 0,
+            "Source still exists", DateTimeOffset.MinValue));
+        fx.Store.AddNotices([new Notice(fx.Pair.PairId, 0, NoticeKind.Info, "x.txt",
+            "Source still exists; nothing deleted", DeleteSourceGuard.ReasonKey, noticeId)]);
+        var report = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        Require(report.Done == 0 && fx.Store.SyncRetryAt(fx.Pair.PairId, "x.txt") is null,
+            "equal baseline replan settles source-guard debt without an effect");
+        Require(fx.Store.NoticeById(fx.Pair.PairId, noticeId) is { Closed: true },
+            "equal no-action replan closes the indexed source guard notice");
     }
 
     private static int OpenUnconfirmed(Fixture fx) =>

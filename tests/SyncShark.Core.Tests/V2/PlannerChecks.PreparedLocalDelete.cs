@@ -1,9 +1,10 @@
 namespace Massdex.SyncShark.V2;
 
 /// <summary>
-/// Prepare-matched post-prepare deletion (decision 71). A local file is deleted only on known-equal content:
-/// known-different keeps the RQ-043 copy-back, unknown holds with one notice and never deletes. Local folders
-/// carry no hash and still propagate recovery-first; remote targets keep their ordinary delete.
+/// Prepare-matched post-prepare deletion (decision 71). A local file is deleted only on known-equal content under
+/// the prepared identity: known-different keeps the RQ-043 copy-back, unknown holds with one notice and never
+/// deletes. A prepared Delete without a trusted opposite identity also holds instead of running path-only. Local
+/// folders carry no hash and still propagate recovery-first; remote targets keep their ordinary delete.
 /// </summary>
 internal static partial class PlannerChecks
 {
@@ -14,9 +15,10 @@ internal static partial class PlannerChecks
         PreparedLocalDelete_UnknownHashWithPreparedHashStampHolds();
         PreparedLocalDelete_UnprovenHashHoldsWithoutDelete();
         PreparedLocalDelete_KnownDifferentCopiesBack();
+        PreparedLocalDelete_EqualHashDifferentIdentityCopiesBack();
         PreparedLocalDelete_LocalFolderEmitsRecoveryFirstDelete();
         PreparedLocalDelete_RemoteTargetKeepsOrdinaryDelete();
-        PreparedLocalDelete_MalformedMissingStampCarriesNoIdentity();
+        PreparedLocalDelete_MalformedOppositeStampHoldsWithoutDelete();
     }
 
     private static PlanOptions PreparedOptions(string path, string stampA, string stampB) =>
@@ -86,24 +88,39 @@ internal static partial class PlannerChecks
     }
 
     // A known hash that differs from the prepare stamp is an edit after prepare: RQ-043 keeps the existing
-    // copy-back and never deletes.
+    // copy-back and never deletes, whether or not the absent side's identity is well formed.
     private static void PreparedLocalDelete_KnownDifferentCopiesBack()
     {
         var local = F("d/x", "loc:x", "hy");
-        var plan = PreparedLocal(local, "loc:x|h:hx", "dbx-gone|v:1");
-        AssertActions(plan, new Exp(ActionKind.CopyNew, Side.B, "d/x", null, false, 7,
-            SourcePath: "d/x", Key: NK(Side.A, "loc:x")));
-        AssertNotices(plan, new NExp(7, NoticeKind.EditBeatsDelete, "d/x"));
+        foreach (var missing in new[] { "dbx-gone|v:1", "no-separator" })
+        {
+            var plan = PreparedLocal(local, "loc:x|h:hx", missing);
+            AssertActions(plan, new Exp(ActionKind.CopyNew, Side.B, "d/x", null, false, 7,
+                SourcePath: "d/x", Key: NK(Side.A, "loc:x")));
+            AssertNotices(plan, new NExp(7, NoticeKind.EditBeatsDelete, "d/x"));
+        }
         Console.WriteLine("PASS PreparedLocalDelete_KnownDifferentCopiesBack");
     }
 
-    // Folders carry no content hash: an unchanged prepared folder still propagates recovery-first, with the
-    // trusted opposite identity for the executor's source probe.
+    // Equal bytes under a new object identity is not the prepared survivor: RQ-043 keeps it (copy-back), never
+    // deletes it, even though the content hash matches.
+    private static void PreparedLocalDelete_EqualHashDifferentIdentityCopiesBack()
+    {
+        var local = F("d/x", "loc:new", "hx");
+        var plan = PreparedLocal(local, "loc:old|h:hx", "dbx-gone|v:1");
+        AssertActions(plan, new Exp(ActionKind.CopyNew, Side.B, "d/x", null, false, 7,
+            SourcePath: "d/x", Key: NK(Side.A, "loc:new")));
+        AssertNotices(plan, new NExp(7, NoticeKind.EditBeatsDelete, "d/x"));
+        Console.WriteLine("PASS PreparedLocalDelete_EqualHashDifferentIdentityCopiesBack");
+    }
+
+    // Folders carry no content hash: an unchanged prepared folder still propagates recovery-first (the empty
+    // folder collapses to rule 23), with the trusted opposite identity for the executor's source probe.
     private static void PreparedLocalDelete_LocalFolderEmitsRecoveryFirstDelete()
     {
         var folder = D("d", "loc:d");
         var plan = PreparedLocal(folder, Content.SideStamp(folder), "dbx-gone|d");
-        AssertActions(plan, new Exp(ActionKind.Delete, Side.A, "d", null, true, 6));
+        AssertActions(plan, new Exp(ActionKind.Delete, Side.A, "d", null, true, 23));
         AssertEmptyNotices(plan);
         Require(plan.Actions.Single().DeletionSourceObjectId == "dbx-gone",
             "the local folder Delete carries the missing side's prepare stamp identity");
@@ -124,16 +141,29 @@ internal static partial class PlannerChecks
         Console.WriteLine("PASS PreparedLocalDelete_RemoteTargetKeepsOrdinaryDelete");
     }
 
-    // A missing or malformed prepare stamp cannot yield an identity: the Delete still propagates under the safe
-    // known-hash rule, but the optional field stays null rather than being invented.
-    private static void PreparedLocalDelete_MalformedMissingStampCarriesNoIdentity()
+    // A missing or malformed opposite identity cannot support a prepared Delete: it holds with one notice and
+    // never runs path-only. This includes an empty id, an empty type and an invalid metadata payload.
+    private static void PreparedLocalDelete_MalformedOppositeStampHoldsWithoutDelete()
     {
         var local = F("d/x", "loc:x", "hx");
-        var plan = PreparedLocal(local, Content.SideStamp(local), "no-separator");
-        AssertActions(plan, new Exp(ActionKind.Delete, Side.A, "d/x", null, true, 6));
-        AssertEmptyNotices(plan);
-        Require(plan.Actions.Single().DeletionSourceObjectId is null,
-            "a malformed missing-side stamp never invents a deletion-source identity");
-        Console.WriteLine("PASS PreparedLocalDelete_MalformedMissingStampCarriesNoIdentity");
+        foreach (var missing in new[] { "no-separator", "|h:hx", "loc:gone|", "loc:gone|q:hx", "loc:gone|m:x:y" })
+        {
+            var plan = PreparedLocal(local, Content.SideStamp(local), missing);
+            AssertActions(plan, new Exp(ActionKind.Hold, Side.A, "d/x", null, false, 6));
+            Require(plan.Notices.Count == 1 &&
+                plan.Notices[0].ReasonKey == PlanNotices.ContentUnconfirmed.Key,
+                "malformed opposite stamp yields exactly one unconfirmed notice: " + missing);
+            Require(plan.Actions.Single().DeletionSourceObjectId is null,
+                "a malformed missing-side stamp never invents a deletion-source identity");
+        }
+        // The same rule protects a remote target: with no trusted opposite identity it holds instead of deleting.
+        var remote = F("d/x", "dbx:x", hash: null, versionId: "rev1");
+        var remotePlan = Planner.Decide(PairId, Gen, new[] { Row(null, null, remote, Ev(A: true)) },
+            PreparedOptions(remote.Path, "not-a-stamp", Content.SideStamp(remote)));
+        AssertActions(remotePlan, new Exp(ActionKind.Hold, Side.B, "d/x", null, false, 6));
+        Require(remotePlan.Notices.Count == 1 &&
+            remotePlan.Notices[0].ReasonKey == PlanNotices.ContentUnconfirmed.Key,
+            "a remote prepared Delete without a trusted identity holds with one notice");
+        Console.WriteLine("PASS PreparedLocalDelete_MalformedOppositeStampHoldsWithoutDelete");
     }
 }
