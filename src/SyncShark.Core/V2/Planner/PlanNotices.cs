@@ -47,6 +47,9 @@ public static class PlanNotices
     public static readonly NoticeReason DeletionEvidencePending = new("deletion-evidence-pending",
         "deletion evidence is pending; this folder is kept until it is resolved");
 
+    public static readonly NoticeReason ProtectedChildPending = new("protected-child-pending",
+        "this folder contains protected or pending children; kept until those children are resolved");
+
     public static readonly NoticeReason CloudFilesBindingNeedsReview = new(
         "cloud-files-binding-needs-review", "Cloud Files binding needs review", AwaitsAcknowledgement: true);
 

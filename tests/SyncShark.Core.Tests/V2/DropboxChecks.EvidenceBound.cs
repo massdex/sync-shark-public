@@ -6,8 +6,10 @@ internal static partial class DropboxChecks
     {
         using var h = new Harness();
         var local = new FakeEndpoint(Side.A, "ra") { DropboxHashes = true };
-        local.Seed("held.txt", "same");
-        h.Wire.SeedFile("held.txt", "same");
+        // The local copy predates the Dropbox deletion. Rule 3 keeps the unreviewed evidence pending;
+        // even a delete proposal is never an automatic upload or delete (a)).
+        local.Seed("held.txt", "same", mtime: DateTimeOffset.Parse("2026-09-01T00:00:00Z"));
+        h.Wire.SeedFile("held.txt", "same", clientModified: DateTimeOffset.Parse("2026-09-01T00:00:00Z"));
         var pair = new PairDef("p1", "evidence bound",
             new RootDef("ra", SyncProviders.Local, null, "C:\\offline-evidence-bound", "id:ra"), Root(), [], [], true);
         h.Known.SavePair(pair);
@@ -44,53 +46,105 @@ internal static partial class DropboxChecks
         if (mode == "age")
             h.Known.StoreDeletionEvidence("p1", RootId, [new DeletionEvidenceRecord("held.txt", null,
                 Failure: new(1, DateTimeOffset.UtcNow.AddHours(-25), -1, false))]);
-        var runs = mode == "attempts" ? 3 : 1;
-        for (var attempt = 1; attempt <= runs; attempt++)
-        {
-            // Reopen the adapter each run: the failure budget must survive the instance's lifetime.
-            provider.AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, h.Known, "p1"));
-            var delaysBefore = delays.Count;
-            var probesBefore = h.Wire.Calls.Count(call => call == "/2/files/list_revisions");
-            var report = await run.IncrementalAsync("p1", new Progress<RunProgress>(), CancellationToken.None);
-            if (mode != "permanent")
-                Require(delays.Count > delaysBefore &&
-                    h.Wire.Calls.Count(call => call == "/2/files/list_revisions") > probesBefore + 1,
-                    "each transient history probe retries within its budget before the run-level ladder advances");
-            Require(report.Failed == 0 && await local.ObserveAsync("held.txt", CancellationToken.None) is not null,
-                "unreadable history never deletes the local path");
-            Require(h.Known.Cursor(RootId) == (attempt < runs ? before : "bound-after"),
-                "transient failure pins cursor only until third run; permanent or aged failure releases immediately");
-        }
-        Require(h.Known.OpenNotices("p1").Any(n => n.Path == "held.txt" &&
-            n.ReasonKey == "deletion-history-unavailable" && n.Detail ==
-            "Deletion history could not be read for held.txt; kept locally; options: delete locally / keep / retry"),
-            "released history failure raises the durable options notice");
-        var probes = h.Wire.Calls.Count(call => call == "/2/files/list_revisions");
-        local.Seed("held.txt", "new local content must remain held");
-        h.Wire.SeedChangePage("bound-after", [h.Wire.ChangeFile("held.txt", "remote restored content")], false, "bound-next");
+        // Owner rule 3: unavailable deletion history is never deletion authority. A failed probe releases
+        // the cursor to exactly one durable item-owned sync_retry hold; the local survivor stays held
+        // until the record is explicitly decided (delete / keep-restore / ignore) or retired by recreation.
+        var localWritesBeforeHold = local.WriteCalls;
+        int CloudWrites() => h.Wire.Calls.Count(call => call.Contains("/delete", StringComparison.Ordinal) ||
+            call.Contains("/upload", StringComparison.Ordinal) || call.Contains("/restore", StringComparison.Ordinal));
+        var cloudWritesBeforeHold = CloudWrites();
         provider.AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, h.Known, "p1"));
-        await run.IncrementalAsync("p1", new Progress<RunProgress>(), CancellationToken.None);
-        Require(h.Known.Cursor(RootId) == "bound-next" &&
+        var delaysBefore = delays.Count;
+        var probesBefore = h.Wire.Calls.Count(call => call == "/2/files/list_revisions");
+        var first = await run.IncrementalAsync("p1", new Progress<RunProgress>(), CancellationToken.None);
+        if (mode != "permanent")
+            Require(delays.Count > delaysBefore &&
+                h.Wire.Calls.Count(call => call == "/2/files/list_revisions") > probesBefore + 1,
+                "each transient history probe retries within its budget before the single durable hold");
+        Require(first.Failed == 0 && await local.ObserveAsync("held.txt", CancellationToken.None) is not null,
+            "unreadable history never deletes the local path");
+        Require(h.Known.Cursor(RootId) == "bound-after",
+            "unreadable history releases the cursor immediately; the evidence hold, not the cursor, protects the path");
+        var held = h.Known.SyncRetryAt("p1", "held.txt");
+        Require(held is { Kind: "deletion-evidence", Held: not null } &&
+            h.Known.ReadSyncRetries("p1").Count() == 1,
+            "failed history leaves exactly one durable sync_retry hold, with no duplicate evidence row or notice");
+        Require(!h.Known.OpenNotices("p1").Any(n => n.ReasonKey is "deletion-history-unavailable" or "deletion-review"),
+            "failed history is a hold, not an automatic deletion or a stale lifecycle notice");
+        Require(local.WriteCalls == localWritesBeforeHold && CloudWrites() == cloudWritesBeforeHold &&
+            !h.Wire.AttemptedWritePaths.Contains("held.txt"),
+            "no delete or upload is authorized before an explicit evidence choice");
+
+        // Make the single hold due. It must surface a choice even if history never becomes readable.
+        // Also simulate a successful background probe replacing the failure cache before decision.
+        h.Known.SaveSyncRetry("p1", held! with { RetryAfter = DateTimeOffset.MinValue });
+        if (mode == "attempts")
+            h.Known.StoreDeletionEvidence("p1", RootId,
+                [new DeletionEvidenceRecord("held.txt", DateTimeOffset.Parse("2026-10-12T00:00:00Z"))]);
+        if (mode == "attempts") h.Wire.OnRevisionAsync = null; // Successful evidence must retire on recreation too.
+        else h.Wire.OnRevisionAsync = _ => throw new InvalidDataException("malformed revision history");
+        provider.AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, h.Known, "p1"));
+        var decisionRun = await run.IncrementalAsync("p1", new Progress<RunProgress>(), CancellationToken.None);
+        Require(decisionRun.Failed == 0 && await local.ObserveAsync("held.txt", CancellationToken.None) is not null &&
+            local.WriteCalls == localWritesBeforeHold && CloudWrites() == cloudWritesBeforeHold,
+            "released history evidence forbids every delete and upload until the user chooses");
+        var decision = h.Known.OpenNotices("p1").Single(n => n.Path == "held.txt" && n.ReasonKey == "deletion-review");
+        Require(NoticeChoices.Options(decision).Select(option => option.Choice).SequenceEqual(
+            new[] { NoticeChoices.DeleteReviewed, NoticeChoices.KeepRestore, NoticeChoices.Ignore }),
+            "unreviewed history evidence offers exactly delete / keep-restore / ignore");
+        var proposed = h.Known.SyncRetryAt("p1", "held.txt");
+        Require(proposed is { Kind: "decision", ProposedActions: { Count: > 0 }, ReviewedActions: null, Held: not null } &&
+            h.Known.ReadSyncRetries("p1").Count() == 1,
+            "the proposed action is stored separately from reviewed authority in the same single retry row");
+        Require(h.Known.Cursor(RootId) == "bound-next",
+            "the safe cursor advances after the decision notice; the path remains protected");
+
+        // A remote recreation retires the obsolete evidence and its decision, then ordinary sync
+        // ingests the current remote content. It is not a stale deletion.
+        h.Wire.SeedFile("held.txt", "remote restored content", clientModified: DateTimeOffset.Parse("2026-10-13T00:00:00Z"));
+        h.Wire.SeedChangePage("bound-next", [h.Wire.ChangeExistingFile("held.txt")], false, "bound-restored");
+        provider.AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, h.Known, "p1"));
+        var restored = await run.IncrementalAsync("p1", new Progress<RunProgress>(), CancellationToken.None);
+        Require(restored.Failed == 0 && h.Known.Cursor(RootId) == "bound-restored" &&
+            h.Known.SyncRetryAt("p1", "held.txt") is null && h.Known.ReadSyncRetries("p1").Count() == 0 &&
+            !h.Known.OpenNotices("p1").Any(n => n.Path == "held.txt" &&
+                n.ReasonKey is "deletion-review" or "deletion-history-unavailable"),
+            "remote recreation retires the evidence hold and its decision without a stale deletion");
+        Require((await local.ObserveAsync("held.txt", CancellationToken.None))?.Hash ==
+                (await h.Writer().ObserveAsync("held.txt", CancellationToken.None))?.Hash &&
             await local.ObserveAsync("held.txt", CancellationToken.None) is not null &&
-            h.Wire.Calls.Count(call => call == "/2/files/list_revisions") == probes &&
-            h.Known.OpenNotices("p1").Any(n => n.ReasonKey == "deletion-history-unavailable"),
-            "future runs advance without probing or deleting the held path, even after a local edit");
-        Require(h.Known.Live(RootId, ["held.txt"]).Single().Size == System.Text.Encoding.UTF8.GetByteCount("remote restored content"),
-            "released hold does not discard a later remote upsert while advancing its cursor");
-        Require(!h.Known.DeletionEvidenceRows("p1", RootId).Any(row => row.Path == "held.txt" && row.Failure is not null),
-            "remote recreation resets the old deletion's failure budget");
-        h.Wire.OnRevisionAsync = null;
-        h.Wire.SeedChangePage("bound-next", [h.Wire.ChangeDeleted("/Pilot/held.txt")], false, "bound-deleted-again");
+            h.Known.Live(RootId, ["held.txt"]).Single().Size ==
+                System.Text.Encoding.UTF8.GetByteCount("remote restored content"),
+            "ordinary sync ingests the recreated remote file; the local survivor is not deleted");
+        Require(CloudWrites() == cloudWritesBeforeHold,
+            "recreation and ordinary sync perform no cloud delete");
+
+        // A later deletion starts a fresh hold rather than replaying the retired one.
+        h.Wire.OnRevisionAsync = _ => throw new TaskCanceledException("request timeout");
+        h.Wire.MoveOutsideRoot("held.txt", "removed-again/held.txt");
+        h.Wire.SeedChangePage("bound-restored", [h.Wire.ChangeDeleted("/Pilot/held.txt")], false, "bound-deleted-again");
         provider.AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, h.Known, "p1"));
         await run.IncrementalAsync("p1", new Progress<RunProgress>(), CancellationToken.None);
         Require(h.Known.Cursor(RootId) == "bound-deleted-again" && h.Known.Live(RootId, ["held.txt"]).Count == 0 &&
-            await local.ObserveAsync("held.txt", CancellationToken.None) is not null,
-            "a new remote deletion is ingested after recreation while the local notice hold remains");
-        var notice = h.Known.OpenNotices("p1").Single(n => n.ReasonKey == "deletion-history-unavailable");
-        h.Known.CloseNotice(notice.NoticeId!, "keep");
-        h.Wire.SeedChangePage("bound-next", [], false, "bound-last");
-        await h.Inventory.ChangesSinceAsync("bound-next", 999, _ => true, CancellationToken.None);
-        Require(!h.Known.OpenNotices("p1").Any(n => n.ReasonKey == "deletion-history-unavailable"),
-            "a dismissed released notice is not reopened by an unrelated delta");
+            await local.ObserveAsync("held.txt", CancellationToken.None) is not null &&
+            h.Known.SyncRetryAt("p1", "held.txt") is { Kind: "deletion-evidence", Held: not null } &&
+            h.Known.ReadSyncRetries("p1").Count() == 1,
+            "a new remote deletion starts one fresh evidence hold; the local survivor is still never deleted");
+        // Ignore is explicit and must survive unrelated cursor changes without reopening the decision.
+        var fresh = h.Known.SyncRetryAt("p1", "held.txt")!;
+        h.Known.SaveSyncRetry("p1", fresh with { RetryAfter = DateTimeOffset.MinValue });
+        h.Wire.OnRevisionAsync = _ => throw new InvalidDataException("malformed revision history");
+        h.Wire.SeedChangePage("bound-deleted-again", [], false, "bound-ignore");
+        await run.IncrementalAsync("p1", new Progress<RunProgress>(), default);
+        var dismiss = h.Known.OpenNotices("p1").Single(n => n.Path == "held.txt" && n.ReasonKey == "deletion-review");
+        await run.ApplyRetryNoticeChoiceAsync("p1", dismiss.NoticeId!, NoticeChoices.Ignore, default);
+        var writesAfterIgnore = local.WriteCalls;
+        var cloudAfterIgnore = CloudWrites();
+        h.Wire.SeedChangePage("bound-ignore", [], false, "bound-unrelated");
+        await run.IncrementalAsync("p1", new Progress<RunProgress>(), default);
+        Require(!h.Known.OpenNotices("p1").Any(n => n.Path == "held.txt" && n.ReasonKey == "deletion-review") &&
+            local.WriteCalls == writesAfterIgnore && CloudWrites() == cloudAfterIgnore &&
+            await local.ObserveAsync("held.txt", default) is not null,
+            "a dismissed evidence decision is not reopened by an unrelated delta and authorizes no writes");
     }
 }

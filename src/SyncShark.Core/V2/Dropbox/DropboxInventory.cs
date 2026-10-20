@@ -29,9 +29,13 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
         _pairId = pairId;
     }
 
-    public Task ReadSubtreeAsync(string path, Func<IReadOnlyList<ItemState>, Task> accept, CancellationToken ct) =>
-        _client.HydratePrefixAsync(path, rows => accept(rows.Where(r => r.Entry is not null)
-            .Select(r => DropboxItems.ToItem(r.Entry!)).ToArray()), ct);
+    public Task ReadSubtreeAsync(string path, Func<IReadOnlyList<ItemState>, Task> accept, CancellationToken ct,
+        IProgress<string>? progress = null) =>
+        _client.HydratePrefixAsync(path, rows =>
+        {
+            progress?.Report($"Review listing {path}: {rows.Count:N0} entries in page");
+            return accept(rows.Where(r => r.Entry is not null).Select(r => DropboxItems.ToItem(r.Entry!)).ToArray());
+        }, ct);
 
     internal Task HydratePrefixesAsync(IReadOnlyList<string> prefixes,
         Func<IReadOnlyList<DropboxChange>, Task> accept, CancellationToken ct) =>
@@ -252,10 +256,11 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
         }
         var failures = _known.DeletionEvidenceRows(_pairId, _root.RootId).Where(row => row.Failure is not null)
             .ToDictionary(row => row.Path, StringComparer.OrdinalIgnoreCase);
-        // A later incarnation starts a new history budget. Keep the open notice's planner hold,
-        // but never let an old failed deletion hide a future deletion of a re-created remote file.
+        // A later incarnation retires obsolete evidence and its decision, including evidence whose
+        // successful probe already replaced the failure row. Query only observed upserts, never all retries.
         var recreated = feed.GroupBy(change => change.Path, StringComparer.OrdinalIgnoreCase)
-            .Where(group => group.Last().Entry is not null && failures.ContainsKey(group.Key))
+            .Where(group => group.Last().Entry is not null && (failures.ContainsKey(group.Key) ||
+                _known.SyncRetryAt(_pairId, group.Key) is { Kind: "deletion-evidence" or "decision", Held: not null }))
             .Select(group => group.Key).ToArray();
         _known.RemoveDeletionEvidence(_pairId, _root.RootId, recreated);
         foreach (var path in recreated)

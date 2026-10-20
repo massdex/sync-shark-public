@@ -161,7 +161,11 @@ public sealed partial class SqliteStateStore
 
     private void TrySweepPrepareGenerations(bool propagateDamage = false)
     {
-        try { SweepPrepareGenerations(); }
+        try
+        {
+            if (propagateDamage) SweepOrphanedRemovalReviews();
+            SweepPrepareGenerations();
+        }
         catch (SqliteException) { } // Transient housekeeping failure must not block readable state.
         // Open still fails closed on corruption. Post-write cleanup must not mask the writer's
         // original exception or make an already committed publication appear to have failed.

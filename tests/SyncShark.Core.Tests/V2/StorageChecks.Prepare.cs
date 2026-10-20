@@ -60,8 +60,8 @@ internal static partial class StorageChecks
         using (var connection = new SqliteConnection($"Data Source={DbPath(folder)};Pooling=False"))
         {
             connection.Open();
-            Require((long)StoreSchema.Scalar(connection, null, "PRAGMA user_version;")! == 12,
-                "migration stamps combined schema v12");
+            Require((long)StoreSchema.Scalar(connection, null, "PRAGMA user_version;")! == StoreSchema.Version,
+                "migration stamps combined current schema");
             Require((long)StoreSchema.Scalar(connection, null,
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='fs_flagged';")! == 1,
                 "combined heldperf/v6 upgrade preserves or creates its required flagged index");

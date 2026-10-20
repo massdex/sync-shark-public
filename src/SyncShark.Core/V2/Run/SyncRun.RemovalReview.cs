@@ -10,7 +10,7 @@ public sealed partial class SyncRun
     private const int RemovalPageSize = 50;
     private sealed record RemovalItem(Side Side, ItemState Item, string? Protected);
     private sealed record RemovalReview(string Path, string OriginReason, Side[] Sides, string Signature,
-        string Policy, long Files, long Folders, long Bytes, long Protected, long Total, int MaxDepth, long ProtectedFolders = 0, bool Excluded = false);
+        string Policy, long Files, long Folders, long Bytes, long Protected, long Total, int MaxDepth, long ProtectedFolders = 0, bool Excluded = false, bool RetryNeeded = false);
 
     private async Task RemovalChoiceAsync(PairDef pair, Notice notice, string choice, CancellationToken ct,
         Action<SyncAction, ActionResult>? removalResult, string? observationSession)
@@ -83,10 +83,14 @@ public sealed partial class SyncRun
             {
                 long ordinal = 0, files = 0, folders = 0, bytes = 0, kept = 0, blockedOrdinal = 0;
                 var maxDepth = 0;
+                var retryNeeded = false;
                 using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
                 foreach (var row in Snapshot())
                 {
                     ct.ThrowIfCancellationRequested();
+                    retryNeeded |= sides.Contains(row.Side) && (row.Item.IncompleteReason is not null ||
+                        (row.Item.Flags & (ItemFlags.Unreadable | ItemFlags.Locked | ItemFlags.NeedsRehash)) != 0 ||
+                        row.Item.Kind == ItemKind.File && row.Item.Flags == ItemFlags.None && row.Item.Hash is null);
                     var json = JsonSerializer.Serialize(row);
                     hash.AppendData(Encoding.UTF8.GetBytes(json + "\n"));
                     writer.Add(RemovalRows, ordinal, FolderDelete.VictimKey(row.Side, row.Item.Path), json);
@@ -107,7 +111,7 @@ public sealed partial class SyncRun
                 var origin = NoticeChoices.IsRemovalAttention(notice) ? notice.ReasonKey :
                     notice.RemovalOriginReason ?? (header is not null ? JsonSerializer.Deserialize<RemovalReview>(header.MetadataJson)!.OriginReason : "reviewed-folder-grew");
                 review = new(notice.Path, origin,
-                    sides, Convert.ToHexString(hash.GetHashAndReset()), policy, files, folders, bytes, kept, ordinal, maxDepth, Excluded: pair.Excluded.Any(p => PairPath.Same(p, notice.Path)));
+                    sides, Convert.ToHexString(hash.GetHashAndReset()), policy, files, folders, bytes, kept, ordinal, maxDepth, Excluded: pair.Excluded.Any(p => PairPath.Same(p, notice.Path)), RetryNeeded: retryNeeded);
                 writer.Commit(JsonSerializer.Serialize(review), review.Signature);
             }, SqliteStateStore.RemovalKey(pair, notice.Path));
             review = review! with { ProtectedFolders = db.ProtectedRemovalFolders(published.Generation) };
@@ -176,7 +180,8 @@ public sealed partial class SyncRun
             }
         }
         db.ClearRemovalReview(approvedHeader.Generation);
-        if (failed) Hold("Some reviewed items changed or could not be removed. Completed removals remain recoverable. Review the remaining contents again.");
+        if (frozen.RetryNeeded && !failed) Hold("Readable reviewed items completed. Some children could not be verified and were kept with their ancestors. Fix access and Retry review, or dismiss (Ignore) to keep them.");
+        else if (failed) Hold("Some reviewed items changed or could not be removed. Completed removals remain recoverable. Review the remaining contents again.");
         else foreach (var old in _store.OpenNotices(pair.PairId).Where(item =>
             PairPath.Same(item.Path, notice.Path) && (NoticeChoices.IsRemovalAttention(item) || NoticeChoices.IsRemovalReview(item))))
             _store.CloseNotice(old.NoticeId!, "removed-reviewed-content");
@@ -201,6 +206,7 @@ public sealed partial class SyncRun
                     ct.ThrowIfCancellationRequested();
                     var reason = !selected.Contains(side) ? "other side (not selected)" :
                         SyncIgnorePolicy.IsIgnored(item.Path, item.Kind == ItemKind.Folder, rules) ? "ignore rule" :
+                        item.IncompleteReason is not null ? "could not be read: " + item.IncompleteReason + "; fix access and retry review, or Ignore (keep)" :
                         item.Flags != ItemFlags.None ? "item flags: " + item.Flags :
                         !allowed(item.Path) || protectedPaths.Contains(item.Path) || protectedPaths.Covers(item.Path) ? "protected path" :
                         item.Kind == ItemKind.File && item.Hash is null ? "content not verified" : null;
@@ -244,7 +250,8 @@ public sealed partial class SyncRun
         {
             var item = JsonSerializer.Deserialize<RemovalItem>(row.Json)!;
             var reason = ProtectedReason(db, header, item);
-            text += $"{item.Side} {item.Item.Path} ({item.Item.Size} bytes): {(reason is null ? "REMOVE with Recovery" : "KEEP: " + reason)}\n";
+            var size = item.Item.ObservationKindUnknown ? "type unknown; could not be read" : $"{item.Item.Size} bytes";
+            text += $"{item.Side} {item.Item.Path} ({size}): {(reason is null ? "REMOVE with Recovery" : "KEEP: " + reason)}\n";
         }
         _store.AddNotices([new Notice(pair.PairId, 40, NoticeKind.UserDecision, review.Path, text,
             NoticeChoices.RemovalReviewPrefix + header.Generation + ":" + page, RemovalSides: review.Sides, RemovalOriginReason: review.OriginReason)]);

@@ -210,6 +210,24 @@ internal sealed class FakeEndpoint : IInventorySource, IEndpointWriter
         }
     }
 
+    public async Task ReadSubtreeAsync(string path, Func<IReadOnlyList<ItemState>, Task> accept, CancellationToken ct,
+        IProgress<string>? progress = null)
+    {
+        SubtreeEntered?.TrySetResult();
+        var snapshot = await FullAsync(0, p => PairPath.IsSelfOrUnder(p, path), new Progress<string>(), ct);
+        foreach (var page in snapshot.Items.Where(i => PairPath.IsSelfOrUnder(i.Path, path)).Chunk(256))
+        {
+            var hashes = await HashAsync(page.Where(i => i.Kind == ItemKind.File && i.Hash is null && i.Flags == ItemFlags.None)
+                .Select(i => i.Path).ToArray(), ct);
+            await accept(page.Select(i => i.Kind == ItemKind.File && i.Hash is null
+                ? i with { Hash = hashes.GetValueOrDefault(i.Path) } : i).Select(i => SubtreeTransform?.Invoke(i) ?? i).ToArray());
+        }
+    }
+
+    internal Func<ItemState, ItemState>? SubtreeTransform { get; set; }
+
+    internal TaskCompletionSource? SubtreeEntered { get; set; }
+
     public Task<Snapshot> FullAsync(long gen, Func<string, bool> include, IProgress<string> p, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();

@@ -6,7 +6,9 @@ namespace Massdex.SyncShark.V2;
 internal static class StoreSchema
 {
     /// <summary>The schema version written to and required by <c>PRAGMA user_version</c>; any schema change bumps it.</summary>
-    public const int Version = 12;
+    // Coordinated additive slots: v12 retry, v13 quarantine, v14 gap verification,
+    // v15 listing/pair pause, v16 local walk, v17 explicit conflict choices, v18 removal review.
+    public const int Version = 18;
 
     /// <summary>The state database path relative to the app data root.</summary>
     public const string DatabaseRelativePath = @"v2\state.db";
@@ -133,7 +135,6 @@ internal static class StoreSchema
                 "SELECT COUNT(*) FROM pragma_table_info('deletion_evidence') WHERE name='failure_json';") is long columns && columns == 0)
                 Execute(connection, transaction, "ALTER TABLE deletion_evidence ADD COLUMN failure_json TEXT;");
             Execute(connection, transaction, PrepareDdl);
-            Execute(connection, transaction, RemovalReviewDdl);
             transaction.Commit();
         }
         // v7 is restartable: column first, short backfill batches, version stamp only after completion.
@@ -144,6 +145,10 @@ internal static class StoreSchema
         using var final = connection.BeginTransaction();
         Execute(connection, final, RehashDdl);
         Execute(connection, final, RetryDdl);
+        // Presence guard also accepts pre-release stores that added the table without a version signal.
+        if (fromVersion < 18 && Scalar(connection, final,
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='removal_review';") is null)
+            Execute(connection, final, RemovalReviewDdl);
         Execute(connection, final, $"PRAGMA user_version={Version};");
         final.Commit();
     }
@@ -274,6 +279,10 @@ internal static class StoreSchema
     {
         if (Scalar(connection, null, "PRAGMA user_version;") is not long version)
             throw new StateDamagedException("v2 state schema version is missing or not numeric.");
+        // This standalone branch lacks the final26 v13-v17 migrations. Refuse BEFORE any DDL or
+        // version stamp; the integrated build must replace this guard with those presence-guarded steps.
+        if (version is >= 13 and <= 17)
+            throw new SyncRunRefusedException($"State schema v{version} needs the integrated final26 build; this standalone removal-review build cannot migrate it. The schema was not changed.");
         // Preserve v3/v4 evidence upgrades and add v6 prepare storage in place.
         // All migrations preserve existing rows and indexes; pre-v3 stores need a fresh database.
         if (version is >= 3 and < Version)
@@ -286,7 +295,6 @@ internal static class StoreSchema
             throw new StateDamagedException($"v2 state schema version {version}, expected {Version}.");
         // Additive feature storage is presence-guarded on every compatible open, not gated by a version bump.
         Execute(connection, null, RetryDdl);
-        Execute(connection, null, RemovalReviewDdl);
         var names = new HashSet<string>(StringComparer.Ordinal);
         using (var command = Command(connection, null,
             "SELECT name FROM sqlite_master WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%';"))

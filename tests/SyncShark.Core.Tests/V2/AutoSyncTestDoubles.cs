@@ -279,6 +279,9 @@ internal sealed class GatedInventory : IInventorySource
     /// <summary>The probe's value at the first scan (e.g. how many intents were still unresolved); null until then.</summary>
     public int? ProbeAtFirstScan { get; private set; }
 
+    public Task ReadSubtreeAsync(string path, Func<IReadOnlyList<ItemState>, Task> accept, CancellationToken ct,
+        IProgress<string>? progress = null) => _inner.ReadSubtreeAsync(path, accept, ct, progress);
+
     public async Task<Snapshot> FullAsync(long gen, Func<string, bool> include, IProgress<string> p, CancellationToken ct)
     {
         await EnterAsync(ct);

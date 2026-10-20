@@ -24,7 +24,7 @@ internal static partial class StorageChecks
             SeedBaseline(store, "p1", "plain", plain, plain);
         }
         var initial = StorageDamage.FlaggedIndexState(DbPath(folder));
-        Require(initial.Version == 12, "fresh combined store includes schema v12 item retry state");
+        Require(initial.Version == StoreSchema.Version, "fresh combined store includes current schema item retry state");
         StorageDamage.RemoveFlaggedIndex(DbPath(folder));
         for (var reopen = 0; reopen < 2; reopen++)
         {

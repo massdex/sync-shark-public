@@ -102,8 +102,9 @@ internal static class LinkExclusionChecks
             await fx.Run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), CancellationToken.None);
             Require(await fx.B.ObserveAsync("locked/x.txt", CancellationToken.None) is not null,
                 "a local folder that cannot be listed at apply time drops the delete under it");
-            Require(!fx.Store.FirstSyncDone(fx.Pair.PairId),
-                "a deferred reviewed removal keeps the pair in first-sync mode");
+            Require(fx.Store.FirstSyncDone(fx.Pair.PairId) &&
+                fx.Store.OpenNotices(fx.Pair.PairId).Any(notice => notice.ReasonKey == "local-changed-since-review"),
+                "a safely skipped removal completes first sync with a visible changed-path notice");
         }
         finally
         {

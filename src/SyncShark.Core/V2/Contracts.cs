@@ -17,6 +17,12 @@ public sealed record ItemState(string Path, ItemKind Kind, string ObjectId, stri
 {
     /// <summary>Planner-only protection of the existing counterpart of a refused move; never persisted as a source flag.</summary>
     public bool ProviderRefusalRetained { get; init; }
+
+    /// <summary>Read-only observation failure: this item and its subtree are kept, never inferred absent.</summary>
+    public string? IncompleteReason { get; init; }
+
+    /// <summary>A read-only sentinel whose filesystem kind could not be observed; never an effect target.</summary>
+    public bool ObservationKindUnknown { get; init; }
 }
 
 /// <summary>Whether a change is an add/update or a deletion.</summary>
@@ -296,6 +302,9 @@ public sealed record PlanOptions(TimeSpan TieWindow, bool FirstSync, LabelRule L
     public IReadOnlyList<ItemState> MappingContextA { get; init; } = [];
     [System.Text.Json.Serialization.JsonIgnore]
     public IReadOnlyList<ItemState> MappingContextB { get; init; } = [];
+    // Query-backed protection keeps overflow/backoff retries out of folder collapse without loading them all.
+    [System.Text.Json.Serialization.JsonIgnore]
+    public Func<string, bool>? ProtectedDescendants { get; init; }
     public DateTimeOffset ObservedAt { get; init; } = DateTimeOffset.MinValue;
 
 }

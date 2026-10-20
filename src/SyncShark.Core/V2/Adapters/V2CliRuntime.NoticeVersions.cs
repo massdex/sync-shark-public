@@ -30,7 +30,7 @@ public sealed partial class V2CliRuntime
                         if (result.Outcome == Outcome.Done && action.ExpectedTarget?.Kind == ItemKind.File) removed++;
                         if (result.Outcome == Outcome.Failed) removalFailures++;
                         if (result.Outcome == Outcome.Uncertain) removalUncertain++;
-                    });
+                    }, new RunProgressForwarder(Console.Error.WriteLine));
                 if (choice is not (NoticeChoices.RetryNow or NoticeChoices.DeleteReviewed or NoticeChoices.KeepRestore) || !_store.FirstSyncDone(pairId))
                     return new SyncCliRunData(pairId, pair.Name, 0, 0, 0, 0, 0, false)
                     { Deleted = removed, Failed = removalFailures, NeedsVerification = removalUncertain };

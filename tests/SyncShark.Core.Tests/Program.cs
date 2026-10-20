@@ -13,6 +13,12 @@ using Massdex.SyncShark;
 using Microsoft.Data.Sqlite;
 #pragma warning disable CS8321
 
+if (args is ["--v2-removal-review-checks"])
+{
+    await Massdex.SyncShark.V2.RunChecks.RemovalReviewChecksAsync();
+    return 0;
+}
+
 if (args is ["--v2-local-constituent-checks", var constituentRoot, var constituent])
 {
     await Massdex.SyncShark.V2.LocalChecks.RunConstituentAsync(constituentRoot, constituent);

@@ -41,8 +41,16 @@ internal static partial class PlannerChecks
             "only the folders above the held path are held");
         Require(plan.Actions.All(action => action.Kind != ActionKind.Delete || action.Path == "p/d/old.txt") &&
             plan.Actions.All(action => action.Rule != 23), "no folder delete or collapse over the held path");
-        Require(plan.Notices.Count(notice => notice.ReasonKey == PlanNotices.DeletionEvidencePending.Key) == 2,
-            "each held folder carries a pending-evidence notice");
+        Require(plan.Notices.Count(notice => notice.ReasonKey == PlanNotices.ProtectedChildPending.Key) == 2,
+            "each held folder carries a neutral protected-child notice");
+        var protectedIndex = PathProtectionIndex.TryCreate(["p/d/conflict.txt"])!;
+        var callbackPlan = Planner.Decide(PairId, Gen, rows, Opt(false) with
+        { ProtectedDescendants = path => protectedIndex.Touches(path, descendants: true) });
+        Require(callbackPlan.Actions.Any(a => a.Kind == ActionKind.Delete && a.Path == "p/d/old.txt") &&
+            callbackPlan.Actions.Count(a => a.Kind == ActionKind.Hold) == 2 &&
+            callbackPlan.Notices.Where(n => n.ReasonKey == PlanNotices.ProtectedChildPending.Key)
+                .All(n => !n.Detail.Contains("evidence", StringComparison.OrdinalIgnoreCase)),
+            "query-backed protection keeps independent deletes and describes non-evidence child holds honestly");
         Console.WriteLine("PASS PostPrepare_HeldChildNeverCollapsedOver");
     }
 

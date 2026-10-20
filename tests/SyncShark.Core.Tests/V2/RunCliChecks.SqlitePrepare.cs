@@ -35,12 +35,15 @@ internal static partial class RunCliChecks
             if (change == "unreviewed-child") fx.A.Seed("a/new", "", ItemKind.Folder);
             if (change != "none")
             {
-                var message = await ApplyRefusalAsync(runtime, fx, choices);
-                Require(message?.Contains("run prepare again", StringComparison.Ordinal) == true &&
-                    fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0 && store.ReadPrepare(fx.Pair.PairId) == header,
-                    "SQLite reviewed apply refuses " + change + " without effects or losing the review");
-                Require(await fx.A.ObserveAsync("a/x.txt", CancellationToken.None) is not null,
-                    "refused SQLite choice leaves the victim intact");
+                var result = await runtime.ApplyFirstSyncAsync(fx.Pair.PairId, choices, false, null, _ => { }, default);
+                Require(result.FirstSyncComplete && result.Failed == 0 &&
+                    fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0 &&
+                    store.OpenNotices(fx.Pair.PairId).Any(notice => notice.ReasonKey == "reviewed-folder-grew"),
+                    "SQLite grown folder choice completes with a decision notice and zero effects: " + change);
+                Require(await fx.A.ObserveAsync("a/x.txt", CancellationToken.None) is not null &&
+                    await fx.A.ObserveAsync("a", default) is not null &&
+                    (change != "unreviewed-child" || await fx.A.ObserveAsync("a/new", default) is not null),
+                    "the entire grown SQLite folder choice survives, including the new child");
             }
             else
             {

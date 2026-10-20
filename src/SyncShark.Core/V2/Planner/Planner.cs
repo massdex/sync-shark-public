@@ -125,7 +125,7 @@ public static partial class Planner
     /// </summary>
     private static Draft BlockHeldFolderDeletes(Context ctx)
     {
-        if (ctx.Options.HeldPaths is not { Count: > 0 }) return ctx.Draft;
+        if (ctx.Options.HeldPaths is not { Count: > 0 } && ctx.Options.ProtectedDescendants is null) return ctx.Draft;
         for (var index = 0; index < ctx.Draft.Count; index++)
         {
             var (row, action) = ctx.Draft[index];
@@ -133,7 +133,7 @@ public static partial class Planner
                 !HeldUnder(ctx, action))
                 continue;
             ctx.Draft[index] = (row, action with { Kind = ActionKind.Hold, RecoveryFirst = false });
-            AddNotice(ctx, action.Rule, NoticeKind.Info, action.Path, PlanNotices.DeletionEvidencePending);
+            AddNotice(ctx, action.Rule, NoticeKind.Info, action.Path, PlanNotices.ProtectedChildPending);
         }
         return ctx.Draft;
     }
@@ -143,8 +143,8 @@ public static partial class Planner
     /// never collapsed over, so its ordinary child deletes are kept) and <see cref="BlockHeldFolderDeletes"/>.
     /// </summary>
     private static bool HeldUnder(Context ctx, SyncAction delete) =>
-        !delete.FirstSyncChoice && ctx.Options.HeldPaths is { Count: > 0 } held &&
-        held.Any(path => PairPath.IsUnder(path, delete.Path));
+        !delete.FirstSyncChoice &&
+        (ctx.Options.ProtectedDescendants?.Invoke(delete.Path) == true || ctx.HeldParents.Contains(delete.Path));
 
     // ---- shared emissions ----------------------------------------------------
 
@@ -298,6 +298,10 @@ public static partial class Planner
         {
             PairId = pairId;
             Options = options;
+            HeldParents = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (options.HeldPaths is { } heldPaths)
+                foreach (var path in heldPaths)
+                    foreach (var parent in PairPath.Ancestors(path)) HeldParents.Add(parent);
             Rows = rows;
             Mapping = new NameMappings(rows, options);
             OccA = occA;
@@ -311,6 +315,7 @@ public static partial class Planner
 
         public string PairId { get; }
         public PlanOptions Options { get; }
+        public HashSet<string> HeldParents { get; }
         public NameMappings Mapping { get; }
         public IReadOnlyList<PlanRow> Rows { get; }
 

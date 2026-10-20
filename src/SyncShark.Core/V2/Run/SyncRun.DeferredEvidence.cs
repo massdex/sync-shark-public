@@ -171,6 +171,16 @@ public sealed partial class SyncRun
                             if (_endpoints.Inventory(cloud) is not IDeferredDeletionEvidence source) continue;
                             var paths = group.Where(item => !heldFolders.Contains(item.Path) && !answered.ContainsKey(item.Path))
                                 .Select(item => item.Path).ToArray();
+                            // Released history failures already require a user choice. Do not make that
+                            // choice depend on the same unavailable history probe ever succeeding.
+                            var released = paths.Where(path => _store.SyncRetryAt(pair.PairId, path) is { Kind: "deletion-evidence", Held: not null })
+                                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                            foreach (var path in released)
+                            {
+                                answered.TryAdd(path, 0);
+                                evidence.Writer.TryWrite((path, new SyncRemoteDeletionEvidence(null, "Released evidence requires a decision.", LookupFailed: true)));
+                            }
+                            paths = paths.Where(path => !released.Contains(path)).ToArray();
                             await source.ResolveDeletionEvidenceAsync(paths, (path, resolved) =>
                             {
                                 answered.TryAdd(path, 0);
@@ -285,11 +295,17 @@ public sealed partial class SyncRun
             {
                 try
                 {
+                    var heldRetry = _store.SyncRetryAt(pair.PairId, rule.Path);
+                    // A released-evidence decision owns the path until the user chooses. A replayed held
+                    // lane (a repeated first-sync apply, for example) must never act under stale prepare
+                    // authority while its decision notice is still open.
+                    if (heldRetry?.Kind == "decision")
+                    { lock (sync) pending.Add(rule.Path); return; }
                     if (parkedFootprints.Covers(rule.Path) || parkedFootprints.Contains(rule.Path))
                     { lock (sync) pending.Add(rule.Path); return; }
                     var isFolder = heldFolders.Contains(rule.Path);
                     var cloud = rule.Local == Side.A ? pair.B : pair.A;
-                    if (_store.SyncRetryAt(pair.PairId, rule.Path) is { Kind: "deletion-evidence" } released)
+                    if (heldRetry is { Kind: "deletion-evidence" } released)
                     {
                         var survivorRoot = rule.Local == Side.A ? pair.A : pair.B;
                         var survivor = await _endpoints.Writer(survivorRoot).ObserveAsync(rule.Path, token);

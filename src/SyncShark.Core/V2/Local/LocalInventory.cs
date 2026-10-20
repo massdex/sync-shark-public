@@ -36,24 +36,64 @@ public sealed class LocalInventory : IInventorySource
         _rootIdentity = new PilotDirectoryIdentity(_volume, _rootFileId);
     }
 
-    public async Task ReadSubtreeAsync(string path, Func<IReadOnlyList<ItemState>, Task> accept, CancellationToken ct)
+    public async Task ReadSubtreeAsync(string path, Func<IReadOnlyList<ItemState>, Task> accept, CancellationToken ct,
+        IProgress<string>? progress = null)
     {
         using var lease = PilotDirectoryLease.Open(_root.RootPath, _rootIdentity);
-        var scan = await ScanAsync(lease, ct, p => PairPath.IsSelfOrUnder(p, path) || PairPath.IsUnder(path, p), [path], null);
-        if (scan is null) throw new IOException("Folder listing is incomplete.");
+        var scan = await ScanAsync(lease, ct, p => PairPath.IsSelfOrUnder(p, path) || PairPath.IsUnder(path, p), [path], progress);
         var snapshot = BuildSnapshot(0, _root.RootId, "", scan, p => PairPath.IsSelfOrUnder(p, path));
-        if (snapshot.IncompleteSubtrees.Count != 0) throw new IOException("Folder listing is incomplete.");
+        var incomplete = scan.Decisions.GroupBy(d => PairPath.IsSelfOrUnder(d.RelativePath, path) ? d.RelativePath : path,
+                StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => string.Join("; ", g.Select(d => d.Reason).Distinct()), StringComparer.OrdinalIgnoreCase);
+        foreach (var owned in _productOwnedRelative.Where(p => PairPath.IsSelfOrUnder(p, path)))
+            incomplete[owned] = "product-owned path";
+        var missing = incomplete.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        string? Incomplete(string itemPath)
+        {
+            if (incomplete.TryGetValue(itemPath, out var reason)) return reason;
+            foreach (var parent in PairPath.Ancestors(itemPath))
+                if (incomplete.TryGetValue(parent, out reason)) return reason;
+            return null;
+        }
+        long done = 0, hashed = 0, reused = 0;
         foreach (var page in snapshot.Items.Chunk(256))
         {
-            var files = page.Where(i => i.Kind == ItemKind.File && i.Flags == ItemFlags.None).ToArray();
+            ct.ThrowIfCancellationRequested();
             var hashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            if (files.Length != 0)
+            var unknown = new List<ItemState>();
+            foreach (var item in page.Where(i => i.Kind == ItemKind.File && i.Flags == ItemFlags.None))
             {
-                var refused = await HashSharesAsync(lease, files, hashes, ct);
-                if (refused.Count != 0) Accept(refused, await HashScanAsync(lease, refused, ct), hashes);
+                if (Incomplete(item.Path) is not null) continue;
+                var prior = _known.ByObject(_root.RootId, item.ObjectId);
+                if (prior is { Hash: not null, Flags: ItemFlags.None } && prior.ObjectId == item.ObjectId &&
+                    prior.Size == item.Size && prior.Mtime.UtcTicks == item.Mtime.UtcTicks)
+                { hashes[item.Path] = prior.Hash; reused++; }
+                else unknown.Add(item);
             }
-            await accept(page.Select(i => i.Kind == ItemKind.File ? i with { Hash = hashes.GetValueOrDefault(i.Path) } : i).ToArray());
+            if (unknown.Count != 0)
+            {
+                progress?.Report($"Hashing {hashed:N0} attempted; {unknown.Count:N0} pending in page; {reused:N0} reused");
+                var refused = await HashSharesAsync(lease, unknown, hashes, ct);
+                if (refused.Count != 0) Accept(refused, await HashScanAsync(lease, refused, ct), hashes);
+                hashed += unknown.Count;
+            }
+            await accept(page.Select(i =>
+            {
+                missing.Remove(i.Path);
+                var reason = Incomplete(i.Path);
+                if (reason is null && i.Kind == ItemKind.File && i.Flags == ItemFlags.None && !hashes.ContainsKey(i.Path))
+                    reason = "content could not be verified (unreadable or changed while hashing)";
+                return i with { Hash = i.Kind == ItemKind.File ? hashes.GetValueOrDefault(i.Path) : i.Hash,
+                    Flags = reason is null ? i.Flags : i.Flags | ItemFlags.Unreadable, IncompleteReason = reason };
+            }).ToArray());
+            done += page.Length;
+            progress?.Report($"Review {done:N0}/{snapshot.Items.Count:N0} items; hashed {hashed:N0}, reused {reused:N0}");
         }
+        // Enumeration can fail before emitting an entry. Keep an explicit sentinel at that path;
+        // its parents are protected, but independent readable siblings remain reviewable (RQ-032/034).
+        foreach (var page in incomplete.Where(p => missing.Contains(p.Key)).Chunk(256))
+            await accept(page.Select(p => new ItemState(p.Key, ItemKind.Folder, "", null, null, 0,
+                DateTimeOffset.UnixEpoch, ItemFlags.Unreadable) { IncompleteReason = p.Value, ObservationKindUnknown = true }).ToArray());
     }
 
     /// <inheritdoc/>

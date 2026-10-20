@@ -5,7 +5,7 @@ public sealed partial class SyncRun
     // One shared authority for app and CLI. These choices change scheduling or exclusion policy,
     // never turn an uncertain effect into deletion permission or mark an effect successful.
     internal async Task<bool> ApplyRetryNoticeChoiceAsync(string pairId, string noticeId, string choice, CancellationToken ct,
-        Action<PairDef, PairDef>? saveNarrowerPair = null, Action<SyncAction, ActionResult>? removalResult = null)
+        Action<PairDef, PairDef>? saveNarrowerPair = null, Action<SyncAction, ActionResult>? removalResult = null, IProgress<RunProgress>? progress = null)
     {
         string? observationSession = null;
         PairDef? observedPair = null;
@@ -14,22 +14,38 @@ public sealed partial class SyncRun
             if ((choice is NoticeChoices.ReviewRemoval or NoticeChoices.ReviewRemovalA or NoticeChoices.ReviewRemovalB or NoticeChoices.ConfirmRemoval) &&
                 _store is SqliteStateStore db)
             {
-                // Only endpoint preparation needs admission. Network/disk subtree enumeration is independent
-                // of other pairs and never holds the global run gate or mutates their live inventories.
-                var input = await RunExclusiveAsync(null, async (_, token) =>
-                {
-                    var saved = _store.NoticeById(pairId, noticeId);
-                    if (saved is null || saved.Value.Closed || !NoticeChoices.Options(saved.Value.Notice).Any(o => o.Choice == choice))
-                        throw new SyncRunRefusedException("That review is no longer available. Refresh notices.");
-                    var pair = _store.Pair(pairId) ?? throw new SyncRunRefusedException("The pair is no longer available.");
-                    RefuseLayout(pair);
-                    await _endpoints.PrepareAsync(pair, token);
-                    return (Pair: pair, Path: saved.Value.Notice.Path, A: _endpoints.Inventory(pair.A), B: _endpoints.Inventory(pair.B));
-                }, ct);
+                // Observation is read-only and must start even while another pair owns the run gate.
+                // Revalidate the notice and root bindings under the gate before publication or effects.
+                var saved = _store.NoticeById(pairId, noticeId);
+                if (saved is null || saved.Value.Closed || !NoticeChoices.Options(saved.Value.Notice).Any(o => o.Choice == choice))
+                    throw new SyncRunRefusedException("That review is no longer available. Refresh notices.");
+                var pair = _store.Pair(pairId) ?? throw new SyncRunRefusedException("The pair is no longer available.");
+                RefuseLayout(pair);
+                (IInventorySource A, IInventorySource B) readers;
+                try { readers = await _endpoints.OpenReviewAsync(pair, ct); }
+                catch (Exception error) when (error is not (OperationCanceledException or StateDamagedException))
+                { throw new SyncRunRefusedException($"Folder review could not open: {error.Message}. Retry review, open settings or dismiss (Ignore); nothing was removed."); }
+                var input = (Pair: pair, Path: saved.Value.Notice.Path, readers.A, readers.B);
+                using var activity = RunActivity.Begin(progress, _settings, _time);
                 observedPair = input.Pair;
                 observationSession = Guid.NewGuid().ToString("N");
                 var session = observationSession;
-                await Task.WhenAll(Read(input.A, Side.A), Read(input.B, Side.B));
+                try { await Task.WhenAll(Read(input.A, Side.A), Read(input.B, Side.B)); }
+                catch (Exception error) when (error is not (OperationCanceledException or StateDamagedException))
+                {
+                    var detail = $"Folder review could not finish: {error.Message}. Retry review, open settings or dismiss (Ignore); nothing was removed.";
+                    var notice = saved.Value.Notice;
+                    if (NoticeChoices.IsRemovalReview(notice))
+                    {
+                        if (db.ReadRemovalReview(pair, notice.Path) is { } old &&
+                            notice.ReasonKey.StartsWith(NoticeChoices.RemovalReviewPrefix + old.Generation + ":", StringComparison.Ordinal))
+                            db.ClearRemovalReview(old.Generation);
+                        _store.CloseNotice(noticeId, "listing-incomplete");
+                    }
+                    _store.AddNotices([notice with { ReasonKey = notice.RemovalOriginReason ??
+                        (NoticeChoices.IsRemovalAttention(notice) ? notice.ReasonKey : "reviewed-folder-grew"), Detail = detail }]);
+                    throw new SyncRunRefusedException(detail);
+                }
                 async Task Read(IInventorySource inventory, Side side) =>
                     await inventory.ReadSubtreeAsync(input.Path, rows =>
                     {
@@ -37,7 +53,7 @@ public sealed partial class SyncRun
                             throw new IOException("Folder listing escaped its requested subtree.");
                         db.StageRemovalItems(session, side, rows);
                         return Task.CompletedTask;
-                    }, ct);
+                    }, ct, new RemovalProgress(activity.Progress, input.Path, side));
                 // A root replacement cannot bind an observation from the old endpoint to the new one.
                 if (_store.Pair(pairId) is not { } current || current.A != input.Pair.A || current.B != input.Pair.B)
                     throw new SyncRunRefusedException("The folder roots changed during review. Refresh the review; nothing was removed.");
@@ -48,6 +64,12 @@ public sealed partial class SyncRun
         {
             if (observationSession is not null && _store is SqliteStateStore db) db.ClearRemovalObservation(observationSession);
         }
+    }
+
+    private sealed class RemovalProgress(IProgress<RunProgress> sink, string path, Side side) : IProgress<string>
+    {
+        public void Report(string message) => sink.Report(new RunProgress("Removal review", path, 0, 0)
+            { Message = $"{side}: {message}" });
     }
 
     private Task<bool> ApplyRetryNoticeChoiceCoreAsync(string pairId, string noticeId, string choice, CancellationToken ct,

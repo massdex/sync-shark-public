@@ -9,6 +9,7 @@ internal static class LocalInventoryChecks
 {
     public static async Task RunAsync()
     {
+        await RemovalSubtreeAsync();
         await FullMapsItemsAsync().ConfigureAwait(false);
         await FullIncludePredicateAsync().ConfigureAwait(false);
         await FullExcludedOfflineDirectoryAsync().ConfigureAwait(false);
@@ -26,6 +27,48 @@ internal static class LocalInventoryChecks
         await HashHardLinkNamesBothHashedAsync().ConfigureAwait(false);
         await HashCancelledThrowsAsync().ConfigureAwait(false);
         HashSettingsRejectedAtConstruction();
+    }
+
+    private sealed class ReviewProgress : IProgress<string>
+    {
+        internal readonly List<string> Messages = [];
+        public void Report(string value) => Messages.Add(value);
+    }
+
+    private static async Task RemovalSubtreeAsync()
+    {
+        var root = LocalChecks.FreshRoot("removal-subtree");
+        LocalChecks.Seed(root, "folder/nested/file.txt", "alpha");
+        LocalChecks.Seed(root, "outside.txt", "outside");
+        using var known = new InMemoryStateStore();
+        var inventory = LocalChecks.Inventory(root, known, TimeProvider.System);
+        var rows = new List<ItemState>();
+        var progress = new ReviewProgress();
+        Task Accept(IReadOnlyList<ItemState> page) { rows.AddRange(page); return Task.CompletedTask; }
+        await inventory.ReadSubtreeAsync("folder", Accept, default, progress);
+        LocalChecks.Require(rows.Select(r => r.Path).Order().SequenceEqual(new[] { "folder", "folder/nested", "folder/nested/file.txt" }),
+            "real subtree listing includes nested files but excludes outside siblings");
+        LocalChecks.Require(rows.Single(r => r.Kind == ItemKind.File).Hash == LocalChecks.BlockHash(LocalChecks.Bytes("alpha")), "real subtree hashes unknown content");
+        known.WriteSnapshot(new Snapshot("root-local", Side.A, 1, "", rows.ToArray(), []));
+        rows.Clear(); progress.Messages.Clear();
+        await inventory.ReadSubtreeAsync("folder", Accept, default, progress);
+        LocalChecks.Require(progress.Messages.Any(m => m.Contains("hashed 0, reused 1")), "unchanged identity size and mtime reuse stored hashes");
+        LocalChecks.Seed(root, "folder/nested/file.txt", "changed content");
+        rows.Clear(); progress.Messages.Clear();
+        await inventory.ReadSubtreeAsync("folder", Accept, default, progress);
+        LocalChecks.Require(rows.Single(r => r.Kind == ItemKind.File).Hash == LocalChecks.BlockHash(LocalChecks.Bytes("changed content")) &&
+            progress.Messages.Any(m => m.Contains("hashed 1, reused 0")), "changed files are rehashed with visible progress");
+        LocalChecks.Seed(root, "folder/locked.txt", "locked");
+        using (var locked = new FileStream(Path.Combine(root, "folder/locked.txt"), FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            rows.Clear();
+            await inventory.ReadSubtreeAsync("folder", Accept, default, progress);
+            LocalChecks.Require(rows.Any(r => r.Path == "folder/locked.txt" && r.IncompleteReason is not null), "unreadable child is retained as unverified or incomplete");
+            LocalChecks.Require(rows.Any(r => r.Path == "folder/nested/file.txt" && r.Hash is not null), "unreadable child does not stop sibling review");
+        }
+        rows.Clear();
+        await inventory.ReadSubtreeAsync("vanished", Accept, default, progress);
+        LocalChecks.Require(rows.Count == 0, "vanished subtree is an empty observation");
     }
 
     private static void HashSettingsRejectedAtConstruction()

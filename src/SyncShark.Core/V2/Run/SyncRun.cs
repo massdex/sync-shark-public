@@ -571,12 +571,6 @@ public sealed partial class SyncRun : ISyncRun
         var pendingEvidence = scan.A.PendingDeletionEvidence.Concat(scan.B.PendingDeletionEvidence)
             .GroupBy(entry => entry.Key, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.First().Value, StringComparer.OrdinalIgnoreCase);
-        var links = before.With(current).WithPending(PendingDecisions(pairId, decisions))
-            .WithPending(pendingEvidence.Keys).WithPending(retryHeld.Select(item => item.Path))
-            .WithRetryProtection((path, descendants) => retryCount > activeRetries.Count &&
-                _store.RetryProtected(pairId, path, activeRetries, descendants));
-        var predicates = Predicates(pair, links);
-        var scanner = new RunScope(_store, predicates.A, predicates.B, links, rules: PairInclude.IgnoreRules(pair), decisions: decisions);
         IReadOnlyDictionary<string, Side?>? winners = decisions?.ToDictionary(entry => entry.Key,
             entry => (Side?)entry.Value, StringComparer.OrdinalIgnoreCase);
         // Execution-time space refusals have no intent. Their durable notices, like unconfirmed content,
@@ -587,6 +581,17 @@ public sealed partial class SyncRun : ISyncRun
                 notice.ReasonKey is FreeSpaceRefusal.InsufficientReasonKey or FreeSpaceRefusal.UnknownSpaceReasonKey or
                     FreeSpaceRefusal.UnknownReserveReasonKey)
             .Select(notice => notice.Path).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        // Content/space notices explicitly rescope their work even before the retry backoff expires.
+        // Otherwise that same retry row filters out the very path we just admitted for re-evaluation.
+        var noticeHeldPaths = retryPaths.Where(path => _store.SyncRetryAt(pairId, path) is
+            { Held: not null } or { Kind: "decision" or "deletion-evidence" }).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        activeRetries.UnionWith(retryPaths.Where(path => !noticeHeldPaths.Contains(path)));
+        var links = before.With(current).WithPending(PendingDecisions(pairId, decisions))
+            .WithPending(noticeHeldPaths).WithPending(pendingEvidence.Keys).WithPending(retryHeld.Select(item => item.Path))
+            .WithRetryProtection((path, descendants) => retryCount > 0 &&
+                _store.RetryProtected(pairId, path, activeRetries, descendants));
+        var predicates = Predicates(pair, links);
+        var scanner = new RunScope(_store, predicates.A, predicates.B, links, rules: PairInclude.IgnoreRules(pair), decisions: decisions);
         retryPaths = retryPaths.Concat(retries.Select(item => item.Path)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var touched = new List<string>(scan.Touched(reconcile.Touched.Concat(retryPaths)
             .Concat(decisions?.Keys ?? Enumerable.Empty<string>())));
@@ -621,7 +626,7 @@ public sealed partial class SyncRun : ISyncRun
         var deciding = DecideWithHashedCopiesAsync(pair, scan, rows,
             () => JoinRows(loadScope(), scan, false),
             pass => ExpandOccupancyOnce(pair, loadScope, scan,
-                ApplySafetyFilter(pair, ActionPredicates(pair, links), Decide(pair, scan, pass, winners, mappingContext)), touched, links,
+                ApplySafetyFilter(pair, ActionPredicates(pair, links), Decide(pair, scan, pass, winners, mappingContext, links)), touched, links,
                 winners),
             throttle, ct);
         rows = [];
@@ -700,14 +705,14 @@ public sealed partial class SyncRun : ISyncRun
         touched.AddRange(extra);
         scope = loadScope();
         var rows = JoinRows(scope, scan, false);
-        return ApplySafetyFilter(pair, ActionPredicates(pair, links), Decide(pair, scan, rows, winners, scope));
+        return ApplySafetyFilter(pair, ActionPredicates(pair, links), Decide(pair, scan, rows, winners, scope, links));
     }
 
     private Plan Decide(PairDef pair, BothScan scan, IReadOnlyList<PlanRow> rows,
-        IReadOnlyDictionary<string, Side?>? winners, RunScope.Scope scope) =>
+        IReadOnlyDictionary<string, Side?>? winners, RunScope.Scope scope, LinkExclusions links) =>
         Planner.Decide(pair.PairId, Math.Max(scan.A.Gen, scan.B.Gen), rows,
             Options(pair, false, winners, null, matchedAtPrepare: new RetryMatches(_store, pair.PairId))
-                with { MappingContextA = scope.ContextA, MappingContextB = scope.ContextB });
+                with { MappingContextA = scope.ContextA, MappingContextB = scope.ContextB, ProtectedDescendants = links.Contains });
 
     // Decision 64: the paths of open user-decision notices, except the ones being decided in this run.
     private IEnumerable<string> PendingDecisions(string pairId, IReadOnlyDictionary<string, Side>? deciding) =>

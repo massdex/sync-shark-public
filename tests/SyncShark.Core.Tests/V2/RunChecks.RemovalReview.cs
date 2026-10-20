@@ -25,7 +25,7 @@ internal static partial class RunChecks
         Require(fx.WriterA.Deletes == 0 && fx.WriterA.Preserves == 0, "paging and replacing a review never authorize removal");
     }
 
-    private static async Task RemovalReviewChecksAsync()
+    internal static async Task RemovalReviewChecksAsync()
     {
         foreach (var mode in new[] { "confirm", "changed-target", "changed-other", "ignored", "cancel" })
         {
@@ -94,6 +94,7 @@ internal static partial class RunChecks
                 review.NoticeId!, NoticeChoices.ConfirmRemoval, default));
         }
         await RemovalReviewPagesAsync();
+        // The focused --v2-removal-review-checks entry point includes all follow-up regressions.
         await RemovalReviewRegressionsAsync();
         Console.WriteLine("PASS RemovalReview confirm/recovery, both-side growth, ignore protection and no-confirm safety");
     }

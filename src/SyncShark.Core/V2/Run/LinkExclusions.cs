@@ -100,6 +100,7 @@ internal sealed class LinkExclusions
     /// <summary>The recorded link paths (the baselines under them are forgotten, see SyncRun).</summary>
     internal IReadOnlyCollection<string> Links => _links;
 
+
     /// <summary>True when the path is protected or lies under a protected path (checks the path and each ancestor).</summary>
     internal bool Covers(string path)
     {

@@ -101,7 +101,7 @@ public sealed partial class V2SyncHost
             // Pause is idempotent if interrupted between these two durable writes.
             if (NoticeChoices.IsRetryNotice(notice))
             {
-                await ApplyRetryNoticeChoiceAsync(notice, choice, cancellationToken);
+                await ApplyRetryNoticeChoiceAsync(notice, choice, cancellationToken, onProgress);
                 continue;
             }
             if (choice is NoticeChoices.UseOtherVersion or NoticeChoices.SaveOtherVersionAsCopy)

@@ -185,8 +185,7 @@ internal static partial class DropboxChecks
                 "HTTP 400 records held evidence and reaches the permanent-failure release bound immediately");
             Require(!delta.CursorInvalid && delta.CursorAfter == "delta-end" &&
                     delta.PendingDeletionEvidence.Keys.All(delta.ReleasedDeletionEvidence.Contains) &&
-                    h.Known.OpenNotices("p1").Any(notice => notice.Path == "gone.txt" &&
-                        notice.ReasonKey == "deletion-history-unavailable"),
+                    h.Known.SyncRetryAt("p1", "gone.txt") is { Kind: "deletion-evidence", Held: not null },
                 "released permanent failure does not pin the cursor and retains the durable planner hold");
         }
         // Different cache bases are conservatively reprobed without a second feed that could

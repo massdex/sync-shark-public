@@ -70,6 +70,23 @@ public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatc
         SafetyPoll = () => floor;
     }
 
+    /// <summary>Opens independent read-only review inventories without replacing active sync endpoints.</summary>
+    public async Task<(IInventorySource A, IInventorySource B)> OpenReviewAsync(PairDef pair, CancellationToken ct)
+    {
+        var a = Read(pair.A, Side.A);
+        var b = Read(pair.B, Side.B);
+        await Task.WhenAll(a, b);
+        return (await a, await b);
+
+        async Task<IInventorySource> Read(RootDef root, Side side)
+        {
+            var checkedSide = await CheckSideAsync(root, ct).ConfigureAwait(false);
+            return checkedSide.Client is { } client
+                ? new DropboxInventory(root, side, client, _store, pair.PairId)
+                : new LocalInventory(root, side, _store, OwnedInside(root, checkedSide.Recovery!), _settings, _time);
+        }
+    }
+
     /// <summary>
     /// Opens both sides of <paramref name="pair"/>. Every prerequisite of BOTH sides (folders, root identities,
     /// installation identity, Recovery location, Dropbox connection and credential) is checked before any writer is

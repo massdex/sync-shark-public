@@ -24,6 +24,51 @@ public sealed partial class SqliteStateStore
         TrySweepPrepareGenerations();
     }
 
+    // Called only on open, before any review writer can publish without its page notice.
+    // Keyset pages and the existing prepare sweeper bound every transaction and allocation.
+    private void SweepOrphanedRemovalReviews()
+    {
+        string after = "";
+        while (true)
+        {
+            var page = InStore(() =>
+            {
+                using var command = StoreSchema.Command(_connection, null,
+                    "SELECT entity_key,pair_id,generation,metadata_json,digest FROM removal_review " +
+                    "WHERE entity_key>$after ORDER BY entity_key LIMIT 128;");
+                command.Parameters.AddWithValue("$after", after);
+                var rows = new List<(string Key, string Pair, string Gen, string Json, string Digest)>();
+                using var reader = command.ExecuteReader();
+                while (reader.Read()) rows.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4)));
+                return rows;
+            });
+            if (page.Count == 0) return;
+            foreach (var row in page)
+            {
+                var orphan = row.Digest == "consumed";
+                try
+                {
+                    using var metadata = JsonDocument.Parse(row.Json);
+                    var path = metadata.RootElement.GetProperty("Path").GetString()!;
+                    var pair = Pair(row.Pair);
+                    orphan |= pair is null || RemovalKey(pair, path) != row.Key;
+                }
+                catch (Exception error) when (error is JsonException or KeyNotFoundException or InvalidOperationException)
+                { orphan = true; }
+                InStore(() =>
+                {
+                    StoreSchema.Execute(_connection, null,
+                        "DELETE FROM removal_review WHERE generation=$g AND ($orphan=1 OR NOT EXISTS(" +
+                        "SELECT 1 FROM notice n JOIN pair p ON p.pair_no=n.pair_no WHERE p.pair_id=$p " +
+                        "AND n.state='open' AND substr(n.reason_key,1,length($prefix))=$prefix));",
+                        ("$g", row.Gen), ("$orphan", orphan ? 1 : 0), ("$p", row.Pair),
+                        ("$prefix", NoticeChoices.RemovalReviewPrefix + row.Gen + ":"));
+                });
+            }
+            after = page[^1].Key;
+        }
+    }
+
     internal long ProtectedRemovalFolders(string generation) => InStore(() =>
         (long)StoreSchema.Scalar(_connection, null,
             "SELECT COUNT(*) FROM prepare_row f WHERE f.generation=$g AND f.kind LIKE 'removal-folders-%' " +

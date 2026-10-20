@@ -218,19 +218,9 @@ public sealed record DeletionClassification(string Cursor, IReadOnlySet<string> 
 public interface IInventorySource
 {
     /// <summary>Read only this folder entity and descendants, without advancing any root cursor.</summary>
-    async Task ReadSubtreeAsync(string path, Func<IReadOnlyList<ItemState>, Task> accept, CancellationToken ct)
-    {
-        // Compatibility for custom inventories. Production providers implement prefix enumeration.
-        var snapshot = await FullAsync(0, p => PairPath.IsSelfOrUnder(p, path), new Progress<string>(), ct);
-        if (snapshot.IncompleteSubtrees.Count != 0) throw new IOException("Folder listing is incomplete.");
-        foreach (var page in snapshot.Items.Where(i => PairPath.IsSelfOrUnder(i.Path, path)).Chunk(256))
-        {
-            var hashes = await HashAsync(page.Where(i => i.Kind == ItemKind.File && i.Hash is null && i.Flags == ItemFlags.None)
-                .Select(i => i.Path).ToArray(), ct);
-            await accept(page.Select(i => i.Kind == ItemKind.File && i.Hash is null
-                ? i with { Hash = hashes.GetValueOrDefault(i.Path) } : i).ToArray());
-        }
-    }
+    Task ReadSubtreeAsync(string path, Func<IReadOnlyList<ItemState>, Task> accept, CancellationToken ct,
+        IProgress<string>? progress = null) =>
+        throw new NotSupportedException("Subtree listing not implemented; a whole-root scan will not be used for removal review.");
 
     /// <summary>After reconciliation is stored, verify pending content in bounded pages and report affected paths.</summary>
     Task VerifyPendingAsync(Func<string, bool> include, Action<string> touched, CancellationToken ct) => Task.CompletedTask;

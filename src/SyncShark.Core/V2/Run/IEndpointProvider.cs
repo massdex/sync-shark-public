@@ -9,6 +9,13 @@ public interface IEndpointProvider
     /// <summary>The writer for one root.</summary>
     IEndpointWriter Writer(RootDef root);
 
+    /// <summary>Independent readers for a read-only review; must not replace a running sync's endpoints.</summary>
+    async Task<(IInventorySource A, IInventorySource B)> OpenReviewAsync(PairDef pair, CancellationToken ct)
+    {
+        await PrepareAsync(pair, ct);
+        return (Inventory(pair.A), Inventory(pair.B));
+    }
+
     /// <summary>Opens this pair's endpoints before the run touches either side; a refusal here has no effect.</summary>
     Task PrepareAsync(PairDef pair, CancellationToken ct) => Task.CompletedTask;
 }
