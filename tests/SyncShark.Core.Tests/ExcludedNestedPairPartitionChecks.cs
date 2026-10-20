@@ -489,9 +489,12 @@ internal static class ExcludedNestedPairPartitionChecks
             parent = DraftFor(parentLeft, parentRight, "Parent pair", rules);
             Require(SyncPairPartitionPolicy.Decide(parent, child) == SyncPairPartitionRelation.NestedAllowed,
                 "ENP-15 the Store baseline excludes both differently named child subtrees and their ownership");
-            await store.SaveAsync(new SyncPairSet([parent, child], parent.Id));
         }
-        var set = await fixture.Database.LoadPairSetAsync();
+        // SyncPairStore persists its aggregate in the dual-slot JSON store, separately
+        // from the Host's SQLite authority. Seed and reopen the actual Store in BOTH legs.
+        await store.SaveAsync(new SyncPairSet([parent, child], parent.Id));
+        var set = new SyncPairStore(fixture.Instance.StateAuthority).Load();
+        var beforeStoredSet = JsonSerializer.Serialize(set);
         var retainedParent = set.Pairs.Single(item => item.Id == parent.Id);
         var retainedChild = set.Pairs.Single(item => item.Id == child.Id);
         var beforeJson = await ScalarAsync(fixture.DatabasePath,
@@ -499,8 +502,10 @@ internal static class ExcludedNestedPairPartitionChecks
         var beforeRevision = await ScalarAsync(fixture.DatabasePath,
             "SELECT configuration_revision FROM sync_pair WHERE pair_id='" + parent.Id + "'");
 
-        Require(beforeJson.Length > 0 && beforeRevision.Length > 0,
-            "ENP-15 the real Store retained the valid baseline before either policy-edit refusal");
+        Require(set.Pairs.Count == 2 && retainedParent.PolicyRevision > 0,
+            "ENP-15 the reopened real Store retained both baseline pairs before either policy-edit refusal");
+        Require(!corresponding || (beforeJson.Length > 0 && beforeRevision.Length > 0),
+            "ENP-15 the Host-bound baseline also has its independent SQLite authority row");
 
         var includedWithOwnership = retainedParent with
         {
@@ -540,11 +545,15 @@ internal static class ExcludedNestedPairPartitionChecks
             "ENP-15 the real Store refuses an included exception below the excluded child: " +
             (refusedException.Length == 0 ? "not refused" : refusedException));
 
+        var afterStoredSet = new SyncPairStore(fixture.Instance.StateAuthority).Load();
+        Require(JsonSerializer.Serialize(afterStoredSet) == beforeStoredSet &&
+                afterStoredSet.Pairs.Single(item => item.Id == parent.Id).PolicyRevision == retainedParent.PolicyRevision,
+            "ENP-15 both refused saved edits leave the real Store's persisted pair set and policy revision unchanged");
         Require(await ScalarAsync(fixture.DatabasePath,
                 "SELECT pair_json FROM sync_pair WHERE pair_id='" + parent.Id + "'") == beforeJson &&
             await ScalarAsync(fixture.DatabasePath,
                 "SELECT configuration_revision FROM sync_pair WHERE pair_id='" + parent.Id + "'") == beforeRevision,
-            "ENP-15 the refused saved policy edits left the persisted parent policy and revision unchanged");
+            "ENP-15 the refused Store edits also leave the independent SQLite authority snapshot unchanged");
     }
 
     private static async Task<string> TrySaveAsync(SyncPairStore store, SyncPairSet set)

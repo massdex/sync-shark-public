@@ -893,6 +893,10 @@ public sealed partial class SyncRun
         try
         {
             _store.RefreshProviderNameNotices(pair);
+            // A refresh that works retires the earlier run's deferral notice: if the next run succeeds the notice goes away.
+            foreach (var notice in _store.OpenNotices(pair.PairId))
+                if (notice.NoticeId is not null && notice.ReasonKey == "refusal-notices-deferred")
+                    _store.CloseNotice(notice.NoticeId, "refreshed");
             // Replace the old aggregate only after the item notices were persisted.
             var summaryId = ShortId.Make("n", pair.PairId, "31", RowCodec.Key(string.Empty), ProviderNameRefusedException.NoticeKey);
             if (_store.NoticeById(pair.PairId, summaryId) is { Closed: false }) _store.CloseNotice(summaryId, "replaced-by-item-notices");

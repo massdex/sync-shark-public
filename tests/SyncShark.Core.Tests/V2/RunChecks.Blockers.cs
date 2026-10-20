@@ -34,6 +34,25 @@ internal static partial class RunChecks
         }
     }
 
+    // Owner rule: a refresh that succeeds on the next run retires the deferral notice the failed run raised.
+    private static async Task RefusalRefreshRecoveryChecksAsync()
+    {
+        var store = new RecordingStore(new InMemoryStateStore());
+        var fx = Build(suppliedStore: store);
+        fx.A.Seed("completed.txt", "independent copy");
+        var run = fx.Run();
+        var plan = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        store.RefusalRefreshError = new InvalidDataException("notice identity collision");
+        await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), default);
+        Require(store.OpenNotices(fx.Pair.PairId).Any(n => n.ReasonKey == "refusal-notices-deferred"),
+            "a failed refusal refresh raises the deferral notice");
+
+        store.RefusalRefreshError = null;
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        Require(store.OpenNotices(fx.Pair.PairId).All(n => n.ReasonKey != "refusal-notices-deferred"),
+            "the first successful refresh closes the deferral notice");
+    }
+
     private static async Task RepairClosureScopeChecksAsync()
     {
         var fx = Build();
@@ -55,6 +74,7 @@ internal static partial class RunChecks
     internal static async Task BlockerChecksAsync()
     {
         await RefusalRefreshFailureChecksAsync();
+        await RefusalRefreshRecoveryChecksAsync();
         await RepairClosureScopeChecksAsync();
         Require(BlockerNames.DropboxRefuses("folder/.DS_Store") && BlockerNames.DropboxRefuses("Icon" + (char)13),
             "Dropbox reserved metadata names are rejected before rename");
