@@ -424,6 +424,15 @@ internal static partial class RunChecks
                     break;
                 case "defender":
                     Require(store.RetireDefenderGrant(grant!), "setup: the Defender grant retires");
+                    // The held run publishes a quarantine notice for the conflicting grant. Mirror
+                    // VerifyRemovedExclusionAsync: retirement also closes this grant's notices, not unrelated holds.
+                    var grantNotices = store.OpenNotices(fx.Pair.PairId)
+                        .Where(notice => notice.Quarantine?.ConflictingGrantId == grant!.GrantId).ToArray();
+                    Require(grantNotices.Length > 0, "setup: the held run published the Defender grant notice");
+                    foreach (var notice in grantNotices)
+                        store.CloseNotice(notice.NoticeId!, "released");
+                    Require(!store.DefenderGrantHoldPaths(fx.Pair.A.RootId).Contains(source.Path),
+                        "setup: the retired Defender grant no longer holds the item");
                     break;
                 default:
                     store.ClearSyncRetry(fx.Pair.PairId, string.Empty);
