@@ -7,19 +7,20 @@ internal static class ProtectionBatchChecks
 {
     internal static void Run(string folder)
     {
-        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast with { StoreBatchRows = 1 }, TimeProvider.System);
         const string root = "gap-root";
-        var paths = new[] { "Parent/Child/held", "Parent/clear", "Parent-Other/held", "Case/held", "case/other", "￿/held", "pending/leaf", "visited/leaf" };
+        var paths = new[] { "Parent/Child/Deep/held", "Parent/clear", "Parent-Other/held", "Case/held", "case/other", "￿/held", "pending/leaf", "visited/leaf", "Parent/shallow" };
         var items = paths.Select((path, n) => new ItemState(path, ItemKind.File, SyncLocalEndpointStore.ObjectId(1, (ulong)n + 10), null,
             new string('a', 64), 1, DateTimeOffset.UnixEpoch,
-            n == 0 || n == 2 || n == 5 ? ItemFlags.NeedsRehash : ItemFlags.None)).ToArray();
+            n == 0 || n == 2 || n == 5 || n == 8 ? ItemFlags.NeedsRehash : ItemFlags.None)).ToArray();
         var gen = store.BeginGeneration(root, "fixture");
         store.WriteSnapshot(new Snapshot(root, Side.A, gen, "", items, []));
         store.CompleteGeneration(gen, "", true);
         using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
         { DataSource = SqliteStateStore.DatabasePath(folder), Pooling = false }.ToString());
         connection.Open();
-        var queries = new[] { "", "Parent", "Parent/Child", "parent/child/HELD", "Parent/Child/held/deep", "Parent/clear", "Paren", "Parent-Other", "Case", "case/other", "￿", "pending", "visited", "missing" };
+        var queries = new[] { "", "Parent", "Parent/Child", "parent/child/HELD", "Parent/Child/held/deep", "Parent/clear", "Paren", "Parent-Other", "Case", "case/other", "￿", "pending", "visited", "missing", "PARENT", "parent", "Parent/Child/Deep", "Parent/Child/Deep/held" }
+            .Concat(Enumerable.Range(0, 300).Select(n => $"Parent/missing-{n}")).ToArray();
         Check(items.Where(i => i.Flags != ItemFlags.None).Select(i => i.Path));
         var gap = (ILocalGapStore)store;
         gap.BeginGap(root, "synthetic-cursor", 1, false, "synthetic gap");
@@ -58,26 +59,85 @@ internal static class ProtectionBatchChecks
             command.ExecuteNonQuery();
         }
         Check(["Parent/clear"]);
+        var snapshotCalls = 0;
+        var moved = items[1] with { Path = "Moved/clear", Flags = ItemFlags.NeedsRehash };
+        var inserted = items[7] with { Path = "Other/inserted", ObjectId = SyncLocalEndpointStore.ObjectId(1, 99) };
+        var deltaGeneration = store.BeginGeneration(root, "delta");
+        store.ProtectionSnapshotReadyForTest = () =>
         {
-            // Model a million-row root for the planner without constructing a million-row
-            // fixture. These statistics belong solely to this test-owned synthetic database.
-            using var command = connection.CreateCommand();
-            command.CommandText = """
-                ANALYZE;
-                UPDATE sqlite_stat1 SET stat='1000000 1000000 1000 1 1' WHERE idx='file_state';
-                UPDATE sqlite_stat1 SET stat='1000000 1000000 1' WHERE idx='fs_obj';
-                UPDATE sqlite_stat1 SET stat='100000 100000' WHERE idx='fs_flagged';
-                UPDATE sqlite_stat1 SET stat='100000 1' WHERE idx='dir_key';
-                INSERT INTO sqlite_stat1(tbl,idx,stat)
-                  SELECT 'local_gap_item','local_gap_item','100000 100000 1'
-                  WHERE NOT EXISTS(SELECT 1 FROM sqlite_stat1 WHERE idx='local_gap_item');
-                UPDATE sqlite_stat1 SET stat='100000 100000 1' WHERE idx='local_gap_item';
-                ANALYZE sqlite_schema;
-                """;
+            snapshotCalls++;
+            // StoreBatchRows=1 commits the unrelated upsert before the moved held
+            // entity's upsert. Current move suppression preserves the old row until
+            // that upsert; the snapshot guarantee must not depend on that optimization.
+            // The pinned reader retains the old hold across the entire multi-commit call.
+            var writer = Task.Run(() => store.WriteDelta(new Delta(root, Side.A, deltaGeneration, "", "",
+            [
+                new Change(ChangeKind.Delete, items[1].ObjectId, items[1].Path, null, DateTimeOffset.UnixEpoch),
+                new Change(ChangeKind.Upsert, inserted.ObjectId, inserted.Path, inserted, null),
+                new Change(ChangeKind.Upsert, moved.ObjectId, moved.Path, moved, null),
+            ], false, [])));
+            LocalChecks.Require(writer.Wait(TimeSpan.FromSeconds(10)), "snapshot releases the gate for multi-commit store writers");
+        };
+        try
+        {
+            var before = store.ProtectionBatch(root, ItemFlags.NeedsRehash, [items[1].Path, moved.Path]);
+            LocalChecks.Require(snapshotCalls == 1 && before[0].Covered && !before[1].Covered,
+                "pinned snapshot retains old-path hold across multi-commit move");
+        }
+        finally { store.ProtectionSnapshotReadyForTest = null; }
+        var afterMove = store.ProtectionBatch(root, ItemFlags.NeedsRehash, [items[1].Path, moved.Path]);
+        LocalChecks.Require(!afterMove[0].Covered && afterMove[1].Covered,
+            "next batch sees the moved hold only at its new path");
+        var failures = 0;
+        store.ProtectionSnapshotReadyForTest = () => { failures++; throw new IOException("synthetic reader failure"); };
+        try
+        {
+            LocalChecks.Require(store.ProtectionBatch(root, ItemFlags.NeedsRehash, [moved.Path])[0].Covered && failures == 1,
+                "one reader failure falls back once without relaxing the hold");
+        }
+        finally { store.ProtectionSnapshotReadyForTest = null; }
+
+        store.ProtectionSnapshotReadyForTest = () => throw new SqliteException("synthetic corruption", 11);
+        var damaged = false;
+        try { store.ProtectionBatch(root, ItemFlags.NeedsRehash, [moved.Path]); }
+        catch (StateDamagedException) { damaged = true; }
+        finally { store.ProtectionSnapshotReadyForTest = null; }
+        LocalChecks.Require(damaged, "corruption remains a damage exception rather than reader fallback");
+
+        // Seed one real pending fixture row so ANALYZE emits its WITHOUT ROWID PK
+        // statistic. Resolve that index via pragma_index_list instead of guessing its name.
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "INSERT INTO local_gap_item(root_no,object_id,epoch,expected_json) " +
+                "SELECT root_no,$pending,epoch,'{}' FROM local_gap; ANALYZE;";
+            command.Parameters.AddWithValue("$pending", items[6].ObjectId);
+            command.ExecuteNonQuery();
+        }
+        SetStats("file_state", null, "1000000 1000000 1000 1 1");
+        SetStats("file_state", "fs_obj", "1000000 1000000 1");
+        SetStats("file_state", "fs_flagged", "100000 100000");
+        SetStats("dir", "dir_key", "100000 1");
+        SetStats("local_gap_item", null, "100000 100000 1");
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "ANALYZE sqlite_schema;";
             command.ExecuteNonQuery();
         }
         Plan(SqliteStateStore.ProtectionDirectSql, true);
         Plan(SqliteStateStore.ProtectionDirectoriesSql, false);
+        Plan(SqliteStateStore.ProtectionRootSql, false);
+
+        void SetStats(string table, string? index, string stats)
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE sqlite_stat1 SET stat=$stats WHERE tbl=$table AND " +
+                "(idx=$index OR ($index IS NULL AND (idx=$table OR idx IN " +
+                "(SELECT name FROM pragma_index_list($table) WHERE origin='pk'))));";
+            command.Parameters.AddWithValue("$table", table);
+            command.Parameters.AddWithValue("$index", (object?)index ?? DBNull.Value);
+            command.Parameters.AddWithValue("$stats", stats);
+            LocalChecks.Require(command.ExecuteNonQuery() == 1, "million-item planner statistic updates exactly one real index");
+        }
 
         void Check(IEnumerable<string> held)
         {
@@ -102,6 +162,15 @@ internal static class ProtectionBatchChecks
             var details = new List<string>();
             using var reader = command.ExecuteReader();
             while (reader.Read()) details.Add(reader.GetString(3));
+            if (sql == SqliteStateStore.ProtectionRootSql)
+            {
+                LocalChecks.Require(details.Any(d => d.Contains("fs_flagged", StringComparison.Ordinal)) &&
+                    details.Any(d => d.Contains("fs_obj", StringComparison.Ordinal)) &&
+                    details.Any(d => d.Contains("SEARCH gi USING PRIMARY KEY", StringComparison.Ordinal)) &&
+                    !details.Any(d => d.StartsWith("SCAN f", StringComparison.Ordinal)),
+                    "root containment uses flagged, object and pending entity indexes");
+                return;
+            }
             LocalChecks.Require(details.Any(d => d.Contains("dir_key", StringComparison.Ordinal)) &&
                 details.Any(d => d.Contains("SEARCH f USING PRIMARY KEY (root_no=? AND dir_no=?", StringComparison.Ordinal)) &&
                 details.Any(d => d.Contains("SEARCH gi USING PRIMARY KEY (root_no=? AND object_id=?)", StringComparison.Ordinal)) &&

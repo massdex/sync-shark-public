@@ -1,39 +1,90 @@
+using Microsoft.Data.Sqlite;
+
 namespace Massdex.SyncShark.V2;
 
 public sealed partial class SqliteStateStore
 {
     internal long ProtectionBatchQueries { get; private set; }
 
+    // Test seam after the first SELECT has pinned the snapshot and the shared gate is released.
+    internal Action? ProtectionSnapshotReadyForTest { get; set; }
+
     public IReadOnlyList<ProtectionMatch> ProtectionBatch(string rootId, ItemFlags flags, IReadOnlyList<string> paths)
     {
         if (paths.Count > 1024) throw new ArgumentOutOfRangeException(nameof(paths));
         if (paths.Count == 0) return Array.Empty<ProtectionMatch>();
         using var operation = RunOperations.Begin(RunOperationKind.Store, "store ProtectionBatch");
-        // Only capture connection metadata under the shared gate. Even a negative containment
-        // check over a large subtree must not monopolize the gap writer's connection/lock.
-        var connectionString = InStore(() =>
+        lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             ProtectionBatchQueries++;
-            return new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder(_connection.ConnectionString)
-            {
-                Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
-                Cache = Microsoft.Data.Sqlite.SqliteCacheMode.Private,
-                Pooling = false,
-            }.ToString();
-        });
+        }
         try
         {
-            using var connection = new Microsoft.Data.Sqlite.SqliteConnection(connectionString);
-            connection.Open();
-            StoreSchema.Execute(connection, null, "PRAGMA query_only=ON; PRAGMA cache_size=-2048;");
-            return ReadProtectionBatch(connection, rootId, flags, paths);
+            try
+            {
+                var snapshot = OpenProtectionSnapshot(rootId);
+                using var connection = snapshot.Connection;
+                using var transaction = snapshot.Transaction;
+                ProtectionSnapshotReadyForTest?.Invoke();
+                return ReadProtectionBatch(connection, transaction, snapshot.Root, flags, paths);
+            }
+            catch (Exception exception) when (exception is not StateDamagedException &&
+                !(exception is SqliteException sqlite && StoreSchema.IsDamaged(sqlite)))
+            {
+                // A transient extra-reader failure must not stop comparison. Retry exactly
+                // once on the existing connection; this slower fallback retains every hold.
+                var code = exception is SqliteException failure
+                    ? $" sqlite={failure.SqliteErrorCode}/{failure.SqliteExtendedErrorCode}" : "";
+                RunLog.Trace($"protection reader unavailable ({exception.GetType().Name}{code}): {exception.Message}; using gated store connection once");
+                lock (_gate)
+                {
+                    ObjectDisposedException.ThrowIf(_disposed, this);
+                    using var transaction = _connection.BeginTransaction(deferred: true);
+                    var root = ProtectionRootNumber(_connection, transaction, rootId);
+                    return ReadProtectionBatch(_connection, transaction, root, flags, paths);
+                }
+            }
         }
-        catch (Microsoft.Data.Sqlite.SqliteException exception) when (StoreSchema.IsDamaged(exception))
+        catch (SqliteException exception) when (StoreSchema.IsDamaged(exception))
         {
             throw new StateDamagedException($"v2 state is damaged: {exception.Message}", exception);
         }
     }
+
+    private (SqliteConnection Connection, SqliteTransaction Transaction, long? Root) OpenProtectionSnapshot(string rootId)
+    {
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            var connection = new SqliteConnection(new SqliteConnectionStringBuilder(_connection.ConnectionString)
+            {
+                Mode = SqliteOpenMode.ReadOnly, Cache = SqliteCacheMode.Private, Pooling = false,
+            }.ToString());
+            SqliteTransaction? transaction = null;
+            try
+            {
+                connection.Open();
+                StoreSchema.Execute(connection, null, "PRAGMA cache_size=-2048;");
+                transaction = connection.BeginTransaction(deferred: true);
+                // BeginTransaction alone does not pin a deferred snapshot. The first SELECT
+                // must also run under _gate, between store calls, never between commits of
+                // one multi-batch delta. Only the later bounded scans run outside the gate.
+                var root = ProtectionRootNumber(connection, transaction, rootId);
+                return (connection, transaction, root);
+            }
+            catch
+            {
+                transaction?.Dispose();
+                connection.Dispose();
+                throw;
+            }
+        }
+    }
+
+    private static long? ProtectionRootNumber(SqliteConnection connection, SqliteTransaction transaction, string rootId) =>
+        StoreSchema.Scalar(connection, transaction,
+            "SELECT root_no FROM root WHERE root_id=$id;", ("$id", rootId)) is long root ? root : null;
 
     /// <summary>One indexed streaming query builds the bounded snapshot; no ItemState decoding.</summary>
     public PathProtectionIndex? ProtectionIndex(string rootId, ItemFlags flags,

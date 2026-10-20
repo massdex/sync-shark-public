@@ -149,12 +149,22 @@ internal sealed class LocalGapWorker(ILocalGapStore store, ILocalGapIo io) : IAs
         }
         // Even a poison item advances discovery. Its protected, entity-owned work is retried separately.
         store.GapDiscoveredBatch(root.RootId, epoch, discovered);
-        store.SetGapDiscoveryReasons(root.RootId, epoch, reasons);
+        foreach (var failure in failures) store.FailGapItem(root.RootId, epoch, failure.Item, failure.Reason);
+        // Diagnostics are best effort and must never skip poison-item accounting or
+        // prevent discovery from completing after durable work has been recorded.
+        // Genuine store corruption is still surfaced, never masked as a diagnostic outage.
+        try
+        {
+            if (reasons.Count != 0) store.SetGapDiscoveryReasons(root.RootId, epoch, reasons);
+        }
+        catch (Exception error) when (error is not (StateDamagedException or OperationCanceledException or OutOfMemoryException))
+        {
+            RunLog.Trace($"local gap discovery reasons unavailable: {error}");
+        }
         if (page.Count > 0)
             RunLog.Trace($"local gap metadata page: root={root.RootId}; epoch={epoch.Epoch}; count={page.Count}; " +
                 string.Join(", ", counts.OrderBy(entry => entry.Key, StringComparer.Ordinal).Select(entry => $"{entry.Key}={entry.Value}")) +
                 "; first-win32=" + (firstWin32 ?? "none"));
-        foreach (var failure in failures) store.FailGapItem(root.RootId, epoch, failure.Item, failure.Reason);
         if (page.Count < 128) store.GapDiscoveryDone(root.RootId, epoch);
         return page.Count > 0;
     }

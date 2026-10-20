@@ -63,16 +63,12 @@ public sealed partial class SqliteStateStore
             directory.StartsWith(candidate, StringComparison.Ordinal));
 
     private static IReadOnlyList<ProtectionMatch> ReadProtectionBatch(SqliteConnection connection,
-        string rootId, ItemFlags flags, IReadOnlyList<string> paths)
+        SqliteTransaction transaction, long? rootNumber, ItemFlags flags, IReadOnlyList<string> paths)
     {
         var result = new ProtectionMatch[paths.Count];
-        // A deferred, read-only WAL snapshot keeps all branches consistent while gap workers
-        // continue writing through the main connection. No root-sized managed collection.
-        using var transaction = connection.BeginTransaction(deferred: true);
-        var rootValue = StoreSchema.Scalar(connection, transaction,
-            "SELECT root_no FROM root WHERE root_id=$id;", ("$id", rootId));
-        if (rootValue is null) return result;
-        var root = (long)rootValue;
+        // The caller pins this snapshot at a store-call boundary before releasing _gate.
+        if (rootNumber is null) return result;
+        var root = rootNumber.Value;
         var gap = false;
         var done = true;
         var after = "";
