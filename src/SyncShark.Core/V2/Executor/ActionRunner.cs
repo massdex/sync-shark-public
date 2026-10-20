@@ -13,6 +13,7 @@ internal sealed class ActionRunner
     private const string UnexpectedKind = "Unexpected effect kind ";
 
     private readonly StoreCommitter _committer;
+    private readonly DropboxQuota _quota;
     private readonly SyncTransferResourceController _admission;
     private readonly string _pairId;
     private readonly TimeSpan _admissionRetryDelay;
@@ -25,9 +26,10 @@ internal sealed class ActionRunner
 
     internal ActionRunner(StoreCommitter committer, V2Settings settings, SyncTransferResourceController admission,
         string pairId, IEndpointWriter a, IEndpointWriter b, IReadOnlyList<SyncAction> dependencies,
-        ConcurrentDictionary<string, Outcome> outcomes)
+        ConcurrentDictionary<string, Outcome> outcomes, DropboxQuota? quota = null)
     {
         _committer = committer;
+        _quota = quota ?? new DropboxQuota(null, false);
         _admission = admission;
         _pairId = pairId;
         _admissionRetryDelay = settings.AdmissionRetryDelay;
@@ -55,6 +57,8 @@ internal sealed class ActionRunner
     private async Task<ActionResult?> RunStepsAsync(SyncAction action, CancellationToken ct)
     {
         if (await CommitOnlyOrSkipAsync(action, ct).ConfigureAwait(false) is { } early) return early;
+        if (_quota.Blocks(action))
+            return await CommitAsync(action, Failed(action, DropboxQuota.Detail) with { UploadQuotaBlocked = true });
         if (RecoverySafety.RequiresRecovery(action) && RecoverySafety.Unavailable(_a, _b) is { } recovery)
             return Failed(action, "Recovery location unavailable: " + recovery);
         var target = action.Target == Side.A ? _a : _b;
@@ -109,6 +113,8 @@ internal sealed class ActionRunner
             if (freeSpace.Refusal is { } refusal)
                 return await PendingForFreeSpaceAsync(action, refusal).ConfigureAwait(false);
 
+            if (_quota.Blocks(action))
+                return await CommitAsync(action, Failed(action, DropboxQuota.Detail) with { UploadQuotaBlocked = true });
             ProviderEffectContext.Current.Value = _committer.CreateProviderContext(action);
             // Step 4: the intent is durable before any effect is attempted (group-committed with its neighbours').
             await _committer.RecordIntentAsync(action, ct).ConfigureAwait(false);
@@ -171,6 +177,12 @@ internal sealed class ActionRunner
             return await CommitAsync(action, new ActionResult(action.ActionId, Outcome.Skipped, null, null,
                 recoveryHolder.Reference, ProviderNameRefusedException.Detail) { ProviderNameRefused = true })
                 .ConfigureAwait(false);
+        }
+        catch (ProviderWriteBlockedException e) when (e.Code == "insufficient_space")
+        {
+            if (_quota.Suspend())
+                await _committer.AddNoticeAsync(DropboxQuota.Notice(_pairId, action.Target, action.Source?.Size));
+            return await CommitAsync(action, Failed(action, DropboxQuota.Detail) with { UploadQuotaBlocked = true });
         }
         catch (ProviderWriteThrottledException e)
         {

@@ -48,6 +48,12 @@ internal static class DropboxItems
         {
             var mapped = MapKnownWriteError(current);
             if (!ReferenceEquals(current, mapped)) return mapped;
+            // A definite quota refusal is useful even under the deliberate session-start wrapper.
+            // Do not unwrap that wrapper for conflict/not_found/throttle classification.
+            if (current is IOException { InnerException: DropboxApiException { WriteErrorTag: "insufficient_space" } quota })
+                return MapKnownWriteError(quota);
+            // Provider-authored IO wrappers deliberately prevent staging errors becoming target mismatches.
+            if (current is not (AggregateException or System.Reflection.TargetInvocationException)) break;
         }
         return exception;
     }
@@ -65,6 +71,8 @@ internal static class DropboxItems
             new ProviderWriteBlockedException("insufficient_space", "Free Dropbox storage or increase its quota, then Retry.", exception),
         DropboxApiException { WriteErrorTag: "no_write_permission" or "operation_suppressed" } denied =>
             new ProviderWriteBlockedException(denied.WriteErrorTag!, "Check write permission for this Dropbox folder, then Retry.", exception),
+        DropboxApiException { WriteErrorTag: "restricted_content" } =>
+            new ProviderWriteBlockedException("restricted_content", "Dropbox restricted this content. Check its access restrictions, then Retry.", exception),
         DropboxApiException { WriteErrorTag: "malformed_path" } =>
             new ProviderWriteBlockedException("malformed_path", "Check the destination path and folder binding, then Retry.", exception),
         DropboxApiException { WriteErrorTag: "team_folder" } =>

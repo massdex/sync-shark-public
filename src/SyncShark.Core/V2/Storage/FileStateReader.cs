@@ -136,11 +136,12 @@ internal sealed class FileStateReader
             "ORDER BY f.dir_no,f.name_key,f.name LIMIT $limit OFFSET $offset;",
             [("$r", rootNo), ("$pk", RowCodec.Key(directory)), ("$limit", limit), ("$offset", offset)]);
 
-    public IReadOnlyList<ItemState> LiveFlaggedPage(long rootNo, ItemFlags flags, ItemState? after, int limit)
+    public IReadOnlyList<ItemState> LiveFlaggedPage(long rootNo, ItemFlags flags, ItemState? after, int limit, SqliteTransaction? transaction = null)
     {
         var (parent, name) = after is null ? ("", "") : RowCodec.Split(after.Path);
-        var dir = after is null ? -1L : (long?)StoreSchema.Scalar(_connection, null,
+        var dir = after is null ? -1L : (long?)StoreSchema.Scalar(_connection, transaction,
             "SELECT dir_no FROM dir WHERE path=$path;", ("$path", parent)) ?? -1L;
+        if (after is not null && dir < 0) return Array.Empty<ItemState>();
         // fs_refused is ordered by root, kind, then the WITHOUT ROWID primary key. Seek rather
         // than OFFSET: enumerating a million refusals must not revisit every earlier page.
         var sql = $"SELECT {Columns} FROM file_state f INDEXED BY fs_flagged JOIN dir d ON d.dir_no=f.dir_no " +
@@ -148,7 +149,7 @@ internal sealed class FileStateReader
             "ORDER BY f.kind,f.dir_no,f.name_key,f.name LIMIT $limit;";
         return QueryItems(FlaggedSql(sql, flags), [("$r", rootNo), ("$f", (long)flags), ("$limit", limit),
             ("$kind", after is null ? -1L : RowCodec.KindCode(after.Kind)), ("$dir", dir),
-            ("$key", RowCodec.Key(name)), ("$name", name)]);
+            ("$key", RowCodec.Key(name)), ("$name", name)], transaction: transaction);
     }
 
     /// <summary>Live rows carrying any requested flags, scanning only the root's indexed nonzero-flag rows.</summary>
@@ -255,9 +256,9 @@ internal sealed class FileStateReader
 
     // Live callers need only item states, not a second root-sized buffer of keys and states.
     private List<ItemState> QueryItems(string sql, (string Name, object? Value)[] arguments,
-        bool distinctPaths = false)
+        bool distinctPaths = false, SqliteTransaction? transaction = null)
     {
-        using var command = StoreSchema.Command(_connection, null, sql);
+        using var command = StoreSchema.Command(_connection, transaction, sql);
         foreach (var (name, value) in arguments) command.Parameters.AddWithValue(name, value ?? DBNull.Value);
         HashSet<string>? seen = distinctPaths ? new(StringComparer.Ordinal) : null;
         var rows = new List<ItemState>();

@@ -167,7 +167,7 @@ public enum NoticeKind { Info, KeepBoth, EditBeatsDelete, AutoConflict, UserDeci
 /// </summary>
 public sealed record Notice(string PairId, int Rule, NoticeKind Kind, string Path, string Detail, string ReasonKey,
     string? NoticeId = null, FreeSpaceNoticeMetadata? FreeSpace = null,
-    RetainedNoticeVersion? RetainedVersion = null, NoticeRepair? Repair = null, bool FolderInspection = false);
+    RetainedNoticeVersion? RetainedVersion = null, NoticeRepair? Repair = null, bool FolderInspection = false, bool? UploadSuspended = null, Side? UploadQuotaSide = null, long? UploadQuotaNeedBytes = null);
 
 /// <summary>Identity-bound repair evidence, stored in the existing notice detail payload.</summary>
 public sealed record NoticeRepair(Side Side, ItemState Item, string? Destination = null);
@@ -286,6 +286,7 @@ public sealed record ActionResult(string ActionId, Outcome Outcome, ItemState? N
 {
     /// <summary>Fresh reconciliation proved only a temporary wait; null requires ordinary review.</summary>
     public int? RetryAfterSeconds { get; init; }
+    public bool UploadQuotaBlocked { get; init; }
 
     /// <summary>Handled by ignoring the refused name, not by completing an endpoint effect.</summary>
     public bool ProviderNameRefused { get; init; }

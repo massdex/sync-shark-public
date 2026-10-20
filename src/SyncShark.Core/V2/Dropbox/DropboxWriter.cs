@@ -4,6 +4,8 @@ namespace Massdex.SyncShark.V2;
 public sealed partial class DropboxWriter : IEndpointWriter, ISyncTransferResourceEndpoint, IProviderEffectReconciler,
     IFolderTreeDeleter, ISyncDirectDownloadSource
 {
+    internal Task<bool> HasUploadSpaceAsync(long needBytes, CancellationToken ct) => _client.HasUploadSpaceAsync(needBytes, ct);
+
     private readonly Side _side;
     private readonly DropboxPilotClient _client;
     private readonly string _spoolDirectory;

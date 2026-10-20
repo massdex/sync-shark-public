@@ -160,7 +160,7 @@ public sealed partial class SyncRun
             RetryAfter = _time.GetUtcNow().AddSeconds(Math.Min(300, 10 * Math.Pow(2, Math.Min(attempts - 1, 5))))
         };
         _store.SaveSyncRetry(pair.PairId, retry);
-        if (attempts >= 1 && retry.Kind is not ("planning" or "recovery"))
+        if (retry.LastError != DropboxQuota.Detail && attempts >= 1 && retry.Kind is not ("planning" or "recovery"))
             WriteNotices([new Notice(pair.PairId, 40, NoticeKind.Info, path,
                 $"Sync will retry this item later ({attempts} attempts): {retry.LastError}. Options: retry now / exclude / ignore.", "sync-retry",
                 FolderInspection: _store.Live(pair.A.RootId, [path]).Concat(_store.Live(pair.B.RootId, [path]))
@@ -172,7 +172,8 @@ public sealed partial class SyncRun
         var failed = tally.Failures.GroupBy(result => result.ActionId).ToDictionary(group => group.Key, group => group.Last().Reason);
         var reasons = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var action in plan.Actions)
-            if (failed.GetValueOrDefault(action.ActionId) is { } reason) reasons[action.Path] = reason;
+            if (tally.WasQuotaBlocked(action.ActionId)) reasons[action.Path] = DropboxQuota.Detail;
+            else if (failed.GetValueOrDefault(action.ActionId) is { } reason) reasons[action.Path] = reason;
         return reasons;
     }
 
@@ -211,6 +212,7 @@ public sealed partial class SyncRun
                 HeldReviewed: held.ContainsKey(path), HeldExpected: held.TryGetValue(path, out var heldItem)
                     ? _store.Live(heldItem.Local == Side.A ? pair.A.RootId : pair.B.RootId, [path]).FirstOrDefault() : null,
                 PendingNotice: _store.SyncRetryAt(pair.PairId, path)?.PendingNotice));
+            if (reason == DropboxQuota.Detail) continue;
             WriteNotices([new Notice(pair.PairId, 40, NoticeKind.Info, path,
                 reason + " This item is not synced yet and will be retried. Other items can continue. Options: retry now / exclude / ignore.", "sync-retry")]);
         }

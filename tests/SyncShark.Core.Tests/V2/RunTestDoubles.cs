@@ -429,6 +429,17 @@ internal sealed class RecordingStore : IStateStore
 
     public IReadOnlyList<SyncAction> UnresolvedIntents(string pairId) => _inner.UnresolvedIntents(pairId);
 
+    public Exception? RefusalRefreshError { get; set; }
+    public void RefreshProviderNameNotices(PairDef pair)
+    {
+        if (RefusalRefreshError is { } error) throw error;
+        var store = (IStateStore)this;
+        foreach (var notice in ProviderNameNotices.Read(pair,
+            (root, after) => store.LiveFlaggedSummary(root.RootId, ItemFlags.ProviderNameRefused, 0).Count == 0
+                ? Array.Empty<ItemState>() : store.LiveFlaggedPage(root.RootId, ItemFlags.ProviderNameRefused, after, 100)))
+            AddNotices([notice]);
+    }
+
     public string? FailNoticePath { get; set; }
     public void AddNotices(IEnumerable<Notice> n)
     {

@@ -9,6 +9,9 @@ namespace Massdex.SyncShark.V2;
 /// <summary>An in-memory Dropbox account under the root "/Pilot" (folder id id:pilot-folder) for the v2 checks.</summary>
 internal sealed partial class DropboxWire : HttpMessageHandler
 {
+    public bool QuotaFull { get; set; }
+    public long QuotaFreeBytes { get; set; } = 999;
+
     internal const string RootId = "id:pilot-folder";
 
     private sealed record Node(string Relative, string Id, string Rev, byte[] Bytes, bool Folder,
@@ -169,6 +172,8 @@ internal sealed partial class DropboxWire : HttpMessageHandler
     {
         switch (path)
         {
+            case "/2/users/get_space_usage":
+                return Json(new { used = 1, allocation = new Dictionary<string, object> { [".tag"] = "individual", ["allocated"] = QuotaFull ? 1L : 1L + QuotaFreeBytes } });
             case "/2/users/get_current_account":
                 return Json(new
                 {

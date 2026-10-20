@@ -46,7 +46,7 @@ internal sealed partial class DropboxWire
                     ? new Dictionary<string, object> { [".tag"] = FailFolderResultAfterDelete ? "failure" : "success", ["metadata"] = BuryFolder(node) }
                     : new Dictionary<string, object>
                     {
-                        [".tag"] = "failure", ["failure"] = new Dictionary<string, object> { [".tag"] = "path_lookup" }
+                        [".tag"] = "failure", ["failure"] = new Dictionary<string, object> { [".tag"] = "path_lookup", ["path_lookup"] = new Dictionary<string, object> { [".tag"] = "not_found" } }
                     });
                 continue;
             }
@@ -70,7 +70,7 @@ internal sealed partial class DropboxWire
             {
                 results.Add(new Dictionary<string, object>
                 {
-                    [".tag"] = "failure", ["failure"] = new Dictionary<string, object> { [".tag"] = "path_lookup" }
+                    [".tag"] = "failure", ["failure"] = new Dictionary<string, object> { [".tag"] = "path_lookup", ["path_lookup"] = new Dictionary<string, object> { [".tag"] = "not_found" } }
                 });
                 continue;
             }

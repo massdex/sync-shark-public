@@ -10,11 +10,18 @@ public sealed partial class SyncRun
         var destination = repair.Destination ?? BlockerNames.Destination(repair.Item.Path, name);
         if (repair.Destination is not null && name is not null && destination != BlockerNames.Destination(repair.Item.Path, name))
             throw new SyncRunRefusedException("The earlier rename must be verified before choosing a different name.");
+        if ((pair.A.Provider == SyncProviders.Dropbox || pair.B.Provider == SyncProviders.Dropbox) &&
+            BlockerNames.DropboxRefuses(destination))
+            throw new SyncRunRefusedException("Dropbox does not accept that name; choose another. Nothing was renamed.");
         await _endpoints.PrepareAsync(pair, ct).ConfigureAwait(false);
         var a = _endpoints.Writer(pair.A);
         var b = _endpoints.Writer(pair.B);
         var writer = repair.Side == Side.A ? a : b;
         var root = repair.Side == Side.A ? pair.A : pair.B;
+        var oppositeRoot = repair.Side == Side.A ? pair.B : pair.A;
+        string InRoot(RootDef endpoint, string path) => root.Provider == SyncProviders.Dropbox && endpoint.Provider == SyncProviders.Local
+            ? DropboxNameMapping.Map(path) : path;
+        var oppositeDestination = InRoot(oppositeRoot, destination);
         var actionId = ShortId.Make("rnm", pair.PairId, notice.NoticeId!, destination);
         var action = new SyncAction(actionId, notice.Rule, ActionKind.Move, repair.Side, destination,
             repair.Item.Path, null, repair.Item, false, null)
@@ -24,9 +31,9 @@ public sealed partial class SyncRun
         var guards = ActionPredicates(pair, LinkExclusions.None);
         foreach (var endpoint in new[] { pair.A, pair.B })
             if (_store.ProtectionBatch(endpoint.RootId, ItemFlags.Link | ItemFlags.Placeholder | ItemFlags.NeedsRehash,
-                [repair.Item.Path, destination]).Any(match => match.Covered || match.Contains))
+                [InRoot(endpoint, repair.Item.Path), InRoot(endpoint, destination)]).Any(match => match.Covered || match.Contains))
                 throw new SyncRunRefusedException("This rename would carry protected links, placeholders or unverified content. Nothing was changed.");
-        if (GuardedActions([action, action with { Target = repair.Side == Side.A ? Side.B : Side.A }], guards)
+        if (GuardedActions([action, action with { Target = repair.Side == Side.A ? Side.B : Side.A, Path = oppositeDestination, FromPath = InRoot(oppositeRoot, repair.Item.Path) }], guards)
             .Any(entry => !Allowed(entry.Guard, entry.Action)))
             throw new SyncRunRefusedException("This path is protected by selection, exclusions, links or a nested pair. Review folder settings first.");
         if (_store.IntentById(pair.PairId, actionId) is { } pending)
@@ -42,10 +49,16 @@ public sealed partial class SyncRun
             // Crash after commit, before returning: recognize only our captured exact identity and revision.
             if (repair.Destination is not null && current is null && SameRepairItem(existing, repair.Item))
                 return ScheduleRenamedItem(pair, notice, destination);
+            if (!SameRepairItem(current, repair.Item) && repair.Destination is null &&
+                current is not null && current.ObjectId == repair.Item.ObjectId && current.Kind == repair.Item.Kind)
+            {
+                _store.AddNotices([notice with { Repair = repair with { Item = current } }]);
+                return "This item changed since the notice was shown; the notice now shows the current version. Choose Rename again. Nothing was renamed.";
+            }
             if (!SameRepairItem(current, repair.Item))
                 throw new SyncRunRefusedException("The item changed identity or revision since this notice. Nothing was renamed. Rename the current item in its source folder, then Retry, or choose Keep excluded.");
-            if (existing is not null || await (repair.Side == Side.A ? b : a).ObserveAsync(destination, ct) is not null ||
-                _store.LiveSpellings(pair.A.RootId, destination).Count != 0 || _store.LiveSpellings(pair.B.RootId, destination).Count != 0)
+            if (existing is not null || await (repair.Side == Side.A ? b : a).ObserveAsync(oppositeDestination, ct) is not null ||
+                _store.LiveSpellings(pair.A.RootId, InRoot(pair.A, destination)).Count != 0 || _store.LiveSpellings(pair.B.RootId, InRoot(pair.B, destination)).Count != 0)
                 throw new SyncRunRefusedException("That name is occupied in one of the two folders. Choose another name; nothing was overwritten.");
             if ((current!.Flags & (ItemFlags.Link | ItemFlags.Placeholder | ItemFlags.Locked)) != 0)
                 throw new SyncRunRefusedException("This item is a link, online-only placeholder or locked item. It was left unchanged.");
@@ -95,6 +108,24 @@ public sealed partial class SyncRun
         if (lines.Count == 1) lines.Add("No children recorded on this page. This is not proof that the folder is empty.");
         if (more) lines.Add($"More items: next offset {offset + size}.");
         return string.Join(Environment.NewLine, lines);
+    }
+
+    private void CloseObservedRepairs(PairDef pair, BothScan scan)
+    {
+        foreach (var notice in _store.OpenNotices(pair.PairId))
+        {
+            if (notice.NoticeId is null || notice.Repair is not { } repair) continue;
+            var sideScan = repair.Side == Side.A ? scan.A : scan.B;
+            if (sideScan.IncompleteSubtrees.Any(path => path.Length == 0 || PairPath.IsSelfOrUnder(repair.Item.Path, path))) continue;
+            var root = repair.Side == Side.A ? pair.A : pair.B;
+            var live = _store.ByObject(root.RootId, repair.Item.ObjectId);
+            if (live is null)
+                _store.CloseNotice(notice.NoticeId, "item-gone");
+            else if (repair.Destination is null && !PairPath.Same(live.Path, repair.Item.Path) &&
+                !live.Flags.HasFlag(ItemFlags.ProviderNameRefused) &&
+                PilotPath.IsWindowsTransferPath(DropboxNameMapping.MatchPath(live)) && !BlockerNames.DropboxRefuses(live.Path))
+                _store.CloseNotice(notice.NoticeId, "name-repaired");
+        }
     }
 
     private bool RepairSynced(Notice notice, Plan plan, Func<string, bool> evaluated, HashSet<string> unsettled)

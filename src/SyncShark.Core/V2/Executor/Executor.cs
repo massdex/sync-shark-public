@@ -44,7 +44,8 @@ public sealed partial class Executor : IExecutor
         var dependencies = actions.Concat(trees.Where(tree => tree.Handled).SelectMany(tree => tree.Actions))
             .Where(action => action.Kind is ActionKind.MkDir or ActionKind.Move or ActionKind.Delete).ToArray();
         var runner = new ActionRunner(committer, _settings, _admission, p.PairId, a, b,
-            dependencies, outcomes);
+            dependencies, outcomes, new DropboxQuota(_store.Pair(p.PairId),
+                _store.NoticeById(p.PairId, DropboxQuota.Id(p.PairId))?.Notice.UploadSuspended == true));
 
         using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
         // Two worker waves can finish while Run consumes results. Capacity follows the existing worker

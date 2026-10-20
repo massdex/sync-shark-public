@@ -32,7 +32,7 @@ internal sealed class NoticeTable
         }
         var noticeId = notice.RetainedVersion is { } retained ? RetainedId(notice.PairId, retained.ActionId) :
             notice.Repair is { } repair ? ShortId.Make("n", notice.PairId, notice.Rule.ToString(CultureInfo.InvariantCulture),
-                RowCodec.Key(notice.Path), notice.ReasonKey, repair.Side.ToString(), repair.Item.ObjectId) :
+                notice.ReasonKey, repair.Side.ToString(), repair.Item.ObjectId) :
             ShortId.Make("n", notice.PairId, notice.Rule.ToString(CultureInfo.InvariantCulture),
                 RowCodec.Key(notice.Path), notice.ReasonKey);
         StoreSchema.Execute(_connection, transaction,
@@ -46,15 +46,14 @@ internal sealed class NoticeTable
         // A version-specific notice is immutable after publication; replay must not reopen a
         // completed choice or replace its committed target identity with a planned source stamp.
         if (notice.RetainedVersion is not null) return;
-        // Generation-zero notice commands must never silently rebind a displayed Rename button to
-        // a newer identity/revision. Refresh display text, but retain the originally published evidence.
-        if (notice.Repair is { Destination: null } && ById(pairNo, noticeId, transaction)?.Notice.Repair is { } captured)
+        // Fresh observations refresh revision evidence, but never erase an already-recorded effect intent.
+        if (notice.Repair is { Destination: null } && ById(pairNo, noticeId, transaction)?.Notice.Repair is { Destination: not null } captured)
             notice = notice with { Repair = captured };
         StoreSchema.Execute(_connection, transaction,
             "UPDATE notice SET state='open', choice=NULL, kind=$kind, path=$path, detail=$detail " +
             "WHERE notice_id=$id AND NOT ($retry=1 AND COALESCE(choice,'')='ignore') " +
             "AND (state <> 'open' OR ($refresh=1 AND detail <> $detail));",
-            ("$retry", NoticeChoices.IsRetryNotice(notice) ? 1 : 0),
+            ("$retry", NoticeChoices.IsRetryNotice(notice) && notice.UploadSuspended is null ? 1 : 0),
             ("$refresh", NoticeChoices.IsRetryNotice(notice) || notice.FreeSpace is not null || (notice.Kind == NoticeKind.UserDecision && notice.Detail.Contains(ProviderNameRefusedException.Detail, StringComparison.Ordinal)) || notice.ReasonKey == ProviderNameRefusedException.NoticeKey ? 1 : 0),
             ("$id", noticeId), ("$kind", notice.Kind.ToString()), ("$path", notice.Path), ("$detail", NoticeDetailCodec.Encode(notice)));
     }
@@ -119,10 +118,14 @@ internal sealed class NoticeTable
             "SELECT pair_no, rule, path, reason_key, detail FROM notice WHERE notice_id=$id;");
         command.Parameters.AddWithValue("$id", noticeId);
         using var reader = command.ExecuteReader();
-        return reader.Read() && reader.GetInt64(0) == pairNo && reader.GetInt64(1) == notice.Rule &&
-            string.Equals(RowCodec.Key(reader.GetString(2)), RowCodec.Key(notice.Path), StringComparison.Ordinal) &&
+        if (!reader.Read()) return false;
+        var saved = NoticeDetailCodec.Decode(notice with
+            { Detail = reader.GetString(4), RetainedVersion = null, Repair = null });
+        return reader.GetInt64(0) == pairNo && reader.GetInt64(1) == notice.Rule &&
+            (notice.Repair is { } repair
+                ? saved.Repair is { } prior && prior.Side == repair.Side && prior.Item.ObjectId == repair.Item.ObjectId
+                : string.Equals(RowCodec.Key(reader.GetString(2)), RowCodec.Key(notice.Path), StringComparison.Ordinal)) &&
             string.Equals(reader.GetString(3), notice.ReasonKey, StringComparison.Ordinal) &&
-            NoticeDetailCodec.Decode(notice with { Detail = reader.GetString(4), RetainedVersion = null })
-                .RetainedVersion?.ActionId == notice.RetainedVersion?.ActionId;
+            saved.RetainedVersion?.ActionId == notice.RetainedVersion?.ActionId;
     }
 }

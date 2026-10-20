@@ -191,6 +191,14 @@ public interface IStateStore : IDisposable
     IReadOnlyList<SyncAction> UnresolvedIntents(string pairId);
 
     void AddNotices(IEnumerable<Notice> n);
+    // Persistent stores override this to page reads and notice writes under one transaction.
+    void RefreshProviderNameNotices(PairDef pair)
+    {
+        foreach (var notice in ProviderNameNotices.Read(pair,
+            (root, after) => LiveFlaggedSummary(root.RootId, ItemFlags.ProviderNameRefused, 0).Count == 0
+                ? Array.Empty<ItemState>() : LiveFlaggedPage(root.RootId, ItemFlags.ProviderNameRefused, after, 100)))
+            AddNotices([notice]);
+    }
     IReadOnlyList<Notice> OpenNotices(string? pairId);
 
     /// <summary>Recovery copies recorded for this pair; the Recovery owner restores or expires them.</summary>

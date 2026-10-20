@@ -177,9 +177,8 @@ internal static partial class DropboxChecks
         await ProviderDeleteAsync(fx.A, "stay.txt");
         await ProviderRenameAsync(fx.A, "new-refusal.txt", "also-accepted.txt");
         await fx.NextAsync(true);
-        Require(fx.Store.OpenNotices("p1").Where(n => n.ReasonKey == ProviderNameRefusedException.NoticeKey)
-                .All(n => n.Path is "delete.txt" or "stay.txt"),
-            "synced renamed identities close; vanished unsynced entities remain for explicit Ignore");
+        Require(!fx.Store.OpenNotices("p1").Any(n => n.ReasonKey == ProviderNameRefusedException.NoticeKey),
+            "last refused item gone closes the notice automatically");
     }
 
     private static async Task ProviderRefusalReportAsync(string root)
@@ -261,8 +260,8 @@ internal static partial class DropboxChecks
     {
         var notices = fx.Store.OpenNotices("p1").Where(n => n.ReasonKey == ProviderNameRefusedException.NoticeKey).ToArray();
         Require(present.Length == count && present.All(path => notices.Count(n => n.Path == path && n.Repair is not null) == 1) &&
-            notices.Select(n => n.Path).Distinct().Count() == notices.Length,
-            "current refused entities have one actionable notice each; unsynced vanished entities retain their notices");
+            notices.Length == count && absent.All(path => notices.All(n => n.Path != path)),
+            "current refused entities have one actionable notice each; deleted or repaired entities close automatically");
     }
 
     private static async Task ProviderRenameAsync(FakeEndpoint endpoint, string from, string to)

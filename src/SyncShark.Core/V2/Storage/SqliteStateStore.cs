@@ -407,6 +407,18 @@ public sealed partial class SqliteStateStore : IStateStore
         return pairNo is null ? new List<SyncAction>() : _intents.Unresolved(pairNo.Value);
     });
 
+    public void RefreshProviderNameNotices(PairDef pair) => InStore(() =>
+    {
+        var pairNo = RequirePair(pair.PairId);
+        var roots = new Dictionary<string, long?> { [pair.A.RootId] = RootNo(pair.A.RootId), [pair.B.RootId] = RootNo(pair.B.RootId) };
+        using var transaction = _connection.BeginTransaction();
+        var now = NowMs();
+        foreach (var notice in ProviderNameNotices.Read(pair, (root, after) =>
+            roots[root.RootId] is { } rootNo ? _reads.LiveFlaggedPage(rootNo, ItemFlags.ProviderNameRefused, after, 100, transaction) : Array.Empty<ItemState>()))
+            _notices.Add(transaction, pairNo, notice, now);
+        transaction.Commit();
+    });
+
     public void AddNotices(IEnumerable<Notice> notices) => InStore(() =>
     {
         using var transaction = _connection.BeginTransaction();

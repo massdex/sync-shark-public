@@ -1404,7 +1404,7 @@ public sealed partial class DropboxPilotClient(
         await EnsureRemoteParentFoldersAsync(destination, cancellationToken);
         var occupant = await FindEntryAtPathAsync(destination, cancellationToken);
         if (occupant is not null && !string.Equals(occupant.Id, expected.Id, StringComparison.Ordinal))
-            throw new DropboxApiException(HttpStatusCode.Conflict, "Dropbox move destination is occupied.");
+            throw new DropboxApiException(HttpStatusCode.Conflict, "Dropbox move destination is occupied.") { WriteErrorTag = "conflict" };
         // This exact-identity metadata read is the final provider observation before the single move
         // request, and it is what remains between the last identity/location check and the effect. It
         // requires the retained stable ID, the exact intended source path and the kind while accepting
@@ -1454,7 +1454,7 @@ public sealed partial class DropboxPilotClient(
         var expectedId = expected.Id;
         if (string.IsNullOrWhiteSpace(expectedId))
             throw new DropboxApiException(HttpStatusCode.Conflict,
-                "Dropbox move source changed after inventory.");
+                "Dropbox move source changed after inventory.") { WriteErrorTag = "conflict" };
         PilotRemoteEntry current;
         try
         {
@@ -1463,11 +1463,11 @@ public sealed partial class DropboxPilotClient(
         catch (Exception exception) when (exception is IOException or InvalidDataException)
         {
             throw new DropboxApiException(HttpStatusCode.Conflict,
-                "Dropbox move source changed after inventory.");
+                "Dropbox move source changed after inventory.") { WriteErrorTag = "conflict" };
         }
         if (current.Kind != expected.Kind)
             throw new DropboxApiException(HttpStatusCode.Conflict,
-                "Dropbox move source changed after inventory.");
+                "Dropbox move source changed after inventory.") { WriteErrorTag = "conflict" };
         return current;
     }
 

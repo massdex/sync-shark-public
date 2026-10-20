@@ -17,6 +17,21 @@ public sealed partial class SyncRun
                 throw new SyncRunRefusedException("Name is only for Rename; offset is only for Show remaining items.");
             var notice = saved.Value.Notice;
             var pair = _store.Pair(pairId) ?? throw new SyncRunRefusedException("The pair is no longer available.");
+            if (notice.ReasonKey == DropboxQuota.NoticeKey)
+            {
+                if (choice == NoticeChoices.RetryNow)
+                {
+                    _store.AddNotices([notice with { UploadSuspended = false }]);
+                    _store.CloseNotice(noticeId, choice);
+                    foreach (var retry in _store.ReadSyncRetries(pairId))
+                        if (retry.LastError == DropboxQuota.Detail)
+                            _store.SaveSyncRetry(pairId, retry with { RetryAfter = DateTimeOffset.MinValue });
+                    return "Upload retry requested. Downloads and other work continue.";
+                }
+                // Dismiss the message, not the upload hold; do not exclude the pair's root.
+                _store.CloseNotice(noticeId, choice);
+                return "Notice ignored. Uploads remain suspended until a quota check finds free space. No files were excluded or deleted.";
+            }
             if (choice == NoticeChoices.Rename) return await RenameNoticeItemAsync(pair, notice, input?.Name, token);
             if (choice == NoticeChoices.ShowRemaining) return RemainingItems(pair, notice, input?.Offset ?? 0);
             if (choice == NoticeChoices.OpenDropbox)

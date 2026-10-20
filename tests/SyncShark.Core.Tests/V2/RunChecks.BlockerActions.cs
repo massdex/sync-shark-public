@@ -25,6 +25,16 @@ internal static partial class RunChecks
         Require(NoticeChoices.Options(notice).Any(o => o.Choice == NoticeChoices.Rename) &&
             NoticeChoices.Options(notice).Any(o => o.Choice == NoticeChoices.Ignore), "refused name offers real Rename / Keep excluded options");
         Require(store.NoticeById(pairId, notice.NoticeId!)?.Notice.Repair?.Item == original, "repair provenance round trips through SQLite");
+        foreach (var name in new[] { "desktop.ini", ".dropbox", "~$document.docx" })
+        {
+            try
+            {
+                await run.ApplyRetryNoticeChoiceAsync(pairId, notice.NoticeId!, NoticeChoices.Rename, default, input: new(name));
+                throw new InvalidOperationException("Provider-reserved rename was accepted");
+            }
+            catch (SyncRunRefusedException) { }
+        }
+        Require(fx.WriterA.Moves == 0, "Dropbox-reserved custom names are rejected before any move");
         fx.B.Seed("occupied.txt", "other");
         try
         {
@@ -52,28 +62,33 @@ internal static partial class RunChecks
         Require(store.SyncRetryAt(pairId, "safe.txt") is not null, "rename schedules targeted re-observation");
         await FirstSyncAsync(run, fx);
         Require(store.NoticeById(pairId, notice.NoticeId!) is { Closed: true }, "notice closes only after renamed identity has synced");
-        var reserved = fx.B.Seed("CON.txt", "cloud document");
+        var reserved = fx.B.Seed("CON", "", ItemKind.Folder);
+        for (var i = 0; i < 3; i++) fx.B.Seed("CON/child" + i, "child");
         store.AddNotices([new(pairId, 30, NoticeKind.Info, reserved.Path, "Windows reserved name", "windows-name-invalid",
             Repair: new NoticeRepair(Side.B, reserved))]);
         var invalid = store.OpenNotices(pairId).Single(n => n.Path == reserved.Path);
         await run.ApplyRetryNoticeChoiceAsync(pairId, invalid.NoticeId!, NoticeChoices.Rename, default);
-        Require((await fx.B.ObserveAsync("Renamed-CON.txt", default))?.ObjectId == reserved.ObjectId,
-            "Windows reserved cloud name is renamed on its source side with safe suggestion");
+        Require((await fx.B.ObserveAsync("Renamed-CON", default))?.ObjectId == reserved.ObjectId,
+            "Windows reserved cloud folder is renamed on its source side with safe suggestion");
+        Require(await fx.B.ObserveAsync("Renamed-CON/child2", default) is not null, "folder Rename carries its children");
 
         var changed = fx.A.Seed("changed.txt", "before");
         store.AddNotices([Refusal(changed)]);
         var stale = store.OpenNotices(pairId).Single(n => n.Path == "changed.txt");
         var updated = fx.A.Seed("changed.txt", "after");
-        store.AddNotices([Refusal(updated)]);
-        Require(store.NoticeById(pairId, stale.NoticeId!)?.Notice.Repair?.Item.VersionId == changed.VersionId,
-            "refresh cannot silently rebind a displayed Rename button to a newer revision");
-        try
-        {
-            await run.ApplyRetryNoticeChoiceAsync(pairId, stale.NoticeId!, NoticeChoices.Rename, default);
-            throw new InvalidOperationException("Stale identity was renamed");
-        }
-        catch (SyncRunRefusedException) { }
-        Require(fx.WriterA.Moves == 1, "changed identity or revision is not renamed");
+        var refresh = await run.ApplyRetryNoticeChoiceAsync(pairId, stale.NoticeId!, NoticeChoices.Rename, default);
+        Require(refresh.Contains("Choose Rename again", StringComparison.Ordinal) && fx.WriterA.Moves == 1,
+            "first action refreshes changed revision without moving it");
+        Require(store.NoticeById(pairId, stale.NoticeId!)?.Notice.Repair?.Item.VersionId == updated.VersionId,
+            "fresh evidence replaces stale revision");
+        await run.ApplyRetryNoticeChoiceAsync(pairId, stale.NoticeId!, NoticeChoices.Rename, default);
+        Require(fx.WriterA.Moves == 2, "second action renames the refreshed revision");
+        var observed = updated with { Path = "another-refused.txt", VersionId = "later" };
+        store.AddNotices([Refusal(observed)]);
+        Require(store.OpenNotices(pairId).Count(n => n.Repair?.Item.ObjectId == updated.ObjectId) == 1,
+            "moving to another refused name reuses the entity notice");
+        foreach (var refused in new[] { "desktop.ini", ".dropbox", "~$document.docx" })
+            Require(BlockerNames.DropboxRefuses(refused), "provider rejects custom reserved name: " + refused);
 
         fx.A.Seed("Remaining", "", ItemKind.Folder);
         for (var i = 0; i < 121; i++) fx.A.Seed($"Remaining/{i:D3}.txt", "child");

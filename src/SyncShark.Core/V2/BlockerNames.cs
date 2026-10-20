@@ -11,6 +11,15 @@ public static class BlockerNames
         return "Renamed-" + (safe.Length == 0 ? "item" : safe);
     }
 
+    internal static bool DropboxRefuses(string path) => path.Split('/').Any(name =>
+        name.Equals(".ds_store", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("icon\r", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("desktop.ini", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("thumbs.db", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals(".dropbox", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals(".dropbox.attr", StringComparison.OrdinalIgnoreCase) ||
+        name.StartsWith("~$", StringComparison.Ordinal));
+
     internal static string Destination(string path, string? name)
     {
         name ??= Suggest(path);
@@ -18,7 +27,7 @@ public static class BlockerNames
             throw new SyncRunRefusedException("Choose one Windows-compatible file or folder name, not a path.");
         var slash = path.LastIndexOf('/');
         var destination = (slash < 0 ? "" : path[..(slash + 1)]) + name;
-        if (!PilotPath.IsWindowsTransferPath(destination) || PairPath.Same(path, destination))
+        if (!PilotPath.IsWindowsTransferPath(DropboxNameMapping.Map(destination)) || PairPath.Same(path, destination))
             throw new SyncRunRefusedException("Choose a different safe name. If a parent has an invalid name, rename that parent first.");
         return destination;
     }

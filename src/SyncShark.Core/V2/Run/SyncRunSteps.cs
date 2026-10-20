@@ -104,9 +104,14 @@ public sealed partial class SyncRun
         // Membership is also used by first-sync completion and notice closure, not just counts.
         // Share one byte of state per id instead of three independently growing hash collections.
         [Flags]
-        private enum ActionState : byte { None = 0, Planned = 1, Counted = 2, Done = 4, Refused = 8, Skipped = 16 }
+        private enum ActionState : byte { None = 0, Planned = 1, Counted = 2, Done = 4, Refused = 8, Skipped = 16, Quota = 32 }
         private readonly Dictionary<string, ActionState> _actions = new(StringComparer.Ordinal);
         private readonly object _actionGate = new();
+
+        public bool WasQuotaBlocked(string actionId)
+        {
+            lock (_actionGate) return (_actions.GetValueOrDefault(actionId) & ActionState.Quota) != 0;
+        }
 
         public bool WasDone(string actionId)
         {
@@ -212,6 +217,7 @@ public sealed partial class SyncRun
                 lock (_actionGate)
                 {
                     var state = _actions.GetValueOrDefault(result.ActionId);
+                    if (result.UploadQuotaBlocked) state |= ActionState.Quota;
                     if ((state & ActionState.Counted) == 0)
                     {
                         if ((state & ActionState.Planned) != 0)
@@ -884,23 +890,25 @@ public sealed partial class SyncRun
 
     private void AddProviderNameRefusalNotice(PairDef pair)
     {
-        foreach (var (root, side) in new[] { (pair.A, Side.A), (pair.B, Side.B) })
+        try
         {
-            ItemState? after = null;
-            while (true)
-            {
-                var page = _store.LiveFlaggedPage(root.RootId, ItemFlags.ProviderNameRefused, after, 100);
-                foreach (var item in page)
-                    WriteNotices([new Notice(pair.PairId, 31, NoticeKind.Info, item.Path,
-                        ProviderNameRefusedException.Detail + " Suggested name: " + BlockerNames.Suggest(item.Path),
-                        ProviderNameRefusedException.NoticeKey, Repair: new NoticeRepair(side, item))]);
-                if (page.Count < 100) break;
-                after = page[^1];
-            }
+            _store.RefreshProviderNameNotices(pair);
+            // Replace the old aggregate only after the item notices were persisted.
+            var summaryId = ShortId.Make("n", pair.PairId, "31", RowCodec.Key(string.Empty), ProviderNameRefusedException.NoticeKey);
+            if (_store.NoticeById(pair.PairId, summaryId) is { Closed: false }) _store.CloseNotice(summaryId, "replaced-by-item-notices");
         }
-        // Replace the old aggregate with actionable exact-entity notices, never a bulk rename.
-        var summaryId = ShortId.Make("n", pair.PairId, "31", RowCodec.Key(string.Empty), ProviderNameRefusedException.NoticeKey);
-        if (_store.NoticeById(pair.PairId, summaryId) is { Closed: false }) _store.CloseNotice(summaryId, "replaced-by-item-notices");
+        catch (Exception error) when (RunFailure(error, CancellationToken.None))
+        {
+            RunLog.Trace("Refusal notice refresh deferred: " + error.Message);
+            try
+            {
+                _store.AddNotices([new Notice(pair.PairId, 40, NoticeKind.Info, "",
+                    "Item notices could not be refreshed: " + error.Message + ". Sync will refresh them on the next run.",
+                    "refusal-notices-deferred")]);
+            }
+            catch (Exception writeError) when (RunFailure(writeError, CancellationToken.None))
+            { RunLog.Trace("Unable to persist refusal refresh notice: " + writeError.Message); }
+        }
     }
 
     // a pre-existing notice closes only when its path was re-evaluated in this run, the plan raised
@@ -928,7 +936,7 @@ public sealed partial class SyncRun
             }
             if (notice.NoticeId is not null &&
                 (notice.ReasonKey == "name-mapping-collision" || !PlanNotices.AwaitsAcknowledgement(notice)) &&
-                notice.ReasonKey != ExcludedIntentNoticeKey && notice.ReasonKey != ProviderNameRefusedException.NoticeKey &&
+                notice.ReasonKey != DropboxQuota.NoticeKey && notice.ReasonKey != ExcludedIntentNoticeKey && notice.ReasonKey != ProviderNameRefusedException.NoticeKey &&
                 notice.ReasonKey != HydrationFallbackNoticeKey && !NoticeChoices.IsRemovalAttention(notice) &&
                 !(notice.ReasonKey == "sync-retry" && _store.SyncRetryAt(plan.PairId, notice.Path)?.Kind == "scan") &&
                 evaluated(notice.Path) && !unsettled.Contains(notice.Path))

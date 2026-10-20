@@ -359,6 +359,7 @@ public sealed partial class SyncRun : ISyncRun
             throw new SyncRunRefusedException("First sync is already applied; use run.");
         RefuseLayout(pair);
         await _endpoints.PrepareAsync(pair, ct);
+        await RefreshDropboxQuotaAsync(pair, ct);
         var throttle = new ProgressThrottle(progress, _time, _settings.ProgressInterval);
         var reconcile = await ReconcileAsync(pair, throttle, ct, narrowedIgnoreRules);
         var before = LeftAlone(pair).WithPending(reconcile.Protected);
@@ -369,6 +370,7 @@ public sealed partial class SyncRun : ISyncRun
         if (scan.A.IncompleteSubtrees.Contains(string.Empty) || scan.B.IncompleteSubtrees.Contains(string.Empty))
             throw new SyncRunRefusedException(IncompleteFirstSync);
         RecordScanRetries(pair, scan);
+        CloseObservedRepairs(pair, scan);
         var current = LeftAlone(pair);
         var links = before.With(current).WithPending(ScanFailures(scan)).WithPending(PendingDecisions(pairId, null));
         var predicates = Predicates(pair, links);
@@ -467,6 +469,7 @@ public sealed partial class SyncRun : ISyncRun
         approved = DropUnderNewLocalLinks(pair, approved, actionPredicates);
         var dropped = reviewed - approved.Actions.Count;
         await _endpoints.PrepareAsync(pair, ct);
+        await RefreshDropboxQuotaAsync(pair, ct);
         var throttle = new ProgressThrottle(progress, _time, _settings.ProgressInterval);
         var reconcile = await ReconcileAsync(pair, throttle, ct, approved.NarrowedIgnoreRules);
         approved = ApplySafetyFilter(pair,
@@ -561,6 +564,7 @@ public sealed partial class SyncRun : ISyncRun
         if (!_store.FirstSyncDone(pairId)) throw new SyncRunRefusedException("Review and apply the first sync first.");
         RefuseLayout(pair);
         await _endpoints.PrepareAsync(pair, ct);
+        await RefreshDropboxQuotaAsync(pair, ct);
         var throttle = new ProgressThrottle(progress, _time, _settings.ProgressInterval);
         var reviewScopes = _store.DueSyncRetries(pairId, _time.GetUtcNow(), 256)
             .SelectMany(retry => retry.ReviewedActions ?? []).Where(action => action.RebuildableRemove)
@@ -584,6 +588,7 @@ public sealed partial class SyncRun : ISyncRun
         }
 
         RecordScanRetries(pair, scan);
+        CloseObservedRepairs(pair, scan);
         // Finding 1 (Astra): a link or stub that disappears in this run still protects its path for the whole run.
         var current = LeftAlone(pair);
         var retryCount = _store.CountSyncRetries(pairId);

@@ -36,10 +36,11 @@ public static class NoticeChoices
     /// </summary>
     public const int DeletionReviewRestoreOnlyRule = 41;
 
+    /// <summary>Fallback reason key for item blockers without a specialized repair.</summary>
+    public const string ItemBlocked = "item-blocked";
+
     public static bool IsRetryNotice(Notice notice) => notice.RetainedVersion is null &&
-        (notice.Repair is not null || notice.ReasonKey is "folder-not-emptied" or "export-required" or "sync-retry" or "deletion-review" or "planning-degraded" or "recovery-unavailable" || IsRemovalAttention(notice) ||
-        notice.Kind == NoticeKind.Info && notice.Path.Length > 0 && notice.Rule is 30 or 40 &&
-        !PlanNotices.AwaitsAcknowledgement(notice));
+        (notice.Repair is not null || notice.ReasonKey is "unreadable" or ItemBlocked or "dropbox-storage-full" or "export-required" or "sync-retry" or "deletion-review" or "planning-degraded" or "recovery-unavailable" || IsRemovalAttention(notice));
 
     public static bool IsRetryChoice(string choice) => choice is Rename or ShowRemaining or OpenDropbox or RepairHelp or RetryNow or Exclude or Ignore or DeleteReviewed or KeepRestore or OpenFolderSettings or OpenRecoverySettings or Dismiss;
 
@@ -62,10 +63,12 @@ public static class NoticeChoices
             ? notice.Repair.Destination is null
                 ? [new(Rename, "Rename…", RequestsName: true), new(Ignore, "Keep excluded"), new(RetryNow, "Retry this item")]
                 : [new(Rename, "Resume / verify rename"), new(RepairHelp, "Rename awaiting sync"), new(RetryNow, "Retry this item"), new(Ignore, "Keep excluded")]
+            : notice.ReasonKey == DropboxQuota.NoticeKey
+            ? [new(RetryNow, "Retry uploads"), new(Ignore, "Ignore; keep uploads suspended")]
             : notice.ReasonKey == "export-required"
             ? [new(OpenDropbox, "Open in Dropbox"), new(RepairHelp, "Why / repair guidance"),
                new(RetryNow, "Retry this item"), new(Ignore, "Ignore; exclude this path from sync")]
-            : notice.FolderInspection || notice.ReasonKey == "folder-not-emptied"
+            : notice.FolderInspection
             ? [new(ShowRemaining, "Show remaining items"), new(RetryNow, "Review removal again"), new(Ignore, "Keep folder; exclude from sync")]
             : IsRemovalAttention(notice)
             ? [new(OpenFolderSettings, "Open folder settings"), new(Dismiss, "Dismiss")]
@@ -79,7 +82,7 @@ public static class NoticeChoices
             ? [new(RetryNow, "Retry now"), new(OpenFolderSettings, "Details / folder settings")]
             : IsRetryNotice(notice)
             ? [new(RepairHelp, "Why / repair guidance"), new(RetryNow, "Retry this item"),
-               new(Ignore, "Ignore; exclude this path from sync"), new(Exclude, "Exclude from sync")]
+               new(Ignore, "Ignore; exclude this path from sync")]
             : [];
 
     public static string Result(string choice, Notice notice) => choice == RepairHelp

@@ -11,7 +11,7 @@ public sealed partial class DropboxPilotClient
     {
         if (error.ValueKind != JsonValueKind.Object) return null;
         var tag = ReadUnionTag(error);
-        if (tag is "path" or "to")
+        if (tag is "path" or "to" or "path_lookup" or "path_write")
         {
             if (error.TryGetProperty("reason", out var reason)) return ReadUnionTag(reason);
             if (error.TryGetProperty(tag, out var nested))
