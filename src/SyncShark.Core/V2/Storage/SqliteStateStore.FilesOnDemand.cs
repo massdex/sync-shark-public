@@ -4,9 +4,35 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SqliteStateStore
 {
+    // Observe an opt-in made by another process (for example a CLI command while the host runs).
+    // This catalog probe belongs to control-plane reads, never per-item write paths.
+    // InStore serializes callers: share one cold probe per 15 seconds across both idle loops.
+    private bool StorageEnabled()
+    {
+        if (_storageEnabled) return true;
+        var now = _clock.GetTimestamp();
+        if (_clock.GetElapsedTime(_storageProbeTimestamp, now) < TimeSpan.FromSeconds(15)) return false;
+        _storageProbeTimestamp = now;
+        if (FilesOnDemandSchema.IsEnabled(_connection))
+        {
+            _storageEnabled = true;
+            _reads.StorageEnabled = true;
+        }
+        return _storageEnabled;
+    }
+
+    public void EnableStorage() => InStore(() =>
+    {
+        if (_storageEnabled) return;
+        FilesOnDemandSchema.Ensure(_connection);
+        _storageEnabled = true;
+        _reads.StorageEnabled = true;
+    });
+
     public void SetStoragePolicy(string rootId, string objectId, string mode) => InStore(() =>
     {
         if (mode is not ("inherit" or "offline" or "online-only")) throw new ArgumentException("Unknown storage mode.", nameof(mode));
+        EnableStorage();
         // Policy and its resumable sweep are one durable intent.
         using var tx = _connection.BeginTransaction();
         WriteStoragePolicy(tx, rootId, objectId, mode);
@@ -23,13 +49,15 @@ public sealed partial class SqliteStateStore
                 "INSERT INTO storage_policy(root_id,object_id,mode,revision) VALUES($r,$o,$m,1) " +
                 "ON CONFLICT(root_id,object_id) DO UPDATE SET mode=excluded.mode,revision=revision+1;",
                 ("$r", rootId), ("$o", objectId), ("$m", mode));
-        StoreSchema.Execute(_connection, tx, "INSERT INTO storage_policy_sweep(root_id) VALUES($r) ON CONFLICT(root_id) DO UPDATE SET after_pair=0,after_key='',revision=revision+1;", ("$r", rootId));
+        StoreSchema.Execute(_connection, tx, "INSERT INTO storage_subtree_sweep(root_id,object_id) VALUES($r,$o) " +
+            "ON CONFLICT(root_id,object_id) DO UPDATE SET after_dir_key='',after_dir=-1,after_name_key='',after_name='',revision=revision+1;", ("$r", rootId), ("$o", objectId));
     }
 
     public string ResolveStoragePolicy(RootDef root, string path) => InStore(() => ResolveStoragePolicy(root, path, null));
 
     private string ResolveStoragePolicy(RootDef root, string path, Microsoft.Data.Sqlite.SqliteTransaction? transaction)
     {
+        if (!_storageEnabled) return "offline";
         if (StoreSchema.Scalar(_connection, transaction, "SELECT 1 FROM storage_policy WHERE root_id=$r AND mode='online-only' LIMIT 1;", ("$r", root.RootId)) is null) return "offline";
         var rootNo = RootNo(root.RootId);
         // Walk only path ancestors (bounded by path depth), never a subtree or every rule.
@@ -58,6 +86,7 @@ public sealed partial class SqliteStateStore
         var relative = path.Replace('\\', '/').Trim('/');
         if (relative.Split('/').Any(part => part is "." or "..") || Path.IsPathRooted(path) || path.Contains(':'))
             throw new ArgumentException("Use a relative path inside the pair, or an empty path for its root.", nameof(path));
+        EnableStorage();
         var objectId = root.RootObjectId;
         if (relative.Length != 0)
         {
@@ -65,7 +94,11 @@ public sealed partial class SqliteStateStore
             var rows = rootNo is null ? [] : _reads.AtKey(rootNo.Value, relative, null);
             if (rows.Count != 1)
             {
-                if (mode is not ("inherit" or "offline" or "online-only")) throw new ArgumentException("Unknown storage mode.", nameof(mode));
+                if (mode == "inherit")
+                {
+                    StoreSchema.Execute(_connection, null, "DELETE FROM storage_path_intent WHERE root_id=$r AND path_key=$k;", ("$r", root.RootId), ("$k", RowCodec.Key(relative)));
+                    return relative;
+                }
                 StoreSchema.Execute(_connection, null, "INSERT INTO storage_path_intent(root_id,path_key,path,root_object,mode) VALUES($r,$k,$p,$o,$m) ON CONFLICT(root_id,path_key) DO UPDATE SET path=excluded.path,mode=excluded.mode,next_attempt=0;",
                     ("$r", root.RootId), ("$k", RowCodec.Key(relative)), ("$p", relative), ("$o", root.RootObjectId), ("$m", mode));
                 return relative;
@@ -82,6 +115,7 @@ public sealed partial class SqliteStateStore
     /// <summary>Bounded policy page with SQL-only descendant counts; unknown observations stay unknown.</summary>
     public IReadOnlyList<StorageFolderSummary> StorageFolderSummaries(RootDef root, int limit = 50, int offset = 0) => InStore(() =>
     {
+        if (!_storageEnabled) return (IReadOnlyList<StorageFolderSummary>)[];
         using var command = StoreSchema.Command(_connection, null, """
             WITH folders AS (
               SELECT p.object_id,CASE WHEN p.object_id=$root THEN '' ELSE
@@ -120,6 +154,7 @@ public sealed partial class SqliteStateStore
     private void QueueConfirmedStorageReceipt(Microsoft.Data.Sqlite.SqliteTransaction transaction,
         PairDef pair, SyncAction action, ActionResult result)
     {
+        if (!_storageEnabled) return;
         if (action.Kind is not (ActionKind.CopyNew or ActionKind.Update or ActionKind.KeepBoth)) return;
         var localSide = pair.A.Provider == SyncProviders.Local ? Side.A : Side.B;
         var localRoot = localSide == Side.A ? pair.A : pair.B;
@@ -150,6 +185,7 @@ public sealed partial class SqliteStateStore
     // Called only with an exact confirmed upload/remote receipt. Conversion retries do not upload.
     public void QueueStorageSettlement(string rootId, string objectId, string remoteBinding, PilotRemoteEntry remote) => InStore(() =>
     {
+        if (!_storageEnabled) return;
         if (remote.Kind != PilotEntryKind.File || string.IsNullOrWhiteSpace(remote.Revision) || string.IsNullOrWhiteSpace(remote.ContentHash))
             throw new ArgumentException("Settlement requires a confirmed revision and content hash.", nameof(remote));
         StoreSchema.Execute(_connection, null, """
@@ -159,11 +195,15 @@ public sealed partial class SqliteStateStore
             """, ("$r", rootId), ("$o", objectId), ("$b", remoteBinding), ("$j", JsonSerializer.Serialize(remote)));
     });
 
-    public IReadOnlyList<StorageSettlement> StorageSettlementPage(long afterJobId = 0, int limit = 128) => InStore(() =>
+    public IReadOnlyList<StorageSettlement> StorageSettlementPage(long afterJobId = 0, int limit = 128, IReadOnlyCollection<string>? activeRoots = null) => InStore(() =>
     {
+        if (!_storageEnabled) return (IReadOnlyList<StorageSettlement>)[];
         using var command = StoreSchema.Command(_connection, null,
-            "SELECT job_id,root_id,object_id,remote_binding,remote_json FROM storage_settlement " +
-            "WHERE state='pending' AND job_id>$after ORDER BY job_id LIMIT $limit;");
+            "SELECT w.job_id,w.root_id,w.object_id,w.remote_binding,w.remote_json FROM " + StorageRootsSql +
+            " CROSS JOIN storage_settlement w ON w.job_id IN (SELECT sw.job_id FROM storage_settlement sw INDEXED BY storage_pending_root " +
+            "WHERE sw.root_id=roots.value AND sw.state='pending' AND sw.job_id>$after ORDER BY sw.job_id LIMIT $limit) " +
+            StorageUnblockedSql + " AND w.state='pending' AND w.job_id>$after ORDER BY w.job_id LIMIT $limit;");
+        StorageRootParameters(command, activeRoots);
         command.Parameters.AddWithValue("$after", afterJobId);
         command.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 512));
         var result = new List<StorageSettlement>();
@@ -174,12 +214,13 @@ public sealed partial class SqliteStateStore
     });
 
     internal bool IsCurrentStorageSettlement(StorageSettlement job) => InStore(() =>
-        StoreSchema.Scalar(_connection, null,
+        _storageEnabled && StoreSchema.Scalar(_connection, null,
             "SELECT 1 FROM storage_settlement WHERE job_id=$id AND remote_json=$j AND state='pending';",
             ("$id", job.JobId), ("$j", JsonSerializer.Serialize(job.Remote))) is not null);
 
     public bool CompleteStorageSettlement(StorageSettlement job, StorageObserved observed) => InStore(() =>
     {
+        if (!_storageEnabled) return false;
         using var tx = _connection.BeginTransaction();
         // CAS protects a newer upload receipt arriving while native conversion was running.
         var json = JsonSerializer.Serialize(job.Remote);

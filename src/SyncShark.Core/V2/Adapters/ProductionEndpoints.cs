@@ -261,30 +261,158 @@ public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatc
         // Direct downloads use a target-volume partial, with no product-spool demand.
         var writer = await OpenLocalWriterAsync(_store, root, side, pair, checkedSide.Installation!, recovery, ct,
             _settings, _paths.DatabasePath, _time, checkedSide.RecoveryUnavailable).ConfigureAwait(false);
-        if (_store is SqliteStateStore storage && side == Side.A && pair.B.Provider == SyncProviders.Dropbox &&
-            storage.HasOnlineStoragePolicy(root.RootId))
+        if (_store is SqliteStateStore storage && side == Side.A && pair.B.Provider == SyncProviders.Dropbox)
         {
-            bool Eligible(string path)
+            var hasOnlinePolicy = storage.HasOnlineStoragePolicy(root.RootId);
+            // N10: one indexed capability check at open; never a native probe or per-item open for an ordinary root.
+            writer.ObserveOwnedPointers = hasOnlinePolicy || storage.HasOwnedPointers(root.RootId);
+            // N4: a recorded root keeps metadata-only pointer updates even after the policy returns to
+            // offline/inherit. The getter revalidates the pair binding on every invocation (including the native
+            // revalidation callback) and never falls back to reading or overwriting the pointer's bytes.
+            if (storage.StorageRegistrations().Any(entry => entry.RootId == root.RootId))
             {
-                if (!storage.HasOnlineStoragePolicy(root.RootId)) return false;
-                var current = storage.Pair(pair.PairId);
-                if (current is null) throw new IOException("The pair was removed. Rescan before creating pointers.");
-                PairMapping.CloudFilesBinding(pair).RequireSame(PairMapping.CloudFilesBinding(current));
-                if (current.Excluded.Any(prefix => PairPath.IsSelfOrUnder(path, prefix)) ||
-                    SyncIgnorePolicy.IsIgnored(path, false, PairInclude.IgnoreRules(current)))
-                    throw new ExpectedTargetMismatchException("The path was excluded before pointer creation. Resync to apply the current selection.");
-                return storage.ResolveStoragePolicy(root, path) == "online-only";
+                writer.PointerUpdateProvider = token =>
+                {
+                    var current = storage.Pair(pair.PairId) ?? throw new StoragePairException("binding",
+                        "The pair was removed. Rescan before updating an online-only item.");
+                    try { PairMapping.CloudFilesBinding(pair).RequireSame(PairMapping.CloudFilesBinding(current)); }
+                    catch (Exception error) when (error is InvalidOperationException or InvalidDataException)
+                    {
+                        throw new StoragePairException("binding",
+                            "The Cloud Files pair binding changed. Rescan before updating an online-only item.", error);
+                    }
+                    try
+                    {
+                        return NewPointerProvider?.Invoke(current, token) ?? throw new StoragePairException("host",
+                            "Updating an online-only item needs the background Cloud Files host. Start Sync Shark and retry; no bytes were read.");
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (StoragePairException) { throw; }
+                    catch (Exception error)
+                    {
+                        throw new StoragePairException("binding",
+                            "Cloud Files is unavailable or a sync-root registration overlaps this pair. Review the registration or keep offline; no bytes were read.",
+                            error);
+                    }
+                };
             }
-            writer.NewPointers = new NewPointerDownload(Eligible, async (remote, path, token) =>
+            if (hasOnlinePolicy)
             {
-                if (!Eligible(path)) throw new ExpectedTargetMismatchException("Storage policy changed. Resync before creating the pointer.");
-                var provider = NewPointerProvider?.Invoke(pair, token) ?? throw new IOException(
-                    "Online-only storage is not connected. Retry with the Cloud Files host running or choose available offline.");
-                return await writer.CreateNewPointerAsync(remote, path, provider, token).ConfigureAwait(false);
-            });
+                // N1: pair availability is decided once per endpoint/run, so a blocked pair never fails an individual
+                // download. A blocked pair takes the ordinary byte path and writes exactly one pair-level notice.
+                var pairUnavailable = StoragePairAvailability(root, storage);
+                bool Eligible(string path)
+                {
+                    if (!storage.HasOnlineStoragePolicy(root.RootId)) return false;
+                    var current = storage.Pair(pair.PairId);
+                    if (current is null) throw new IOException("The pair was removed. Rescan before creating pointers.");
+                    PairMapping.CloudFilesBinding(pair).RequireSame(PairMapping.CloudFilesBinding(current));
+                    if (current.Excluded.Any(prefix => PairPath.IsSelfOrUnder(path, prefix)) ||
+                        SyncIgnorePolicy.IsIgnored(path, false, PairInclude.IgnoreRules(current)))
+                        throw new ExpectedTargetMismatchException("The path was excluded before pointer creation. Resync to apply the current selection.");
+                    return storage.ResolveStoragePolicy(root, path) == "online-only";
+                }
+                writer.NewPointers = new NewPointerDownload(Eligible, pairUnavailable,
+                    token =>
+                    {
+                        // Opening/registering the provider is pair-level: any failure here precedes pointer creation,
+                        // so it must become an ordinary download, never a per-item action failure (N1).
+                        try
+                        {
+                            return NewPointerProvider?.Invoke(pair, token) ?? throw new StoragePairException("host",
+                                "Creating an online-only file needs the background Cloud Files host. Files download normally until it is available.");
+                        }
+                        catch (OperationCanceledException) { throw; }
+                        catch (StoragePairException) { throw; }
+                        catch (Exception error)
+                        {
+                            throw new StoragePairException("binding",
+                                "Cloud Files is unavailable or a sync-root registration overlaps this pair. Files download normally; review the registration or keep offline.",
+                                error);
+                        }
+                    },
+                    (remote, path, provider, token) => writer.CreateNewPointerAsync(remote, path, provider, token),
+                    error => ReportPairAvailability(storage, pair, root, error));
+            }
         }
         return (inventory, writer);
 
+    }
+
+    /// <summary>
+    /// N1/N16: one read-only pair-availability decision per endpoint/run. A blocked pair must take the ordinary byte
+    /// path; it never registers, connects or creates a pointer. No host means no native probe at all (direct CLI).
+    /// </summary>
+    private StoragePairException? StoragePairAvailability(RootDef root, SqliteStateStore store)
+    {
+        if (NewPointerProvider is null)
+            return new StoragePairException("host",
+                "Online-only storage needs the background Cloud Files host. Files download normally until it is available.");
+        string full;
+        try { full = Path.GetFullPath(root.RootPath); }
+        catch (Exception error) when (error is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return new StoragePairException("binding",
+                "The local folder path could not be resolved. Files download normally.", error);
+        }
+        try
+        {
+            var drive = new DriveInfo(Path.GetPathRoot(full)!);
+            if (drive.DriveType != DriveType.Fixed ||
+                !string.Equals(drive.DriveFormat, "NTFS", StringComparison.OrdinalIgnoreCase))
+                return new StoragePairException("volume",
+                    "Online-only storage requires a fixed NTFS volume. Files download normally; keep offline or move the pair to a fixed NTFS volume.");
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return new StoragePairException("volume",
+                "The pair's volume could not be inspected. Files download normally until a fixed NTFS volume is available.",
+                error);
+        }
+        CloudFilesRootRegistration? registration;
+        try { registration = WindowsCloudFilesProvider.ReadRootRegistration(full); }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            return new StoragePairException("binding",
+                "The Cloud Files registration could not be inspected. Files download normally; keep offline or review the registration.",
+                error);
+        }
+        if (registration is not null)
+        {
+            // Ownership is the recorded v2 GUID; a legacy or foreign registration is never adopted.
+            var token = registration.OwnershipToken;
+            if (token is null || !store.OwnsStorageRegistration(root.RootId, full, token))
+                return new StoragePairException("binding",
+                    "Another Cloud Files registration overlaps this pair. Files download normally; review the registration, keep offline, or choose a separate root.");
+            return null;
+        }
+        string? overlap;
+        try { overlap = WindowsCloudFilesProvider.RegisteredOverlapReason(full); }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            // The overlap probe is read-only and fails closed; an unexpected native/registry failure must still be a
+            // pair cause (ordinary bytes), never an endpoint-open or per-item abort.
+            return new StoragePairException("binding",
+                "The registered sync-root list could not be inspected. Files download normally; keep offline or retry when Windows registration data is readable.",
+                error);
+        }
+        return overlap is null ? null : new StoragePairException("binding",
+            "Cloud Files is not available here: " + overlap + ". Files download normally until the registration is resolved.");
+    }
+
+    // One pair notice per run for a blocked pair; a notice failure never changes the download's outcome.
+    private static void ReportPairAvailability(SqliteStateStore store, PairDef pair, RootDef root,
+        StoragePairException error)
+    {
+        try
+        {
+            StorageNotices.Report(store, pair, string.Empty,
+                new StorageNotice(root.RootId, string.Empty, pair.B.RootId, "pointer"), error);
+        }
+        catch
+        {
+            // The file still downloads normally; the next run reports the pair cause again.
+        }
     }
 
     // Shared production composition seam: tests exercise this factory, not a copy of its callback.

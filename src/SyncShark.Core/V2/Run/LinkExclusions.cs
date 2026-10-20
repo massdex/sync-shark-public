@@ -73,7 +73,7 @@ internal sealed class LinkExclusions
     {
         IEnumerable<string> Flagged(ItemFlags flag) =>
             store.LiveFlagged(pair.A.RootId, flag).Concat(store.LiveFlagged(pair.B.RootId, flag))
-                .Where(item => flag != ItemFlags.Placeholder || item.Kind == ItemKind.File && !item.Flags.HasFlag(ItemFlags.OwnedPointer)).Select(item => item.Path);
+                .Where(item => flag != ItemFlags.Placeholder || item.Kind == ItemKind.File).Select(item => item.Path);
         var nonLocalLinks = new[] { pair.A, pair.B }
             .Where(root => !string.Equals(root.Provider, SyncProviders.Local, StringComparison.OrdinalIgnoreCase))
             .SelectMany(root => store.LiveFlagged(root.RootId, ItemFlags.Link)).Select(item => item.Path);

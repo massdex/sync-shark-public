@@ -6,6 +6,8 @@ internal static class FilesOnDemandStorageChecks
     internal static async Task RunAsync(string root)
     {
         if (Directory.Exists(root)) throw new InvalidOperationException("Use a fresh disposable database directory.");
+        FilesOnDemandCompatibilityChecks.Run(Path.Combine(root, "v20-fixture"));
+        await FilesOnDemandServiceChecks.RunAsync(Path.Combine(root, "service"));
         CloudFilesOwnershipChecks.Run();
         await NewPointerDownloadChecks.RunAsync();
         await HydrationNoticeWriterChecks.RunAsync(Path.Combine(root, "hydration-notices"));
@@ -168,6 +170,7 @@ internal static class FilesOnDemandStorageChecks
         store.CommitResult(pair.PairId, localGen, upload, new(upload.ActionId, Outcome.Done, local, cloud, null, null));
         Require(!store.HasStorageWork() && store.StorageSettlementPage().Count == 0,
             "default offline upload writes no receipt or background work");
+        store.SetStoragePolicyAtPath(localRoot, "Folder", "online-only");
         using (var connection = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = SqliteStateStore.DatabasePath(root) }.ToString()))
         {
             connection.Open();
@@ -175,9 +178,12 @@ internal static class FilesOnDemandStorageChecks
             Require(plan.Contains("storage_online_policy") && plan.Contains("storage_pending") && plan.Contains("storage_refresh_due"),
                 "cheap work existence uses policy, pending and due indexes");
         }
-        store.SetStoragePolicyAtPath(localRoot, "Folder", "online-only");
-        Require(store.EnqueueStoragePolicyPage() == 1 && store.StorageSettlementPage().Count == 1,
+        Require(store.EnqueueStoragePolicyPage() > 0 && store.StorageSettlementPage().Count == 1,
             "setting online-only enqueues existing fully verified baseline without upload");
+        Require(store.StorageSettlementPage(activeRoots: []).Count == 0, "inactive roots are excluded before item paging");
+        store.SetStorageRootBackoff(localRoot.RootId, TimeSpan.FromHours(1));
+        Require(store.StorageSettlementPage().Count == 0, "root backoff excludes pending work");
+        store.ClearStorageRootBackoff(localRoot.RootId);
         var old = store.StorageSettlementPage().Single();
         store.CompleteStorageSettlement(old, new("OnlineOnly", false, true));
         Require(store.ChangedStoragePointers().Count == 0, "unchanged pointers are not scanned as refresh work");
@@ -202,6 +208,10 @@ internal static class FilesOnDemandStorageChecks
             "confirmed download queues new local identity under inherited online-only policy");
         store.SetStoragePolicyAtPath(localRoot, "Later", "online-only");
         Require(store.HasUnresolvedStorageIntent(localRoot, "Later"), "unindexed path intent persists");
+        Require(store.UnresolvedStorageIntents(localRoot).Single().Path == "Later", "unresolved intent appears in bounded list");
+        store.SetStoragePolicyAtPath(localRoot, "Typo", "online-only");
+        store.SetStoragePolicyAtPath(localRoot, "Typo", "inherit");
+        Require(!store.HasUnresolvedStorageIntent(localRoot, "Typo"), "inherit removes unresolved intent");
         var later = folder with { Path = "Later", ObjectId = "later-folder" };
         store.WriteDelta(new(localRoot.RootId, Side.A, localGen, "next", "later",
             [new(ChangeKind.Upsert, later.ObjectId, later.Path, later, null)], false, []));

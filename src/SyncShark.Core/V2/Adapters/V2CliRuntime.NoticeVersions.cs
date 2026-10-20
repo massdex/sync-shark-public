@@ -25,8 +25,8 @@ public sealed partial class V2CliRuntime
             return new SyncCliRunData(pairId, pair.Name, 0, 0, 0, 0, 0, false);
         }
         var selected = _store.NoticeById(pairId, conflictId);
-        if (selected is { Closed: false, Notice.Storage: not null } &&
-            PairPath.Same(selected.Value.Notice.Path, relativePath) && _store is SqliteStateStore storage)
+        if (selected is { Closed: false } && StorageNotices.HandlesAtPath(selected.Value.Notice, relativePath) &&
+            _store is SqliteStateStore storage)
         {
             await StorageNotices.ApplyAsync(storage, RequireStorageConnections(), selected.Value.Notice, choice, cancellationToken, IsStoragePaused);
             return new SyncCliRunData(pairId, pair.Name, 0, 0, 0, 0, 0, false);

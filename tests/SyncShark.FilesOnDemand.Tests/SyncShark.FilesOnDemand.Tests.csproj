@@ -18,5 +18,9 @@
     <Compile Include="../SyncShark.Core.Tests/V2/NewPointerDownloadChecks.cs" Link="NewPointerDownloadChecks.cs" />
     <Compile Include="../SyncShark.Core.Tests/CloudFilesLifetimeChecks.cs" Link="CloudFilesLifetimeChecks.cs" />
     <Compile Include="../SyncShark.Core.Tests/CloudFilesOwnershipChecks.cs" Link="CloudFilesOwnershipChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/FilesOnDemandServiceChecks.cs" Link="FilesOnDemandServiceChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/StorageNoticeLaneChecks.cs" Link="StorageNoticeLaneChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/FilesOnDemandCompatibilityChecks.cs" Link="FilesOnDemandCompatibilityChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/FilesOnDemandV20Fixture.cs" Link="FilesOnDemandV20Fixture.cs" />
   </ItemGroup>
 </Project>

@@ -6,17 +6,19 @@ internal static class NewPointerDownloadChecks
     {
         var remote = new ItemState("folder/file.bin", ItemKind.File, "remote-id", "revision-1",
             new string('a', 64), 8_000_000_000, DateTimeOffset.UnixEpoch.AddDays(1), ItemFlags.None);
+        NewPointerDownload.RequireExactRemote(remote, remote with { Path = "Folder/File.bin" });
         var action = new SyncAction("new-pointer", 19, ActionKind.CopyNew, Side.A, remote.Path,
             null, remote, null, false, null);
         var source = new MetadataOnlySource(remote);
         var creations = 0;
         var enabled = true;
-        var creator = new NewPointerDownload(_ => enabled, (confirmed, path, ct) =>
-        {
-            creations++;
-            Require(confirmed == remote && path == remote.Path, "exact metadata reaches native creation");
-            return Task.FromResult(confirmed with { ObjectId = "local-id", VersionId = null, Flags = ItemFlags.OwnedPointer });
-        });
+        var creator = new NewPointerDownload(_ => enabled, null, _ => null!,
+            (confirmed, path, provider, ct) =>
+            {
+                creations++;
+                Require(confirmed == remote && path == remote.Path, "exact metadata reaches native creation");
+                return Task.FromResult(confirmed with { ObjectId = "local-id", VersionId = null, Flags = ItemFlags.OwnedPointer });
+            });
         var result = await creator.TryCreateAsync(action, source, CancellationToken.None);
         Require(result?.Flags == ItemFlags.OwnedPointer && creations == 1 && source.Observations == 1 &&
             source.ByteCalls == 0, "new online-only remote file is created without downloading bytes");
@@ -36,9 +38,44 @@ internal static class NewPointerDownloadChecks
         }
         Require(creations == 1 && source.ByteCalls == 0, "metadata mismatch never publishes or downloads");
         source.Current = remote;
-        var failed = new NewPointerDownload(_ => true, (_, _, _) => throw new IOException("provider unavailable: retry"));
-        await FailsAsync(() => failed.TryCreateAsync(action, source, CancellationToken.None));
-        Require(source.ByteCalls == 0, "native failure propagates to the ordinary action notice, not a false success");
+
+        // N1: a pair-level cause is an ordinary download, reported once, with no metadata or native call.
+        var pairNotices = 0;
+        var blockedCreations = 0;
+        var blocked = new NewPointerDownload(_ => true, new StoragePairException("binding", "registration overlaps this pair"),
+            _ => { blockedCreations++; return null!; },
+            (_, _, _, _) => { blockedCreations++; throw new InvalidOperationException("a blocked pair must not create a pointer"); },
+            _ => pairNotices++);
+        var observations = source.Observations;
+        Require(await blocked.TryCreateAsync(action, source, CancellationToken.None) is null &&
+            pairNotices == 1 && blockedCreations == 0 && source.Observations == observations && source.ByteCalls == 0,
+            "blocked pair falls back to ordinary bytes with one pair notice and no native effect");
+        Require(await blocked.TryCreateAsync(action, source, CancellationToken.None) is null &&
+            pairNotices == 1 && blockedCreations == 0,
+            "the pair notice is written once per endpoint/run, not once per file");
+
+        // A provider that disappears after the Open decision is also a pair cause, before any pointer exists.
+        var acquireNotices = 0;
+        var providerLost = new StoragePairException("provider", "the Cloud Files host is unavailable");
+        var raced = new NewPointerDownload(_ => true, null,
+            _ => throw providerLost,
+            (_, _, _, _) => throw new InvalidOperationException("no pointer after a provider cause"),
+            _ => acquireNotices++);
+        observations = source.Observations;
+        Require(await raced.TryCreateAsync(action, source, CancellationToken.None) is null &&
+            acquireNotices == 1 && source.Observations == observations + 1 && source.ByteCalls == 0,
+            "provider loss before creation falls back to ordinary bytes with one pair notice");
+        Require(await raced.TryCreateAsync(action, source, CancellationToken.None) is null && acquireNotices == 1,
+            "a repeated provider cause never duplicates the pair notice");
+
+        // A native creation failure may already have created a pointer: it stays an actionable item failure.
+        var nativeNotices = 0;
+        var unsafeNative = new NewPointerDownload(_ => true, null, _ => null!,
+            (_, _, _, _) => throw new IOException("placeholder creation failed after a native effect"),
+            _ => nativeNotices++);
+        await FailsAsync(() => unsafeNative.TryCreateAsync(action, source, CancellationToken.None));
+        Require(source.ByteCalls == 0 && nativeNotices == 0,
+            "an unsafe native effect is actionable and never blindly falls back to bytes");
     }
 
     private static async Task FailsAsync(Func<Task<ItemState?>> run)

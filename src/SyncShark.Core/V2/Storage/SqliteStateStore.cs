@@ -23,6 +23,8 @@ public sealed partial class SqliteStateStore : IStateStore
     private readonly Dictionary<string, long> _pairNo = new(StringComparer.Ordinal);
     private readonly Dictionary<long, (long PairNo, Side Side)[]> _rootSides = new();
     private bool _disposed;
+    private bool _storageEnabled;
+    private long _storageProbeTimestamp;
 
     private SqliteStateStore(SqliteConnection connection, V2Settings settings, TimeProvider clock)
     {
@@ -31,7 +33,9 @@ public sealed partial class SqliteStateStore : IStateStore
         _settings = settings;
         _clock = clock;
         _dir = new DirTable(connection);
-        _reads = new FileStateReader(connection, _dir);
+        _storageEnabled = FilesOnDemandSchema.IsEnabled(connection);
+        _storageProbeTimestamp = _clock.GetTimestamp();
+        _reads = new FileStateReader(connection, _dir) { StorageEnabled = _storageEnabled };
         _points = new SyncPointTable(connection, _dir);
         _files = new FileStateTable(connection, _dir, _reads, settings, clock,
             (rootNo, objectId, transaction) =>

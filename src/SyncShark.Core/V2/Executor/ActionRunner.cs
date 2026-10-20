@@ -259,6 +259,12 @@ internal sealed class ActionRunner
         RecoveryHolder recoveryHolder, bool deferPreserve, CancellationToken ct)
     {
         if (action.Source is null) throw new InvalidOperationException("Source missing for " + action.ActionId);
+        if (OwnedPointerUpdates.IsMetadataUpdate(action))
+        {
+            if (target is not IOwnedPointerUpdateTarget pointers)
+                throw new IOException("The endpoint cannot update online-only metadata. Reconnect the owned root and retry.");
+            return await pointers.UpdateOwnedPointerAsync(action, source, ct).ConfigureAwait(false);
+        }
         // A remote source and a local target download straight into the target's own temporary file: no product
         // spool, so the target volume holds one copy. Any other pair keeps the streaming handoff.
         if (target is ISyncDirectDownloadTarget direct && source is ISyncDirectDownloadSource remote)
@@ -348,14 +354,15 @@ internal sealed class ActionRunner
         using var timing = RunInstrumentation.Current?.Measure(RunTimingStage.AdmissionWait);
         // The admission retry is a tracked wait, announced once with its reason and delay (RQ-090).
         using var wait = RunOperations.Begin(RunOperationKind.TransferSlot, "resource admission");
-        var bytes = action.Source?.Size ?? 0;
-        var file = action.Kind is ActionKind.CopyNew or ActionKind.Update or ActionKind.KeepBoth;
+        var metadata = OwnedPointerUpdates.IsMetadataUpdate(action);
+        var bytes = metadata ? 0 : action.Source?.Size ?? 0;
+        var file = !metadata && action.Kind is ActionKind.CopyNew or ActionKind.Update or ActionKind.KeepBoth;
         var target = action.Target == Side.A ? _a : _b;
         var source = action.Target == Side.A ? _b : _a;
         var keys = new List<SyncProviderBudgetKey>(2);
         if (target is ISyncTransferResourceEndpoint write)
             keys.Add(new(write.TransferResourceKey, SyncProviderOperation.Write));
-        if (file && source is ISyncTransferResourceEndpoint read)
+        if ((file || metadata) && source is ISyncTransferResourceEndpoint read)
             keys.Add(new(read.TransferResourceKey, SyncProviderOperation.Read));
         var scope = _admission.ForOperations(keys);
         while (true)

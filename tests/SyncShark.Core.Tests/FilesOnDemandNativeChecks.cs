@@ -106,6 +106,7 @@ internal static class FilesOnDemandNativeChecks
                 null, hash, remote.Size, new DateTimeOffset(File.GetLastWriteTimeUtc(path)), ItemFlags.None);
             using (var uploadStore = SqliteStateStore.Open(database, V2Settings.Default, TimeProvider.System))
             {
+                uploadStore.EnableStorage();
                 uploadStore.SavePair(pair);
                 uploadStore.RecordStorageRegistration(localRoot.RootId, root, registrationId);
                 var generation = uploadStore.BeginGeneration(localRoot.RootId, "snapshot");
@@ -153,7 +154,7 @@ internal static class FilesOnDemandNativeChecks
                 new PlanOptions(TimeSpan.Zero, true, new LabelRule("{name}", "yyyyMMdd", TimeSpan.Zero, "A", "B"), 10));
             if (pointerPlan.Actions.Any(action => action.Source?.ObjectId == pointer.ObjectId || action.Kind == ActionKind.Delete))
                 throw new IOException("Planner used a pointer as an upload source or deletion evidence.");
-            await FilesOnDemandNativePointerChecks.VerifyRenameAsync(root, path, binding.PairId, pointer, () => source.Reads);
+            await FilesOnDemandNativePointerChecks.VerifyRenameAsync(root, path, binding.PairId, pointer, () => source.Reads, provider, remote);
             byte[] read;
             using (PairPause.Begin(null!, binding.PairId, () => true))
             {
@@ -245,7 +246,7 @@ internal static class FilesOnDemandNativeChecks
             var readsBeforeIgnore = source.Reads;
             await StorageNotices.ApplyAsync(verifyStore, verifyLifetime, hydrationNotice, NoticeChoices.Ignore, CancellationToken.None);
             await WaitUntilHydrationNoticesClosedAsync(verifyStore, pair.PairId);
-            if (!verifyStore.StorageOperationIgnored(pair.PairId, hydrationNotice.Storage!) ||
+            if (!verifyStore.StorageCauseIgnored(pair.PairId, hydrationNotice.ReasonKey) ||
                 !WindowsCloudFilesProvider.TryReadOwnedPlaceholder(path, out var ignoredPointer) || ignoredPointer is null ||
                 ignoredPointer.State.Availability != SyncCloudFileAvailability.OnlineOnly ||
                 ignoredPointer.Identity.DropboxRevision != next.Revision || source.Reads != readsBeforeIgnore)

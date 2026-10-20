@@ -118,14 +118,15 @@ public static partial class Planner
     }
 
     private const string PointerReadPending =
-        "Online-only content cannot be copied or replaced by this operation; make the item available offline and retry";
+        "This operation needs online-only content; open the file while connected to download it, then retry";
 
     private static bool IsOwnedPointer(ItemState? item) => item?.Flags.HasFlag(ItemFlags.OwnedPointer) == true;
 
     private static bool ReadsOwnedPointer(SyncAction action) =>
-        action.Kind is ActionKind.CopyNew or ActionKind.Update or ActionKind.KeepBoth &&
+        !OwnedPointerUpdates.IsMetadataUpdate(action) &&
+        (action.Kind is ActionKind.CopyNew or ActionKind.Update or ActionKind.KeepBoth &&
             (IsOwnedPointer(action.Source) || IsOwnedPointer(action.ExpectedTarget)) ||
-        action.RecoveryFirst && IsOwnedPointer(action.ExpectedTarget);
+        action.RecoveryFirst && IsOwnedPointer(action.ExpectedTarget));
 
     private static void HoldPlanningFailure(Context ctx, PlanRow row, Exception error)
     {

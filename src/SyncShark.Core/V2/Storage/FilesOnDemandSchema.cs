@@ -3,7 +3,43 @@ namespace Massdex.SyncShark.V2;
 // Presence-guarded additive schema: merge-safe with independently arriving schema slots.
 internal static class FilesOnDemandSchema
 {
+    internal static bool IsEnabled(Microsoft.Data.Sqlite.SqliteConnection connection) =>
+        StoreSchema.Scalar(connection, null, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='storage_policy';") is not null;
+
+    internal static readonly string[] Names = [
+        "storage_policy", "storage_item", "storage_settlement", "storage_pending", "storage_online_policy",
+        "storage_path_intent", "storage_intent_due", "storage_policy_sweep", "storage_remote_object",
+        "storage_refresh", "storage_refresh_due", "storage_cleanup", "storage_registration", "fs_owned",
+        "storage_subtree_sweep", "storage_root_backoff", "storage_pending_root", "storage_refresh_root",
+        "storage_hydration", "storage_hydration_root", "storage_hydration_due", "fs_nonpointer"
+    ];
+
+    internal static void Ensure(Microsoft.Data.Sqlite.SqliteConnection connection)
+    {
+        var legacyPeriodic = IsEnabled(connection) && StoreSchema.Scalar(connection, null, "SELECT 1 FROM sqlite_master WHERE name='storage_root_backoff';") is null;
+        using var tx = connection.BeginTransaction();
+        StoreSchema.Execute(connection, tx, Ddl);
+        if (legacyPeriodic) StoreSchema.Execute(connection, tx, "DELETE FROM storage_refresh WHERE due>0;");
+        // Preview builds changed the shared index. Restore its final26 predicate only on opted-in stores.
+        if (StoreSchema.Scalar(connection, tx, "SELECT sql FROM sqlite_master WHERE name='fs_flagged';") is string sql && sql.Contains("~512", StringComparison.Ordinal))
+            StoreSchema.Execute(connection, tx, "DROP INDEX fs_flagged; CREATE INDEX fs_flagged ON file_state(root_no) WHERE flags != 0;");
+        // Resume legacy whole-root sweeps once; new commands create entity-scoped sweeps.
+        StoreSchema.Execute(connection, tx, "INSERT OR IGNORE INTO storage_subtree_sweep(root_id,object_id) SELECT root_id,'' FROM storage_policy_sweep; DELETE FROM storage_policy_sweep;");
+        tx.Commit();
+    }
+
     internal const string Ddl = """
+        CREATE INDEX IF NOT EXISTS fs_nonpointer ON file_state(root_no) WHERE (flags & ~512) != 0;
+        CREATE INDEX IF NOT EXISTS fs_owned ON file_state(root_no) WHERE (flags & 512) != 0;
+        CREATE TABLE IF NOT EXISTS storage_root_backoff(root_id TEXT PRIMARY KEY,due INTEGER NOT NULL) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS storage_subtree_sweep(root_id TEXT NOT NULL,object_id TEXT NOT NULL,
+          after_dir_key TEXT NOT NULL DEFAULT '',after_dir INTEGER NOT NULL DEFAULT -1,
+          after_name_key TEXT NOT NULL DEFAULT '',after_name TEXT NOT NULL DEFAULT '',scope_key TEXT NOT NULL DEFAULT '',revision INTEGER NOT NULL DEFAULT 1,
+          PRIMARY KEY(root_id,object_id)) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS storage_hydration(job_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          root_id TEXT NOT NULL,object_id TEXT NOT NULL,due INTEGER NOT NULL DEFAULT 0,UNIQUE(root_id,object_id));
+        CREATE INDEX IF NOT EXISTS storage_hydration_root ON storage_hydration(root_id,job_id,due);
+        CREATE INDEX IF NOT EXISTS storage_hydration_due ON storage_hydration(due,root_id,job_id);
         CREATE TABLE IF NOT EXISTS storage_policy(root_id TEXT NOT NULL, object_id TEXT NOT NULL,
           mode TEXT NOT NULL CHECK(mode IN ('offline','online-only')), revision INTEGER NOT NULL,
           PRIMARY KEY(root_id,object_id)) WITHOUT ROWID;
@@ -23,10 +59,12 @@ internal static class FilesOnDemandSchema
           root_id TEXT NOT NULL, object_id TEXT NOT NULL, remote_binding TEXT NOT NULL,
           remote_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
           UNIQUE(root_id,object_id,remote_binding));
+        CREATE INDEX IF NOT EXISTS storage_pending_root ON storage_settlement(root_id,state,job_id);
         CREATE INDEX IF NOT EXISTS storage_pending ON storage_settlement(state,job_id);
         CREATE TABLE IF NOT EXISTS storage_refresh(job_id INTEGER PRIMARY KEY AUTOINCREMENT,
           root_id TEXT NOT NULL,object_id TEXT NOT NULL,remote_binding TEXT NOT NULL,due INTEGER NOT NULL,
           UNIQUE(root_id,object_id,remote_binding));
+        CREATE INDEX IF NOT EXISTS storage_refresh_root ON storage_refresh(root_id,due,object_id,remote_binding);
         CREATE INDEX IF NOT EXISTS storage_refresh_due ON storage_refresh(due,root_id,object_id,remote_binding);
         CREATE TABLE IF NOT EXISTS storage_cleanup(root_id TEXT NOT NULL,object_id TEXT NOT NULL,
           PRIMARY KEY(root_id,object_id)) WITHOUT ROWID;
@@ -35,6 +73,7 @@ internal static class FilesOnDemandSchema
         WHEN EXISTS(SELECT 1 FROM storage_policy WHERE root_id=(SELECT root_id FROM root WHERE root_no=old.root_no) AND object_id=old.object_id)
           OR EXISTS(SELECT 1 FROM storage_item WHERE root_id=(SELECT root_id FROM root WHERE root_no=old.root_no) AND object_id=old.object_id)
           OR EXISTS(SELECT 1 FROM storage_settlement WHERE root_id=(SELECT root_id FROM root WHERE root_no=old.root_no) AND object_id=old.object_id)
+          OR EXISTS(SELECT 1 FROM storage_hydration WHERE root_id=(SELECT root_id FROM root WHERE root_no=old.root_no) AND object_id=old.object_id)
         BEGIN
           INSERT OR IGNORE INTO storage_cleanup SELECT root_id,old.object_id FROM root WHERE root_no=old.root_no;
         END;
@@ -43,7 +82,8 @@ internal static class FilesOnDemandSchema
           INSERT OR IGNORE INTO storage_cleanup SELECT root_id,old.object_id FROM root WHERE root_no=old.root_no
           AND (EXISTS(SELECT 1 FROM storage_policy WHERE root_id=root.root_id AND object_id=old.object_id)
             OR EXISTS(SELECT 1 FROM storage_item WHERE root_id=root.root_id AND object_id=old.object_id)
-            OR EXISTS(SELECT 1 FROM storage_settlement WHERE root_id=root.root_id AND object_id=old.object_id));
+            OR EXISTS(SELECT 1 FROM storage_settlement WHERE root_id=root.root_id AND object_id=old.object_id)
+            OR EXISTS(SELECT 1 FROM storage_hydration WHERE root_id=root.root_id AND object_id=old.object_id));
         END;
         CREATE TRIGGER IF NOT EXISTS storage_remote_insert AFTER INSERT ON file_state
         BEGIN
@@ -72,3 +112,6 @@ public sealed record StorageFolderSummary(string ObjectId, string Path, long Ite
 {
     public long Unknown => Items - Hydrated - Dehydrated;
 }
+
+public sealed record StorageHydrationJob(long JobId, string RootId, string ObjectId);
+public sealed record StoragePathIntent(string Path, string Mode);

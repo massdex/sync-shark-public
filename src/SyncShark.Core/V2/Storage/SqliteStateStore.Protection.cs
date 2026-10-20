@@ -2,10 +2,12 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SqliteStateStore
 {
-    private static string StorageProtectionSql(string sql, ItemFlags flags) => flags == ItemFlags.OwnedPointer
-        ? sql.Replace("INDEXED BY fs_flagged", "INDEXED BY fs_owned").Replace("(f.flags & ~512)!=0", "(f.flags & 512) != 0")
-        : (flags & ItemFlags.OwnedPointer) != 0
-            ? sql.Replace("INDEXED BY fs_flagged", "INDEXED BY fs_obj").Replace("(f.flags & ~512)!=0", "f.flags!=0") : sql;
+    internal string StorageProtectionSql(string sql, ItemFlags flags) => _storageEnabled && flags == ItemFlags.OwnedPointer
+        ? sql.Replace("INDEXED BY fs_flagged", "INDEXED BY fs_owned").Replace("f.flags!=0", "(f.flags & 512) != 0")
+        : _storageEnabled && (flags & ItemFlags.OwnedPointer) == 0
+            ? sql.Replace("INDEXED BY fs_flagged", "INDEXED BY fs_nonpointer")
+                .Replace("rf.flags!=0", "(rf.flags & ~512) != 0").Replace("f.flags!=0", "(f.flags & ~512) != 0")
+            : sql;
 
     internal long ProtectionBatchQueries { get; private set; }
 
@@ -44,31 +46,31 @@ public sealed partial class SqliteStateStore
             matches AS (
               SELECT a.n n,1 kind FROM a CROSS JOIN dir d INDEXED BY dir_key ON d.path_key=a.d
                 CROSS JOIN file_state f NOT INDEXED ON f.dir_no=d.dir_no AND f.name_key=a.name
-                WHERE f.root_no=$r AND (f.flags & ~512)!=0 AND (f.flags & $flags)!=0
+                WHERE f.root_no=$r AND f.flags!=0 AND (f.flags & $flags)!=0
               UNION ALL
               SELECT q.n,2 FROM q CROSS JOIN dir d INDEXED BY dir_key ON d.path_key=q.d
                 CROSS JOIN file_state f NOT INDEXED ON f.dir_no=d.dir_no AND f.name_key=q.name
-                WHERE f.root_no=$r AND (f.flags & ~512)!=0 AND (f.flags & $flags)!=0
+                WHERE f.root_no=$r AND f.flags!=0 AND (f.flags & $flags)!=0
               UNION ALL
               SELECT q.n,2 FROM q WHERE q.k!='' AND EXISTS (
                 SELECT 1 FROM dir d INDEXED BY dir_key
                 CROSS JOIN file_state f NOT INDEXED ON f.dir_no=d.dir_no
                 WHERE (d.path_key=q.k OR (d.path_key>=q.lo AND d.path_key<q.hi))
-                  AND f.root_no=$r AND (f.flags & ~512)!=0 AND (f.flags & $flags)!=0)
+                  AND f.root_no=$r AND f.flags!=0 AND (f.flags & $flags)!=0)
               UNION ALL
               SELECT q.n,2 FROM q WHERE q.k='' AND EXISTS (
                 SELECT 1 FROM file_state f INDEXED BY fs_flagged
-                WHERE f.root_no=$r AND (f.flags & ~512)!=0 AND (f.flags & $flags)!=0))
+                WHERE f.root_no=$r AND f.flags!=0 AND (f.flags & $flags)!=0))
             SELECT n,MAX(kind=1),MAX(kind=2) FROM matches GROUP BY n;
             """.Replace("\r\n", "\n", StringComparison.Ordinal);
         if (gap is not null)
-            sql = sql.Replace("SELECT 1 FROM file_state f INDEXED BY fs_flagged\n                WHERE f.root_no=$r AND (f.flags & ~512)!=0 AND (f.flags & $flags)!=0",
-                "SELECT 1 WHERE EXISTS(SELECT 1 FROM file_state rf INDEXED BY fs_flagged WHERE rf.root_no=$r AND (rf.flags & ~512)!=0 AND (rf.flags & $flags)!=0) " +
+            sql = sql.Replace("SELECT 1 FROM file_state f INDEXED BY fs_flagged\n                WHERE f.root_no=$r AND f.flags!=0 AND (f.flags & $flags)!=0",
+                "SELECT 1 WHERE EXISTS(SELECT 1 FROM file_state rf INDEXED BY fs_flagged WHERE rf.root_no=$r AND rf.flags!=0 AND (rf.flags & $flags)!=0) " +
                 "OR ($done=0 AND EXISTS(SELECT 1 FROM file_state uf INDEXED BY fs_obj WHERE uf.root_no=$r AND uf.object_id>$after AND uf.kind=0)) " +
                 "OR EXISTS(SELECT 1 FROM local_gap_item gi CROSS JOIN file_state gf INDEXED BY fs_obj " +
                 "WHERE gi.root_no=$r AND gf.root_no=gi.root_no AND gf.object_id=gi.object_id)", StringComparison.Ordinal)
-                .Replace("(f.flags & ~512)!=0 AND (f.flags & $flags)!=0",
-                "(((f.flags & ~512)!=0 AND (f.flags & $flags)!=0) OR (f.kind=0 AND " +
+                .Replace("AND f.flags!=0 AND (f.flags & $flags)!=0",
+                "AND ((f.flags!=0 AND (f.flags & $flags)!=0) OR (f.kind=0 AND " +
                 "(($done=0 AND f.object_id>$after) OR EXISTS(SELECT 1 FROM local_gap_item gi " +
                 "WHERE gi.root_no=f.root_no AND gi.object_id=f.object_id))))", StringComparison.Ordinal)
                 .Replace("file_state f INDEXED BY fs_flagged", "file_state f INDEXED BY fs_obj", StringComparison.Ordinal);
@@ -99,7 +101,7 @@ public sealed partial class SqliteStateStore
         if ((flags & ItemFlags.NeedsRehash) != 0 && HasGapProtection(root)) return null;
         using var command = StoreSchema.Command(_connection, null,
             StorageProtectionSql("SELECT d.path,f.name FROM file_state f INDEXED BY fs_flagged JOIN dir d ON d.dir_no=f.dir_no " +
-            "WHERE f.root_no=$r AND (f.flags & ~512)!=0 AND (f.flags & $flags)!=0 LIMIT $limit;", flags));
+            "WHERE f.root_no=$r AND f.flags!=0 AND (f.flags & $flags)!=0 LIMIT $limit;", flags));
         command.Parameters.AddWithValue("$r", root.Value);
         command.Parameters.AddWithValue("$flags", (long)flags);
         command.Parameters.AddWithValue("$limit", (long)pathLimit + 1);

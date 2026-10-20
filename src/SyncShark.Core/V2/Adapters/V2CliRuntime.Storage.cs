@@ -23,6 +23,10 @@ public sealed partial class V2CliRuntime
         // Deliberately independent of Run.UpdatePairSettings: intent is accepted during an active run.
         // A valid relative path with no indexed identity is retained as unresolved intent by the store.
         var relative = store.SetStoragePolicyAtPath(local, path, availability);
+        // An online-only capability warning no longer applies after the final online policy is removed.
+        // Offline hydration failures, if any, report their own current cause from the background lane.
+        if (!store.HasOnlineStoragePolicy(local.RootId))
+            StorageNotices.CompletePair(store, pair, "availability");
 
         var unsupportedLayout = pair.A.Provider != SyncProviders.Local || pair.B.Provider != SyncProviders.Dropbox;
         var volumeReason = availability == "online-only" ? StorageVolumeReason(local.RootPath) : null;
@@ -76,11 +80,12 @@ public sealed partial class V2CliRuntime
 
     private static string StoragePhaseNote(string availability) => availability switch
     {
-        "offline" => " Existing online-only files are not downloaded by this command; bulk offline is phase 2.",
+        "offline" => " Existing online-only files are queued for bounded, resumable hydration by the background host. " +
+                     "Start the host to download them; failures retain the intent with Retry or Ignore.",
         "online-only" => " Files already on this device convert only after a verified remote revision and a " +
                          "reverified local content match; this command does not remove local bytes.",
         _ => " The explicit override is removed and the remaining policy hierarchy applies. " +
-             "Existing online-only files are not downloaded by this command; bulk offline is phase 2."
+             "If the effective policy is offline, existing pointers are queued for hydration by the background host."
     };
 
     /// <summary>
@@ -127,9 +132,11 @@ public sealed partial class V2CliRuntime
             if (!StorageInventoryWindows.TryRegisteredRoots(out var registrations))
                 return "the registered sync-root list could not be inspected";
             // Always inspect native identity, including when Explorer has published no entry at this path.
-            var token = WindowsCloudFilesProvider.RequireRecordedRegistration(root,
-                WindowsCloudFilesProvider.ReadRootRegistration,
-                (path, id) => StoragePolicyStore.OwnsStorageRegistration(local.RootId, path, id));
+            var registration = WindowsCloudFilesProvider.ReadRootRegistration(root);
+            var token = registration?.OwnershipToken;
+            if (registration is not null && (token is null ||
+                !StoragePolicyStore.OwnsStorageRegistration(local.RootId, root, token)))
+                return "another or unrecorded provider owns the folder's native Cloud Files registration";
             foreach (var entry in registrations)
             {
                 var overlap = WindowsCloudFilesProvider.RegisteredPathOverlap(root, new[] { entry.Path });
@@ -159,7 +166,9 @@ public sealed partial class V2CliRuntime
         // The advertised help says 1..200; use that literal rather than an activity-specific constant.
         limit = Math.Clamp(limit, 1, 200);
         offset = Math.Max(0, offset);
+        StoragePolicyStore.EnableStorage();
         return Task.FromResult<object>(new { pairId, limit, offset,
+            unresolvedIntents = StoragePolicyStore.UnresolvedStorageIntents(StorageLocalRoot(pair), limit, offset),
             folders = StoragePolicyStore.StorageFolderSummaries(StorageLocalRoot(pair), limit, offset),
             detail = "Explicit online-only folders; counts describe indexed descendant files, including nested overrides. " +
                      "Unknown means no confirmed physical observation." });

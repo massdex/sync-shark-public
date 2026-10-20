@@ -151,11 +151,11 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
     // thread or a sync-run gate; only eight admitted requests may allocate transfer buffers concurrently.
     private readonly SemaphoreSlim _fetchSlots = new(8, 8);
     private readonly SemaphoreSlim _fetchAdmission = new(72, 72); // eight active plus at most 64 waiting
-    public event Action<string, Exception>? FetchFailed;
-    public event Action<string>? FetchSucceeded;
-    private void ReportFetchFailure(string path, Exception error)
+    public event Action<string, string, Exception>? FetchFailed;
+    public event Action<string, string>? FetchSucceeded;
+    private void ReportFetchFailure(string path, string localObjectId, Exception error)
     {
-        try { FetchFailed?.Invoke(path, error); }
+        try { FetchFailed?.Invoke(path, localObjectId, error); }
         catch { /* Notice persistence must never escape a native callback or hide its I/O completion. */ }
     }
     internal static Func<string, long, bool>? SufficientDiskSpaceForTest { get; set; }
@@ -199,7 +199,6 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
     public bool CreatedRegistration { get; private set; }
     /// <summary>The exact native root identity a durable ownership record must store, never a path prefix guess.</summary>
     public string RegisteredRootPath => Path.GetFullPath(_pair.LocalRoot);
-    public ulong RegisteredRootFileId => _pair.LocalRootFileId;
     /// <summary>The v2-generated GUID read from native SyncRootIdentity; Explorer publication is irrelevant.</summary>
     private string? _createdRegistrationId;
     public string? RegistrationId
@@ -592,9 +591,18 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
         using var held = OpenAttributes(target, writeDac: true, exclusive: true);
         VerifySettlementIdentity(held.Handle, expectedLocalIdentity);
         if (!TryReadOwnedPlaceholder(held.Handle, false, out var current) || current is null ||
-            (!SameIdentity(current.Identity, expected) && !SameIdentity(current.Identity, identity)) ||
-            ReadStubState(held.Handle) is not { OwnedFullyDehydrated: true } || !current.State.IsInSync)
+            (!SameIdentity(current.Identity with { RelativePath = expected.RelativePath }, expected) &&
+             !SameIdentity(current.Identity with { RelativePath = identity.RelativePath }, identity)) ||
+            current.SyncRootFileId != _pair.LocalRootFileId ||
+            ReadStubState(held.Handle) is not { OwnedFullyDehydrated: true } || !current.State.IsInSync ||
+            !PilotDirectoryLease.GetFileInformationByHandle(held.Handle, out var physical) ||
+            physical.NumberOfLinks != 1 ||
+            (((long)physical.FileSizeHigh << 32) | physical.FileSizeLow) != current.Identity.LogicalSize ||
+            current.Identity.ModifiedUtc is not { } modified ||
+            DateTime.FromFileTimeUtc(((long)physical.LastWriteTime.dwHighDateTime << 32) |
+                (uint)physical.LastWriteTime.dwLowDateTime) != modified.UtcDateTime)
             throw new IOException("The pointer was hydrated, modified or replaced. Leave it unchanged and rescan for ordinary conflict handling.");
+        RequireCurrentNativeBinding();
         revalidate?.Invoke();
         if (!SameIdentity(current.Identity, identity))
         {
@@ -1234,14 +1242,19 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
         // notice location. The exact revision identity below is deliberately untouched.
         var callbackPath = CallbackRelativePath(info.NormalizedPath, info.VolumeDosName, identity.RelativePath,
             _pair.LocalRoot);
+        var localObjectId = SyncLocalEndpointStore.ObjectId(_pair.LocalVolumeSerialNumber, unchecked((ulong)info.FileId));
+        // Bind to this attempt now, not when the task completes: a delayed old callback must not
+        // poison a subsequent retry for the same entity. No persistence runs before Windows completion.
+        _offlineAttempts.TryGetValue(localObjectId, out var offlineAttempt);
         // Reserve bounded queue capacity before allocating a task or cancellation source. Only a full queue
         // fails immediately; normal bursts await a worker asynchronously and leave this callback thread free.
         if (!_fetchAdmission.Wait(0))
         {
+            var error = new IOException("The hydration queue is full. Retry the read after other requests finish, or Ignore the notice.");
+            offlineAttempt?.Failed(error);
             ExecuteTransfer(info, IntPtr.Zero, parameters.RequiredFileOffset,
                 parameters.RequiredLength, StatusUnsuccessful);
-            ReportFetchFailure(callbackPath,
-                new IOException("The hydration queue is full. Retry the read after other requests finish, or Ignore the notice."));
+            ReportFetchFailure(callbackPath, localObjectId, error);
             return;
         }
         var cancellation = new CancellationTokenSource();
@@ -1261,14 +1274,15 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
                 admitted = await _fetchSlots.WaitAsync(FetchAdmissionTimeoutMs, cancellation.Token).ConfigureAwait(false);
                 if (!admitted)
                 {
+                    var error = new IOException("Hydration waited too long for capacity. Retry the read, or Ignore the notice.");
+                    offlineAttempt?.Failed(error);
                     ExecuteTransfer(info, IntPtr.Zero, parameters.RequiredFileOffset,
                         parameters.RequiredLength, StatusUnsuccessful);
-                    ReportFetchFailure(callbackPath,
-                        new IOException("Hydration waited too long for capacity. Retry the read, or Ignore the notice."));
+                    ReportFetchFailure(callbackPath, localObjectId, error);
                     return;
                 }
                 await FetchAsync(info, parameters, identity, cancellation.Token);
-                try { FetchSucceeded?.Invoke(callbackPath); }
+                try { FetchSucceeded?.Invoke(callbackPath, localObjectId); }
                 catch { /* Persistence cannot change the completed Windows I/O. */ }
             }
             catch (OperationCanceledException)
@@ -1278,10 +1292,13 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
             }
             catch (Exception error)
             {
+                // Only bounded, in-memory attempt correlation precedes I/O completion. This preserves
+                // the typed source failure before Windows wakes the reader with a generic IOException.
+                offlineAttempt?.Failed(error);
                 // Windows owns the completion status; the durable notice is queued only after that completion.
                 ExecuteTransfer(info, IntPtr.Zero, parameters.RequiredFileOffset,
                     parameters.RequiredLength, StatusUnsuccessful);
-                ReportFetchFailure(callbackPath, error);
+                ReportFetchFailure(callbackPath, localObjectId, error);
             }
             finally
             {

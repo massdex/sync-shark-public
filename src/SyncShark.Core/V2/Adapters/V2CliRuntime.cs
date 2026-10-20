@@ -112,8 +112,9 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
             {
                 _composition = composition
             };
-            // Lazily connect only when an explicitly online-only item actually needs a pointer.
-            composition.Endpoints.NewPointerProvider = (pair, ct) => runtime.RequireStorageConnections().RequireProvider(pair, ct);
+            // N16 the background host owns CfConnectSyncRoot. A direct, short-lived CLI run
+            // never registers, connects, or creates pointers; a new online-only file downloads normally and the run
+            // reports one pair-level notice. A host-attached (borrowed) runtime gets its provider from the host.
             return runtime;
         }
         catch
@@ -718,7 +719,7 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
     public async ValueTask DisposeAsync()
     {
         if (_borrowed) return; // The host, not a disconnected client, owns the engine and authority lease.
-        _storageConnections?.Dispose();
+        // Direct runs never create storage connections (N16); an injected host lifetime is disposed by its host.
         if (_composition is not null) _composition.Dispose();
         else _store.Dispose();
         _dropboxHttp?.Dispose();

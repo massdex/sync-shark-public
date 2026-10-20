@@ -53,6 +53,7 @@ internal static partial class ExecutorChecks
         await Reconcile_RecoveryLookupFails_Continues();
         await FolderDelete_ExpandsPerFile();
         await FolderDelete_OwnedPointerDoesNotArchive();
+        await OwnedPointerUpdates_NoDownloadAsync();
         await FolderDelete_FrozenVictimsChanged_Skipped();
         await FolderDelete_DescendantFails_FolderKept();
         await RunPlannedDescendantChecksAsync();

@@ -97,8 +97,15 @@ public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResource
     /// </remarks>
     internal NewPointerDownload? NewPointers { get; set; }
 
+    /// <summary>
+    /// N10: decided once when the writer is opened. True only for a root with an online-only policy or with
+    /// already-owned pointer rows, so an ordinary pair pays no root/parent/attribute probes on every observe.
+    /// </summary>
+    internal bool ObserveOwnedPointers { get; set; }
+
     public Task<FreeSpaceAdmission> AdmitFreeSpaceAsync(SyncAction action, CancellationToken ct) =>
-        NewPointers is not null && NewPointerDownload.IsNewFile(action)
+        OwnedPointerUpdates.IsMetadataUpdate(action) ||
+        (NewPointers is not null && NewPointerDownload.IsNewFile(action))
             ? _freeSpace.AdmitAsync(0, _rootPath, true, 0, _recoveryRoot, ct)
             : _freeSpace.AdmitAsync(action, _rootPath, _recoveryRoot, ct);
 
@@ -484,7 +491,12 @@ public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResource
         try
         {
             ct.ThrowIfCancellationRequested();
-            if (ObserveOwnedPointer(path) is { } pointer) return pointer;
+            // N10: an ordinary pair with no storage policy, owned pointers or recorded root pays no
+            // root/parent/attribute probes. A recorded root keeps observing pointers after its policy returns to
+            // offline/inherit, so intent recovery and OwnedPointer classification still work.
+            if ((NewPointers is not null || ObserveOwnedPointers || PointerUpdateProvider is not null) &&
+                ObserveOwnedPointer(path) is { } pointer)
+                return pointer;
             var current = await _store.FindEntryAtPathAsync(path, ct).ConfigureAwait(false);
             return current is null ? null : LocalItems.FromStore(current, LocalItems.FullPath(_rootPath, current.RelativePath));
         }

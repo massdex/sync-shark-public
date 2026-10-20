@@ -29,14 +29,29 @@ internal static partial class PlannerChecks
         foreach (var row in new[] {
             Row(null, local, null),
             Row(baseline, local with { Path = "elsewhere.txt" }, null, Ev(B: true)),
-            Row(baseline, local with { Path = "left.txt" }, remote with { Path = "right.txt" }),
-            Row(baseline, local, remote with { Hash = "edited", Mtime = T0.AddHours(1) }) })
+            Row(baseline, local with { Path = "left.txt" }, remote with { Path = "right.txt" }) })
         {
             var held = PlanRows(row, row);
             AssertNoActions(held);
             Require(held.Notices.Any(n => n.ReasonKey == "sync-retry") &&
                 held.Notices.Select(n => (n.Path, n.ReasonKey)).Distinct().Count() == held.Notices.Count,
                 "unsupported pointer content operation is pending with deduplicated actionable notices");
+        }
+        foreach (var move in new[] { false, true })
+        {
+            var edited = remote with { Hash = "edited", VersionId = "revision-2", Mtime = T0.AddHours(1),
+                Path = move ? "other/renamed.txt" : remote.Path };
+            var plan = PlanRows(Row(baseline, local, edited));
+            var update = plan.Actions.Single(a => a.Kind == ActionKind.Update);
+            Require(OwnedPointerUpdates.IsMetadataUpdate(update) && update.Path == edited.Path &&
+                update.ExpectedTarget?.ObjectId == local.ObjectId && !update.RecoveryFirst,
+                "remote edit updates the existing pointer metadata through the ordinary Update action");
+            Require(plan.Actions.Count == (move ? 2 : 1) &&
+                plan.Actions.Count(a => a.Kind == ActionKind.Move) == (move ? 1 : 0) &&
+                !plan.Notices.Any(n => n.ReasonKey == "sync-retry"),
+                "remote edit plus rename keeps its independent Move and never creates a false planner hold");
+            Require(Planner.HashRequests([Row(baseline, local, edited)]).PathsA.Count == 0,
+                "metadata-only updates never request pointer bytes");
         }
         var needs = Planner.HashRequests([Row(baseline, local with { Hash = null, Size = 8 }, remote)]);
         Require(needs.PathsA.Count == 0, "even incomplete pointer metadata never requests a content read");

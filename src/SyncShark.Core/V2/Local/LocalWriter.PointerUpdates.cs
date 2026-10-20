@@ -1,0 +1,74 @@
+namespace Massdex.SyncShark.V2;
+
+/// <summary>A metadata effect inside the ordinary Update intent/commit pipeline, never a transfer.</summary>
+internal interface IOwnedPointerUpdateTarget
+{
+    Task<ItemState> UpdateOwnedPointerAsync(SyncAction action, IEndpointWriter source, CancellationToken ct);
+}
+
+internal static class OwnedPointerUpdates
+{
+    // Only unchanged-target propagation. Conflict choices and Recovery-first replacements must
+    // never borrow this path: their destination can contain independent user bytes.
+    internal static bool IsMetadataUpdate(SyncAction action) => action is
+    {
+        Kind: ActionKind.Update, Rule: 2 or 28, Target: Side.A, RecoveryFirst: false,
+        Source: { Kind: ItemKind.File, Flags: ItemFlags.None, Hash: not null, VersionId: not null },
+        ExpectedTarget: { Kind: ItemKind.File, Flags: ItemFlags.OwnedPointer, Hash: not null }
+    };
+}
+
+public sealed partial class LocalWriter : IOwnedPointerUpdateTarget
+{
+    // Composition rechecks the exact pair/account/root binding on every invocation, including
+    // the invocation under the native exclusive hold. This works after policy changes to offline.
+    internal Func<CancellationToken, WindowsCloudFilesProvider>? PointerUpdateProvider { get; set; }
+
+    async Task<ItemState> IOwnedPointerUpdateTarget.UpdateOwnedPointerAsync(SyncAction action,
+        IEndpointWriter source, CancellationToken ct)
+    {
+        if (!OwnedPointerUpdates.IsMetadataUpdate(action) || _side != action.Target ||
+            PointerUpdateProvider is not { } getProvider)
+            throw new IOException("The online-only update is not connected to its owned root. Start the host and retry; no bytes were read.");
+        var planned = action.Source!;
+        var expected = action.ExpectedTarget!;
+        var confirmed = await source.ObserveAsync(planned.Path, ct).ConfigureAwait(false);
+        NewPointerDownload.RequireExactRemote(planned, confirmed);
+        using var root = PilotDirectoryLease.Open(_rootPath, _rootIdentity);
+        var parents = new List<PilotDirectoryLease>();
+        try
+        {
+            var segments = PilotPath.NormalizeRelative(action.Path).Split('/');
+            var parent = root;
+            foreach (var segment in segments.Take(segments.Length - 1))
+            {
+                parent = PilotDirectoryLease.Open(Path.Combine(parent.Path, segment));
+                parents.Add(parent);
+            }
+            var full = Path.Combine(parent.Path, segments[^1]);
+            if (!WindowsCloudFilesProvider.TryReadOwnedPlaceholder(full, out var pointer) || pointer is null ||
+                !pointer.Identity.IsBoundTo(_pairId, SyncProviders.Dropbox) || pointer.Identity.ObjectKind != "file" ||
+                pointer.SyncRootFileId != root.Identity.FileId || pointer.Identity.DropboxId != planned.ObjectId ||
+                pointer.Identity.ContentHash != expected.Hash || pointer.Identity.LogicalSize != expected.Size ||
+                pointer.Identity.ModifiedUtc != expected.Mtime ||
+                SyncLocalEndpointStore.ObjectId(_rootIdentity.VolumeSerialNumber, pointer.FileId) != expected.ObjectId)
+                throw new ExpectedTargetMismatchException("The online-only target identity changed. Rescan and retry; no bytes were read.");
+            var previous = DropboxItems.ToEntry(expected with { Path = action.Path,
+                ObjectId = pointer.Identity.DropboxId!, VersionId = pointer.Identity.DropboxRevision,
+                Flags = ItemFlags.None });
+            var provider = getProvider(ct);
+            var (volume, id) = LocalItems.ParseObjectId(expected.ObjectId);
+            var result = provider.UpdateDehydratedPlaceholder(previous,
+                DropboxItems.ToEntry(confirmed! with { Path = action.Path }), new(volume, id), () =>
+                {
+                    ct.ThrowIfCancellationRequested();
+                    root.VerifyBinding();
+                    foreach (var lease in parents) lease.VerifyBinding();
+                    if (!ReferenceEquals(provider, getProvider(ct)))
+                        throw new ExpectedTargetMismatchException("The Cloud Files connection changed. Rescan and retry.");
+                });
+            return PointerState(action.Path, result, volume);
+        }
+        finally { for (var i = parents.Count - 1; i >= 0; i--) parents[i].Dispose(); }
+    }
+}

@@ -14,6 +14,7 @@ internal static class DirectDownloadChecks
     public static async Task RunAsync()
     {
         await DirectDownloadPublishesFromTheTargetDirectoryAsync().ConfigureAwait(false);
+        await BlockedPairDownloadsOrdinaryBytesAsync().ConfigureAwait(false);
         await DownloadMtimeAndBaselineAsync().ConfigureAwait(false);
         await FailedVerifyLeavesTheOriginalAsync().ConfigureAwait(false);
         await CancellationLeavesTheOriginalAsync().ConfigureAwait(false);
@@ -59,6 +60,30 @@ internal static class DirectDownloadChecks
         LocalChecks.Require(Directory.GetFiles(setup.Root, ".syncshark-transfer-*", SearchOption.AllDirectories)
             .Length == 0, "the published download leaves no partial behind");
         _ = store;
+    }
+
+    // N1: when the pair cannot create pointers (coexistence, volume or missing host), a CopyNew under an
+    // online-only policy is still an ordinary download. The cause is one pair notice, never a per-item failure.
+    private static async Task BlockedPairDownloadsOrdinaryBytesAsync()
+    {
+        var setup = await LocalWriterChecks.SetupAsync("direct-blocked-pair").ConfigureAwait(false);
+        var content = LocalChecks.Bytes("blocked-pair-ordinary-bytes");
+        using var store = new InMemoryStateStore();
+        RegisterPair(store, setup.Root);
+        var notices = 0;
+        setup.Writer.NewPointers = new NewPointerDownload(_ => true,
+            new StoragePairException("binding", "a descendant folder is already a registered sync root"),
+            _ => throw new InvalidOperationException("a blocked pair must not acquire a provider"),
+            (_, _, _, _) => throw new InvalidOperationException("a blocked pair must not create a pointer"),
+            _ => notices++);
+        var action = new SyncAction("act-blocked-pair", 1, ActionKind.CopyNew, Side.A, "d/file.bin", null,
+            Planned(content), null, false, null);
+        var result = await RunAsync(setup.Writer, new Source(content), action, store).ConfigureAwait(false);
+        LocalChecks.Require(result is { Outcome: Outcome.Done },
+            "a blocked pair downloads ordinary bytes: " + result?.Reason);
+        LocalChecks.Require(File.ReadAllBytes(Path.Combine(setup.Root, "d", "file.bin")).SequenceEqual(content),
+            "the ordinary fallback publishes the full remote bytes");
+        LocalChecks.Require(notices == 1, "the pair-level cause is written once, not once per file");
     }
 
     // RQ-036/038/140: client_modified, not download time or server_modified, becomes the local

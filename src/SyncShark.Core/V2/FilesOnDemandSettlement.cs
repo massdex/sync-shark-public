@@ -17,8 +17,14 @@ internal sealed class FilesOnDemandSettlement(SqliteStateStore store,
     internal static async Task SerializeAsync(SqliteStateStore store, StorageSettlement job,
         Func<Task> work, CancellationToken ct)
     {
+        await SerializeAsync(store, job.RootId, job.ObjectId, work, ct).ConfigureAwait(false);
+    }
+
+    internal static async Task SerializeAsync(SqliteStateStore store, string rootId, string objectId,
+        Func<Task> work, CancellationToken ct)
+    {
         var gates = Gates.GetOrCreateValue(store);
-        var key = (job.RootId, job.ObjectId);
+        var key = (rootId, objectId);
         ItemGate gate;
         lock (gates)
         {
@@ -56,9 +62,10 @@ internal sealed class FilesOnDemandSettlement(SqliteStateStore store,
         catch (Exception error) { reportFailure(job, error); }
     }, ct);
 
-    internal async Task<long> RunPageAsync(long after, CancellationToken ct)
+    internal async Task<long> RunPageAsync(long after, CancellationToken ct,
+        IReadOnlyCollection<string>? activeRoots = null)
     {
-        var page = store.StorageSettlementPage(after, 128);
+        var page = store.StorageSettlementPage(after, 128, activeRoots);
         await Parallel.ForEachAsync(page,
             new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = ct },
             async (job, token) => await RunItemAsync(job, token).ConfigureAwait(false)).ConfigureAwait(false);

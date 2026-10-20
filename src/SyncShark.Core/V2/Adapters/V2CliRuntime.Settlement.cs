@@ -2,7 +2,6 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class V2CliRuntime
 {
-    private CloudFilesLifetime? _storageConnections;
     internal CloudFilesLifetime? StorageNoticeConnections { get; set; }
     internal Func<PairDef, bool>? StoragePaused { get; set; }
 
@@ -17,21 +16,14 @@ public sealed partial class V2CliRuntime
             PauseStateProjection.AccountPaused(saved, pair.B.AccountId, now);
     }
 
-    private CloudFilesLifetime RequireStorageConnections()
-    {
-        if (StorageNoticeConnections is not null) return StorageNoticeConnections;
-        if (_composition is null || _store is not SqliteStateStore store)
-            throw new IOException("Storage provider is unavailable. Retry through the background host.");
-        return _storageConnections ??= new CloudFilesLifetime(_composition.Endpoints.CreateCloudFiles,
-            pair => CloudFilesLifetime.IsRegisteredPair(pair, V2Settings.Default),
-            store, _composition.Endpoints.ObserveStorageRemoteAsync);
-    }
+    private CloudFilesLifetime RequireStorageConnections() => StorageNoticeConnections ??
+        throw new IOException("The storage intent is retained. Start the background host and Retry; a short-lived CLI process cannot own Cloud Files hydration.");
 
-    private async Task SettleAfterRunAsync(CancellationToken ct)
+    private Task SettleAfterRunAsync(CancellationToken ct)
     {
-        // Borrowed CLI calls already have the independent host lane.
-        if (_borrowed || _composition is null || _store is not SqliteStateStore store || !store.HasStorageWork()) return;
-        await using var settlement = new StorageSettlementService(store, RequireStorageConnections(), paused: IsStoragePaused);
-        await settlement.DrainAsync(ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
+        // Only the persistent background host owns Cloud Files connections and settlement. Direct CLI
+        // runs retain durable work for that host; they must not create pointers then disconnect on exit.
+        return Task.CompletedTask;
     }
 }

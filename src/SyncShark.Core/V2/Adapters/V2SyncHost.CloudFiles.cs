@@ -111,6 +111,7 @@ internal sealed class CloudFilesLifetime(
                 // Everything that opens the placeholder or touches SQLite runs on the writer's thread. The native
                 // callback thread only enqueues (and only after Windows I/O has been completed).
                 var writer = _notices ??= new HydrationNoticeWriter(noticeStore);
+                writer.Register(pair);
                 StorageNotice? Item(string path)
                 {
                     var full = LocalItems.FullPath(pair.A.RootPath, path);
@@ -119,10 +120,10 @@ internal sealed class CloudFilesLifetime(
                     var (volume, _) = LocalItems.ParseObjectId(pair.A.RootObjectId);
                     return new(pair.A.RootId, SyncLocalEndpointStore.ObjectId(volume, pointer.FileId), pair.B.RootId, "hydration");
                 }
-                native.FetchFailed += (path, error) => writer.Report(pair, path, error, Item);
-                // A success costs one in-memory lookup once the pair's durable notices are primed: no placeholder
-                // open and no database write unless a hydration notice is open for this exact path.
-                native.FetchSucceeded += path => writer.Succeeded(pair.PairId, path, Item);
+                // The callback carries the placeholder's local object id, so a renamed pointer's success closes the
+                // notice opened under its old path without a placeholder open or a database write per range.
+                native.FetchFailed += (path, localObjectId, error) => writer.Report(pair, path, error, Item, localObjectId);
+                native.FetchSucceeded += (path, localObjectId) => writer.Succeeded(pair.PairId, path, Item, localObjectId);
             }
             try
             {
@@ -182,33 +183,42 @@ internal sealed class CloudFilesLifetime(
 /// <remarks>
 /// Windows I/O completion must never wait on SQLite: the provider calls <see cref="Report"/> or
 /// <see cref="Succeeded"/> only after it has completed the transfer, and both only enqueue. Both queues are bounded and
-/// coalesce by item, so a burst of callbacks cannot grow memory with the item count. A single worker drains them in
-/// bounded batches. On the first success for a pair it loads the durable hydration notices once, so a notice left by a
-/// previous process still closes; after that a success for a path without an open notice costs no placeholder open and
-/// no database write.
+/// coalesce by item identity (or by pair cause for a pair-level failure), so a burst of callbacks cannot grow memory
+/// with the item count. A single worker drains them in bounded batches. Pair-level causes (network, account auth, a
+/// disconnected provider) are reported once per pair, never once per file. The open-notice cache is keyed by the
+/// callback's local object identity when available, so a rename still closes the old notice without a per-range
+/// placeholder open or database write. A success also closes the pair's hydration cause family once, so a recovery
+/// closes a notice left by a previous process.
 /// </remarks>
 internal sealed class HydrationNoticeWriter : IDisposable
 {
     private const int BatchLimit = 128;
+    private static readonly TimeSpan PairBackoff = TimeSpan.FromMinutes(1);
     internal const int MaximumQueuedEvents = 4096;
     internal const int MaximumOpenCache = 16_384;
     private const int MaximumOpenOrder = MaximumOpenCache * 4;
     private readonly SqliteStateStore _store;
     private readonly object _gate = new();
-    private readonly Dictionary<(string PairId, string Path), StorageNotice> _open = new();
-    private readonly Queue<(string PairId, string Path)> _openOrder = new();
-    private readonly Dictionary<(string PairId, string Path), NoticeEvent> _pendingEvents = new();
-    private readonly Queue<(string PairId, string Path)> _eventOrder = new();
-    private readonly HashSet<(string PairId, string Path)> _queued = new();
-    private readonly HashSet<(string PairId, string Path)> _inFlight = new();
+    private readonly Dictionary<(string PairId, string Key), StorageNotice> _open = new();
+    private readonly Queue<(string PairId, string Key)> _openOrder = new();
+    private readonly Dictionary<(string PairId, string Key), NoticeEvent> _pendingEvents = new();
+    private readonly Queue<(string PairId, string Key)> _eventOrder = new();
+    private readonly HashSet<(string PairId, string Key)> _queued = new();
+    private readonly HashSet<(string PairId, string Key)> _inFlight = new();
     private readonly HashSet<string> _primedPairs = new();
     private readonly HashSet<string> _incompletePairs = new();
+    private readonly HashSet<string> _hydratedPairs = new();
+    private readonly HashSet<string> _pairHydrationCauses = new();
+    private readonly Dictionary<string, PairDef> _pairDefs = new();
     private readonly HashSet<string> _overflowPairs = new();
     private readonly Dictionary<string, PairDef> _overflowPairDefs = new();
     private readonly HashSet<(string PairId, string Path)> _probed = new();
     private readonly SemaphoreSlim _signal = new(0);
     private readonly CancellationTokenSource _stop = new();
     private Task? _worker;
+    private Exception? _workerFailure;
+    private Exception? _firstPersistenceError;
+    private long _barrierSequence;
     private bool _disposed;
 
     internal HydrationNoticeWriter(SqliteStateStore store, bool startWorker = true)
@@ -223,25 +233,51 @@ internal sealed class HydrationNoticeWriter : IDisposable
     internal int DroppedEvents { get; private set; }
     internal int PersistedFailures { get; private set; }
     internal int ClosedNotices { get; private set; }
+    internal int ClosedPairCauses { get; private set; }
+    /// <summary>Store failures the worker recovered from by dropping the write (the item/notice is retried by a
+    /// later read). Focused checks assert this stays zero so a swallowed store error cannot look like a healthy
+    /// worker that merely never persisted.</summary>
+    internal int PersistenceErrors { get; private set; }
+    /// <summary>The first swallowed store failure, one bounded reference, so a check can show the real error and
+    /// stack instead of only a counter.</summary>
+    internal Exception? FirstPersistenceError { get { lock (_gate) return _firstPersistenceError; } }
+
+    /// <summary>Records the pair shape once per open so a later success can build its pair notice family.</summary>
+    internal void Register(PairDef pair)
+    {
+        lock (_gate) _pairDefs[pair.PairId] = pair;
+    }
 
     /// <summary>Queues one failed hydration; never opens a file or touches the store on the calling thread.</summary>
-    internal void Report(PairDef pair, string path, Exception error, Func<string, StorageNotice?> resolve)
+    internal void Report(PairDef pair, string path, Exception error, Func<string, StorageNotice?> resolve,
+        string? localObjectId = null)
     {
+        // Positive type evidence only, and only after Windows I/O completion. A pair-level cause is coalesced by
+        // (pair, cause) so an offline burst of thousands of reads queues one event, not one per file.
+        var pairError = StorageNotices.ClassifyHydrationFailure(error);
         lock (_gate)
         {
             if (_disposed) return;
-            EnqueueLocked(new NoticeEvent(NoticeKind.Failure, pair.PairId, path, pair, error, resolve));
+            _pairDefs[pair.PairId] = pair;
+            if (pairError is not null)
+            {
+                _pairHydrationCauses.Add(pair.PairId);
+                EnqueueLocked(NoticeKind.PairFailure, pair.PairId, string.Empty, null, pairError, null, pairError.Cause);
+            }
+            else
+                EnqueueLocked(NoticeKind.Failure, pair.PairId, path, pair, error, resolve, localObjectId);
         }
         Signal();
     }
 
     /// <summary>
     /// Records a successful hydration. Returns false, without any work, when the pair's durable notice state is
-    /// already loaded and no notice is open for the path. The first success for a pair loads that state once.
+    /// already loaded, no pair cause is outstanding and no notice is open for the item identity or path.
     /// </summary>
-    internal bool Succeeded(string pairId, string path, Func<string, StorageNotice?>? resolve)
+    internal bool Succeeded(string pairId, string path, Func<string, StorageNotice?>? resolve,
+        string? localObjectId = null)
     {
-        var key = (pairId, path);
+        var key = ItemKey(localObjectId, path);
         bool queued;
         lock (_gate)
         {
@@ -249,14 +285,24 @@ internal sealed class HydrationNoticeWriter : IDisposable
             if (!_primedPairs.Contains(pairId))
             {
                 // Prime before this success so a durable notice from a previous process can be closed.
-                queued = EnqueueLocked(new NoticeEvent(NoticeKind.Prime, pairId, string.Empty, null, null, null));
-                queued |= EnqueueLocked(new NoticeEvent(NoticeKind.Success, pairId, path, null, null, resolve));
+                queued = EnqueueLocked(NoticeKind.Prime, pairId, string.Empty, null, null, null, null);
+                queued |= EnqueueLocked(NoticeKind.Success, pairId, path, null, null, resolve, localObjectId);
             }
-            else if (!_incompletePairs.Contains(pairId) &&
-                     !_pendingEvents.ContainsKey(key) && !_inFlight.Contains(key) && !_open.ContainsKey(key))
-                return false;
+            else if (!_incompletePairs.Contains(pairId) && !_pairHydrationCauses.Contains(pairId) &&
+                     !_pendingEvents.ContainsKey((pairId, key)) && !_inFlight.ContainsKey((pairId, key)) &&
+                     !_open.ContainsKey((pairId, key)) &&
+                     !_pendingEvents.ContainsKey((pairId, "path:" + path)) &&
+                     !_inFlight.ContainsKey((pairId, "path:" + path)) &&
+                     !_open.ContainsKey((pairId, "path:" + path)))
+            {
+                // First success per process still needs one bounded close of a prior-process pair cause.
+                if (!_hydratedPairs.Contains(pairId))
+                    queued = EnqueueLocked(NoticeKind.Success, pairId, path, null, null, resolve, localObjectId);
+                else
+                    return false;
+            }
             else
-                queued = EnqueueLocked(new NoticeEvent(NoticeKind.Success, pairId, path, null, null, resolve));
+                queued = EnqueueLocked(NoticeKind.Success, pairId, path, null, null, resolve, localObjectId);
         }
         if (queued) Signal();
         return queued;
@@ -268,8 +314,9 @@ internal sealed class HydrationNoticeWriter : IDisposable
     {
         List<Notice> notices;
         try { notices = _store.HydrationNoticesPage(pairId, MaximumOpenCache + 1).ToList(); }
-        catch
+        catch (Exception error)
         {
+            RecordPersistenceError(error);
             lock (_gate)
             {
                 _primedPairs.Add(pairId);
@@ -283,9 +330,9 @@ internal sealed class HydrationNoticeWriter : IDisposable
             foreach (var notice in notices)
             {
                 if (notice.Storage is not { Operation: "hydration" } item) continue;
-                var key = (notice.PairId, notice.Path);
-                if (_open.ContainsKey(key)) continue;
-                if (!RememberLocked(key, item))
+                var key = ItemKey(item.ObjectId, notice.Path);
+                if (_open.ContainsKey((notice.PairId, key))) continue;
+                if (!RememberLocked((notice.PairId, key), item, (notice.PairId, "path:" + notice.Path)))
                 {
                     _incompletePairs.Add(pairId);
                     break;
@@ -302,6 +349,69 @@ internal sealed class HydrationNoticeWriter : IDisposable
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             _worker ??= Task.Run(RunAsync);
+        }
+    }
+
+    /// <summary>Drains every queued event on the calling thread. Focused checks use a writer without its worker and
+    /// assert deterministic counters instead of polling a scheduled task on a loaded CI thread pool.</summary>
+    internal void Drain()
+    {
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+        }
+        Process();
+        ThrowPersistenceFailure();
+    }
+
+    /// <summary>
+    /// Queues a barrier and completes only after the real background worker has applied every event queued before it.
+    /// Focused checks use this to exercise the Task.Run drain without sleeps; a bounded wait surfaces a stopped or
+    /// faulted worker instead of hanging the suite.
+    /// </summary>
+    internal async Task DrainAsync()
+    {
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_gate)
+        {
+            if (_disposed) return;
+            var key = ("", "\0barrier:" + (++_barrierSequence).ToString(System.Globalization.CultureInfo.InvariantCulture));
+            _pendingEvents[key] = new NoticeEvent(NoticeKind.Barrier, "", "", null, null, null, null, done);
+            _eventOrder.Enqueue(key);
+        }
+        Signal();
+        try { await done.Task.WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false); }
+        catch (TimeoutException)
+        {
+            Exception? failure;
+            lock (_gate) failure = _workerFailure ?? _firstPersistenceError;
+            throw new IOException("The hydration notice worker did not reach the test barrier.", failure);
+        }
+        ThrowPersistenceFailure();
+    }
+
+    /// <summary>Test seam: a swallowed store failure is rethrown after a drain so checks show the real error and
+    /// stack; production keeps its retry-by-next-read behaviour.</summary>
+    private void ThrowPersistenceFailure()
+    {
+        Exception? error;
+        int count;
+        lock (_gate)
+        {
+            error = _firstPersistenceError;
+            count = PersistenceErrors;
+        }
+        if (error is not null)
+            throw new IOException("The hydration notice writer could not persist a notice (" + count +
+                " failure(s)); the first cause is attached.", error);
+    }
+
+    private void RecordPersistenceError(Exception error)
+    {
+        lock (_gate)
+        {
+            PersistenceErrors++;
+            _firstPersistenceError ??= error;
         }
     }
 
@@ -335,34 +445,54 @@ internal sealed class HydrationNoticeWriter : IDisposable
                 Process();
             }
         }
+        catch (Exception error)
+        {
+            // Surface an unexpected worker fault through DrainAsync instead of silently stopping persistence.
+            lock (_gate) _workerFailure = error;
+        }
         finally
         {
             // Best-effort drain of events already observed before shutdown.
-            Process();
+            try { Process(); }
+            catch (Exception error) { lock (_gate) _workerFailure ??= error; }
         }
     }
 
-    /// <summary>Latest event per item; a replacement keeps the item's queue position. Never grows past the bound.</summary>
-    private bool EnqueueLocked(NoticeEvent next)
+    // Item events coalesce by local object identity when the callback supplied it (rename-safe), otherwise by path.
+    private static string ItemKey(string? localObjectId, string path) =>
+        string.IsNullOrEmpty(localObjectId) ? "path:" + path : "id:" + localObjectId;
+
+    private static (string PairId, string Key) EventKey(NoticeKind kind, string pairId, string path,
+        string? localObjectId, string? cause) => kind switch
     {
-        var key = (next.PairId, next.Path);
+        NoticeKind.PairFailure => (pairId, "\0pair:" + cause),
+        NoticeKind.Prime => (pairId, "\0prime"),
+        _ => (pairId, ItemKey(localObjectId, path))
+    };
+
+    /// <summary>Latest event per item (or per pair cause); a replacement keeps the item's queue position. Never
+    /// grows past the bound.</summary>
+    private bool EnqueueLocked(NoticeKind kind, string pairId, string path, PairDef? pair, Exception? error,
+        Func<string, StorageNotice?>? resolve, string? localObjectId)
+    {
+        var key = EventKey(kind, pairId, path, localObjectId, error is StoragePairException classified ? classified.Cause : null);
         if (_pendingEvents.ContainsKey(key))
         {
-            _pendingEvents[key] = next;
+            _pendingEvents[key] = new NoticeEvent(kind, pairId, path, localObjectId, pair, error, resolve);
             return true;
         }
         if (_pendingEvents.Count >= MaximumQueuedEvents)
         {
             DroppedEvents++;
             // Never lose failure reporting entirely: remember one pair-level backlog notice for the worker.
-            if (next.Kind == NoticeKind.Failure && next.Pair is { } pair)
+            if ((kind is NoticeKind.Failure or NoticeKind.PairFailure) && pair is { } failed)
             {
-                _overflowPairs.Add(next.PairId);
-                _overflowPairDefs[next.PairId] = pair;
+                _overflowPairs.Add(failed.PairId);
+                _overflowPairDefs[failed.PairId] = failed;
             }
             return false;
         }
-        _pendingEvents[key] = next;
+        _pendingEvents[key] = new NoticeEvent(kind, pairId, path, localObjectId, pair, error, resolve);
         if (_queued.Add(key)) _eventOrder.Enqueue(key);
         return true;
     }
@@ -379,7 +509,7 @@ internal sealed class HydrationNoticeWriter : IDisposable
                     var key = _eventOrder.Dequeue();
                     _queued.Remove(key);
                     if (!_pendingEvents.Remove(key, out var next)) continue;
-                    if (next.Kind == NoticeKind.Failure) _inFlight.Add(key);
+                    if (next.Kind is NoticeKind.Failure or NoticeKind.PairFailure) _inFlight.Add(key);
                     batch.Add(next);
                 }
             }
@@ -389,19 +519,57 @@ internal sealed class HydrationNoticeWriter : IDisposable
                 return;
             }
             var closures = new List<(string PairId, StorageNotice Item)>();
-            foreach (var next in batch) Apply(next, closures);
+            var pairClosures = new HashSet<string>();
+            List<TaskCompletionSource>? barriers = null;
+            foreach (var next in batch)
+            {
+                if (next.Kind == NoticeKind.Barrier)
+                {
+                    (barriers ??= new List<TaskCompletionSource>()).Add(next.Barrier!);
+                    continue;
+                }
+                Apply(next, closures, pairClosures);
+            }
             FlushClosures(closures);
+            FlushPairClosures(pairClosures);
+            if (barriers is not null)
+                foreach (var barrier in barriers) barrier.TrySetResult();
         }
     }
 
-    private void Apply(NoticeEvent next, List<(string PairId, StorageNotice Item)> closures)
+    private void Apply(NoticeEvent next, List<(string PairId, StorageNotice Item)> closures,
+        HashSet<string> pairClosures)
     {
-        var key = (next.PairId, next.Path);
+        var eventKey = EventKey(next.Kind, next.PairId, next.Path, next.LocalObjectId,
+            next.Error is StoragePairException classified ? classified.Cause : null);
         switch (next.Kind)
         {
             case NoticeKind.Prime:
                 Prime(next.PairId);
                 return;
+            case NoticeKind.PairFailure:
+            {
+                lock (_gate) _inFlight.Remove(eventKey);
+                if (next.Pair is { } pair && next.Error is { } pairError)
+                {
+                    try
+                    {
+                        StorageNotices.Report(_store, pair, string.Empty,
+                            new StorageNotice(pair.A.RootId, string.Empty, pair.B.RootId, "hydration"), pairError);
+                        PersistedFailures++;
+                        // Durable root backoff: the durable offline lane's page query skips a backed-off root, so a
+                        // pair outage cannot turn every offline hydration job into its own per-item notice. The lane
+                        // must NOT blanket-close offline item notices: a disk/hash/sharing cause is item-specific.
+                        _store.SetStorageRootBackoff(pair.A.RootId, PairBackoff);
+                    }
+                    catch (Exception error)
+                    {
+                        RecordPersistenceError(error);
+                        // A later failed read reports the pair cause again.
+                    }
+                }
+                return;
+            }
             case NoticeKind.Failure:
             {
                 StorageNotice? notice = null;
@@ -409,8 +577,10 @@ internal sealed class HydrationNoticeWriter : IDisposable
                 catch { /* An unreadable placeholder cannot name the item; a later read reports again. */ }
                 lock (_gate)
                 {
-                    _inFlight.Remove(key);
-                    if (notice is not null) RememberLocked(key, notice);
+                    _inFlight.Remove(eventKey);
+                    if (notice is not null)
+                        RememberLocked((next.PairId, ItemKey(next.LocalObjectId, next.Path)), notice,
+                            (next.PairId, "path:" + next.Path));
                 }
                 if (notice is not null && next.Pair is { } pair && next.Error is { } error) CloseOrReport(pair, next.Path, notice, error);
                 return;
@@ -419,10 +589,18 @@ internal sealed class HydrationNoticeWriter : IDisposable
             {
                 StorageNotice? known;
                 bool incomplete;
+                bool closePair;
                 lock (_gate)
                 {
-                    _open.Remove(key, out known);
+                    _open.Remove((next.PairId, ItemKey(next.LocalObjectId, next.Path)), out known);
+                    // Also drop the path alias a failure or a prior-process prime may have cached.
+                    if (_open.Remove((next.PairId, "path:" + next.Path), out var pathKnown)) known ??= pathKnown;
                     incomplete = _incompletePairs.Contains(next.PairId);
+                    // A real successful read proves the pair's network/auth/provider path works. Close its pair cause
+                    // family once per process (prior-process notice included) and after any new pair cause report.
+                    var first = _hydratedPairs.Add(next.PairId);
+                    var caused = _pairHydrationCauses.Remove(next.PairId);
+                    closePair = first || caused;
                 }
                 if (known is not null) closures.Add((next.PairId, known));
                 else if (incomplete && next.Resolve is { } resolve)
@@ -433,7 +611,7 @@ internal sealed class HydrationNoticeWriter : IDisposable
                     lock (_gate)
                     {
                         if (_probed.Count > MaximumOpenCache * 2) _probed.Clear();
-                        first = _probed.Add(key);
+                        first = _probed.Add((next.PairId, next.Path));
                     }
                     if (!first) return;
                     StorageNotice? probed = null;
@@ -441,6 +619,7 @@ internal sealed class HydrationNoticeWriter : IDisposable
                     catch { }
                     if (probed is not null) closures.Add((next.PairId, probed));
                 }
+                if (closePair) pairClosures.Add(next.PairId);
                 return;
             }
         }
@@ -453,8 +632,9 @@ internal sealed class HydrationNoticeWriter : IDisposable
             StorageNotices.Report(_store, pair, path, notice, error);
             PersistedFailures++;
         }
-        catch
+        catch (Exception error)
         {
+            RecordPersistenceError(error);
             // The item is still unchanged; a later failed read queues the notice again.
         }
     }
@@ -471,12 +651,37 @@ internal sealed class HydrationNoticeWriter : IDisposable
                 _store.CloseStorageNoticeBatch(group.Key, items);
                 ClosedNotices += items.Count;
             }
-            catch
+            catch (Exception error)
             {
+                RecordPersistenceError(error);
                 // A notice left open is recoverable with Retry; the hydration itself already succeeded.
             }
         }
         closures.Clear();
+    }
+
+    /// <summary>One bounded indexed update per recovered pair closes only its hydration cause family.</summary>
+    private void FlushPairClosures(HashSet<string> pairClosures)
+    {
+        if (pairClosures.Count == 0) return;
+        foreach (var pairId in pairClosures)
+        {
+            PairDef? pair;
+            lock (_gate) pair = _pairDefs.TryGetValue(pairId, out var found) ? found : null;
+            if (pair is null) continue;
+            try
+            {
+                StorageNotices.CompleteHydrationPair(_store, pair);
+                _store.ClearStorageRootBackoff(pair.A.RootId);
+                ClosedPairCauses++;
+            }
+            catch (Exception error)
+            {
+                RecordPersistenceError(error);
+                // The next successful read closes it; the read itself already succeeded.
+            }
+        }
+        pairClosures.Clear();
     }
 
     /// <summary>One deduplicated pair-level notice for a burst that overflowed the bounded queue. Written after the
@@ -498,16 +703,30 @@ internal sealed class HydrationNoticeWriter : IDisposable
         {
             try
             {
+                lock (_gate) _pairHydrationCauses.Add(pairId);
                 StorageNotices.Report(_store, pair, string.Empty,
-                    new StorageNotice(pair.A.RootId, string.Empty, pair.B.RootId, "hydration"),
-                    new StoragePairException("hydration-backlog",
-                        "Some hydration reads failed while the notice queue was busy. Retry reading those files, or Ignore this cause."));
+                    new StorageNotice(pair.A.RootId, string.Empty, pair.B.RootId, StorageNotices.HydrationPairOperation),
+                    new StoragePairException("backlog",
+                        "Some hydration reads failed while the notice queue was busy. Retry the read, or Ignore this cause."));
             }
-            catch { /* Ordinary failed reads still report their own per-item notice after the burst. */ }
+            catch (Exception error)
+            {
+                RecordPersistenceError(error); // Ordinary failed reads still report their own item notice after the burst.
+            }
         }
     }
 
-    private bool RememberLocked((string PairId, string Path) key, StorageNotice item)
+    /// <summary>Caches a notice under its primary identity key and, when different, the path alias so a success
+    /// without a callback identity (or a prior-process prime) still closes it. Both entries share the cache bound.</summary>
+    private bool RememberLocked((string PairId, string Key) primary, StorageNotice item,
+        (string PairId, string Key) alias)
+    {
+        var stored = StoreLocked(primary, item);
+        if (stored && alias != primary) StoreLocked(alias, item);
+        return stored;
+    }
+
+    private bool StoreLocked((string PairId, string Key) key, StorageNotice item)
     {
         if (_open.ContainsKey(key))
         {
@@ -534,8 +753,8 @@ internal sealed class HydrationNoticeWriter : IDisposable
         return true;
     }
 
-    private enum NoticeKind { Failure, Success, Prime }
+    private enum NoticeKind { Failure, Success, Prime, PairFailure, Barrier }
 
-    private sealed record NoticeEvent(NoticeKind Kind, string PairId, string Path, PairDef? Pair, Exception? Error,
-        Func<string, StorageNotice?>? Resolve);
+    private sealed record NoticeEvent(NoticeKind Kind, string PairId, string Path, string? LocalObjectId, PairDef? Pair,
+        Exception? Error, Func<string, StorageNotice?>? Resolve, TaskCompletionSource? Barrier = null);
 }
