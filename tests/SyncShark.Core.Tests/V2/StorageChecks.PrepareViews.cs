@@ -16,7 +16,7 @@ internal static partial class StorageChecks
         string[] victims = ["A:gone", "a:GONE", "B:other"];
         SyncCliCarriedIgnoredData[] budgets = [new("heldfolder", "A", 2, 1, 33)];
         var local = F("match", "loc:match", "aabbccdd");
-        MatchedPair[] matches = [new("match", Content.SideStamp(local), Content.SideStamp(local with { ObjectId = "dbx:match" }))];
+        MatchedPair[] matches = [new("match", local, local with { ObjectId = "dbx:match" })];
         FirstSyncChoicesState.Save(folder, "p1", choices, [], victims, [], held, matches,
             carriedIgnoredDeletes: budgets, store: store);
         FirstSyncChoicesState.Save(legacyFolder, "p1", choices, [], victims, [], held, matches,

@@ -684,7 +684,7 @@ internal static partial class RunCliChecks
                     4096, at.AddSeconds(index), ItemFlags.None);
                 var cloud = new ItemState(path, ItemKind.File, "id:dbx:" + index.ToString("x"),
                     "rev-" + index, null, 4096, at.AddSeconds(index), ItemFlags.None);
-                return new MatchedPair(path, Content.SideStamp(local), Content.SideStamp(cloud));
+                return new MatchedPair(path, local, cloud);
             }).ToArray();
             var watch = System.Diagnostics.Stopwatch.StartNew();
             FirstSyncChoicesState.Save(root, "p1", parsed, [], [], [], null, items);

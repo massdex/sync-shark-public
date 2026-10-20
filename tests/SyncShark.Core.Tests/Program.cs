@@ -87,6 +87,12 @@ var inheritedTestProductRoot = args switch
 };
 using var isolatedProductRuntime = new IsolatedTestProductRuntime(inheritedTestProductRoot);
 
+if (args is ["--v2-snapshot-production-million-checks", var snapshotBenchmarkRoot])
+{
+    await Massdex.SyncShark.V2.StorageChecks.SnapshotProductionMillionAsync(snapshotBenchmarkRoot);
+    return 0;
+}
+
 if (args is ["--v2-snapshot-streaming-checks", var snapshotStreamingRoot])
 {
     Directory.CreateDirectory(snapshotStreamingRoot);

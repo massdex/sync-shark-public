@@ -66,6 +66,7 @@ public sealed partial class SqliteStateStore : IStateStore
             if (fresh) StoreSchema.Create(connection);
             else StoreSchema.Verify(connection);
             StoreSchema.CreateTemporary(connection);
+            SnapshotTemporary.Sweep(connection);
             var store = new SqliteStateStore(connection, settings, clock);
             store.TrySweepPrepareGenerations(propagateDamage: true);
             return store;
@@ -110,11 +111,6 @@ public sealed partial class SqliteStateStore : IStateStore
         _rootNo[rootId] = rootNo;
         return gen;
     });
-
-    /// <summary>Stages a streamed inventory once; caller owns/disposes it after snapshot publication/replay.
-    /// Keep the same scope delegate on the Snapshot so unchanged ordered input needs no restaging.</summary>
-    internal SnapshotInput StageSnapshotItems(IEnumerable<ItemState> items, Func<string, bool>? include = null) =>
-        InStore(() => SnapshotInput.Create(_connection, _dir, items, include));
 
     public void WriteSnapshot(Snapshot snapshot) => InStore(() =>
     {

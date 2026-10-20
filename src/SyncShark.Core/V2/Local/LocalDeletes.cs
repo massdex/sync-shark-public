@@ -11,7 +11,7 @@ internal static class LocalDeletes
 {
     /// <param name="decidable">Whether this refresh may decide on a path (selection, artifacts, incomplete subtrees).</param>
     public static IReadOnlyList<Change> Build(IStateStore known, string rootId, IReadOnlyList<string> paths,
-        PilotLocalScan scan, Func<string, bool> decidable, DateTimeOffset scanTime)
+        PilotLocalScan scan, Func<string, bool> decidable, DateTimeOffset scanTime, Func<ItemState, bool>? confirmAbsence = null)
     {
         var present = new HashSet<string>(scan.Entries.Keys, StringComparer.OrdinalIgnoreCase);
         var folders = scan.Entries.Values.Where(entry => entry.Kind == PilotEntryKind.Directory)
@@ -45,7 +45,7 @@ internal static class LocalDeletes
         void Add(ItemState row, bool isGone)
         {
             stored.TryAdd(row.Path, row);
-            if (isGone) gone.Add(row.Path);
+            if (isGone && (confirmAbsence?.Invoke(row) ?? true)) gone.Add(row.Path);
         }
     }
 

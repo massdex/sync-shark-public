@@ -431,7 +431,7 @@ public sealed partial class SyncRun
                 observationStore?.SaveInventoryObservation(coverage, observedCursor);
             Trace($"scan {side}: snapshot stored ({watch.ElapsedMilliseconds} ms)");
             return new SideScan(gen, snapshot.CursorAfter, snapshot.IncompleteSubtrees.Count == 0, true, [], [],
-                NoDeletions, []) { ObservedCoverage = observationStore is null ? null : coverage, RehashThrough = _store.RehashWatermark(root.RootId) };
+                NoDeletions, []) { PendingDeletionEvidence = snapshot.PendingDeletionEvidence, ObservedCoverage = observationStore is null ? null : coverage, RehashThrough = _store.RehashWatermark(root.RootId) };
         }
         Trace($"scan {side}: resuming {(inventoryCursors is null ? "committed" : "pending")} inventory cursor");
         var deltaGen = _store.BeginGeneration(root.RootId, "delta");
@@ -486,7 +486,7 @@ public sealed partial class SyncRun
                 observationStore?.SaveInventoryObservation(coverage, rescanCursor);
             Trace($"scan {side}: rescan snapshot stored ({watch.ElapsedMilliseconds} ms)");
             return new SideScan(fullGen, rescan.CursorAfter, rescan.IncompleteSubtrees.Count == 0, true, [], [],
-                NoDeletions, []) { ObservedCoverage = observationStore is null ? null : coverage, RehashThrough = _store.RehashWatermark(root.RootId) };
+                NoDeletions, []) { PendingDeletionEvidence = rescan.PendingDeletionEvidence, ObservedCoverage = observationStore is null ? null : coverage, RehashThrough = _store.RehashWatermark(root.RootId) };
         }
         var paths = new List<string>();
         var ids = new List<string>();

@@ -147,13 +147,14 @@ internal sealed class InMemoryStateStore : IStateStore
     {
         lock (_gate)
         {
+            s.PendingDeletionEvidence.Clear();
             var live = LiveRows(s.RootId);
             var incomplete = s.IncompleteSubtrees;
             // A snapshot is authoritative per exact spelling: case clashes it reports are all kept (RQ-039).
             var seen = new HashSet<string>(StringComparer.Ordinal);
             foreach (var item in s.Items)
             {
-                if (!(s.IncludesPath?.Invoke(item.Path) ?? true)) continue;
+                if (!(s.IncludesPath?.Invoke(item.Path) ?? true) || (incomplete.Count > 0 && IsInsideIncomplete(item.Path, incomplete))) continue;
                 seen.Add(item.Path);
                 Put(s.RootId, item, s.Gen);
                 ForgetUnderLink(s.RootId, item);
@@ -162,7 +163,7 @@ internal sealed class InMemoryStateStore : IStateStore
             foreach (var path in live.Keys.ToList())
             {
                 if (seen.Contains(path) || IsInsideIncomplete(path, incomplete) ||
-                    !(s.IncludesPath?.Invoke(path) ?? true)) continue;
+                    !(s.IncludesPath?.Invoke(path) ?? true) || !s.CanCloseAbsent(live[path].State)) continue;
                 Close(s.RootId, path, s.Gen);
             }
         }

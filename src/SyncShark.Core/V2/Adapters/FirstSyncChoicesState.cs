@@ -95,7 +95,7 @@ internal static class FirstSyncChoicesState
             .GroupBy(pair => pair.Path, StringComparer.OrdinalIgnoreCase)
             .Select(group => group.First())
             .OrderBy(pair => pair.Path, StringComparer.Ordinal)
-            .Select(pair => new StoredMatch(pair.Path, pair.A, pair.B))
+            .Select(pair => new StoredMatch(pair.Path, Content.SideStamp(pair.A), Content.SideStamp(pair.B)))
             .ToArray();
         var record = new Prepared(FirstSyncChoices.Digest(choices, rebuildables, held),
             choices.Winners.ToDictionary(entry => entry.Key, entry => FirstSyncChoices.WinnerText(entry.Value),

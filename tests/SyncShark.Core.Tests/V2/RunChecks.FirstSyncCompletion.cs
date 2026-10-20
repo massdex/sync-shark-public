@@ -52,7 +52,7 @@ internal static partial class RunChecks
         var run = fx.Run();
         var preview = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), default);
         var matches = preview.MatchedBothSides.ToDictionary(item => item.Path,
-            item => new PrepareMatch(item.A, item.B));
+            item => new PrepareMatch(Content.SideStamp(item.A), Content.SideStamp(item.B)));
         fx.Provider.AddInventory(fx.Pair.A, new ScriptedInventory(fx.A) { Incomplete = true });
         await ExpectAsync<SyncRunRefusedException>(() => run.PreviewFirstSyncApplyResolvedAsync(fx.Pair.PairId,
             null, null, [], matches, new RecordingProgress(), default));
@@ -281,7 +281,7 @@ internal static partial class RunChecks
         var progress = new RecordingProgress();
         var preview = await run.PreviewFirstSyncAsync(fx.Pair.PairId, progress, CancellationToken.None);
         var matches = preview.MatchedBothSides.ToDictionary(item => item.Path,
-            item => new PrepareMatch(item.A, item.B), StringComparer.OrdinalIgnoreCase);
+            item => new PrepareMatch(Content.SideStamp(item.A), Content.SideStamp(item.B)), StringComparer.OrdinalIgnoreCase);
         await fx.A.DeleteAsync(new SyncAction("owner-delete", 6, ActionKind.Delete, Side.A, a.Path, null, null, a, false, null), CancellationToken.None);
         var (plan, _) = await run.PreviewFirstSyncApplyResolvedAsync(fx.Pair.PairId, null, null, [], matches, progress, CancellationToken.None);
         plan = run.DeferPostPreviewChanges(fx.Pair, plan, matches);

@@ -187,7 +187,7 @@ internal sealed partial class PrepareDatabase(SqliteStateStore store, PrepareHea
             ordinal = 0;
             foreach (var pair in matches)
             {
-                var match = new FirstSyncChoicesState.StoredMatch(pair.Path, pair.A, pair.B);
+                var match = new FirstSyncChoicesState.StoredMatch(pair.Path, Content.SideStamp(pair.A), Content.SideStamp(pair.B));
                 if (writer.AddUniqueValidated(Matches, ordinal, match.Path, JsonSerializer.Serialize(match, Json))) ordinal++;
             }
             ordinal = 0;

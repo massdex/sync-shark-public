@@ -29,12 +29,17 @@ internal static partial class RunChecks
                 catch (OperationCanceledException) { break; }
             }
         });
+        var watch = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             var plan = await fx.Run().PreviewFirstSyncAsync(fx.Pair.PairId, progress, CancellationToken.None);
             Require(plan.MatchedBothSides.Count == count, "million-item prepare captures every matched pair");
             Require(plan.Actions.All(action => action.Kind == ActionKind.Adopt), "equal million-item pair needs only adoption");
             Require(plan.Actions.Count == count, "million-item prepare produces all adoptions");
+            Console.WriteLine($"prepare-wall-ms={watch.ElapsedMilliseconds}");
+            GC.Collect(2, GCCollectionMode.Forced, true, true);
+            Console.WriteLine($"prepare-completed-gen2-heap={GC.GetGCMemoryInfo().HeapSizeBytes}");
+            GC.KeepAlive(plan);
         }
         finally
         {

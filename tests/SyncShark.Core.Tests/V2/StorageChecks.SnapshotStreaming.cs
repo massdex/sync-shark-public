@@ -9,11 +9,16 @@ internal static partial class StorageChecks
     public static void SnapshotStreamingChecks(string root)
     {
         CompactMatchesSerializeIdentically();
+        SnapshotFailureAndPartialAbsence(root);
+        SnapshotNativeAbsence(root);
+        SnapshotStoredKeyDrift(root);
+        SnapshotConcurrentRetry(root);
+        SnapshotScratchLifecycle(root);
         for (var seed = 0; seed < 12; seed++) SnapshotDifferential(root, seed);
         using var fixture = new SnapshotFixture(Fresh(root, "snapshot-read-only"));
         var items = Enumerable.Range(0, 1100).Select(i => F($"d{i % 7}/f{i:D5}", "id:" + i, "aabb")).ToArray();
         using var staged = SnapshotInput.Create(fixture.Connection, fixture.Dirs, items);
-        fixture.Write(staged);
+        fixture.Write(items);
         var plans = staged.Plans().Concat(StoreSchema.QueryPlan(fixture.Connection, "LiveDirectory",
             FileStateReader.SnapshotDirectorySql, "$r", "$d")).Concat(StoreSchema.QueryPlan(fixture.Connection,
             "LivePage", FileStateReader.SnapshotPageSql, "$r", "$d", "$k", "$n")).ToArray();
@@ -26,7 +31,7 @@ internal static partial class StorageChecks
             "suppression probes the non-unique object index");
         // SQLite itself rejects even zero-row DML under query_only: stronger than total_changes.
         StoreSchema.Execute(fixture.Connection, null, "PRAGMA query_only=ON;");
-        fixture.Write(staged);
+        fixture.Write(items);
         Require(fixture.Reader.Live(1, null).Count == items.Length, "durable unchanged input is entirely read-only");
         StoreSchema.Execute(fixture.Connection, null, "PRAGMA query_only=OFF;");
     }
@@ -41,8 +46,8 @@ internal static partial class StorageChecks
                 Kind = i % 7 == 0 ? ItemKind.Folder : ItemKind.File };
             // Same final post-hash planning rows: the old writer computed stamps at serialization.
             var old = new FirstSyncChoicesState.StoredMatch(a.Path, Content.SideStamp(a), Content.SideStamp(b));
-            var compact = new MatchedPair(a.Path, Content.SideStamp(a), Content.SideStamp(b));
-            var current = new FirstSyncChoicesState.StoredMatch(compact.Path, compact.A, compact.B);
+            var compact = new MatchedPair(a.Path, a, b);
+            var current = new FirstSyncChoicesState.StoredMatch(compact.Path, Content.SideStamp(compact.A), Content.SideStamp(compact.B));
             Require(JsonSerializer.Serialize(old) == JsonSerializer.Serialize(current),
                 "compact matches preserve serialized prepare bytes");
         }
@@ -60,6 +65,8 @@ internal static partial class StorageChecks
             F("é/文件", "unicode", "cc"), F("z/hard1", "id:local:hard", "dd"),
             F("a/hard2", "id:local:hard", "dd"), F("blocked/child", "blocked", "ee"), F("link/child", "link-child", "aa"),
             F("z/deleted-alias", "id:local:deleted", "aa"), F("b/deleted-alias", "id:local:deleted", "aa")]);
+        foreach (var name in new[] { "a[", "ab", "_x", "X", "ß", "ſ", "😀", "！" })
+            initial.Add(F("edge/" + name, "edge:" + name, "aa"));
         current.Write(initial);
         legacy.Write(initial);
         foreach (var fixture in new[] { current, legacy })
@@ -93,11 +100,124 @@ internal static partial class StorageChecks
         Func<string, bool> include = p => !p.StartsWith("a/", StringComparison.Ordinal);
         string[] incomplete = ["blocked"];
         current.Write(unordered, include, incomplete);
-        legacy.Write(unordered, include, incomplete);
+        // The new owner rule protects the whole incomplete subtree, including observations made
+        // before enumeration failed. Feed that protected scope to the frozen merge oracle.
+        legacy.Write(unordered.Where(i => !PairPath.IsSelfOrUnder(i.Path, "blocked")).ToArray(), include, incomplete);
+        Require(current.Reader.Live(1, null).Any(i => i.Path == "blocked/child"), "incomplete subtree row remains open");
+        Require(!current.Reader.Tombstones(1).Any(t => t.Path.StartsWith("blocked/", StringComparison.Ordinal)), "no incomplete subtree tombstone");
         Require(current.Dump().SequenceEqual(legacy.Dump()), "streaming snapshot matches frozen writer, seed " + seed);
         current.Write(unordered);
         legacy.Write(unordered);
         Require(current.Dump().SequenceEqual(legacy.Dump()), "complete snapshot and debt cleanup match frozen writer, seed " + seed);
+    }
+
+    private static void SnapshotNativeAbsence(string root)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var folder = Fresh(root, "native-absence");
+        Directory.CreateDirectory(folder);
+        Directory.CreateDirectory(Path.Combine(folder, "blocked"));
+        var path = Path.Combine(folder, "original");
+        ItemState item;
+        using (var file = File.Create(path))
+        {
+            Require(PilotDirectoryLease.GetFileInformationByHandle(file.SafeFileHandle, out var info), "native fixture identity");
+            item = F("original", SyncLocalEndpointStore.ObjectId(info.VolumeSerialNumber,
+                ((ulong)info.FileIndexHigh << 32) | info.FileIndexLow), "aa");
+        }
+        using var lease = PilotDirectoryLease.Open(folder);
+        File.Move(path, Path.Combine(folder, "blocked", "moved"));
+        Require(LocalFileAbsence.Check(folder, lease.Identity, item) == FileAbsence.Present,
+            "native file ID finds a move into an unscanned subtree");
+        File.Delete(Path.Combine(folder, "blocked", "moved"));
+        Require(LocalFileAbsence.Check(folder, lease.Identity, item) == FileAbsence.Gone,
+            "native file ID confirms a genuine delete");
+        Require(LocalFileAbsence.Check(folder, lease.Identity, item with { ObjectId = "unknown" }) == FileAbsence.Unknown,
+            "unverifiable identity never confirms deletion");
+    }
+
+    private static void SnapshotScratchLifecycle(string root)
+    {
+        using var fixture = new SnapshotFixture(Fresh(root, "snapshot-scratch"));
+        var stage = new SnapshotTemporary(fixture.Connection);
+        var path = stage.Connection.DataSource;
+        Require(Path.GetDirectoryName(path) == Path.Combine(Path.GetDirectoryName(fixture.Connection.DataSource)!, "tmp"),
+            "scratch lives beside its store");
+        Require((string)StoreSchema.Scalar(stage.Connection, null, "PRAGMA journal_mode;")! == "off", "scratch journaling disabled");
+        SnapshotTemporary.Sweep(fixture.Connection);
+        Require(File.Exists(path), "startup sweep protects a live stage lease");
+        if (OperatingSystem.IsWindows())
+        {
+            using (var hold = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            {
+                stage.Dispose();
+                Require(File.Exists(path + ".lease"), "failed cleanup retains an orphan marker without failing publication");
+            }
+            SnapshotTemporary.Sweep(fixture.Connection);
+            Require(!File.Exists(path) && !File.Exists(path + ".lease"), "next startup sweeps the orphan");
+        }
+        else stage.Dispose();
+    }
+
+    private static void SnapshotConcurrentRetry(string root)
+    {
+        using var fixture = new SnapshotFixture(Fresh(root, "snapshot-concurrent"));
+        ItemState[] items = [F("file", "id", "aa")];
+        fixture.Write(items);
+        var calls = 0;
+        fixture._writer.AfterSnapshotCompared = () =>
+        {
+            if (++calls != 1) return;
+            using var other = new SqliteConnection(fixture.Connection.ConnectionString);
+            other.Open();
+            StoreSchema.Execute(other, null, "UPDATE file_state SET size=99;");
+        };
+        fixture.Write(items);
+        Require(calls == 2 && fixture.Reader.Live(1, null).Single().Size == items[0].Size,
+            "concurrent writer forces one fresh comparison before publication");
+    }
+
+    private static void SnapshotStoredKeyDrift(string root)
+    {
+        using var fixture = new SnapshotFixture(Fresh(root, "stored-key-drift"));
+        ItemState[] items = [F("a[", "a", "aa"), F("ab", "b", "bb")];
+        fixture.Write(items);
+        StoreSchema.Execute(fixture.Connection, null, "UPDATE file_state SET name_key='zz' WHERE name='a[';");
+        fixture.Write(items);
+        Require(fixture.Reader.Live(1, null).Count == 2 && fixture.Reader.Tombstones(1).Count == 0,
+            "persisted key drift is a replacement, never a false deletion");
+    }
+
+    private static void SnapshotFailureAndPartialAbsence(string root)
+    {
+        using var fixture = new SnapshotFixture(Fresh(root, "snapshot-failure"));
+        var original = Enumerable.Range(0, 80).Select(i => F($"file{i:D3}", "id:" + i, "aa")).ToArray();
+        fixture.Write(original);
+        var before = fixture.Dump();
+        fixture._writer.OnLinkWritten = (_, _, _) => throw new IOException("injected replay failure");
+        var failed = false;
+        try { fixture.Write(original.Select(i => i with { Size = 2 }).Append(D("z-link", "link") with { Flags = ItemFlags.Link }).ToArray()); }
+        catch (IOException) { failed = true; }
+        Require(failed && before.SequenceEqual(fixture.Dump()), "failure beyond a batch boundary leaves no partial state");
+        fixture._writer.OnLinkWritten = null;
+        fixture.Write(original);
+        Require(!Directory.EnumerateFiles(Path.Combine(Path.GetDirectoryName(fixture.Connection.DataSource)!, "tmp")).Any(),
+            "failed snapshot stages are cleaned");
+        foreach (var status in new[] { FileAbsence.Present, FileAbsence.Gone, FileAbsence.Unknown })
+        {
+            using var partial = new SnapshotFixture(Fresh(root, "partial-" + status));
+            var missing = F("outside/file", "id:local:00000001:0000000000000001", "aa");
+            var blocked = F("blocked/child", "blocked-id", "bb");
+            partial.Write([missing, blocked]);
+            StoreSchema.Execute(partial.Connection, null, "INSERT INTO baseline_fixture VALUES($p,$o);", ("$p", missing.Path), ("$o", missing.ObjectId));
+            var snapshot = new Snapshot("root", Side.A, 1, "c", [blocked with { ObjectId = "observed-before-failure" }], ["blocked"])
+                { VerifyAbsence = _ => status };
+            partial._writer.WriteSnapshot(snapshot, 1);
+            Require(partial.Reader.Live(1, null).Any(i => i.Path == blocked.Path && i.ObjectId == blocked.ObjectId), "no row under incomplete subtree is ever closed, even by a partial observation");
+            Require(partial.Reader.Tombstones(1).Count == (status == FileAbsence.Gone ? 1 : 0), "only identity-confirmed absence yields deletion evidence");
+            Require(partial.Reader.Live(1, null).Any(i => i.Path == missing.Path) == (status != FileAbsence.Gone), "moved or unverifiable identity stays open");
+            Require(snapshot.PendingDeletionEvidence.ContainsKey(missing.Path) == (status != FileAbsence.Gone), "unverified absence enters pending mechanism");
+        }
     }
 
     private sealed class SnapshotFixture : IDisposable
@@ -105,7 +225,7 @@ internal static partial class StorageChecks
         public SqliteConnection Connection { get; }
         public DirTable Dirs { get; }
         public FileStateReader Reader { get; }
-        private readonly FileStateTable _writer;
+        internal readonly FileStateTable _writer;
         private readonly LegacySnapshotWriter? _legacy;
 
         public SnapshotFixture(string folder, bool legacy = false)
@@ -139,9 +259,12 @@ internal static partial class StorageChecks
                 "DELETE FROM baseline_fixture WHERE path=$p OR substr(path,1,length($p)+1)=$p||'/';", ("$p", path));
         }
 
+        public void WriteStream(IEnumerable<ItemState> items) => _writer.WriteSnapshot(
+            new Snapshot("root", Side.A, 1, "c", [], []), 1, items);
+
         public void Write(IReadOnlyList<ItemState> items, Func<string, bool>? include = null, IReadOnlyList<string>? incomplete = null)
         {
-            var snapshot = new Snapshot("root", Side.A, 1, "c", items, incomplete ?? []) { IncludesPath = include };
+            var snapshot = new Snapshot("root", Side.A, 1, "c", items, incomplete ?? []) { IncludesPath = include, VerifyAbsence = _ => FileAbsence.Gone };
             if (_legacy is null) _writer.WriteSnapshot(snapshot, 1);
             else _legacy.WriteSnapshot(snapshot, 1);
         }
@@ -192,11 +315,10 @@ internal static partial class StorageChecks
         try
         {
             // 100k directories also exercises the bounded DirTable cache; no million-row input array.
-            using var input = SnapshotInput.Create(fixture.Connection, fixture.Dirs,
-                Enumerable.Range(0, count).Select(i => F($"d{i / 10:D6}/f{i:D7}", "id:" + i, "aabb")));
-            fixture.Write(input);
+            var input = Enumerable.Range(0, count).Select(i => F($"d{i / 10:D6}/f{i:D7}", "id:" + i, "aabb"));
+            fixture.WriteStream(input);
             StoreSchema.Execute(fixture.Connection, null, "PRAGMA query_only=ON;");
-            fixture.Write(input);
+            fixture.WriteStream(input);
             Require((long)StoreSchema.Scalar(fixture.Connection, null, "SELECT COUNT(*) FROM file_state;")! == count,
                 "million-item streaming snapshot and unchanged replay preserve all rows");
         }

@@ -420,7 +420,7 @@ public sealed partial class SyncRun : ISyncRun
             plan = plan with
             {
                 MatchedBothSides = planningRows.Where(row => row.A is not null && row.B is not null)
-                    .Select(row => new MatchedPair(row.A!.Path, Content.SideStamp(row.A!), Content.SideStamp(row.B!))).ToArray(),
+                    .Select(row => new MatchedPair(row.A!.Path, row.A!, row.B!)).ToArray(),
             };
         planningRows = [];
         inventory = null;

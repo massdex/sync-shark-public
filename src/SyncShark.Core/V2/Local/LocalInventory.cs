@@ -360,7 +360,11 @@ public sealed class LocalInventory : IInventorySource
             if (include(entry.RelativePath) && !LocalItems.IsExcluded(entry.RelativePath, _productOwnedRelative))
                 items.Add(LocalItems.FromScan(entry));
         items.Sort((left, right) => string.CompareOrdinal(left.Path, right.Path));
-        return new Snapshot(rootId, _side, gen, cursor, items, DecisionPaths(scan, include)) { IncludesPath = include };
+        return new Snapshot(rootId, _side, gen, cursor, items, DecisionPaths(scan, include))
+        {
+            IncludesPath = include,
+            VerifyAbsence = item => LocalFileAbsence.Check(_root.RootPath, _rootIdentity, item)
+        };
     }
 
     private Delta BuildDelta(long gen, string rootId, string cursor, string throughCursor, PilotLocalScan scan,
@@ -372,15 +376,19 @@ public sealed class LocalInventory : IInventorySource
         var changes = new List<Change>();
         foreach (var entry in scan.Entries.Values)
         {
-            if (!include(entry.RelativePath) || LocalItems.IsExcluded(entry.RelativePath, _productOwnedRelative)) continue;
+            if (!include(entry.RelativePath) || LocalItems.IsExcluded(entry.RelativePath, _productOwnedRelative) ||
+                LocalItems.InsideAny(entry.RelativePath, decisionPaths)) continue;
             var state = LocalItems.FromScan(entry);
             changes.Add(new Change(ChangeKind.Upsert, state.ObjectId, state.Path, state, null));
         }
+        var absence = new Snapshot(rootId, _side, gen, throughCursor, [], decisionPaths)
+            { VerifyAbsence = item => LocalFileAbsence.Check(_root.RootPath, _rootIdentity, item) };
         changes.AddRange(LocalDeletes.Build(_known, rootId, paths, scan,
             path => include(path) && !LocalItems.IsExcluded(path, _productOwnedRelative) &&
                 !LocalItems.InsideAny(path, decisionPaths),
-            scanTime));
-        return new Delta(rootId, _side, gen, cursor, throughCursor, changes, false, decisionPaths) { IncludesPath = include };
+            scanTime, absence.CanCloseAbsent));
+        return new Delta(rootId, _side, gen, cursor, throughCursor, changes, false, decisionPaths)
+            { IncludesPath = include, PendingDeletionEvidence = absence.PendingDeletionEvidence };
     }
 
     private static IReadOnlyList<string> DecisionPaths(PilotLocalScan scan, Func<string, bool> include) =>

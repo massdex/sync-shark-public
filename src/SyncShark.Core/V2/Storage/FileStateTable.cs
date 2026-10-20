@@ -17,6 +17,7 @@ internal sealed class FileStateTable
     /// forgotten atomically with its discovery (no window in which the link is stored but its baselines survive).
     /// </summary>
     internal Action<SqliteTransaction, long, string>? OnLinkWritten { get; set; }
+    internal Action? AfterSnapshotCompared { get; set; }
 
     /// <param name="baselined">Whether an object of a root is a side of some baseline .</param>
     public FileStateTable(SqliteConnection connection, DirTable dir, FileStateReader reader, V2Settings settings,
@@ -31,16 +32,29 @@ internal sealed class FileStateTable
     }
 
     /// <summary>Replaces the live set with the snapshot's items, closing anything absent outside incomplete subtrees.</summary>
-    public void WriteSnapshot(Snapshot snapshot, long rootNo)
+    public void WriteSnapshot(Snapshot snapshot, long rootNo, IEnumerable<ItemState>? input = null)
     {
-        // A reusable, already-staged input needs no staging writes on a replay.
-        using var owned = snapshot.Items is SnapshotInput ready && ready.IsFor(_connection, snapshot.IncludesPath)
-            ? null : SnapshotInput.Create(_connection, _dir, snapshot.Items, snapshot.IncludesPath);
-        var incoming = owned ?? (SnapshotInput)snapshot.Items;
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            try { if (TryWriteSnapshot(snapshot, rootNo, input ?? snapshot.Items)) return; }
+            finally { _dir.ClearCache(); }
+        }
+        throw new IOException("Snapshot changed concurrently twice. Retry the inventory scan.");
+    }
+
+    private bool TryWriteSnapshot(Snapshot snapshot, long rootNo, IEnumerable<ItemState> input)
+    {
+        snapshot.PendingDeletionEvidence.Clear();
+        var version = StoreSchema.Scalar(_connection, null, "PRAGMA data_version;");
+        // A partially enumerated subtree can contain observations from before the failure. Do not
+        // let even a replacement close a row there, or let an ignored observation suppress a move.
+        Func<string, bool>? include = snapshot.IncompleteSubtrees.Count == 0 ? snapshot.IncludesPath
+            : path => (snapshot.IncludesPath?.Invoke(path) ?? true) && !InsideIncomplete(path, snapshot.IncompleteSubtrees);
+        using var incoming = SnapshotInput.Create(_connection, _dir, input, include);
         var now = _clock.GetUtcNow();
         using var reading = _connection.BeginTransaction(deferred: true);
         Func<string, bool> suppressed = incoming.ContainsObject;
-        using var changes = new SnapshotChanges();
+        using var changes = new SnapshotChanges(_connection);
         using var left = incoming.Entries().GetEnumerator();
         using var right = _reader.SnapshotEntries(rootNo, () => reading).GetEnumerator();
         var hasLeft = left.MoveNext();
@@ -64,35 +78,48 @@ internal sealed class FileStateTable
             else
             {
                 var row = right.Current;
-                if ((snapshot.IncludesPath?.Invoke(row.Item.Path) ?? true) &&
-                    !InsideIncomplete(row.Item.Path, snapshot.IncompleteSubtrees))
+                if (row.NameKey != RowCodec.Key(row.Name) && incoming.At(row) is { } samePath)
+                    changes.Add(row, RowCodec.CarryHash(samePath, row.Item), wasLive: true);
+                else if ((snapshot.IncludesPath?.Invoke(row.Item.Path) ?? true) &&
+                    !InsideIncomplete(row.Item.Path, snapshot.IncompleteSubtrees) &&
+                    (suppressed(row.Item.ObjectId) || snapshot.CanCloseAbsent(row.Item)))
                     changes.Add(row, null, wasLive: true);
                 hasRight = right.MoveNext();
             }
         }
         reading.Commit();
+        AfterSnapshotCompared?.Invoke();
         // Preserve cross-row effects of the old writer without retaining the old live root in memory.
         // End the read snapshot before opening the write transaction (no deferred upgrade/BUSY_SNAPSHOT).
-        if (changes.HasChanges)
+        const string orphan = "FROM local_rehash WHERE root_no=$r AND NOT EXISTS " +
+            "(SELECT 1 FROM file_state f WHERE f.root_no=local_rehash.root_no AND f.object_id=local_rehash.object_id)";
+        bool hasOrphans(SqliteTransaction? tx) => snapshot.IncompleteSubtrees.Count == 0 &&
+            (long)StoreSchema.Scalar(_connection, tx, "SELECT EXISTS(SELECT 1 " + orphan + ");", ("$r", rootNo))! != 0;
+        if (changes.HasChanges || hasOrphans(null))
         {
-            using var batch = new StoreBatch(_connection, _settings.StoreBatchRows);
+            // A snapshot is one publication: callback or disk failures must roll back every row.
+            using var batch = new StoreBatch(_connection, int.MaxValue);
+            if (!Equals(version, StoreSchema.Scalar(_connection, batch.Transaction, "PRAGMA data_version;")))
+                return false;
             foreach (var change in changes.Read())
             {
                 if (change.Incoming is null)
-                    Step(batch, RemoveAt(rootNo, change.Entry.DirNo, change.Entry.Name, now, suppressed, batch));
+                {
+                    DeleteRow(rootNo, change.Entry.DirNo, change.Entry.Name, batch, change.Entry.NameKey);
+                    if (!suppressed(change.Entry.Item.ObjectId))
+                        InsertTombstone(rootNo, change.Entry.DirNo, change.Entry.Name, change.Entry.Item.ObjectId, now, batch);
+                }
                 else if (change.WasLive)
                     Step(batch, Replace(change.Entry, change.Incoming, rootNo, suppressed, now, batch));
                 else
                     Step(batch, Insert(change.Entry, rootNo, batch));
             }
+            if (hasOrphans(batch.Transaction))
+                StoreSchema.Execute(_connection, batch.Transaction, "DELETE " + orphan + ";", ("$r", rootNo));
             batch.Flush();
         }
-        // A no-op snapshot must not even issue a mutation statement for an empty cleanup.
-        const string orphan = "FROM local_rehash WHERE root_no=$r AND NOT EXISTS " +
-            "(SELECT 1 FROM file_state f WHERE f.root_no=local_rehash.root_no AND f.object_id=local_rehash.object_id)";
-        if (snapshot.IncompleteSubtrees.Count == 0 && (long)StoreSchema.Scalar(_connection, null,
-            "SELECT EXISTS(SELECT 1 " + orphan + ");", ("$r", rootNo))! != 0)
-            StoreSchema.Execute(_connection, null, "DELETE " + orphan + ";", ("$r", rootNo));
+        else if (!Equals(version, StoreSchema.Scalar(_connection, null, "PRAGMA data_version;"))) return false;
+        return true;
     }
 
     /// <summary>Applies a delta's deletes then upserts, each in list order, tombstoning every real deletion.</summary>
@@ -288,7 +315,7 @@ internal sealed class FileStateTable
         DateTimeOffset deletedAt, StoreBatch batch)
     {
         item = ReconcileDebt(item, rootNo, batch.Transaction);
-        DeleteRow(rootNo, live.DirNo, live.Name, batch);
+        DeleteRow(rootNo, live.DirNo, live.Name, batch, live.NameKey);
         var displaced = live.Item.ObjectId;
         if (!string.Equals(displaced, item.ObjectId, StringComparison.Ordinal) && !suppressed(displaced))
             InsertTombstone(rootNo, live.DirNo, live.Name, displaced, deletedAt, batch);
@@ -342,10 +369,10 @@ internal sealed class FileStateTable
         return true;
     }
 
-    private void DeleteRow(long rootNo, long dirNo, string name, StoreBatch batch) =>
+    private void DeleteRow(long rootNo, long dirNo, string name, StoreBatch batch, string? storedKey = null) =>
         StoreSchema.Execute(_connection, batch.Transaction,
             "DELETE FROM file_state WHERE root_no=$r AND dir_no=$d AND name_key=$k AND name=$n;",
-            ("$r", rootNo), ("$d", dirNo), ("$k", RowCodec.Key(name)), ("$n", name));
+            ("$r", rootNo), ("$d", dirNo), ("$k", storedKey ?? RowCodec.Key(name)), ("$n", name));
 
     // Keyed by object: a later deletion at the same path never overwrites an unresolved tombstone (decision 19).
     // Written only for an object that has a baseline: the Planner's deletion evidence has no other reader (49).
