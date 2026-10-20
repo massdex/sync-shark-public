@@ -320,7 +320,7 @@ internal static partial class RunChecks
             var fx = Build(suppliedStore: store);
             store.MarkFirstSyncDone(fx.Pair.PairId);
             var item = fx.A.Seed("protected/item.txt", "target content");
-            fx.Provider.AddInventory(fx.Pair.A, new FlaggedInventory(fx.A, item.Path, kind));
+            fx.Provider.AddInventory(fx.Pair.A, new HeldFlaggedInventory(fx.A, item.Path, kind));
             var settings = kind == ItemFlags.Placeholder
                 ? (Settings with { ReplaceOnlineOnlyStubs = false }) : Settings;
             var run = new SyncRun(store, fx.Executor, fx.Provider, settings, TimeProvider.System);
@@ -526,7 +526,7 @@ internal static partial class RunChecks
     }
 
     /// <summary>An inventory that reports one path with a chosen flag, as the real scanners do for links/stubs.</summary>
-    private sealed class FlaggedInventory(FakeEndpoint inner, string path, ItemFlags flags) : IInventorySource
+    private sealed class HeldFlaggedInventory(FakeEndpoint inner, string path, ItemFlags flags) : IInventorySource
     {
         public async Task<Snapshot> FullAsync(long gen, Func<string, bool> include, IProgress<string> p,
             CancellationToken ct)
