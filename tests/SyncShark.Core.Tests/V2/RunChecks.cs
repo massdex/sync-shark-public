@@ -1683,16 +1683,17 @@ internal static partial class RunChecks
         using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
         var fx = Build(suppliedStore: store);
         for (var i = 0; i < 5; i++) { fx.A.Seed($"{i}.txt", "same"); fx.B.Seed($"{i}.txt", "same"); }
-        var inventory = new ScriptedInventory(fx.A) { Hashless = true, CrashOnHashCall = 3 };
+        var inventory = new ScriptedInventory(fx.A) { Hashless = true, ThrowHashPath = "4.txt" };
         fx.Provider.AddInventory(fx.Pair.A, inventory);
         var settings = Settings with { LocalHashCheckpointFiles = 2 };
         var run = new SyncRun(fx.Store, fx.Executor, fx.Provider, settings, TimeProvider.System);
-        await ExpectAsync<SimulatedCrash>(() => run.PreviewFirstSyncAsync(fx.Pair.PairId,
-            new RecordingProgress(), CancellationToken.None));
+        var preview = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        Require(preview.RunUnavailable is null && fx.Store.SyncRetryAt(fx.Pair.PairId, "4.txt") is not null,
+            "failed hash checkpoint remains retryable while the preview completes");
         Require(inventory.HashedPaths == 4, "two completed hash chunks before interruption");
         Require(fx.Store.Live(fx.Pair.A.RootId, Enumerable.Range(0, 5).Select(i => $"{i}.txt"))
             .Count(x => x.Hash is not null) == 4, "completed chunks are committed before the next hash call");
-        inventory.CrashOnHashCall = null;
+        inventory.ThrowHashPath = null;
         store.Dispose();
         using var reopened = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
         var restarted = new SyncRun(reopened, NewExecutor(reopened), fx.Provider, settings, TimeProvider.System);

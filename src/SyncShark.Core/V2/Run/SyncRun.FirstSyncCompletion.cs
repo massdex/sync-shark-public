@@ -111,6 +111,8 @@ public sealed partial class SyncRun
         foreach (var item in previous)
         {
             // Read-stage debt is owned by RecordScanRetries, never by action/equality settlement.
+            if (plan.RecoveryPending.Contains(item.Path, StringComparer.OrdinalIgnoreCase))
+            { remaining.Remove(item.Path); continue; }
             if (item.Kind == "scan" || item.ReadRoots is { Count: > 0 } ||
                 _store.SyncRetryAt(pair.PairId, item.Path)?.PendingNotice is not null)
             { remaining.Remove(item.Path); continue; }
@@ -188,7 +190,7 @@ public sealed partial class SyncRun
             // Recovery holds already retained exact reviewed authority before filtering effects.
             if (plan.RecoveryPending.Contains(path, StringComparer.OrdinalIgnoreCase)) continue;
             // A decision supersedes prepare authority. Preserve its proposal and dormant scheduling.
-            if (_store.SyncRetryAt(pair.PairId, path)?.Kind == "decision") continue;
+            if (_store.SyncRetryAt(pair.PairId, path)?.Kind is "decision" or "reviewed-removal" or "reviewed-choice") continue;
             if (_store.Live(pair.A.RootId, [path]).Concat(_store.Live(pair.B.RootId, [path]))
                 .Any(item => item.Flags.HasFlag(ItemFlags.ProviderNameRefused)))
             { _store.ClearSyncRetry(pair.PairId, path); continue; }

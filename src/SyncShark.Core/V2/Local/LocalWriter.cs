@@ -93,8 +93,8 @@ public sealed class LocalWriter : IEndpointWriter, ISyncTransferResourceEndpoint
 
     private void RequireAvailableRecovery(SyncAction action)
     {
-        if (RecoveryUnavailable is not null && RecoverySafety.RequiresRecovery(action))
-            throw new IOException("Recovery location unavailable: " + RecoveryUnavailable);
+        if (RecoverySafety.RequiresRecovery(action) && RecoveryUnavailable is { } unavailable)
+            throw new IOException("Recovery location unavailable: " + unavailable);
     }
 
     /// <inheritdoc/>
