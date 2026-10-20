@@ -210,7 +210,8 @@ internal sealed class PairLoop
             _backoff = TimeSpan.Zero; // A bounded backlog is draining; don't exponentially slow useful progress.
         _last = report with { CompletedUtc = _in.Time.GetUtcNow() };
         if (report.Outcome == RunOutcomes.Stopped) return;
-        if (report.Outcome is RunOutcomes.Complete or RunOutcomes.Partial)
+        if (report.Outcome is RunOutcomes.Complete or RunOutcomes.Partial &&
+                report.FailureCount == 0 && report.Failures.Count == 0)
         {
             _consecutiveFailures = 0;
             try
@@ -220,7 +221,12 @@ internal sealed class PairLoop
             catch (Exception error) { RunOutput.Observe(error); }
         }
         if (report.Outcome == RunOutcomes.Failed)
-            RecordFailure(new IOException(report.Failures.FirstOrDefault()?.Reason ?? "The run reported failure; inspect its item notices for details."));
+        {
+            var failure = report.Failures.FirstOrDefault(f => f.FailureHResult is unchecked((int)0x80070070) or unchecked((int)0x80070027))
+                ?? report.Failures.FirstOrDefault();
+            RecordFailure(new IOException(failure?.Reason ?? "The run reported failure; inspect its item notices for details.",
+                failure?.FailureHResult ?? unchecked((int)0x80131620)));
+        }
         if (report.Outcome == RunOutcomes.Failed || report.FailureCount > 0 || report.Failures.Count > 0 || report.Deferred > 0 ||
             report.DeletionEvidencePending.Count > 0) ScheduleRetry();
         else _backoff = TimeSpan.Zero;
@@ -239,7 +245,8 @@ internal sealed class PairLoop
         try
         {
             _consecutiveFailures++;
-            if (error is not (EndpointAccessException or StateDamagedException or SyncRunRefusedException) && _consecutiveFailures < 3) return;
+            if (error is not (EndpointAccessException or StateDamagedException or SyncRunRefusedException) &&
+                error.HResult is not (unchecked((int)0x80070070) or unchecked((int)0x80070027)) && _consecutiveFailures < 3) return;
             var cause = error is EndpointAccessException ? "account-access" :
                 error is StateDamagedException ? "store-damage" :
                 error is SyncRunRefusedException ? "blocked" :
@@ -254,10 +261,9 @@ internal sealed class PairLoop
                 : error is StateDamagedException
                     ? "Check state-store diagnostics and restore a verified backup if needed, then choose Retry."
                     : "Check connectivity and available disk space, then choose Retry. Automatic retries continue with bounded waits.";
-            _in.Store.CloseNoticeFamily(_pairId, "autosync-failed", "autosync-failed-" + cause);
             _in.Store.AddNotices([new Notice(_pairId, 0, NoticeKind.Info, string.Empty,
                 $"Automatic sync could not finish ({cause}): {why}. {resolution} Ignore dismisses this notice without excluding files. Other pairs continue.",
-                "autosync-failed-" + cause)]);
+                "autosync-failed")]);
         }
         catch (Exception) { /* A damaged/unavailable notice store cannot terminate another pair or the host. */ }
     }

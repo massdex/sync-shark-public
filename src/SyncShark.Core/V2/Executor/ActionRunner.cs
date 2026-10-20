@@ -88,7 +88,7 @@ internal sealed class ActionRunner
         }
         catch (HttpRequestException e)
         {
-            return await CommitAsync(action, Failed(action, Describe(e))).ConfigureAwait(false);
+            return await CommitAsync(action, Failed(action, Describe(e)) with { FailureHResult = e.HResult }).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -201,7 +201,7 @@ internal sealed class ActionRunner
             // durable download checkpoint the same holds for any other failure, so resume keeps the provenance.
             return await CommitAsync(action, recoveryHolder.CheckpointRecorded
                 ? Uncertain(action, e)
-                : Failed(action, Describe(e))).ConfigureAwait(false);
+                : Failed(action, Describe(e)) with { FailureHResult = e.HResult }).ConfigureAwait(false);
         }
 
         var done = DoneResult(action, newT, recoveryHolder.Reference);
@@ -288,7 +288,7 @@ internal sealed class ActionRunner
         }
         catch (Exception e) when (e is not (OperationCanceledException or EndpointAccessException))
         {
-            return (null, Failed(action, RecoveryFailed + Describe(e)));
+            return (null, Failed(action, RecoveryFailed + Describe(e)) with { FailureHResult = e.HResult });
         }
     }
 

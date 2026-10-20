@@ -8,6 +8,8 @@ internal static partial class AutoSyncChecks
     {
         await LoopExceptionAndNoticeRecoveryAsync();
         await ImmediateAccessNoticeAsync();
+        await ImmediateDiskFullReportAsync();
+        await OutageCauseChangesStayIgnoredAsync();
         await ForeignCancellation_RetriesAsync();
         await AccessFault_RetriesAtSafetyPollAsync();
         await DyingWatches_BoundedRebuildsAsync();
@@ -56,9 +58,48 @@ internal static partial class AutoSyncChecks
         await rig.StartAsync();
         await rig.ParkedAsync(AutoStatus.Held);
         var notice = rig._store.OpenNotices("p1").Single();
-        Require(notice.ReasonKey == "autosync-failed-account-access" && notice.Detail.Contains("Reconnect", StringComparison.Ordinal),
+        Require(notice.ReasonKey == "autosync-failed" && notice.Detail.Contains("Reconnect", StringComparison.Ordinal),
             "first auth failure immediately explains the reconnect fix");
         Pass("ImmediateAccessNotice");
+    }
+
+    internal static async Task ImmediateDiskFullReportAsync()
+    {
+        await using var rig = new Rig(["p1"]);
+        rig.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Failed, 0,
+            new ActionResult("effect", Outcome.Failed, null, null, null, "disk full")
+                { FailureHResult = unchecked((int)0x80070070) }));
+        await rig.StartAsync();
+        await rig.ParkedAsync(AutoStatus.Waiting);
+        Require(rig._store.OpenNotices("p1").Single().Detail.Contains("disk-full", StringComparison.Ordinal),
+            "a failed report preserves disk-full classification and raises it immediately");
+        Pass("ImmediateDiskFullReport");
+    }
+
+    internal static async Task OutageCauseChangesStayIgnoredAsync()
+    {
+        await using var rig = await Rig.StartedAsync();
+        async Task Fail(Exception error)
+        {
+            var before = rig.Run.Runs("p1");
+            rig.Run.Then(error);
+            rig.Auto.Kick("p1");
+            await rig.ParkedAsync(AutoStatus.Waiting);
+            rig.Clock.Advance(Settings.ChangeQuietWindow);
+            await Until(() => rig.Run.Runs("p1") == before + 1 && rig.State("p1").RetryAt > rig.Clock.GetUtcNow() &&
+                rig.Clock.ActiveTimers == 1, "failure is parked");
+        }
+        for (var i = 0; i < 3; i++) await Fail(new HttpRequestException("network unavailable"));
+        var notice = rig._store.OpenNotices("p1").Single();
+        rig._store.CloseNotice(notice.NoticeId!, NoticeChoices.Ignore);
+        for (var i = 0; i < 4; i++)
+            await Fail(i % 2 == 0 ? new IOException("socket unavailable") : new HttpRequestException("network unavailable"));
+        Require(rig._store.OpenNotices("p1").Count == 0, "changing cause does not reset Ignore in one outage");
+        rig.Clock.Advance(SafetyPoll);
+        await rig.ParkedAsync(AutoStatus.Idle);
+        for (var i = 0; i < 3; i++) await Fail(new HttpRequestException("second outage"));
+        Require(rig._store.OpenNotices("p1").Count == 1, "success resets Ignore for the next outage");
+        Pass("OutageCauseChangesStayIgnored");
     }
 
     private static async Task ThrowingWatch_IsDeadWatchAsync()

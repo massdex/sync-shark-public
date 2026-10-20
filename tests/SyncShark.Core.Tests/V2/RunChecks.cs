@@ -9,6 +9,7 @@ internal static partial class RunChecks
 {
     public static async Task RunAsync()
     {
+        await ItemIgnoreWaitsForSettingsSaveAsync();
         await HistoryFailureDoesNotFailCompletedRunAsync();
         PairMissing_Refused();
         DisabledPair_Refused();
@@ -185,11 +186,46 @@ internal static partial class RunChecks
             var notice = fx.Store.OpenNotices(fx.Pair.PairId).Single(n => NoticeChoices.IsPairRetryNotice(n));
             var runtime = new V2CliRuntime(null, fx.Store, run, new EndpointRootProbe(fx.Provider), Path.GetTempPath());
             await runtime.ResolveConflictAsync(fx.Pair.PairId, "", NoticeChoices.Ignore, notice.NoticeId, 0, null, default).WaitAsync(TimeSpan.FromSeconds(2));
+            Require(fx.Store.NoticeById(fx.Pair.PairId, notice.NoticeId!) is { Closed: true }, "pair Ignore closes the notice");
             Require(!pending.IsCompleted && fx.Store.Pair(fx.Pair.PairId)!.Excluded.Count == 0,
                 "Ignore responds while the run remains active and never excludes the root");
         }
         finally { await run.StopAsync(); await pending; }
         Console.WriteLine("PASS pair notice Ignore bypasses the active run gate");
+    }
+
+    internal static async Task ItemIgnoreWaitsForSettingsSaveAsync()
+    {
+        var fx = Build();
+        var run = fx.Run();
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim();
+        // This uses the production run gate and deliberately saves the stale run-start pair
+        // exactly as PersistRebuildables does. No timing assumptions or real providers.
+        var pending = Task.Run(() => run.UpdatePairSettingsAsync(() =>
+        {
+            var snapshot = fx.Store.Pair(fx.Pair.PairId)!;
+            started.SetResult();
+            if (!release.Wait(GateTimeout)) throw new TimeoutException("test run was not released");
+            fx.Store.SavePair(snapshot with { Excluded = ["generated"] });
+        }, default));
+        await started.Task.WaitAsync(GateTimeout);
+        fx.Store.AddNotices([new Notice(fx.Pair.PairId, 0, NoticeKind.Info, "failed.txt", "Retry this item", "sync-retry")]);
+        var notice = fx.Store.OpenNotices(fx.Pair.PairId).Single();
+        var runtime = new V2CliRuntime(null, fx.Store, run, new EndpointRootProbe(fx.Provider), Path.GetTempPath());
+        var ignored = runtime.ResolveConflictAsync(fx.Pair.PairId, "failed.txt", NoticeChoices.Ignore, notice.NoticeId, 0, null, default);
+        try
+        {
+            Require(!ignored.IsCompleted, "item Ignore waits behind the active run gate");
+            // A run may also resolve the original notice while the user's exclusion is queued.
+            fx.Store.CloseNotice(notice.NoticeId!, "resolved");
+        }
+        finally { release.Set(); }
+        await pending.WaitAsync(GateTimeout);
+        await ignored.WaitAsync(GateTimeout);
+        var exclusions = fx.Store.Pair(fx.Pair.PairId)!.Excluded;
+        Require(exclusions.Contains("generated") && exclusions.Contains("failed.txt"), "both run settings and queued exclusion survive");
+        Console.WriteLine("PASS ItemIgnoreWaitsForSettingsSave");
     }
 
     internal static async Task HistoryFailureDoesNotFailCompletedRunAsync()
@@ -201,6 +237,10 @@ internal static partial class RunChecks
         Require(report.Outcome == RunOutcomes.Complete && report.Done == 1, "history failure leaves the successful run outcome unchanged");
         var notice = store.OpenNotices(fx.Pair.PairId).Single(n => n.ReasonKey == "run-history-unavailable");
         Require(NoticeChoices.Options(notice).Any(o => o.Choice == NoticeChoices.RetryNow), "history failure offers a retry notice");
+        await MirrorAsync(fx);
+        var empty = await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        Require(empty.Done == 0 && store.OpenNotices(fx.Pair.PairId).Any(n => n.ReasonKey == "run-history-unavailable"),
+            "an empty poll does not clear a history failure without a successful history write");
         store.BeforeRecordSummary = null;
         fx.A.Seed("another.txt", "more content");
         await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);

@@ -21,6 +21,19 @@ public static class AutoSyncProcess
         return $"\"{Path.GetFullPath(executable)}\" {SupervisorArguments}";
     }
 
+    public static string SelectStartupExecutable(string running, string? runningVersion,
+        string installed, string? installedVersion, bool thisBuild)
+    {
+        if (thisBuild) return running;
+        if (string.Equals(runningVersion, installedVersion, StringComparison.Ordinal) && !string.IsNullOrEmpty(runningVersion))
+            return installed;
+        // Unknown or equal numeric versions with different revision labels are not evidence of
+        // a newer installed build. Prefer the executable whose capabilities the caller is using.
+        static Version? Parse(string? value) => Version.TryParse(value?.Split('-', '+')[0], out var version) ? version : null;
+        return Parse(runningVersion) is { } current && Parse(installedVersion) is { } candidate && candidate > current
+            ? installed : running;
+    }
+
     public static string RegisterStartup(string executable, bool enabled)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
@@ -30,17 +43,13 @@ public static class AutoSyncProcess
         if (!enabled)
         {
             key.DeleteValue(ValueName, throwOnMissingValue: false);
-            key.DeleteValue("Sync Shark", throwOnMissingValue: false);
-            return "Removed Sync Shark logon entries; running processes are unchanged.";
+            return "Removed AutoSync logon startup; GUI startup and running processes are unchanged.";
         }
         var command = StartupCommand(executable);
         var warning = key.GetValue(ValueName) is string current && !string.Equals(current, command, StringComparison.OrdinalIgnoreCase)
             ? "Replaced a stale AutoSync startup entry. " : string.Empty;
         if (key.GetValue("Sync Shark") is not null)
-        {
-            key.DeleteValue("Sync Shark", throwOnMissingValue: false);
-            warning += "Replaced legacy GUI logon startup with shared AutoSync to avoid competing owners. ";
-        }
+            warning += "GUI logon startup and its setting were left unchanged. Disable GUI Start With Windows in settings to avoid competing owners. ";
         key.SetValue(ValueName, command, RegistryValueKind.String);
         return warning + "Registered per-user AutoSync logon startup with crash supervision.";
     }

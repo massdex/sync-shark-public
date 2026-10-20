@@ -43,8 +43,6 @@ internal static class BackgroundHostEntry
     internal static async Task<AutoSyncHostReply> StartAsync(CancellationToken ct)
     {
         var client = Client();
-        if (await client.TrySendAsync(AutoSyncHostClient.Request("status"), TimeSpan.FromMilliseconds(300), ct) is { } existing)
-            return existing;
         using var process = AutoSyncProcess.StartDetached(
             Environment.ProcessPath ?? throw new IOException("Executable path unavailable."), supervisor: true, warning: Console.Error.WriteLine);
         // Only observations are retried. Mutations are sent exactly once by their caller.
@@ -79,12 +77,20 @@ internal static class BackgroundHostEntry
             if (command == "stop") ProcessEntry.StopSupervisor();
             if (command is "install-startup" or "uninstall-startup")
             {
-                var executable = SyncSharkRuntimePaths.InstalledExecutablePath;
-                if (invocation.Flag("--this-build") || !File.Exists(executable))
+                var running = Environment.ProcessPath ?? throw new IOException("Executable path unavailable.");
+                var installed = SyncSharkRuntimePaths.InstalledExecutablePath;
+                var executable = running;
+                if (command == "install-startup" && File.Exists(installed))
                 {
-                    executable = Environment.ProcessPath ?? throw new IOException("Executable path unavailable.");
-                    if (command == "install-startup") error.WriteLine("Using this build because --this-build was selected or no installed stable launcher exists. Install the product and rerun install-startup to follow future updates.");
+                    var currentVersion = FileVersionInfo.GetVersionInfo(running).ProductVersion;
+                    var installedVersion = FileVersionInfo.GetVersionInfo(installed).ProductVersion;
+                    executable = AutoSyncProcess.SelectStartupExecutable(running, currentVersion, installed,
+                        installedVersion, invocation.Flag("--this-build"));
+                    if (!string.Equals(currentVersion, installedVersion, StringComparison.Ordinal))
+                        error.WriteLine($"Startup versions differ: running {running} ({currentVersion}); installed {installed} ({installedVersion}). Registered {executable}. Use --this-build to select the running executable.");
                 }
+                if (command == "install-startup" && string.Equals(executable, running, StringComparison.OrdinalIgnoreCase))
+                    error.WriteLine("Registering the running build. Keep this executable in place, or rerun install-startup after installing an update.");
                 output.WriteLine(AutoSyncProcess.RegisterStartup(executable, command == "install-startup"));
                 return 0;
             }

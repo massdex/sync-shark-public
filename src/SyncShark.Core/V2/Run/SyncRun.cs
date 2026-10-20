@@ -271,18 +271,15 @@ public sealed partial class SyncRun : ISyncRun
     {
         try
         {
-            if (report.Outcome is RunOutcomes.Complete or RunOutcomes.Partial)
+            if (report.Outcome is RunOutcomes.Complete or RunOutcomes.Partial &&
+                report.FailureCount == 0 && report.Failures.Count == 0)
                 _store.CloseNoticeFamily(report.PairId, "autosync-failed");
         }
         catch (Exception error) { RunOutput.Observe(error); }
         // Empty successful safety polls do not evict meaningful history.
         if (report.Outcome == RunOutcomes.Complete && report.Done == 0 && report.FailureCount == 0 &&
             report.Held == 0 && report.Deferred == 0 && report.Skipped == 0)
-        {
-            try { _store.CloseNoticeFamily(report.PairId, "run-history-unavailable"); }
-            catch (Exception error) { RunOutput.Observe(error); }
             return;
-        }
         try
         {
             _store.RecordRunSummary(RunSummary.Of(Guid.NewGuid().ToString("N"), report, startedAt, _time.GetUtcNow()));
@@ -395,8 +392,13 @@ public sealed partial class SyncRun : ISyncRun
     {
         var saved = statuses.Select(status => status.Path).ToArray();
         if (saved.Length == 0) return;
-        var merged = pair.Excluded.Concat(saved).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        if (merged.Length != pair.Excluded.Count) _store.SavePair(pair with { Excluded = merged });
+        UpdatePairSettings(() =>
+        {
+            var current = _store.Pair(pair.PairId);
+            if (current is null) return;
+            var merged = current.Excluded.Concat(saved).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            if (merged.Length != current.Excluded.Count) _store.SavePair(current with { Excluded = merged });
+        });
     }
 
     private async Task<(Plan Plan, RebuildableResolution Rebuildables)> PreviewCoreAsync(string pairId,

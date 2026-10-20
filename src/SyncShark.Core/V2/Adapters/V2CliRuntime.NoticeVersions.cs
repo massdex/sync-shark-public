@@ -17,8 +17,7 @@ public sealed partial class V2CliRuntime
         var selected = _store.NoticeById(pairId, conflictId);
         if (selected is { Closed: false } &&
             (NoticeChoices.IsPairRetryNotice(selected.Value.Notice) || PairPath.Same(selected.Value.Notice.Path, relativePath)) &&
-            _run.TryApplyImmediateNoticeChoice(pairId, conflictId, choice, cancellationToken,
-                (previous, updated) => SaveNarrowerPair(previous, updated)))
+            _run.TryApplyImmediateNoticeChoice(pairId, conflictId, choice, cancellationToken))
         {
             if (!_borrowed && choice == NoticeChoices.RetryNow && _store.FirstSyncDone(pairId))
             {
@@ -29,16 +28,25 @@ public sealed partial class V2CliRuntime
             }
             return new SyncCliRunData(pairId, pair.Name, 0, 0, 0, 0, 0, false);
         }
+        if (selected is { Closed: false } && !NoticeChoices.IsPairRetryNotice(selected.Value.Notice) && string.IsNullOrEmpty(relativePath))
+            throw new SyncCliUsageException("--path is required for item notices.");
+        var acceptedExclusion = selected is { Closed: false } &&
+            choice is NoticeChoices.Ignore or NoticeChoices.Exclude &&
+            !NoticeChoices.IsPairRetryNotice(selected.Value.Notice) &&
+            NoticeChoices.IsRetryNotice(selected.Value.Notice) &&
+            PairPath.Same(selected.Value.Notice.Path, relativePath) &&
+            NoticeChoices.Options(selected.Value.Notice).Any(option => option.Choice == choice)
+                ? selected.Value.Notice : null;
         await WaitForDataLockAsync(_runGate, Console.Error.WriteLine, cancellationToken);
         try
         {
             var current = _store.NoticeById(pairId, conflictId);
-            var notice = current is { Closed: false } && PairPath.Same(current.Value.Notice.Path, relativePath)
-                ? current.Value.Notice : null;
+            var notice = acceptedExclusion ?? (current is { Closed: false } && PairPath.Same(current.Value.Notice.Path, relativePath)
+                ? current.Value.Notice : null);
             if (notice is not null && NoticeChoices.IsRetryNotice(notice) && NoticeChoices.IsRetryChoice(choice))
             {
                 await _run.ApplyRetryNoticeChoiceAsync(pairId, conflictId, choice, cancellationToken,
-                    (previous, updated) => SaveNarrowerPair(previous, updated));
+                    (previous, updated) => SaveNarrowerPair(previous, updated), acceptedExclusion);
                 if (NoticeChoices.IsPairRetryNotice(notice))
                     return new SyncCliRunData(pairId, pair.Name, 0, 0, 0, 0, 0, false);
                 if (choice is not (NoticeChoices.RetryNow or NoticeChoices.DeleteReviewed or NoticeChoices.KeepRestore) || !_store.FirstSyncDone(pairId))

@@ -4,8 +4,15 @@ public sealed partial class SyncRun
 {
     private readonly object _noticeChoiceGate = new();
 
-    internal bool TryApplyImmediateNoticeChoice(string pairId, string noticeId, string choice, CancellationToken ct,
-        Action<PairDef, PairDef> saveNarrowerPair)
+    internal void UpdatePairSettings(Action update)
+    {
+        lock (_noticeChoiceGate) update();
+    }
+
+    internal Task UpdatePairSettingsAsync(Action update, CancellationToken ct) =>
+        RunExclusiveAsync(null, (_, _) => { update(); return Task.FromResult(true); }, ct);
+
+    internal bool TryApplyImmediateNoticeChoice(string pairId, string noticeId, string choice, CancellationToken ct)
     {
         if (choice is not (NoticeChoices.RetryNow or NoticeChoices.Ignore)) return false;
         lock (_noticeChoiceGate)
@@ -16,15 +23,8 @@ public sealed partial class SyncRun
                 !NoticeChoices.Options(saved.Value.Notice).Any(option => option.Choice == choice)) return false;
             var notice = saved.Value.Notice;
             if (NoticeChoices.IsPairRetryNotice(notice)) return ApplyPairNoticeChoice(pairId, noticeId, choice, ct);
-            if (choice == NoticeChoices.RetryNow) _store.RequestSyncRetryNow(pairId, notice.Path);
-            else
-            {
-                var pair = _store.Pair(pairId) ?? throw new SyncRunRefusedException("The pair no longer exists.");
-                var paths = CreateExclusions.Validate(pair.Excluded.Concat([notice.Path]).ToArray());
-                saveNarrowerPair(pair, pair with { Excluded = paths });
-                _store.ClearSyncRetry(pairId, notice.Path);
-                _store.CloseNotice(noticeId, choice);
-            }
+            if (choice != NoticeChoices.RetryNow) return false;
+            _store.RequestSyncRetryNow(pairId, notice.Path);
             return true; // scheduler will pick up retries; no synchronous run or effect here
         }
     }
@@ -43,15 +43,19 @@ public sealed partial class SyncRun
     // One shared authority for app and CLI. These choices change scheduling or exclusion policy,
     // never turn an uncertain effect into deletion permission or mark an effect successful.
     internal Task<bool> ApplyRetryNoticeChoiceAsync(string pairId, string noticeId, string choice, CancellationToken ct,
-        Action<PairDef, PairDef>? saveNarrowerPair = null) =>
+        Action<PairDef, PairDef>? saveNarrowerPair = null, Notice? acceptedExclusion = null) =>
         RunExclusiveAsync(null, (_, token) =>
         {
             token.ThrowIfCancellationRequested();
             var saved = _store.NoticeById(pairId, noticeId);
-            if (saved is null || saved.Value.Closed || !NoticeChoices.IsRetryNotice(saved.Value.Notice) ||
-                !NoticeChoices.Options(saved.Value.Notice).Any(option => option.Choice == choice))
+            // A validated exclusion accepted before waiting remains user intent even if the run
+            // resolves its notice. Read the pair only AFTER admission, never save a run-start snapshot.
+            var notice = acceptedExclusion ?? (saved is { Closed: false } ? saved.Value.Notice : null);
+            if (notice is null || !NoticeChoices.IsRetryNotice(notice) ||
+                !NoticeChoices.Options(notice).Any(option => option.Choice == choice) ||
+                (acceptedExclusion is not null && (NoticeChoices.IsPairRetryNotice(notice) ||
+                    choice is not (NoticeChoices.Ignore or NoticeChoices.Exclude) || notice.NoticeId != noticeId)))
                 throw new SyncRunRefusedException("That retry notice or option is no longer available. Refresh notices.");
-            var notice = saved.Value.Notice;
             var pair = _store.Pair(pairId) ?? throw new SyncRunRefusedException("The pair is no longer available.");
             if (NoticeChoices.IsPairRetryNotice(notice))
             {
@@ -105,9 +109,13 @@ public sealed partial class SyncRun
             }
             if (choice is NoticeChoices.Exclude or NoticeChoices.Ignore)
             {
-                var paths = CreateExclusions.Validate(pair.Excluded.Concat([notice.Path]).ToArray());
-                if (saveNarrowerPair is not null) saveNarrowerPair(pair, pair with { Excluded = paths });
-                else _store.SavePair(pair with { Excluded = paths });
+                lock (_noticeChoiceGate)
+                {
+                    pair = _store.Pair(pairId) ?? throw new SyncRunRefusedException("The pair is no longer available.");
+                    var paths = CreateExclusions.Validate(pair.Excluded.Concat([notice.Path]).ToArray());
+                    if (saveNarrowerPair is not null) saveNarrowerPair(pair, pair with { Excluded = paths });
+                    else _store.SavePair(pair with { Excluded = paths });
+                }
                 _store.ClearSyncRetry(pairId, notice.Path);
                 // Retain pending effects for verify-only reconciliation under the normal exclusion policy.
             }

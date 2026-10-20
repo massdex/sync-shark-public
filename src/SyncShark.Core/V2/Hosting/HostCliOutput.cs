@@ -7,7 +7,7 @@ public sealed record HostCliOutput(int ExitCode, string Stdout, string Stderr);
 
 internal sealed class HostCliWriter(int maximumCharacters) : TextWriter
 {
-    private readonly char[] _buffer = new char[maximumCharacters];
+    private char[] _buffer = new char[Math.Min(256, maximumCharacters)];
     private int _next, _count;
     private readonly object _gate = new();
     public override Encoding Encoding => Encoding.UTF8;
@@ -18,6 +18,11 @@ internal sealed class HostCliWriter(int maximumCharacters) : TextWriter
     }
     private void Append(char value)
     {
+        if (_count == _buffer.Length && _buffer.Length < maximumCharacters)
+        {
+            Array.Resize(ref _buffer, Math.Min(maximumCharacters, _buffer.Length * 2));
+            _next = _count; // no wrap until the maximum is reached
+        }
         if (_count == _buffer.Length) Truncated = true;
         else _count++;
         _buffer[_next] = value;
@@ -28,7 +33,7 @@ internal sealed class HostCliWriter(int maximumCharacters) : TextWriter
         if (value is null) return;
         lock (_gate)
         {
-            var start = Math.Max(0, value.Length - _buffer.Length);
+            var start = Math.Max(0, value.Length - maximumCharacters);
             if (start > 0) Truncated = true;
             for (var i = start; i < value.Length; i++) Append(value[i]);
         }

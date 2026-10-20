@@ -20,6 +20,9 @@ if (args is ["--v2-autosync-phase3-checks"])
 {
     await Massdex.SyncShark.V2.AutoSyncChecks.LoopExceptionAndNoticeRecoveryAsync();
     await Massdex.SyncShark.V2.AutoSyncChecks.ImmediateAccessNoticeAsync();
+    await Massdex.SyncShark.V2.AutoSyncChecks.ImmediateDiskFullReportAsync();
+    await Massdex.SyncShark.V2.AutoSyncChecks.OutageCauseChangesStayIgnoredAsync();
+    await Massdex.SyncShark.V2.RunChecks.ItemIgnoreWaitsForSettingsSaveAsync();
     await Massdex.SyncShark.V2.RunChecks.PairNoticeIgnoreDoesNotWaitForRunAsync();
     await Massdex.SyncShark.V2.RunChecks.HistoryFailureDoesNotFailCompletedRunAsync();
     await Massdex.SyncShark.V2.AutoSyncHostChecks.RunAsync();

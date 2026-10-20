@@ -32,8 +32,19 @@ internal static class ProcessEntry
         using var mutex = new Mutex(false, @"Local\" + AutoSyncHostProtocol.PipeName(SyncSharkRuntimePaths.InstanceLockFile) + ".supervisor");
         bool owned;
         try { owned = mutex.WaitOne(0); } catch (AbandonedMutexException) { owned = true; }
-        if (!owned) return 0;
         using var stop = new EventWaitHandle(false, EventResetMode.ManualReset, SupervisorStopName);
+        if (!owned)
+        {
+            if (!stop.WaitOne(0)) return 0; // a healthy supervisor already owns this generation
+            // A quick restart must inherit ownership after the stopping generation drains.
+            while (!owned)
+            {
+                try { owned = mutex.WaitOne(TimeSpan.FromSeconds(1)); }
+                catch (AbandonedMutexException) { owned = true; }
+                if (!owned && !stop.WaitOne(0)) return 0; // another starter already took over
+            }
+        }
+        stop.Reset(); // this owner begins a new supervisor generation
         var delay = TimeSpan.FromSeconds(5);
         try
         {
@@ -41,8 +52,10 @@ internal static class ProcessEntry
             {
                 try
                 {
+                    var started = System.Diagnostics.Stopwatch.StartNew();
                     using var child = AutoSyncProcess.StartDetached(Environment.ProcessPath ?? throw new IOException("Executable unavailable."), supervisor: false, warning: Console.Error.WriteLine);
                     child.WaitForExit();
+                    if (started.Elapsed >= TimeSpan.FromMinutes(10)) delay = TimeSpan.FromSeconds(5);
                     if (child.ExitCode == 0) return 0; // explicit safe stop/attach is not a crash
                 }
                 catch (Exception error)

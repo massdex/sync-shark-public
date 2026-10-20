@@ -24,6 +24,15 @@ internal static class AutoSyncHostChecks
             writer.Write("0123456789"); writer.Write("abcdefghijk");
             Require(writer.Truncated && writer.ToString() == "bcdefghijk", "bounded output retains the tail");
         }
+        using (var writer = new HostCliWriter(1000))
+        {
+            writer.Write(new string('a', 900)); writer.Write(new string('b', 300));
+            Require(writer.Truncated && writer.ToString() == new string('a', 700) + new string('b', 300), "lazy buffer growth preserves ordered tail");
+        }
+        Require(AutoSyncProcess.SelectStartupExecutable("running", "2.0.0", "installed", "1.0.0", false) == "running", "older installed build is never selected");
+        Require(AutoSyncProcess.SelectStartupExecutable("running", "2.0.0", "installed", "2.0.0", false) == "installed", "same version uses installed build");
+        Require(AutoSyncProcess.SelectStartupExecutable("running", "2.0.0", "installed", "3.0.0", false) == "installed", "newer installed build is selected");
+        Require(AutoSyncProcess.SelectStartupExecutable("running", "2.0.0+new", "installed", "2.0.0+old", false) == "running", "unknown revision order uses running build");
         Require(AutoSyncProcess.StartupCommand(Path.Combine(Path.GetTempPath(), "Product", "SyncShark.exe"))
             .EndsWith("--core v2 --autosync-supervisor", StringComparison.Ordinal), "startup explicitly selects v2 and supervises crashes");
         if (OperatingSystem.IsWindows()) await AutoSyncProcessChecks.RunAsync();
