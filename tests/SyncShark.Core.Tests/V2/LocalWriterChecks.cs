@@ -6,6 +6,7 @@ internal static class LocalWriterChecks
     public static async Task RunAsync()
     {
         await PutCreateAndParentsAsync().ConfigureAwait(false);
+        await RecoveryUnavailableCreateOnlyAsync().ConfigureAwait(false);
         await PutCreateOccupiedMismatchAsync().ConfigureAwait(false);
         await PutUpdateMatchesAsync().ConfigureAwait(false);
         await PutUpdateStaleAsync().ConfigureAwait(false);
@@ -28,6 +29,25 @@ internal static class LocalWriterChecks
         await LocalWriterReadChecks.RunAsync().ConfigureAwait(false);
         await LocalIgnoredChildrenChecks.RunAsync().ConfigureAwait(false);
         await LocalIgnoredChildrenChecks.SyncRunCloudFolderDeletionAsync().ConfigureAwait(false);
+    }
+
+    private static async Task RecoveryUnavailableCreateOnlyAsync()
+    {
+        var root = LocalChecks.FreshRoot("recovery-unavailable");
+        var recovery = Path.Combine(Path.GetDirectoryName(root)!, "missing-recovery");
+        var writer = await LocalWriter.OpenAsync(LocalChecks.RootOf(root, "root-local"), Side.A,
+            LocalChecks.PairId, LocalChecks.InstallationId, recovery, default, recoveryUnavailable: "removable drive missing");
+        var bytes = LocalChecks.Bytes("safe copy");
+        var action = new SyncAction("recovery-create", 1, ActionKind.CopyNew, Side.A, "new.txt", null, Source(bytes), null, false, null);
+        var admitted = await writer.AdmitFreeSpaceAsync(action, default);
+        using var admission = admitted.Reservation;
+        LocalChecks.Require(admitted.Refusal is null, "create-only space admission does not depend on missing Recovery volume");
+        var victim = await writer.PutAsync(action, new MemoryStream(bytes), default);
+        LocalChecks.Require(File.ReadAllText(Path.Combine(root, "new.txt")) == "safe copy" && !Directory.Exists(recovery),
+            "degraded local writer copies without probing or allocating missing Recovery");
+        await ExpectAsync<IOException>(() => writer.DeleteAsync(new SyncAction("blocked-delete", 6, ActionKind.Delete,
+            Side.A, "new.txt", null, null, victim, true, null), default));
+        LocalChecks.Require(File.Exists(Path.Combine(root, "new.txt")), "degraded writer independently refuses destructive effects");
     }
 
     private static async Task PutCreateAndParentsAsync()

@@ -22,18 +22,31 @@ public sealed partial class SyncRun
             var old = _store.SyncRetryAt(pair.PairId, group.Key);
             if (old?.Kind == "decision") continue;
             _store.SaveSyncRetry(pair.PairId, (old ?? new SyncRetry(group.Key, "recovery", 0, "", DateTimeOffset.MinValue)) with
-            { LastError = unavailable, ReviewedActions = group.ToArray(), RetryAfter = DateTimeOffset.MinValue });
+            { LastError = old?.LastError ?? unavailable,
+                ReviewedActions = old?.ReviewedActions ?? (plan.FirstSyncOptions?.FirstSync == true ? group.ToArray() : null),
+                ProposedActions = old?.ProposedActions ?? group.ToArray(), RetryAfter = old?.RetryAfter ?? DateTimeOffset.MinValue });
         }
         foreach (var item in plan.HeldDeletions)
         {
             var old = _store.SyncRetryAt(pair.PairId, item.Path);
             if (old?.Kind == "decision") continue;
+            if (plan.FirstSyncOptions?.FirstSync == true &&
+                reviewedDeletes?.Contains(FolderDelete.VictimKey(item.Local, item.Path)) != true)
+            {
+                // An unavailable Recovery location never upgrades an unreviewed held path.
+                _store.SaveSyncRetry(pair.PairId, old ?? new SyncRetry(item.Path, "recovery", 0, unavailable, DateTimeOffset.MinValue));
+                continue;
+            }
             _store.SaveSyncRetry(pair.PairId, (old ?? new SyncRetry(item.Path, "recovery", 0, "", DateTimeOffset.MinValue)) with
-            { LastError = unavailable, Held = item, HeldReviewed = reviewedDeletes?.Contains(FolderDelete.VictimKey(item.Local, item.Path)) == true });
+            { LastError = old?.LastError ?? unavailable, Held = old?.Held ?? item,
+                HeldReviewed = old?.HeldReviewed == true || reviewedDeletes?.Contains(FolderDelete.VictimKey(item.Local, item.Path)) == true,
+                HeldExpected = old?.HeldExpected ?? _store.Live(item.Local == Side.A ? pair.A.RootId : pair.B.RootId, [item.Path]).FirstOrDefault() });
         }
         WriteNotices([new Notice(pair.PairId, 40, NoticeKind.Info, "",
             "Recovery location unavailable (" + unavailable + "); deletions and replacements paused. Retry when the location returns, or open settings to choose another location.",
             "recovery-unavailable")]);
-        return plan with { Actions = plan.Actions.Except(held).ToArray(), HeldDeletions = [] };
+        return plan with { Actions = plan.Actions.Except(held).ToArray(), HeldDeletions = [],
+            RecoveryPending = held.Select(action => action.Path).Concat(plan.HeldDeletions.Select(item => item.Path))
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray() };
     }
 }

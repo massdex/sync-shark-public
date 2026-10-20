@@ -15,6 +15,12 @@ public partial class MainWindow
         _noticeOptionBusy = true;
         try
         {
+            if (option.Choice == V2.NoticeChoices.OpenRecoverySettings)
+            {
+                NavigateTo("Settings");
+                ShowStatus("Choose an available Recovery location. Deletions and replacements remain paused until Recovery is available.");
+                return;
+            }
             if (option.Choice == V2.NoticeChoices.OpenFolderSettings)
             {
                 var pair = PairRows.FirstOrDefault(item => item.Id == row.PairId)

@@ -185,6 +185,8 @@ public sealed partial class SyncRun
             .Concat(plan.Actions.Where(action => action.Kind != ActionKind.Hold && !tally.WasSettled(action.ActionId))
                 .Select(action => action.Path)).Distinct(StringComparer.OrdinalIgnoreCase))
         {
+            // Recovery holds already retained exact reviewed authority before filtering effects.
+            if (plan.RecoveryPending.Contains(path, StringComparer.OrdinalIgnoreCase)) continue;
             // A decision supersedes prepare authority. Preserve its proposal and dormant scheduling.
             if (_store.SyncRetryAt(pair.PairId, path)?.Kind == "decision") continue;
             if (_store.Live(pair.A.RootId, [path]).Concat(_store.Live(pair.B.RootId, [path]))

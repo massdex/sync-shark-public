@@ -15,6 +15,7 @@ public static class NoticeChoices
     public const string RetryNow = "retry-now";
     public const string Exclude = "exclude";
     public const string OpenFolderSettings = "open-folder-settings";
+    public const string OpenRecoverySettings = "open-recovery-settings";
     public static bool IsRemovalAttention(Notice notice) => notice.ReasonKey is "reviewed-folder-grew" or "reviewed-removal-skipped";
     public const string RemovalAttentionHelp = " Open folder settings to inspect selection and ignore rules, or dismiss this notice. You can remove the unwanted copy yourself or adjust the ignore rules. Ordinary sync carries deletions with its usual Recovery safeguards only when the path is included and no protection holds it; excluded paths remain untouched.";
 
@@ -33,7 +34,7 @@ public static class NoticeChoices
 
     public static bool IsRetryNotice(Notice notice) => notice.ReasonKey is "sync-retry" or "deletion-review" or "planning-degraded" or "recovery-unavailable" || IsRemovalAttention(notice);
 
-    public static bool IsRetryChoice(string choice) => choice is RetryNow or Exclude or Ignore or DeleteReviewed or KeepRestore or OpenFolderSettings or Dismiss;
+    public static bool IsRetryChoice(string choice) => choice is RetryNow or Exclude or Ignore or DeleteReviewed or KeepRestore or OpenFolderSettings or OpenRecoverySettings or Dismiss;
 
     public static bool IsRetainedVersionChoice(string choice) =>
         choice is UseOtherVersion or SaveOtherVersionAsCopy or Dismiss;
@@ -56,7 +57,9 @@ public static class NoticeChoices
             ? [new(KeepRestore, "Keep / restore"), new(Ignore, "Ignore; exclude this path from sync")]
             : notice.ReasonKey == "deletion-review"
             ? [new(DeleteReviewed, "Delete with recovery"), new(KeepRestore, "Keep / restore"), new(Ignore, "Ignore; exclude this path from sync")]
-            : notice.ReasonKey is "planning-degraded" or "recovery-unavailable"
+            : notice.ReasonKey == "recovery-unavailable"
+            ? [new(RetryNow, "Retry now"), new(OpenRecoverySettings, "Recovery settings")]
+            : notice.ReasonKey == "planning-degraded"
             ? [new(RetryNow, "Retry now"), new(OpenFolderSettings, "Details / folder settings")]
             : IsRetryNotice(notice)
             ? [new(RetryNow, "Retry now"), new(Exclude, "Exclude from sync"), new(Ignore, "Ignore; exclude this path from sync")]
@@ -64,6 +67,7 @@ public static class NoticeChoices
 
     public static string Result(string choice) => choice switch
     {
+        OpenRecoverySettings => "Open Settings and choose an available Recovery location. No files changed; paused operations remain retryable.",
         OpenFolderSettings => "Open this pair's folder settings to inspect selection and ignore rules. The notice remains open; no files changed.",
         RetryNow => "Retry requested. Existing evidence and deletion safeguards remain in force.",
         Exclude => "Excluded from future sync on both sides; no files were deleted.",

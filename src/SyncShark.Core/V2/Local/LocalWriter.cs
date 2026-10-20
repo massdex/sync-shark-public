@@ -14,7 +14,12 @@ public sealed class LocalWriter : IEndpointWriter, ISyncTransferResourceEndpoint
     private readonly Side _side;
     private readonly string _pairId;
     private readonly string _recoveryRoot;
-    public string? RecoveryUnavailable { get; private init; }
+    private string? _recoveryUnavailable;
+    public string? RecoveryUnavailable
+    {
+        get => _recoveryUnavailable ?? (Directory.Exists(_recoveryRoot) ? null : _recoveryRoot + " is unavailable");
+        private init => _recoveryUnavailable = value;
+    }
     private readonly PilotDirectoryIdentity _rootIdentity;
     private readonly LocalFreeSpaceGuard _freeSpace;
     private readonly IReadOnlyList<SyncIgnoreRule> _ignoreRules;

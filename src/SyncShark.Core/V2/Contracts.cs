@@ -178,6 +178,7 @@ public sealed record Plan(string PairId, long Gen, IReadOnlyList<SyncAction> Act
 {
     public string? RunUnavailable { get; init; }
     public IReadOnlyList<SyncAction> DeferredPlanningActions { get; init; } = [];
+    public IReadOnlyList<string> RecoveryPending { get; init; } = [];
     /// <summary>Safety-filtered effects, reported as Skipped but never submitted to an executor.</summary>
     public IReadOnlyList<SyncAction> SkippedActions { get; init; } = [];
 

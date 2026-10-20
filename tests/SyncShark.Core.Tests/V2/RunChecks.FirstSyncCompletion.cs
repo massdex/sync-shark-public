@@ -28,6 +28,8 @@ internal static partial class RunChecks
         await Completion_PostPassFailureAsync();
         await Completion_NoticeWriteFailureAsync();
         await Completion_RecoveryUnavailableAsync();
+        await Completion_DeliberatelySkippedLinkAsync();
+        await Completion_RecoveryDoesNotApproveHeldAsync();
         await Completion_ExcludeNarrowsPrepareAsync();
     }
 
@@ -50,6 +52,39 @@ internal static partial class RunChecks
             fx.WriterA.Deletes == 0 && fx.WriterB.Deletes == 0,
             "retry exclusion narrows the retained prepare through normal authority without deleting either side");
         Console.WriteLine("PASS Completion_ExcludeNarrowsPrepare");
+    }
+
+    private static async Task Completion_RecoveryDoesNotApproveHeldAsync()
+    {
+        var fx = Build();
+        fx.A.Seed("unapproved.txt", "must survive");
+        var run = fx.Run();
+        var plan = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        plan = plan with { Actions = [], HeldDeletions = [new("unapproved.txt", Side.A)] };
+        fx.WriterA.RecoveryUnavailable = "missing USB";
+        await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), default, new HashSet<string>());
+        Require(fx.Store.SyncRetryAt(fx.Pair.PairId, "unapproved.txt")?.Held is null,
+            "Recovery outage never grants held-deletion authority absent from review");
+        fx.WriterA.RecoveryUnavailable = null;
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        Require(fx.WriterA.Deletes == 0 && fx.WriterB.Deletes == 0 && await fx.A.ObserveAsync("unapproved.txt", default) is not null,
+            "restoring Recovery cannot authorize an unreviewed first-sync deletion");
+    }
+
+    private static async Task Completion_DeliberatelySkippedLinkAsync()
+    {
+        var fx = Build();
+        fx.A.Seed("junction", "", ItemKind.Folder);
+        fx.B.Seed("junction/cloud.txt", "protected opposite subtree");
+        fx.A.Seed("ordinary.txt", "copy");
+        fx.Provider.AddInventory(fx.Pair.A, new ScriptedInventory(fx.A) { LinkPath = "junction" });
+        var run = fx.Run();
+        var plan = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), default, ReviewedHeld(plan));
+        Require(fx.Store.FirstSyncDone(fx.Pair.PairId) && fx.Store.Cursor(fx.Pair.A.RootId) is not null &&
+            fx.Store.SyncRetryAt(fx.Pair.PairId, "junction") is null && await fx.B.ObserveAsync("ordinary.txt", default) is not null &&
+            await fx.A.ObserveAsync("junction/cloud.txt", default) is null && fx.WriterA.Deletes == 0 && fx.WriterB.Deletes == 0,
+            "deliberately unfollowed junction protects both sides without retry failure or blocking cursor/first-sync completion");
     }
 
     private static async Task Completion_RecoveryUnavailableAsync()

@@ -88,8 +88,9 @@ internal sealed class GatedObserveProvider : IEndpointProvider, IEndpointWriter
 }
 
 /// <summary>Counts writer calls while delegating to a fake endpoint.</summary>
-internal sealed class CountingWriter : IEndpointWriter
+internal sealed class CountingWriter : IEndpointWriter, IRecoveryAvailability
 {
+    public string? RecoveryUnavailable { get; set; }
     private readonly FakeEndpoint _inner;
     private int _effects;
 
@@ -222,6 +223,7 @@ internal sealed class ScriptedInventory : IInventorySource
     /// <summary>Full listings and deltas report the whole root as one incomplete subtree.</summary>
     public bool Incomplete { get; init; }
     public IReadOnlyList<string> Unreadable { get; set; } = [];
+    public string? LinkPath { get; init; }
 
     /// <summary>While set, HashAsync answers nothing, as when hashing fails.</summary>
     public bool FailHashes { get; set; }
@@ -242,7 +244,7 @@ internal sealed class ScriptedInventory : IInventorySource
         return snapshot with
         {
             Items = snapshot.Items.Where(item => !Unreadable.Any(path => PairPath.IsSelfOrUnder(item.Path, path)))
-                .Select(item => Hashless ? item with { Hash = null } : item).ToArray(),
+                .Select(item => item.Path == LinkPath ? item with { Flags = ItemFlags.Link } : Hashless ? item with { Hash = null } : item).ToArray(),
             IncompleteSubtrees = Incomplete ? [string.Empty] : Unreadable.Concat(snapshot.IncompleteSubtrees).ToArray()
         };
     }

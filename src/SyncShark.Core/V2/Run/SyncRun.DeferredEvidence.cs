@@ -71,11 +71,11 @@ public sealed partial class SyncRun
         ProgressThrottle throttle, IReadOnlySet<string>? reviewedDeletes, CancellationToken ct,
         bool allowUnreviewedEvidence = false)
     {
-        approved = HoldUnavailableRecovery(pair, approved, reviewedDeletes);
         if (approved.HeldDeletions.Count == 0)
         {
+            approved = HoldUnavailableRecovery(pair, approved, reviewedDeletes);
             Trace("0 held deletes skipped Recovery (identical to Dropbox history)");
-            return new(approved, await ExecuteAsync(approved, pair, throttle, ct), []);
+            return new(approved, await ExecuteAsync(approved, pair, throttle, ct), approved.RecoveryPending);
         }
         var parkedFootprints = LinkExclusions.None.WithPending(OutstandingFootprints(pair.PairId));
         var held = approved.HeldDeletions.ToDictionary(item => item.Path, StringComparer.OrdinalIgnoreCase);
@@ -89,9 +89,11 @@ public sealed partial class SyncRun
             held.Remove(path);
         }
         var authorityGuard = LinkExclusions.None.WithPending(unapproved);
-        approved = ApplySafetyFilter(pair, ActionPredicates(pair, authorityGuard), approved);
+        approved = ApplySafetyFilter(pair, ActionPredicates(pair, authorityGuard), approved) with { HeldDeletions = held.Values.ToArray() };
+        approved = HoldUnavailableRecovery(pair, approved, reviewedDeletes);
+        held = approved.HeldDeletions.ToDictionary(item => item.Path, StringComparer.OrdinalIgnoreCase);
         if (held.Count == 0)
-            return new(approved, await ExecuteAsync(approved, pair, throttle, ct), unapproved);
+            return new(approved, await ExecuteAsync(approved, pair, throttle, ct), unapproved.Concat(approved.RecoveryPending).Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
         // RQ-141: one exclusion snapshot for the lane, not a root scan per action. Folder refreshes
         // invalidate it under the same gate as their writes. Retain every protection seen this run
         // (decisions 57/59); the filesystem probe and executor's effect-time checks remain per item.

@@ -912,8 +912,10 @@ internal static partial class RunChecks
         await FirstSyncAsync(run, fx);
         for (var index = 0; index < 20; index++) fx.A.Seed($"f{index:D2}.txt", "content" + index);
         fx.Recorder!.CrashOnCommit = 6;
-        await ExpectAsync<SimulatedCrash>(() =>
-            run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None));
+        var interrupted = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        Require(interrupted.Uncertain > 0 || interrupted.Failed > 0, "injected persistence interruption leaves unfinished work, not an escaped run");
+        foreach (var retry in fx.Store.ReadSyncRetries(fx.Pair.PairId))
+            fx.Store.SaveSyncRetry(fx.Pair.PairId, retry with { RetryAfter = DateTimeOffset.MinValue });
         fx.Recorder.CrashOnCommit = -1;
         await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
         var b = await MapAsync(fx.B);
@@ -933,8 +935,10 @@ internal static partial class RunChecks
         await FirstSyncAsync(run, fx);
         for (var index = 0; index < 20; index++) fx.A.Seed($"g{index:D2}.txt", "content" + index);
         fx.Recorder!.CrashAfterIntent = 6;
-        await ExpectAsync<SimulatedCrash>(() =>
-            run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None));
+        var interrupted = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        Require(interrupted.Uncertain > 0 || interrupted.Failed > 0, "injected persistence interruption leaves unfinished work, not an escaped run");
+        foreach (var retry in fx.Store.ReadSyncRetries(fx.Pair.PairId))
+            fx.Store.SaveSyncRetry(fx.Pair.PairId, retry with { RetryAfter = DateTimeOffset.MinValue });
         fx.Recorder.CrashAfterIntent = -1;
         await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
         var b = await MapAsync(fx.B);
