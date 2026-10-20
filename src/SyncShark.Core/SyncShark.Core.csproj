@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+    <RootNamespace>Massdex.SyncShark</RootNamespace>
+    <AssemblyName>SyncShark.Core</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- M7 is retained source/proof only pending its mandatory destructive-history review.
+         Ordinary app releases must not contain either planning or expiration entry point. -->
+    <Compile Remove="SyncAuthorityDatabase.HistoryRetention.cs;SyncAuthorityRuntimeHost.HistoryRetention.cs" />
+    <EmbeddedResource Include="..\..\apps\SyncShark\Assets\sync-shark-mark.svg" LogicalName="SyncShark.BrandMark.svg" />
+    <EmbeddedResource Include="Dropbox\dropbox-routes.json" LogicalName="SyncShark.DropboxRoutes.json" />
+    <EmbeddedResource Include="DropboxCli\dropbox-cli.json" LogicalName="SyncShark.DropboxCli.json" />
+    <EmbeddedResource Include="V2\Adapters\edge-messages.json" LogicalName="SyncShark.EdgeMessages.json" />
+    <Compile Include="../../tools/SyncShark.JournalNative.cs" Link="JournalNative.cs" />
+    <EmbeddedResource Include="../../tools/SyncShark.JournalNative.cs" LogicalName="SyncShark.JournalNative.cs" />
+    <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="10.0.11" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
+  </ItemGroup>
+</Project>
