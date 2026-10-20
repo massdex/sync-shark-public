@@ -85,8 +85,13 @@ internal static partial class RunChecks
         Require(fx.WriterA.Moves == 2, "second action renames the refreshed revision");
         var observed = updated with { Path = "another-refused.txt", VersionId = "later" };
         store.AddNotices([Refusal(observed)]);
-        Require(store.OpenNotices(pairId).Count(n => n.Repair?.Item.ObjectId == updated.ObjectId) == 1,
+        // Provider object ids are scoped to their side; the opposite folder can have the same id.
+        var entityNotices = store.OpenNotices(pairId)
+            .Where(n => n.Repair is { Side: Side.A } repair && repair.Item.ObjectId == updated.ObjectId).ToArray();
+        Require(entityNotices.Length == 1 && entityNotices[0].NoticeId == stale.NoticeId,
             "moving to another refused name reuses the entity notice");
+        Require(store.NoticeById(pairId, invalid.NoticeId!) is { Closed: false, Notice.Repair.Side: Side.B },
+            "reusing a source notice preserves the opposite entity's pending rename notice");
         foreach (var refused in new[] { "desktop.ini", ".dropbox", "~$document.docx" })
             Require(BlockerNames.DropboxRefuses(refused), "provider rejects custom reserved name: " + refused);
 
