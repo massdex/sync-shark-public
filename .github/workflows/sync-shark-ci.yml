@@ -107,6 +107,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - suite: retry-protection
+            flag: --retry-protection-checks
+            takes-root: false
           - suite: nested-pair
             flag: --excluded-nested-pair-partition-checks
             takes-root: true
