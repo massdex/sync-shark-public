@@ -25,7 +25,8 @@ internal static class LinkExclusionChecks
         StoreForgetsBaselinesWhenLinkIsWritten();
         await ApplyDropsEffectsUnderNewLocalLinkAsync();
         await ApplyDropsRemoteRemovalWhenLocalAppearsAsync();
-        if (OperatingSystem.IsWindows()) await ApplyDropsEffectWhenLocalPathUncheckableAsync();
+        if (OperatingSystem.IsWindows())
+            foreach (var changed in new[] { false, true }) await ApplyDropsEffectWhenLocalPathUncheckableAsync(changed);
         await InterleavedPreviewCannotPassStaleDeleteAsync();
     }
 
@@ -78,7 +79,7 @@ internal static class LinkExclusionChecks
 
     // Astra (dfab3c5) 2: a local path that cannot be inspected is never "nothing there": the effect is dropped.
     [SupportedOSPlatform("windows")]
-    private static async Task ApplyDropsEffectWhenLocalPathUncheckableAsync()
+    private static async Task ApplyDropsEffectWhenLocalPathUncheckableAsync(bool changed)
     {
         var localRoot = Path.Combine(Path.GetTempPath(), "v2-uncheckable-" + Guid.NewGuid().ToString("N"), "root");
         var locked = Path.Combine(localRoot, "locked");
@@ -105,6 +106,16 @@ internal static class LinkExclusionChecks
             Require(fx.Store.FirstSyncDone(fx.Pair.PairId) &&
                 fx.Store.OpenNotices(fx.Pair.PairId).Any(notice => notice.ReasonKey == "local-changed-since-review"),
                 "a safely skipped removal completes first sync with a visible changed-path notice");
+            Require(fx.Store.SyncRetryAt(fx.Pair.PairId, "locked/x.txt") is
+                { Kind: "reviewed-removal", ReviewedActions: { Count: > 0 } },
+                "a lock retains the original stamped reviewed removal, never an ordinary copy-back");
+            await fx.Run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            Require(await fx.A.ObserveAsync("locked/x.txt", default) is null &&
+                await fx.B.ObserveAsync("locked/x.txt", default) is not null,
+                "a retry while still locked neither copies down nor deletes the reviewed survivor");
+            Require(fx.Store.OpenNotices(fx.Pair.PairId).Any(notice => notice.Path == "locked/x.txt" &&
+                notice.ReasonKey == "sync-retry" && NoticeChoices.Options(notice).Any(option => option.Choice == NoticeChoices.RetryNow)),
+                "the locked-removal retry notice remains open and usable after the run");
         }
         finally
         {
@@ -112,14 +123,28 @@ internal static class LinkExclusionChecks
             security.RemoveAccessRule(deny);
             info.SetAccessControl(security);
         }
-        // Access is back: the same choices, prepared and applied again, remove it (it is never copied down).
-        var again = await fx.Run.PreviewFirstSyncAsync(fx.Pair.PairId, null, [new OneSidedChoice("", Side.B, true)],
-            new RecordingProgress(), CancellationToken.None);
-        var report = await fx.Run.ApplyAsync(fx.Pair.PairId, again, new RecordingProgress(), CancellationToken.None);
-        Require(await fx.B.ObserveAsync("locked/x.txt", CancellationToken.None) is null &&
-                await fx.A.ObserveAsync("locked/x.txt", CancellationToken.None) is null &&
-                fx.Store.FirstSyncDone(fx.Pair.PairId) && report.Deferred == 0,
-            "after access returns, prepare + apply removes the remote file and completes the first sync");
+        // Owner R2 ruling: a temporary lock must not reverse the reviewed remove into copy-down.
+        if (changed) fx.B.Seed("locked/x.txt", "changed after the reviewed removal was parked");
+        var retry = fx.Store.SyncRetryAt(fx.Pair.PairId, "locked/x.txt")!;
+        fx.Store.SaveSyncRetry(fx.Pair.PairId, retry with { RetryAfter = DateTimeOffset.MinValue });
+        var report = await fx.Run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        Require(await fx.A.ObserveAsync("locked/x.txt", default) is null &&
+            fx.Store.FirstSyncDone(fx.Pair.PairId) && report.Failed == 0,
+            "unlocking never copies down the file the user chose to remove");
+        if (!changed)
+            Require(await fx.B.ObserveAsync("locked/x.txt", default) is null && report.Deferred == 0,
+                "the unchanged stamped removal executes once the local folder unlocks");
+        else
+        {
+            Require(await fx.B.ObserveAsync("locked/x.txt", default) is not null &&
+                fx.Store.OpenNotices(fx.Pair.PairId).Any(notice => notice.Path == "locked/x.txt" &&
+                    notice.ReasonKey == "reviewed-removal-skipped"),
+                "changed stamps hold the removal with a notice instead of deleting or copying");
+            await fx.Run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            Require(await fx.A.ObserveAsync("locked/x.txt", default) is null &&
+                await fx.B.ObserveAsync("locked/x.txt", default) is not null,
+                "the changed reviewed removal stays held on later runs");
+        }
     }
 
     // Astra (cec2a29) 1: the one-sided fact is captured in the plan. A second preview after the local item appears
@@ -140,9 +165,9 @@ internal static class LinkExclusionChecks
         await fx.Run.PreviewFirstSyncAsync(fx.Pair.PairId, null, [new OneSidedChoice("", Side.B, true)],
             new RecordingProgress(), CancellationToken.None);   // interleaved preview: the store now holds local q
         var report = await fx.Run.ApplyAsync(fx.Pair.PairId, reviewed, new RecordingProgress(), CancellationToken.None);
-        Require(await fx.B.ObserveAsync("q/x.txt", CancellationToken.None) is not null && report.Deferred > 0 &&
-                !fx.Store.FirstSyncDone(fx.Pair.PairId),
-            "a stale reviewed delete is dropped after an interleaved preview, and the first sync stays open");
+        Require(await fx.B.ObserveAsync("q/x.txt", CancellationToken.None) is not null && report.Deferred == 0 &&
+                fx.Store.FirstSyncDone(fx.Pair.PairId) && await fx.A.ObserveAsync("q/x.txt", default) is not null,
+            "a stale reviewed delete is dropped after an interleaved preview; first sync completes with both survivors");
     }
 
     // Astra fix 3: a known link tag wins over online-only bits; a cloud stub is still an online-only file.

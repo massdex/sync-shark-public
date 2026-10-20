@@ -322,13 +322,22 @@ public sealed partial class SyncRun
                             lock (sync) pending.Remove(rule.Path);
                             return; // Current inventory is ordinary sync input on the next run, never old delete authority.
                         }
-                        if (survivor.Flags != ItemFlags.None || survivor.Kind != ItemKind.File || survivor.Hash is null)
-                        { lock (sync) pending.Add(rule.Path); return; }
+                        // Released history always ends in an explicit decision; it is never retried forever.
+                        // A hash is not required for Delete: the proposal is stamped and Recovery-first, so
+                        // the executor re-checks the victim. A folder or a flagged survivor gets no deletion
+                        // authority at all: only keep/restore and ignore are offered, and the ordinary safety
+                        // guards still refuse a restore that would write over protected content.
+                        var deletable = survivor.Kind == ItemKind.File && survivor.Flags == ItemFlags.None;
                         var proposal = new SyncAction(PlanIds.ActionId(pair.PairId, approved.Gen, 40, ActionKind.Delete,
                             rule.Local, rule.Path), 40, ActionKind.Delete, rule.Local, rule.Path, null, null,
                             survivor, true, null) { OppositeAbsent = true };
-                        var attention = new Notice(pair.PairId, 40, NoticeKind.UserDecision, rule.Path,
-                            "Dropbox reports this file deleted. Nothing was deleted or uploaded. Choose Delete with Recovery, Keep and restore to Dropbox, or Ignore.", "deletion-review");
+                        var attention = new Notice(pair.PairId,
+                            deletable ? NoticeChoices.DeletionReviewRule : NoticeChoices.DeletionReviewRestoreOnlyRule,
+                            NoticeKind.UserDecision, rule.Path,
+                            deletable
+                                ? "Dropbox reports this file deleted. Nothing was deleted or uploaded. Choose Delete with Recovery, Keep and restore to Dropbox, or Ignore."
+                                : "Dropbox reports this item deleted. Nothing was deleted or uploaded. Choose Keep and restore to Dropbox, or Ignore to exclude this path from sync.",
+                            "deletion-review");
                         _store.AddNotices([attention]);
                         _store.SaveSyncRetry(pair.PairId, released with { Kind = "decision", RetryAfter = DateTimeOffset.MaxValue,
                             HeldReviewed = false, ReviewedActions = null, ProposedActions = [proposal] });

@@ -23,7 +23,7 @@ internal static partial class PlannerChecks
     private static PlanOptions Opt(bool firstSync = false, TimeSpan? tie = null, IReadOnlyDictionary<string, Side?>? winners = null,
         IReadOnlyList<OneSidedChoice>? oneSided = null) =>
         new(tie ?? TimeSpan.FromSeconds(2), firstSync, Label, V2Settings.Default.MaxLabelAttempts, winners, oneSided)
-        { ObservedAt = T0.AddDays(1) };
+        { ObservedAt = T0.AddDays(1), ProviderA = SyncProviders.Local, ProviderB = SyncProviders.Dropbox };
 
     /// <summary>The exact key of a new identity whose source item is on <paramref name="side"/>.</summary>
     private static string NK(Side side, string objectId) => PlanIds.ObjectKey(PairId, side, objectId);

@@ -701,7 +701,9 @@ internal sealed class InMemoryStateStore : IStateStore
             (prior.State.Size != item.Size || prior.State.Mtime != item.Mtime))
             foreach (var alias in live.Where(p => p.Value.State.ObjectId == item.ObjectId).ToArray())
                 live[alias.Key] = alias.Value with { State = alias.Value.State with { Hash = null, Flags = alias.Value.State.Flags & ~ItemFlags.NeedsRehash } };
-        var aliases = live.Values.Where(r => r.State.ObjectId == item.ObjectId).ToArray();
+        // Alias evidence is relevant only to rehash debt. Avoid a whole-store scan on every
+        // ordinary snapshot insertion (the million-item prepare fixture otherwise becomes quadratic).
+        var aliases = debt ? live.Values.Where(r => r.State.ObjectId == item.ObjectId).ToArray() : Array.Empty<Row>();
         var needs = debt && (aliases.Length == 0 || aliases.Any(r => (r.State.Flags & ItemFlags.NeedsRehash) != 0));
         if (needs) item = item with { Hash = null, Flags = item.Flags | ItemFlags.NeedsRehash };
         else if ((item.Flags & ItemFlags.NeedsRehash) != 0) item = item with { Hash = null, Flags = item.Flags & ~ItemFlags.NeedsRehash };

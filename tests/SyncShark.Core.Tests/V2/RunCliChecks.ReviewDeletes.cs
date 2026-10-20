@@ -18,7 +18,8 @@ internal static partial class RunCliChecks
         await Cli_ReviewDeletes_PrepareMatchedHeldLaneMissChangedSurvivorAsync();
         await Cli_ReviewDeletes_PrepareMatchedHashPassNoCopyBackAsync();
         await Cli_ReviewDeletes_PrepareMatchedMetadataStampNoCopyBackAsync();
-        await Cli_ReviewDeletes_HeldChildBlocksFolderDeleteAsync();
+        await Cli_ReviewDeletes_HeldChildBlocksFolderDeleteAsync(false);
+        await Cli_ReviewDeletes_HeldChildBlocksFolderDeleteAsync(true);
         await Cli_ReviewDeletes_ResolvedHeldChildKeepsFolderPendingAsync();
         await Cli_ReviewDeletes_NewChoiceVictimIsRefusedAsync();
         await Cli_ReviewDeletes_NewDeletionEvidenceVictimIsRefusedAsync();
@@ -330,7 +331,7 @@ internal static partial class RunCliChecks
     // third-review finding 1: a held child is hidden from planner rows, so an ordinary folder
     // delete must not be emitted over it. The folder is held with a pending-evidence notice, the child survives, and
     // a later run (after the evidence resolves) handles the folder.
-    private static async Task Cli_ReviewDeletes_HeldChildBlocksFolderDeleteAsync()
+    private static async Task Cli_ReviewDeletes_HeldChildBlocksFolderDeleteAsync(bool sleeping)
     {
         var fx = Build();
         var folder = fx.A.Seed("d", "", ItemKind.Folder);
@@ -359,6 +360,11 @@ internal static partial class RunCliChecks
             Require(await fx.A.ObserveAsync("d/keep.txt", CancellationToken.None) is not null,
                 "the matched post-preview delete waits for ordinary sync");
             Require(result.FirstSyncComplete, "the pending held child does not prevent completion");
+            if (sleeping)
+            {
+                var retry = fx.Store.SyncRetryAt(fx.Pair.PairId, "d/new.txt")!;
+                fx.Store.SaveSyncRetry(fx.Pair.PairId, retry with { RetryAfter = DateTimeOffset.UtcNow.AddHours(1) });
+            }
             var handoff = System.Text.Json.JsonSerializer.Serialize(fx.Store.ReadSyncRetries(fx.Pair.PairId));
             var following = await fx.Run().IncrementalAsync(fx.Pair.PairId, new Progress<RunProgress>(), default);
             Require(await fx.A.ObserveAsync("d/keep.txt", default) is null,
@@ -366,12 +372,15 @@ internal static partial class RunCliChecks
                 "; after=" + System.Text.Json.JsonSerializer.Serialize(new { Retry = fx.Store.ReadSyncRetries(fx.Pair.PairId), Report = following }));
             Require(await fx.A.ObserveAsync("d/new.txt", default) is not null && await fx.A.ObserveAsync("d", default) is not null,
                 "ordinary propagation never expands the folder delete over its unreviewed child");
+            Require(fx.Store.OpenNotices(fx.Pair.PairId).Any(notice =>
+                notice.ReasonKey == "deletion-evidence-pending" && notice.Path == "d"),
+                "the blocked ordinary folder delete retains its pending-evidence notice");
         }
         finally
         {
             Cleanup(root);
         }
-        Console.WriteLine("PASS Cli_ReviewDeletes_HeldChildBlocksFolderDelete");
+        Console.WriteLine("PASS Cli_ReviewDeletes_HeldChildBlocksFolderDelete sleeping=" + sleeping);
     }
 
     // Fourth review finding 1: the reviewed held child resolves and finishes in the same apply, but the folder delete

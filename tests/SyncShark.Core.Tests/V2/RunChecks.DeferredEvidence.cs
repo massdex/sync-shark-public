@@ -115,8 +115,9 @@ internal static partial class RunChecks
         var run = fx.Run();
         var plan = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), deadline.Token);
         var report = await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), deadline.Token, ReviewedHeld(plan));
-        Require(report.Deferred == 1 && !fx.Store.FirstSyncDone(fx.Pair.PairId),
-            "failed evidence remains pending and never marks first sync done");
+        Require(report.Deferred == 0 && fx.Store.FirstSyncDone(fx.Pair.PairId) &&
+            fx.Store.SyncRetryAt(fx.Pair.PairId, "held.txt")?.Held is not null,
+            "item-level evidence failure completes first sync with durable held retry input");
         Require(fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0,
             "failed evidence neither guesses upload nor deletes");
         Console.WriteLine("PASS DeferredEvidence_FailureRemainsPending");
@@ -134,15 +135,19 @@ internal static partial class RunChecks
         plan = plan with
         {
             HeldDeletions = plan.HeldDeletions.Where(held => held.Path == "held.txt").ToArray(),
+            // Decision 64's explicit no-change choice isolates this authorization test: decision 85
+            // allows independent work to continue, so an unrelated held upload must not affect its zero-write assertion.
+            FirstSyncOptions = plan.FirstSyncOptions! with
+            { Winners = new Dictionary<string, Side?> { ["held.txt"] = null } },
             // ordinary deletes need no review; a first-sync choice delete still does.
             Actions = [new SyncAction("outside-delete", 32, ActionKind.Delete, Side.A, "outside.txt", null,
                 null, outside, true, null) { ChoiceRemove = true, FirstSyncChoice = true }]
         };
-        await ExpectAsync<SyncRunRefusedException>(() => run.ApplyAsync(fx.Pair.PairId, plan,
-            new RecordingProgress(), deadline.Token,
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "A:held.txt" }));
-        Require(fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0 && !fx.Store.FirstSyncDone(fx.Pair.PairId),
-            "held review does not authorize first-sync choice deletes for any other exact path");
+        await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), deadline.Token,
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "A:held.txt" });
+        Require(fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0 && fx.Store.FirstSyncDone(fx.Pair.PairId) &&
+            await fx.A.ObserveAsync("outside.txt", default) is not null,
+            "unreviewed outside choice stays untouched without refusing first-sync completion");
         Console.WriteLine("PASS DeferredEvidence_OutsideHeldDeleteRefused");
     }
 
@@ -205,8 +210,9 @@ internal static partial class RunChecks
         var run = fx.Run();
         var plan = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), deadline.Token);
         var report = await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), deadline.Token, ReviewedHeld(plan));
-        Require(report.DeletionEvidencePending.SequenceEqual(["held.txt"]) && !fx.Store.FirstSyncDone(fx.Pair.PairId),
-            "tokenless evidence cancellation is pending, not caller cancellation");
+        Require(report.DeletionEvidencePending.SequenceEqual(["held.txt"]) && fx.Store.FirstSyncDone(fx.Pair.PairId) &&
+            fx.Store.SyncRetryAt(fx.Pair.PairId, "held.txt")?.Held is not null,
+            "tokenless item evidence cancellation is durable retry work, not caller cancellation or a proven outage");
         Require(fx.WriterA.Puts == 1 && await fx.A.ObserveAsync("ordinary.txt", deadline.Token) is not null,
             "evidence cancellation never cancels the ordinary executor");
         Console.WriteLine("PASS DeferredEvidence_TokenlessCancellationStaysPending");
@@ -223,8 +229,9 @@ internal static partial class RunChecks
         var plan = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), deadline.Token);
         plan = plan with { UnreviewedHeldDeletions = plan.HeldDeletions, HeldDeletions = [] };
         var report = await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), deadline.Token, ReviewedHeld(plan));
-        Require(report.DeletionEvidencePending.SequenceEqual(["new.txt"]) && report.Deferred > 0 &&
-            !fx.Store.FirstSyncDone(fx.Pair.PairId), "unreviewed held paths remain pending and incomplete");
+        Require(report.UnreviewedPending == 1 && report.Deferred == 0 &&
+            fx.Store.FirstSyncDone(fx.Pair.PairId) && fx.Store.SyncRetryAt(fx.Pair.PairId, "new.txt")?.Held is not null,
+            "unreviewed held paths remain durable and protected after first-sync completion");
         Require(fx.WriterA.Puts == 1 && fx.WriterB.Calls == 0, "unreviewed pending paths do not block ordinary download");
         Console.WriteLine("PASS DeferredEvidence_UnreviewedStaysPending");
     }
@@ -434,8 +441,9 @@ internal static partial class RunChecks
         var report = await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), deadline.Token, ReviewedHeld(plan));
         Require(await fx.B.ObserveAsync("ordinary-folder", deadline.Token) is not null,
             "unrelated new folder uses ordinary MkDir even while deletion evidence remains pending");
-        Require(report.DeletionEvidencePending.Contains("folder/pending.txt") && !fx.Store.FirstSyncDone(fx.Pair.PairId),
-            "pending child and containing folder leave first sync incomplete");
+        Require(report.DeletionEvidencePending.Contains("folder/pending.txt") && fx.Store.FirstSyncDone(fx.Pair.PairId) &&
+            fx.Store.SyncRetryAt(fx.Pair.PairId, "folder/pending.txt")?.Held is not null,
+            "pending child and containing folder remain protected retry work after first-sync completion");
         Require(fx.WriterB.Puts == 0 && await fx.B.ObserveAsync("folder/pending.txt", deadline.Token) is null,
             "held parent must not accidentally replan and upload a pending child");
         Require(fx.WriterA.Deletes == 0 && await fx.A.ObserveAsync("folder", deadline.Token) is not null,
@@ -524,7 +532,9 @@ internal static partial class RunChecks
         Require(applying.All(entry => entry.Done <= entry.Total), "applying progress stays within its total");
         Require(applying[^1] is { Done: 1, Total: 1 },
             "a held path that resolves without an effect leaves no permanent shortfall");
-        Require(report.Deferred == 1, "the vanished path stays pending for the next run");
+        Require(report.Deferred == 0 && fx.Store.FirstSyncDone(fx.Pair.PairId) &&
+            fx.Store.SyncRetryAt(fx.Pair.PairId, "held.txt") is not null,
+            "the vanished path remains durable recheck input without holding first-sync completion open");
         Console.WriteLine("PASS DeferredEvidence_ResolvedWithoutEffectKeepsProgressWhole");
     }
 

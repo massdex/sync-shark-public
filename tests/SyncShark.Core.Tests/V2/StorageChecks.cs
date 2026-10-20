@@ -47,6 +47,7 @@ internal static partial class StorageChecks
         PairRollbackDoesNotCacheRoot(root);
         Both(root, "live-under", LiveUnderSelfAndDescendants);
         Both(root, "case-insensitive", PathLookupsIgnoreCase);
+        Both(root, "batched-lookups", BatchedPathLookups);
         Both(root, "two-roots-case", PathLookups_TwoRootsDifferentCase);
         RunHeldPerformanceChecks(root);
         Both(root, "non-ascii", PathLookups_NonAscii);
@@ -662,6 +663,20 @@ internal static partial class StorageChecks
         var under = store.LiveUnder("root", ["d"]).Select(item => item.Path).OrderBy(p => p, StringComparer.Ordinal).ToArray();
         Require(under.SequenceEqual(["d", "d/e/y", "d/x"]), $"LiveUnder('d') = [{string.Join(", ", under)}]");
         Require(store.LiveUnder("root", [""]).Count == 5, "LiveUnder with the empty prefix returns every row");
+    }
+
+    private static void BatchedPathLookups(IStateStore store)
+    {
+        var gen = store.BeginGeneration("root", "snapshot");
+        var items = Enumerable.Range(0, 300).Select(i => F($"Docs/{i:D4}.txt", $"id:{i}", "77")).ToArray();
+        store.WriteSnapshot(new Snapshot("root", Side.A, gen, "c", items, []));
+        var requested = items.Select(item => item.Path.ToUpperInvariant()).Reverse()
+            .Concat(items.Select(item => item.Path)).Concat(new[] { "", "missing" });
+        var actual = store.Live("root", requested);
+        Require(actual.Count == items.Length && actual.Select(item => item.ObjectId).ToHashSet().SetEquals(items.Select(item => item.ObjectId)),
+            "bounded batches retain every distinct requested entity across batch boundaries");
+        Require(actual.All(item => item.Path.StartsWith("Docs/", StringComparison.Ordinal)),
+            "batched lookup preserves stored spelling");
     }
 
     private static void PathLookupsIgnoreCase(IStateStore store)

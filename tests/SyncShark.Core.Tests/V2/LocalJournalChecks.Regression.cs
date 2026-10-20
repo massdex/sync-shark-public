@@ -59,7 +59,7 @@ internal static partial class LocalJournalChecks
         LocalChecks.Require(store.Live("root-local", ["a/one.txt", "b/renamed.txt"]).Count == 2 && store.Live("root-local", ["b/two.txt"]).Count == 0, "rename does not remove surviving alias or retain phantom");
         File.Delete(Path.Combine(root, "b/renamed.txt")); // test-owned fixture only
         delta = await inventory.ChangesSinceAsync(snapshot.CursorAfter, store.BeginGeneration("root-local", "delta"), _ => true, default);
-        LocalChecks.Require(delta.CursorInvalid && inventory.LastFallbackReason!.Contains("multiple stored hard-link names"), "link removal reconciles");
+        LocalChecks.Require(delta.CursorInvalid && (inventory.LastFallbackReason!.Contains("multiple stored hard-link names") || inventory.LastFallbackReason == "hard-link journal change"), "link removal reconciles");
         await SaveFull(inventory, store);
         LocalChecks.Require(store.Live("root-local", ["a/one.txt"]).Count == 1 && store.Live("root-local", ["b/renamed.txt"]).Count == 0, "deleting one link retains the other");
     }

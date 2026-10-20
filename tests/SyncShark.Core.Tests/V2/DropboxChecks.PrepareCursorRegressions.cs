@@ -141,7 +141,7 @@ internal static partial class DropboxChecks
                 scenario + ": unresolved delta deletes prune phantom rows without losing the saved cursor or relisting");
             Require(store.DeletionEvidenceRows(pair.PairId, RootId).Any(row =>
                 row.Path == "remote-only.txt" && row.Failure is { Released: true }),
-                scenario + ": fixture exercises the intended pending versus permanently released evidence lane");
+                scenario + ": permanent and transient history failures both release to one durable evidence hold");
             var full = await run.PreviewFirstSyncApplyResolvedAsync(pair.PairId, null, null, [], matches,
                 new Progress<RunProgress>(), CancellationToken.None);
             // Generation/action IDs are intentionally fresh; compare the semantic plan instead.
@@ -231,7 +231,7 @@ internal static partial class DropboxChecks
                 store.Cursor(RootId) == "deferred-refreshed" && pending is not null &&
                 await local.ObserveAsync("ordinary.txt", CancellationToken.None) is not null &&
                 await local.ObserveAsync("held.txt", CancellationToken.None) is not null,
-                "nonfailed partial apply completes unrelated work but cannot promote a cursor while evidence is deferred");
+                "nonfailed partial apply completes unrelated work and promotes the refreshed safe cursor despite the evidence hold");
             Require(h.Wire.Calls.Count(call => call == "/2/files/list_revisions") == 1 &&
                 !h.Wire.Calls.Any(call => call.Contains("/delete", StringComparison.Ordinal) ||
                     call.Contains("/restore", StringComparison.Ordinal) || call.Contains("/upload", StringComparison.Ordinal) ||

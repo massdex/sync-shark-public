@@ -82,6 +82,21 @@ public sealed record SyncAction(string ActionId, int Rule, ActionKind Kind, Side
     /// </summary>
     public bool ChoiceRemove { get; init; }
 
+    private string _actionId = ActionId;
+    /// <summary>The durable effect id; finalized by the planner before the action escapes its draft.</summary>
+    public string ActionId { get => _actionId; init => _actionId = value; }
+    private bool _oppositeAbsent;
+
+    // Only Planner.Decide may finalize; draft actions must not escape that boundary.
+    // Emissions carry s+index; post-pass NewAction replacements may still carry the empty draft id.
+    internal void FinalizeDraft(string actionId, bool oppositeAbsent)
+    {
+        if (_actionId.Length != 0 && (_actionId.Length < 2 || _actionId[0] != 's' || !int.TryParse(_actionId.AsSpan(1), out _)))
+            throw new InvalidOperationException("Only an unfinalized planner draft can be finalized.");
+        _actionId = actionId;
+        _oppositeAbsent = oppositeAbsent;
+    }
+
     /// <summary>Re-include retired this intent's old history. Verify its effect, but never restore a baseline from it.</summary>
     public bool SuppressReconciledBaseline { get; init; }
 
@@ -102,7 +117,7 @@ public sealed record SyncAction(string ActionId, int Rule, ActionKind Kind, Side
     /// removal). The first-sync apply drops such a delete when the other (local) side now holds the path, reading
     /// this captured fact rather than the mutable store.
     /// </summary>
-    public bool OppositeAbsent { get; init; }
+    public bool OppositeAbsent { get => _oppositeAbsent; init => _oppositeAbsent = value; }
 
     /// <summary>
     /// Set by the Planner on the one folder Delete it appends for a chosen rebuildable folder: the single effect that
@@ -306,6 +321,8 @@ public sealed record PlanOptions(TimeSpan TieWindow, bool FirstSync, LabelRule L
     [System.Text.Json.Serialization.JsonIgnore]
     public Func<string, bool>? ProtectedDescendants { get; init; }
     public DateTimeOffset ObservedAt { get; init; } = DateTimeOffset.MinValue;
+    public string? ProviderA { get; init; }
+    public string? ProviderB { get; init; }
 
 }
 

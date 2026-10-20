@@ -15,10 +15,12 @@ public sealed partial class SyncRun
             var b = _store.Live(pair.B.RootId, [action.Path]).FirstOrDefault();
             if (a is not null && b is not null && match.Unchanged(Side.A, a) && match.Unchanged(Side.B, b)) continue;
             deferred.Add(action.Path);
-            _store.SaveSyncRetry(pair.PairId, new(action.Path, "post-preview", 0, "", DateTimeOffset.MinValue, match));
+            if (_store.SyncRetryAt(pair.PairId, action.Path)?.Kind != "decision")
+                _store.SaveSyncRetry(pair.PairId, new(action.Path, "post-preview", 0, "", DateTimeOffset.MinValue, match));
         }
         foreach (var held in plan.UnreviewedHeldDeletions)
-            _store.SaveSyncRetry(pair.PairId, new(held.Path, "post-preview", 0, "", DateTimeOffset.MinValue, Held: held));
+            if (_store.SyncRetryAt(pair.PairId, held.Path)?.Kind != "decision")
+                _store.SaveSyncRetry(pair.PairId, new(held.Path, "post-preview", 0, "", DateTimeOffset.MinValue, Held: held));
         if (deferred.Count == 0) return plan;
         var guard = ActionPredicates(pair, LeftAlone(pair).WithPending(deferred));
         return ApplySafetyFilter(pair, guard, plan) with
@@ -59,7 +61,8 @@ public sealed partial class SyncRun
                 action.Source is { } source && touchesGrowth(source.Path)) continue;
             if (action.Kind != ActionKind.Delete || !blocked.Contains(FolderDelete.VictimKey(action.Target, action.Path)))
             { actions.Add(action); continue; }
-            _store.SaveSyncRetry(pair.PairId, new(action.Path, "post-preview", 0, "", DateTimeOffset.MinValue));
+            if (_store.SyncRetryAt(pair.PairId, action.Path)?.Kind != "decision")
+                _store.SaveSyncRetry(pair.PairId, new(action.Path, "post-preview", 0, "", DateTimeOffset.MinValue));
         }
         return plan with { Actions = actions, Notices = notices };
     }
@@ -143,6 +146,7 @@ public sealed partial class SyncRun
 
     private void SaveFailedRetry(PairDef pair, string path, string? reason, SyncRetry? old)
     {
+        if (old?.Kind == "decision") return;
         var attempts = (old?.Attempts ?? 0) + 1;
         var retry = (old ?? new SyncRetry(path, "sync", 0, "", DateTimeOffset.MinValue)) with
         {
@@ -178,6 +182,8 @@ public sealed partial class SyncRun
             .Concat(plan.Actions.Where(action => action.Kind != ActionKind.Hold && !tally.WasSettled(action.ActionId))
                 .Select(action => action.Path)).Distinct(StringComparer.OrdinalIgnoreCase))
         {
+            // A decision supersedes prepare authority. Preserve its proposal and dormant scheduling.
+            if (_store.SyncRetryAt(pair.PairId, path)?.Kind == "decision") continue;
             if (_store.Live(pair.A.RootId, [path]).Concat(_store.Live(pair.B.RootId, [path]))
                 .Any(item => item.Flags.HasFlag(ItemFlags.ProviderNameRefused)))
             { _store.ClearSyncRetry(pair.PairId, path); continue; }

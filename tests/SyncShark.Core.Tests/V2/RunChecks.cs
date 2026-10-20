@@ -41,6 +41,7 @@ internal static partial class RunChecks
         await CliRuntime_CreatePairAwaitsRootObservationAsync();
         await Incremental_OneSidedEditAsync();
         await Incremental_DeletedIdenticalSkipsRecoveryAsync();
+        await Incremental_LocalLocalDeleteCreatesRecoveryAsync();
         await Incremental_NoChanges_WritesNothingAsync();
         await Incremental_FullRescanAfterForgetCursorAsync();
         await RequestRescan_WaitsForRunningScanAsync();
@@ -1561,6 +1562,9 @@ internal static partial class RunChecks
         Require(await TextAsync(fx.A, "f.txt") == "local edit" && await TextAsync(fx.B, "f.txt") == "a much longer cloud edit",
             "both edits are untouched");
         fx.A.Unhashable.Clear();
+        // Decision 85: retry timing is durable; explicitly make the recovered item due.
+        var retry = fx.Store.SyncRetryAt(fx.Pair.PairId, "f.txt")!;
+        fx.Store.SaveSyncRetry(fx.Pair.PairId, retry with { RetryAfter = DateTimeOffset.MinValue });
         var retried = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
         Require(retried.Failed == 0 && retried.KeptBoth == 2,
             $"once hashable, the next run keeps both versions (kept both {retried.KeptBoth}, failed {retried.Failed}, " +
@@ -1713,7 +1717,7 @@ internal static partial class RunChecks
 
     private static Executor NewExecutor(IStateStore store) => new(store, Settings, ExecutorChecks.Admission());
 
-    private static Fixture Build(bool enabled = true, bool record = false, string pairId = "p1", IStateStore? suppliedStore = null)
+    private static Fixture Build(bool enabled = true, bool record = false, string pairId = "p1", IStateStore? suppliedStore = null, bool localLocal = false)
     {
         var inner = suppliedStore ?? new InMemoryStateStore();
         var recorder = record ? new RecordingStore(inner) : null;
@@ -1724,7 +1728,8 @@ internal static partial class RunChecks
         var writerB = new CountingWriter(b);
         var pair = new PairDef(pairId, pairId,
             new RootDef("ra", SyncProviders.Local, null, "C:\\a", "id:ra"),
-            new RootDef("rb", SyncProviders.Dropbox, "acc", "/b", "id:rb"),
+            new RootDef("rb", localLocal ? SyncProviders.Local : SyncProviders.Dropbox,
+                localLocal ? null : "acc", localLocal ? @"C:\b" : "/b", "id:rb"),
             [], [], enabled);
         store.SavePair(pair);
         var provider = new FakeEndpointProvider()

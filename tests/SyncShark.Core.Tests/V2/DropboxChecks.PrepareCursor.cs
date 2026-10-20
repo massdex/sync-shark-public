@@ -107,7 +107,7 @@ internal static partial class DropboxChecks
             Require(failed.Failed == 1 && local.FailNextWrites == 0 && store.FirstSyncDone(pair.PairId) &&
                 store.Cursor(RootId) == appliedCursor &&
                 await local.ObserveAsync("after-prepare.txt", CancellationToken.None) is null,
-                "a failed executor effect leaves first sync unfinished and does not commit the refreshed cursor");
+                "a failed executor effect completes first sync and commits only the refreshed safe cursor");
             Require(h.Wire.ContinueCursors.Skip(feedsBeforeFailure).FirstOrDefault() == preparedCursor &&
                 h.Wire.ListRequests.Count == listingsBeforeFailure &&
                 store.Live(RootId, ["after-prepare.txt"]).Count == 1,

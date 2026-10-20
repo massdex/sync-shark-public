@@ -598,7 +598,7 @@ public sealed partial class SyncRun
     }
 
     private async Task<IReadOnlyList<PlanRow>> HashAndJoinAsync(PairDef pair, Func<RunScope.Scope> loadScope,
-        BothScan scan, bool firstSync, ProgressThrottle throttle, CancellationToken ct)
+        BothScan scan, bool firstSync, ProgressThrottle throttle, CancellationToken ct, Action<HashRequest>? refresh = null)
     {
         throttle.Report(RunPhases.Comparing, null, 0, 0);
         var rows = JoinRows(loadScope(), scan, firstSync);
@@ -607,6 +607,7 @@ public sealed partial class SyncRun
         // Requests retain only paths; release the old joined inventory before hashing and reloading.
         rows = [];
         await PatchHashesAsync(pair, scan, requests, ct);
+        refresh?.Invoke(requests);
         return JoinRows(loadScope(), scan, firstSync);
     }
 
@@ -664,7 +665,7 @@ public sealed partial class SyncRun
     /// </summary>
     private async Task<(Plan Plan, IReadOnlyList<PlanRow> FinalRows)> DecideWithHashedCopiesAsync(PairDef pair,
         BothScan scan, IReadOnlyList<PlanRow> rows, Func<IReadOnlyList<PlanRow>> reload,
-        Func<IReadOnlyList<PlanRow>, Plan> decide, ProgressThrottle throttle, CancellationToken ct)
+        Func<IReadOnlyList<PlanRow>, Plan> decide, ProgressThrottle throttle, CancellationToken ct, Action<HashRequest>? refresh = null)
     {
         var plan = decide(rows);
         var victims = UnhashedFolderVictims(pair, plan);
@@ -678,6 +679,7 @@ public sealed partial class SyncRun
         victims = null!;
         throttle.Report(RunPhases.Hashing, null, 0, request.PathsA.Count + request.PathsB.Count);
         await PatchHashesAsync(pair, scan, request, ct);
+        refresh?.Invoke(request);
         // finding 4 (review fix): the caller captures the prepare-matched states from these final
         // reloaded rows, so a size-only difference resolved by the hash pass never produces a false copy-back.
         var finalRows = reload();

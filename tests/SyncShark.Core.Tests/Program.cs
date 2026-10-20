@@ -93,6 +93,12 @@ var inheritedTestProductRoot = args switch
 };
 using var isolatedProductRuntime = new IsolatedTestProductRuntime(inheritedTestProductRoot);
 
+if (args is ["--v2-million-memory-checks"])
+{
+    await Massdex.SyncShark.V2.RunChecks.MillionItemPrepareMemoryAsync();
+    return 0;
+}
+
 if (args is ["--essential-successor-checks", var successorRoot])
 {
     var root=Path.GetFullPath(successorRoot);

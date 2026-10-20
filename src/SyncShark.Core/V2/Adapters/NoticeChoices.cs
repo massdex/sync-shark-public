@@ -29,6 +29,16 @@ public static class NoticeChoices
     public const string DeleteReviewed = "delete";
     public const string KeepRestore = "keep-restore";
 
+    /// <summary>A deletion-review notice whose survivor may be deleted with Recovery, kept/restored, or ignored.</summary>
+    public const int DeletionReviewRule = 40;
+
+    /// <summary>
+    /// A deletion-review notice whose survivor is a folder or is flagged: neither may be given deletion
+    /// authority automatically, so only keep/restore and ignore are offered. The ordinary safety guards
+    /// still hold any restore that would write over protected content.
+    /// </summary>
+    public const int DeletionReviewRestoreOnlyRule = 41;
+
     public static bool IsRetryNotice(Notice notice) => notice.ReasonKey is "sync-retry" or "deletion-review" || IsRemovalAttention(notice) || IsRemovalReview(notice);
 
     public static bool IsRetryChoice(string choice) => choice is RetryNow or Exclude or Ignore or DeleteReviewed or KeepRestore or OpenFolderSettings or Dismiss or ReviewRemoval or ReviewRemovalA or ReviewRemovalB or ConfirmRemoval or RemovalNextPage or RemovalPreviousPage;
@@ -56,10 +66,12 @@ public static class NoticeChoices
                new(ReviewRemovalB, "Review removal on B (right)"), new(OpenFolderSettings, "Open folder settings"), new(Dismiss, "Dismiss")]
             : IsRemovalAttention(notice)
             ? [new(ReviewRemoval, "Review removal"), new(OpenFolderSettings, "Open folder settings"), new(Dismiss, "Dismiss")]
+            : notice.ReasonKey == "deletion-review" && notice.Rule == DeletionReviewRestoreOnlyRule
+            ? [new(KeepRestore, "Keep / restore"), new(Ignore, "Ignore; exclude this path from sync")]
             : notice.ReasonKey == "deletion-review"
-            ? [new(DeleteReviewed, "Delete with recovery"), new(KeepRestore, "Keep / restore"), new(Ignore, "Ignore; leave this path alone")]
+            ? [new(DeleteReviewed, "Delete with recovery"), new(KeepRestore, "Keep / restore"), new(Ignore, "Ignore; exclude this path from sync")]
             : IsRetryNotice(notice)
-            ? [new(RetryNow, "Retry now"), new(Exclude, "Exclude from sync"), new(Ignore, "Ignore; leave this path alone")]
+            ? [new(RetryNow, "Retry now"), new(Exclude, "Exclude from sync"), new(Ignore, "Ignore; exclude this path from sync")]
             : [];
 
     public static string Result(string choice) => choice switch
@@ -70,7 +82,7 @@ public static class NoticeChoices
         OpenFolderSettings => "Open this pair's folder settings to inspect selection and ignore rules. The notice remains open; no files changed.",
         RetryNow => "Retry requested. Existing evidence and deletion safeguards remain in force.",
         Exclude => "Excluded from future sync on both sides; no files were deleted.",
-        Ignore => "Notice dismissed; no files changed.",
+        Ignore => "Excluded this path from future sync on both sides; no files were changed or deleted.",
         UseOtherVersion => "Restored the other version; the displaced current version remains recoverable.",
         SaveOtherVersionAsCopy => "Saved the other version as a separate copy at your request.",
         Dismiss => "Dismissed; no files changed.",

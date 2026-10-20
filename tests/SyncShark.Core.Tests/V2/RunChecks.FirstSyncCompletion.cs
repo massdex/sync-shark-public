@@ -8,6 +8,8 @@ internal static partial class RunChecks
         await Completion_PostPreviewDeleteAsync();
         await Completion_UnreviewedEvidenceCursorAsync();
         await Completion_ReleasedEvidenceAsync();
+        await Completion_ApplyPreservesDecisionAsync();
+        await ReleasedSurvivorChecksAsync();
         await Completion_FailedItemAsync();
         await Completion_ReviewedWinnerRetryAsync();
         await RunCliChecks.Cli_Completion_NoExclusionsWhenRemovalFailsAsync();
@@ -328,6 +330,14 @@ internal static partial class RunChecks
         Require(fx.Store.OpenNotices(fx.Pair.PairId).Any(notice => notice.Path == "later.txt" && notice.ReasonKey == "deletion-review"),
             "newer deletion evidence asks delete / keep-restore / ignore");
         Require(fx.Store.CountSyncRetries(fx.Pair.PairId) == 0, "decision-held evidence does not keep AutoSync busy");
+        var decision = fx.Store.OpenNotices(fx.Pair.PairId).Single(notice => notice.Path == "later.txt" && notice.ReasonKey == "deletion-review");
+        await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, decision.NoticeId!, NoticeChoices.DeleteReviewed, default);
+        Require(fx.Store.SyncRetryAt(fx.Pair.PairId, "later.txt")!.ReviewedActions!.All(action =>
+            action.Kind != ActionKind.Delete || action.RecoveryFirst), "explicit evidence deletion always requires Recovery");
+        await run.IncrementalAsync(fx.Pair.PairId, progress, default);
+        Require(fx.WriterA.Deletes == 1 && fx.WriterA.Preserves == 1 &&
+            await fx.A.ObserveAsync("later.txt", default) is null,
+            "explicit delete preserves the stamped survivor before removing it, even with identical history");
         Console.WriteLine("PASS Completion_UnreviewedEvidenceCursor");
     }
 

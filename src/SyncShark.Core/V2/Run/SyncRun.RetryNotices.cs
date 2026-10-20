@@ -98,10 +98,19 @@ public sealed partial class SyncRun
             }
             if (notice.ReasonKey == "deletion-review" && choice is NoticeChoices.DeleteReviewed or NoticeChoices.KeepRestore)
             {
+                // A folder or flagged survivor never carries deletion authority, even if a fabricated
+                // request bypasses the option list.
+                if (choice == NoticeChoices.DeleteReviewed && notice.Rule == NoticeChoices.DeletionReviewRestoreOnlyRule)
+                    throw new SyncRunRefusedException(
+                        "This item cannot be deleted automatically. Choose Keep / restore or Ignore; nothing was deleted.");
                 var retry = _store.SyncRetryAt(pairId, notice.Path);
                 if (retry?.ProposedActions is not { Count: > 0 } proposed)
                     throw new SyncRunRefusedException("The deletion proposal is no longer available. Refresh notices.");
-                var actions = choice == NoticeChoices.DeleteReviewed ? proposed : proposed
+                // Explicit notice deletion is Recovery-first, even if cached history would let
+                // automatic reviewed propagation skip Recovery for identical content.
+                var actions = choice == NoticeChoices.DeleteReviewed
+                    ? proposed.Select(action => action.Kind == ActionKind.Delete ? action with { RecoveryFirst = true } : action).ToArray()
+                    : proposed
                     .Where(action => action.Kind == ActionKind.Delete && action.ExpectedTarget is not null)
                     .Select(action => action with
                     {

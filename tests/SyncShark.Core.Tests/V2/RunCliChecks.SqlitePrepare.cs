@@ -83,6 +83,10 @@ internal static partial class RunCliChecks
             // Reconstruct the runtime so apply must reload the persisted review.
             var result = await Runtime(fx, root).ApplyFirstSyncAsync(fx.Pair.PairId, EmptyChoices, false, null,
                 _ => { }, CancellationToken.None);
+            Require(await survivor.ObserveAsync("d/x.txt", default) is not null &&
+                fx.WriterA.Deletes + fx.WriterB.Deletes == 0 && fx.WriterA.Puts + fx.WriterB.Puts == 0,
+                "SQLite first-sync apply defers post-preview changes without deleting or copying the survivor");
+            await fx.Run().IncrementalAsync(fx.Pair.PairId, new Progress<RunProgress>(), default);
             var a = await fx.A.ObserveAsync("d/x.txt", CancellationToken.None);
             var b = await fx.B.ObserveAsync("d/x.txt", CancellationToken.None);
             Require(result.Failed == 0 && result.FirstSyncComplete,
@@ -113,12 +117,17 @@ internal static partial class RunCliChecks
                 { ResolveDeleted = local.Mtime.AddHours(1), ContentHash = local.Hash });
             var result = await runtime.ApplyFirstSyncAsync(fx.Pair.PairId, EmptyChoices, false, null,
                 _ => { }, CancellationToken.None);
-            Require(result.UnreviewedPending == 1 && !result.FirstSyncComplete && result.Failed == 0 &&
+            Require(result.UnreviewedPending == 1 && result.FirstSyncComplete && result.Failed == 0 &&
                 fx.WriterA.Deletes == 0 && fx.WriterA.Preserves == 0 && fx.WriterB.Calls == 0 &&
                 (await fx.A.ObserveAsync("d/x.txt", CancellationToken.None))?.Hash == local.Hash,
                 "SQL reviewed set holds a newly evidenced victim without deleting or preserving it");
             Require(await fx.A.ObserveAsync("ordinary.txt", CancellationToken.None) is not null,
                 "unrelated work proceeds while SQL-unreviewed deletion waits");
+            await fx.Run().IncrementalAsync(fx.Pair.PairId, new Progress<RunProgress>(), default);
+            Require(fx.WriterA.Deletes == 0 && fx.WriterB.Calls == 0 &&
+                (await fx.A.ObserveAsync("d/x.txt", default))?.Hash == local.Hash &&
+                store.OpenNotices(fx.Pair.PairId).Any(notice => notice.Path == "d/x.txt" && notice.ReasonKey == "deletion-review"),
+                "SQL unreviewed evidence stays inert in ordinary sync until an explicit decision");
         }
         finally { Cleanup(root); }
     }

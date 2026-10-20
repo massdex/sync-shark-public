@@ -91,7 +91,7 @@ internal static partial class DropboxChecks
             h.Wire.Calls.Count(call => call == "/2/files/list_revisions") > probesBeforeTimeout + 1 &&
             h.Known.DeletionEvidenceRows("p1", RootId).Single(row => row.Path == "gone.txt").Failure is
                 { Attempts: 1, Released: true },
-            "timeout retries before exhaustion and remains a transient, unreleased history failure");
+            "timeout retries before exhaustion, then releases the cursor with one durable evidence hold");
         h.Wire.SeedChangePage("file-after", [], false, "file-after");
         var localWrites = local.WriteCalls;
         int CloudWrites() => h.Wire.Calls.Count(call => call.Contains("/upload", StringComparison.Ordinal) ||
@@ -108,10 +108,10 @@ internal static partial class DropboxChecks
         var second = await run.IncrementalAsync("p1", new Progress<RunProgress>(), CancellationToken.None);
         Require(second.Failed == 0 && h.Known.Cursor(RootId) == "file-after" &&
             await local.ObserveAsync("gone.txt", CancellationToken.None) is not null &&
-            h.Wire.Calls.Count(call => call == "/2/files/list_revisions") == probesBeforeRetry + 1 &&
+            h.Wire.Calls.Count(call => call == "/2/files/list_revisions") == probesBeforeRetry &&
             h.Known.OpenNotices("p1").Any(n => n.Path == "gone.txt" && n.ReasonKey == "deletion-review") &&
             local.WriteCalls == localWrites && CloudWrites() == cloudWrites,
-            "resolved evidence asks for a decision; no delete or resurrection without explicit choice");
+            "released evidence asks for a decision without another history probe; no delete or resurrection without explicit choice");
         await run.IncrementalAsync("p1", new Progress<RunProgress>(), default);
         Require(local.WriteCalls == localWrites && CloudWrites() == cloudWrites &&
             await local.ObserveAsync("gone.txt", default) is not null, "decision hold remains inert across later runs");
