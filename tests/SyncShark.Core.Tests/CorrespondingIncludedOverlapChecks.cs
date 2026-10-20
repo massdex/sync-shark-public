@@ -396,7 +396,7 @@ internal static class CorrespondingIncludedOverlapChecks
         using var fixture = await OpaqueFixture.CreateAsync(Path.Combine(root, "opaque"));
         // POSITIVE: an independently bound opaque corresponding overlap is admitted on both endpoints.
         await fixture.RegisterAdmittedAsync(fixture.ParentSnapshot, fixture.ChildSnapshot, fixture.Child);
-        Require(await fixture.ActiveRootCountAsync() == 4,
+        Require(await fixture.ActiveRootCountAsync() == 3,
             "OV637-4 the bound opaque corresponding child is admitted alongside the retained parent");
         var pinned = SyncPairPartitionPolicy.TryCorrespondingIncluded(fixture.Parent, fixture.Child,
             out var opaqueEnclosing, out var opaqueNested, out var opaqueRelative,
@@ -427,6 +427,7 @@ internal static class CorrespondingIncludedOverlapChecks
         // nesting, so the opaque alias fence is exercised here through the SAME two production decision
         // entries the projection uses, with the same independently bound proofs (see OPAQUE-FENCE-OPEN in the
         // result ledger). Real reservations on both retained cloud roots stay available for the fence itself.
+        await fixture.RetainRootObservationsAsync();
         await fixture.CreateParentGoogleOperationAsync("op-opaque-parent", NestedChildName + "/a");
         await fixture.CreateChildGoogleOperationAsync("op-opaque-child-z", "z", fixture.Evidence());
 
@@ -454,7 +455,7 @@ internal static class CorrespondingIncludedOverlapChecks
         using (var fixture = await OpaqueFixture.CreateAsync(Path.Combine(root, "opaque-absent")))
         {
             await RefuseAsync(() => fixture.RegisterAdmittedAsync(null, null, fixture.Child));
-            Require(await fixture.ActiveRootCountAsync() == 3,
+            Require(await fixture.ActiveRootCountAsync() == 2,
                 "OV637-2 an absent opaque hierarchy writes no candidate root");
         }
         // FORGED hierarchy: a snapshot bound to another root/namespace is refused, not used as authority.
@@ -462,7 +463,7 @@ internal static class CorrespondingIncludedOverlapChecks
         {
             var forged = fixture.ChildSnapshot with { RootBindingId = "forged-root-binding" };
             await RefuseAsync(() => fixture.RegisterAdmittedAsync(fixture.ParentSnapshot, forged, fixture.Child));
-            Require(await fixture.ActiveRootCountAsync() == 3,
+            Require(await fixture.ActiveRootCountAsync() == 2,
                 "OV637-2 a forged or unbound opaque hierarchy writes no candidate root");
         }
     }
@@ -835,12 +836,6 @@ internal static class CorrespondingIncludedOverlapChecks
                 [Corpus, "folder-parent", "folder-child"], ["Corpus", "Parent", NestedChildName], provider);
             await fixture.Db.RegisterPairAsync(fixture.Parent.Id, fixture.Parent.PolicyRevision,
                 SyncAuthorityPairConfiguration.FromPair(fixture.Parent));
-            // Bind the child's local endpoint before publishing the enclosing pair. The cloud
-            // endpoint still goes through the independently verified candidate admission below.
-            await fixture.Db.RegisterPairAsync(fixture.Child.Id, fixture.Child.PolicyRevision,
-                SyncAuthorityPairConfiguration.FromPair(fixture.Child));
-            await fixture.Db.RegisterRootBindingAsync(ChildLocalRootId, fixture.Child.Id, "local", 1, "{}",
-                fixture.Child.LocalRoot);
             await fixture.Db.RetainPairDefinitionAsync(fixture.Parent, select: false);
             await fixture.Db.RegisterRootBindingAsync(ParentLocalRootId, fixture.Parent.Id, "local", 1, "{}",
                 fixture.Parent.LocalRoot);
@@ -962,6 +957,10 @@ internal static class CorrespondingIncludedOverlapChecks
         {
             await Db.RetainOpaqueHierarchyObservationAsync(ParentSnapshot, Parent.Id, "dropbox", 1);
             await Db.RetainOpaqueHierarchyObservationAsync(ChildSnapshot, Child.Id, "dropbox", 1);
+            // Planning requires both endpoints. Admit the local endpoint only after the
+            // independently bound cloud observations can prove the complete correspondence.
+            await Db.RegisterRootBindingAsync(ChildLocalRootId, Child.Id, "local", 1, "{}",
+                Child.LocalRoot, partitionCandidate: Child);
         }
 
         /// <summary>A NEW authority database instance over the SAME file, for the restart leg.</summary>
