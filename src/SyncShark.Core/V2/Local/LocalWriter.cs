@@ -210,12 +210,16 @@ public sealed class LocalWriter : IEndpointWriter, ISyncTransferResourceEndpoint
         var recovery = needsRecovery ? await TryRecoveryRefAsync(action, ct).ConfigureAwait(false) : null;
         if (current is { Kind: PilotEntryKind.File } && current.Id == stage.ObjectId &&
             current.Size == source.Size && string.Equals(current.ContentHash, sourceHash, StringComparison.OrdinalIgnoreCase))
+        {
+            current = await _store.StampPublishedDownloadAsync(action.Path, stage.ObjectId, source.Size,
+                sourceHash, source.Mtime, ct).ConfigureAwait(false);
             return ResumeDone(action, LocalItems.FromStore(current, targetFull), recovery) with
             {
                 Reason = needsRecovery && recovery is null ? SyncDirectDownloadCheckpoint.NoticePrefix +
                     "Download published, but its Recovery copy is unavailable at " + stage.RecoveryPath +
                     ". Keep the current file; inspect backups if the old version is needed." : null
             };
+        }
 
         if (!stage.Verified || current is not null || recovery is null)
         {

@@ -439,6 +439,10 @@ internal static partial class CliChecks
                 SyncCliRegistry.Rows.Single(row => row.Command == "attention list").Effect.Contains(
                     "current pending count", StringComparison.Ordinal),
             "The one help/capability registry distinguishes current work from preserved retired history.");
+        var dates = SyncCliRegistry.Parse(["--cli", "dates", "repair", "--pair", "test", "--dry-run",
+            "--from", "2026-10-17", "--to", "2026-10-19"]);
+        Require(dates.Value("--from") == "2026-10-17" && dates.Value("--to") == "2026-10-19",
+            "dates repair exposes inclusive local date range");
         PairRemoveRegistryChecks();
         await CliDeadlineChecks.RunAsync();
         Require(SyncCliRegistry.Rows.Single(row => row.Command == "pairs edit").Effect.Contains(

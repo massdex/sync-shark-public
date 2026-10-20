@@ -11,7 +11,7 @@ internal static class DateRepairReviewChecks
         var pair = new PairDef("review", "review", LocalChecks.RootOf(files, "a"),
             new RootDef("b", SyncProviders.Dropbox, "account", "/test", "id:root"), [], [], true);
         store.SavePair(pair);
-        var old = new DateTimeOffset(2026, 10, 18, 0, 0, 0, TimeSpan.Zero);
+        var old = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(new DateTime(2026, 10, 18, 12, 0, 0), TimeZoneInfo.Local));
         var target = new DateTimeOffset(2015, 1, 1, 0, 0, 0, TimeSpan.Zero);
         var remote = new Dictionary<string, ItemState>();
         var gen = store.BeginGeneration("a", "test");
@@ -40,7 +40,7 @@ internal static class DateRepairReviewChecks
         var calls = 0;
         Task<ItemState?> Observe(string path, CancellationToken _)
         {
-            LocalChecks.Require(path is not ("132" or "133"), "SQL rejects matching dates and other UTC dates before remote calls");
+            LocalChecks.Require(path is not ("132" or "133"), "SQL rejects matching dates and other local dates before remote calls");
             Interlocked.Increment(ref calls);
             return Task.FromResult<ItemState?>(remote[path]);
         }

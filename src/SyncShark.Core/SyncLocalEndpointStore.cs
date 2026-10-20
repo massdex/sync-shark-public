@@ -18,7 +18,7 @@ public sealed record SyncLocalEndpointBinding(string RootPath, uint VolumeSerial
 /// authority pipeline. Every effect holds the exact object and its ancestors through verification and
 /// commit. Staging and retained predecessors live only in the caller's bound private namespace.
 /// </summary>
-public sealed class SyncLocalEndpointStore : ISyncRemoteStore, ISyncUploadSessionPolicySource
+public sealed partial class SyncLocalEndpointStore : ISyncRemoteStore, ISyncUploadSessionPolicySource
 {
     internal static Action? PublishedBeforeCloseForTest { get; set; }
 

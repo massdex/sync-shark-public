@@ -31,7 +31,7 @@ public static class SyncCliRegistry
         , "--description", "--choices", "--group", "--filter", "--seconds", "--side",
         "--categories", "--severity", "--entity", "--run", "--order", "--type", "--since", "--after", "--before",
         "--source", "--destination", "--bytes", "--sha256", "--local-root", "--source-sha256", "--draft",
-        "--keep", "--token", "--archive", "--local-date",
+        "--keep", "--token", "--archive", "--local-date", "--from", "--to",
         RepeatableExclude,
         ..DropboxCliCatalog.ValueOptions
     ];
@@ -117,10 +117,10 @@ public static class SyncCliRegistry
             "no local or remote file is touched",
             "the product state and the exclusive product lock", "direct", "--pair,--archive,--drop-unfinished,--yes",
             Mutating: true, RequiresYes: true, RequiresPair: true),
-        new("dates repair", "dates repair --pair <exact-id> [--dry-run] [--yes] [--local-date yyyy-MM-dd] [--after <key>]", SyncCliRequestKind.State, "yes",
+        new("dates repair", "dates repair --pair <exact-id> [--dry-run] [--yes] [--local-date yyyy-MM-dd | --from yyyy-MM-dd --to yyyy-MM-dd] [--after <key>]", SyncCliRequestKind.State, "yes",
             "repairs newer local download timestamps only after verifying identical baseline and Dropbox content; " +
             "logs every date change, never changes content or uploads; --dry-run reports without changing dates",
-            "the v2 store and exclusive product/run locks", "direct", "--pair,--dry-run,--yes,--local-date,--after",
+            "the v2 store and exclusive product/run locks", "direct", "--pair,--dry-run,--yes,--local-date,--from,--to,--after",
             Mutating: true, RequiresPair: true),
         new("pairs rescan", "pairs rescan --pair <exact-id> [--side a|b|both] --yes", SyncCliRequestKind.State, "yes",
             "forgets the pair's stored scan cursors for the chosen side(s) so its next run re-reads those roots in " +
@@ -828,10 +828,17 @@ public static class SyncCliRegistry
             exactVersion is null || !System.Text.RegularExpressions.Regex.IsMatch(exactVersion,
                 @"^[0-9]+\.[0-9]+\.[0-9]+$", System.Text.RegularExpressions.RegexOptions.CultureInvariant)))
             throw new SyncCliUsageException("updates apply requires --update <exact-version>, for example 0.3.35.");
-        if (command == "dates repair" && options.TryGetValue("--local-date", out var localDateText) &&
-            (!DateOnly.TryParseExact(localDateText, "yyyy-MM-dd", CultureInfo.InvariantCulture,
-                DateTimeStyles.None, out var localDate) || localDate == DateOnly.MaxValue))
-            throw new SyncCliUsageException("--local-date requires a UTC calendar date in yyyy-MM-dd format.");
+        if (command == "dates repair")
+        {
+            DateOnly? Day(string option)
+            {
+                if (!options.TryGetValue(option, out var text)) return null;
+                if (!DateOnly.TryParseExact(text, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var day))
+                    throw new SyncCliUsageException(option + " requires a local calendar date in yyyy-MM-dd format.");
+                return day;
+            }
+            _ = V2.DateRepair.UtcRange(Day("--local-date"), Day("--from"), Day("--to"), TimeZoneInfo.Local);
+        }
         if (command == "dates repair" && !options.ContainsKey("--dry-run") && !options.ContainsKey("--yes"))
             throw new SyncCliUsageException("Use dates repair --pair <id> --dry-run to review, or add --yes to repair dates.");
         if (row.RequiresYes && (row.MutationOption is null || options.ContainsKey(row.MutationOption)) &&
@@ -1033,7 +1040,9 @@ public static class SyncCliRegistry
                     throw new SyncCliUnsupportedException("Date repair is available in core v2. Select v2 and retry.");
                 return await v2Dates.RepairDatesAsync(invocation.PairId!, invocation.Flag("--dry-run"), cancellationToken,
                     invocation.Value("--local-date") is { } date ? DateOnly.ParseExact(date, "yyyy-MM-dd", CultureInfo.InvariantCulture) : null,
-                    invocation.Value("--after") ?? "");
+                    invocation.Value("--after") ?? "",
+                    invocation.Value("--from") is { } from ? DateOnly.ParseExact(from, "yyyy-MM-dd", CultureInfo.InvariantCulture) : null,
+                    invocation.Value("--to") is { } to ? DateOnly.ParseExact(to, "yyyy-MM-dd", CultureInfo.InvariantCulture) : null);
             case "pairs rescan":
                 return await operations.RescanPairAsync(invocation.PairId!, invocation.Value("--side"),
                     cancellationToken);

@@ -3,7 +3,7 @@ namespace Massdex.SyncShark.V2;
 public sealed partial class V2CliRuntime
 {
     internal async Task<DateRepairReport> RepairDatesAsync(string pairId, bool dryRun, CancellationToken ct,
-        DateOnly? localDate = null, string after = "")
+        DateOnly? localDate = null, string after = "", DateOnly? from = null, DateOnly? to = null)
     {
         var pair = RequirePair(pairId);
         if (_store is not SqliteStateStore sqlite)
@@ -31,6 +31,6 @@ public sealed partial class V2CliRuntime
                 var entries = await client.ReadMetadataPageAsync(paths, token);
                 return entries.ToDictionary(row => row.Key, row => row.Value is { ClientModifiedUtc: not null } entry
                     ? DropboxItems.ToItem(entry) : null);
-            }).ConfigureAwait(false);
+            }, from, to).ConfigureAwait(false);
     }
 }
