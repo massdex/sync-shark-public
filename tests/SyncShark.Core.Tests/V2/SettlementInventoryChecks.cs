@@ -74,7 +74,7 @@ internal static class SettlementInventoryChecks
             Require(probes == 1 && pointer.Flags == ItemFlags.OwnedPointer && pointer.Hash == local.Hash &&
                 scanned.IncompleteSubtrees.Count == 0, "next scan recognises the converted entity without reading bytes");
             store.WriteSnapshot(scanned with { Gen = store.BeginGeneration(pair.A.RootId, "snapshot") });
-            Require(!LinkExclusions.Of(store, pair, replace).Covers(local.Path), "converted pointer is not excluded as a foreign stub");
+            Require(!LinkExclusions.Of(store, pair, !replace).Covers(local.Path), "converted pointer is not excluded as a foreign stub");
             var edited = remote with { Hash = new string('b', 64), VersionId = "revision-2", Size = 8,
                 Mtime = remote.Mtime.AddHours(1) };
             store.WriteDelta(new(pair.B.RootId, Side.B, remoteGen, "remote", "edited",

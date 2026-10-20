@@ -84,6 +84,16 @@ jobs:
           dotnet build 'tests/SyncShark.Core.Tests/SyncShark.Core.Tests.csproj' -c $env:CONFIGURATION --nologo -p:NoWarn=CA1416
           exit $LASTEXITCODE
 
+      # The standalone Files On-Demand project is the native acceptance runner and
+      # compiles a different subset of files than the main test project. Build it
+      # (compile only, its tests never run in CI) without NoWarn=CA1416 so drift the
+      # main project hides fails here instead of on native-acceptance day.
+      - name: Build Files On-Demand tests
+        shell: pwsh
+        run: |
+          dotnet build 'tests/SyncShark.FilesOnDemand.Tests/SyncShark.FilesOnDemand.Tests.csproj' -c $env:CONFIGURATION --nologo
+          exit $LASTEXITCODE
+
       # The product build owns its output allocation through SyncSharkBuildRoot;
       # the native setup script refuses an output outside it.
       - name: Build app

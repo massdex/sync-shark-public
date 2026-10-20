@@ -60,8 +60,11 @@ public sealed partial class V2CliRuntime
             var optIn = store.EnableStorageWithBackup(backupDirectory, confirmWithoutBackup);
             if (settingsWarning is not null) optIn = optIn with { Warning = settingsWarning + optIn.Warning };
             if (!optIn.Enabled)
+            {
+                (progress ?? Console.Error.WriteLine)("Pre-storage backup failed; Files On-Demand was not enabled.");
                 return Task.FromResult(new SyncCliAvailabilityData(pairId, validatedPath, false,
                     "Online-only intent is awaiting your backup choice; no policy or schema changed. " + optIn.Warning));
+            }
             optInNote = optIn.BackupPath is { } backup
                 ? " Pre-storage state backup: " + backup + ". To roll back, stop every Sync Shark process; " +
                   "retain the current state.db and its -wal/-shm sidecars together elsewhere, then copy this backup to " +
