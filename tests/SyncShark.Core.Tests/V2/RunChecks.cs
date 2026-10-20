@@ -11,7 +11,10 @@ internal static partial class RunChecks
     {
         await PairSummaryDoesNotHoldSiblingsAsync();
         await HeldRetriesSurviveAsync();
+        await ReleasedSurvivor_FlaggedAsync();
         await HeldIntentsDoNotStarveAsync();
+        await HeldRetryRotationAndReleaseAsync();
+        await HeldRetryExclusionAndContainersAsync();
         await ItemIgnoreWaitsForSettingsSaveAsync();
         await HistoryFailureDoesNotFailCompletedRunAsync();
         PairMissing_Refused();

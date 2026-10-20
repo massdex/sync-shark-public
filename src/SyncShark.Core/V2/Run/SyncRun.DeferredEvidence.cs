@@ -98,6 +98,7 @@ public sealed partial class SyncRun
         // invalidate it under the same gate as their writes. Retain every protection seen this run
         // (decisions 57/59); the filesystem probe and executor's effect-time checks remain per item.
         var leftAlone = LinkExclusions.None;
+        var evidenceHolds = LinkExclusions.None;
         ActionGuard? heldGuard = null;
         var guardVersion = -1L;
         ActionGuard HeldGuard(bool refresh = false)
@@ -106,7 +107,9 @@ public sealed partial class SyncRun
             {
                 if (refresh || heldGuard is null || guardVersion != _heldRefreshVersion)
                 {
-                    leftAlone = leftAlone.With(LeftAlone(pair)).WithPending(OutstandingFootprints(pair.PairId));
+                    var footprints = OutstandingFootprints(pair.PairId);
+                    leftAlone = leftAlone.With(LeftAlone(pair)).WithPending(footprints);
+                    evidenceHolds = evidenceHolds.With(LinkExclusions.HoldsOf(_store, pair)).WithPending(footprints);
                     heldGuard = ActionPredicates(pair, leftAlone);
                     guardVersion = _heldRefreshVersion;
                 }
@@ -313,7 +316,8 @@ public sealed partial class SyncRun
                     // authority while its decision notice is still open.
                     if (heldRetry?.Kind == "decision")
                     { lock (sync) pending.Add(rule.Path); return; }
-                    if (parkedFootprints.Covers(rule.Path) || parkedFootprints.Contains(rule.Path))
+                    if (parkedFootprints.Covers(rule.Path) ||
+                        heldRetry?.Kind != "deletion-evidence" && parkedFootprints.Contains(rule.Path))
                     { lock (sync) pending.Add(rule.Path); return; }
                     var isFolder = heldFolders.Contains(rule.Path);
                     var cloud = rule.Local == Side.A ? pair.B : pair.A;
@@ -321,9 +325,13 @@ public sealed partial class SyncRun
                     {
                         // Protection also gates evidence retirement, not just the eventual delete.
                         // A held root may not be observable as an item; that is not proof of absence.
-                        var evidenceGuard = HeldGuard();
-                        evidenceGuard = evidenceGuard.Prepare?.Invoke([rule.Path]) ?? evidenceGuard;
-                        if (!evidenceGuard.StrictA(rule.Path) || !evidenceGuard.StrictB(rule.Path))
+                        bool evidenceHeld;
+                        lock (_heldRefreshSync)
+                        {
+                            HeldGuard();
+                            evidenceHeld = evidenceHolds.Covers(rule.Path);
+                        }
+                        if (evidenceHeld)
                         { lock (sync) pending.Add(rule.Path); return; }
                         var survivorRoot = rule.Local == Side.A ? pair.A : pair.B;
                         var survivor = await _endpoints.Writer(survivorRoot).ObserveAsync(rule.Path, token);

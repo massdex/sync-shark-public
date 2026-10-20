@@ -92,7 +92,7 @@ public sealed partial class SyncRun
     {
         var byPath = previous.ToDictionary(item => item.Path, StringComparer.OrdinalIgnoreCase);
         var leftAlone = LeftAlone(pair);
-        var includes = BuildPredicates(pair, PairInclude.ForAction);
+        var includes = BuildPredicates(pair, PairInclude.For);
         var ignoreRules = PairInclude.IgnoreRules(pair);
         var decisions = _store.OpenNotices(pair.PairId).Where(PlanNotices.HasPathScope).Where(notice => notice.Kind == NoticeKind.UserDecision)
             .Select(notice => notice.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -129,9 +129,16 @@ public sealed partial class SyncRun
             // A hold is not an exclusion or proof of success. In particular, inventory narrowed by
             // a root/quarantine/grant hold may look absent or equal without evaluating this retry.
             // Only the user's actual exclusion/ignore can retire debt in a protected scope.
-            if (!excluded && !ignored && (leftAlone.Covers(item.Path) ||
+            if (!excluded && !ignored && ((rebuildable ? leftAlone.CoversExceptLocalLinks(item.Path) : leftAlone.Covers(item.Path)) ||
                 !rebuildable && (!includes.A(item.Path) || !includes.B(item.Path))))
-            { remaining.Remove(item.Path); continue; }
+            {
+                // Rotate held debt out of the bounded due page without recording a failed attempt.
+                var current = _store.SyncRetryAt(pair.PairId, item.Path);
+                if (current is not null)
+                    _store.SaveSyncRetry(pair.PairId, current with { RetryAfter = _time.GetUtcNow().AddMinutes(5) });
+                remaining.Remove(item.Path);
+                continue;
+            }
             var refused = (a?.Flags.HasFlag(ItemFlags.ProviderNameRefused) ?? false) ||
                 (b?.Flags.HasFlag(ItemFlags.ProviderNameRefused) ?? false);
             var absent = scanComplete && a is null && b is null && !uncertain.Contains(item.Path);

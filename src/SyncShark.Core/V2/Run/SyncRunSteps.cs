@@ -263,7 +263,7 @@ public sealed partial class SyncRun
             var retry = _store.SyncRetryAt(pair.PairId, action.Path);
             if (retry?.RetryAfter > _time.GetUtcNow())
             {
-                sleeping.Add(new(action.ActionId, Outcome.Uncertain, null, null, null, retry.LastError));
+                sleeping.Add(new(action.ActionId, Outcome.Uncertain, null, null, null, retry?.LastError));
                 continue;
             }
             // Holds retain authority and are not exclusions. Neither they nor the independent
@@ -279,7 +279,10 @@ public sealed partial class SyncRun
                 if (excludedIntents.Count < 256) excludedIntents.Add(action);
                 else sleeping.Add(new(action.ActionId, Outcome.Uncertain, null, null, null, retry?.LastError));
             }
-            else sleeping.Add(new(action.ActionId, Outcome.Uncertain, null, null, null, retry?.LastError));
+            // Permanent boundaries (including nested pairs and product-owned paths) retain the
+            // intent and its footprint indefinitely; only explicit exclusion or positive proof retires it.
+            else sleeping.Add(new(action.ActionId, Outcome.Uncertain, null, null, null,
+                "Held by a protected path (link, placeholder, quarantine or ownership boundary); retained and re-checked when the hold clears."));
         }
         var excludedUncertain = (await SettleExcludedIntentsAsync(pair, excludedIntents, ct)).Concat(sleeping).ToArray();
         // The phase's real total from its first line, so progress reads n/of-the-actual-count instead of 0/0.

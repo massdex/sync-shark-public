@@ -211,20 +211,20 @@ internal static partial class LocalJournalChecks
             store.RecordIntent(pair.PairId, action with { Path = "synthetic-0000001/" + action.ActionId, Source = null });
         queries = store.ProtectionBatchQueries;
         var preflight = (Task<int>)typeof(SyncRun).GetMethod("CompletionIntentPreflightAsync", hidden)!.Invoke(run, [pair])!;
-        LocalChecks.Require(await preflight == 1025 && store.ProtectionBatchQueries == queries + 5,
-            "completion preflight handles1025 overflow intents in five batches");
+        LocalChecks.Require(await preflight == 1025 && store.ProtectionBatchQueries == queries,
+            "completion preflight reports real exclusions without querying temporary hash-debt protection");
         queries = store.ProtectionBatchQueries;
         var reconcile = (Task)typeof(SyncRun).GetMethod("ReconcileAsync", hidden)!.Invoke(run,
             [pair, new ProgressThrottle(null, TimeProvider.System, TimeSpan.Zero), CancellationToken.None, null])!;
         await reconcile;
-        LocalChecks.Require(store.ProtectionBatchQueries == queries + 1 && endpointA.WriteCalls == 0 && endpointB.WriteCalls == 0 &&
-            store.UnresolvedIntents(pair.PairId).Count == 1025 - 256,
-            "reconciliation admits one bounded 256-intent batch, preserves the remainder and never replays protected effects");
+        LocalChecks.Require(store.ProtectionBatchQueries == queries + 5 && endpointA.WriteCalls == 0 && endpointB.WriteCalls == 0 &&
+            store.UnresolvedIntents(pair.PairId).Count == 1025,
+            "reconciliation classifies five bounded batches and retains every hash-debt-held intent without effects");
         queries = store.ProtectionBatchQueries;
         await (Task)typeof(SyncRun).GetMethod("ReconcileAsync", hidden)!.Invoke(run,
             [pair, new ProgressThrottle(null, TimeProvider.System, TimeSpan.Zero), CancellationToken.None, null])!;
-        LocalChecks.Require(store.ProtectionBatchQueries == queries + 1 && endpointA.WriteCalls == 0 && endpointB.WriteCalls == 0 &&
-            store.UnresolvedIntents(pair.PairId).Count == 1025 - 512,
-            "next run settles the next 256 retained intents without starvation or protected effects");
+        LocalChecks.Require(store.ProtectionBatchQueries == queries + 5 && endpointA.WriteCalls == 0 && endpointB.WriteCalls == 0 &&
+            store.UnresolvedIntents(pair.PairId).Count == 1025,
+            "next run keeps unresolved hash debt held rather than retiring it as an exclusion");
     }
 }

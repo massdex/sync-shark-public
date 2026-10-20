@@ -5,8 +5,10 @@ internal static partial class RunChecks
     // RQ-034: a protected scan is not evidence of deletion or successful retry settlement.
     private static async Task HeldRetriesSurviveAsync()
     {
-        foreach (var rootHold in new[] { true, false })
+        foreach (var mode in new[] { "root", "quarantine", "both" })
         {
+            var rootHold = mode != "quarantine";
+            var quarantine = mode != "root";
             using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "held-retries-" + Guid.NewGuid().ToString("N")),
                 Settings, TimeProvider.System);
             var fx = Build(suppliedStore: store);
@@ -14,8 +16,8 @@ internal static partial class RunChecks
             await FirstSyncAsync(fx.Run(), fx);
             var remote = await fx.B.ObserveAsync(local.Path, default);
             await fx.B.DeleteAsync(new("fixture-delete", 6, ActionKind.Delete, Side.B, local.Path, null, null, remote, false, null), default);
-            store.HoldQuarantine(fx.Pair.A.RootId, local);
-            store.AddNotices([new(fx.Pair.PairId, 30, NoticeKind.UserDecision, local.Path, "held", QuarantineFailure.NoticeKey,
+            if (quarantine) store.HoldQuarantine(fx.Pair.A.RootId, local);
+            if (quarantine) store.AddNotices([new(fx.Pair.PairId, 30, NoticeKind.UserDecision, local.Path, "held", QuarantineFailure.NoticeKey,
                 Quarantine: new(Side.A, null, local, true))]);
             fx.Provider.AddInventory(fx.Pair.B, new RecoveryEvidenceInventory(fx.B)
                 { Deleted = DateTimeOffset.UtcNow, ContentHash = local.Hash });
@@ -45,6 +47,75 @@ internal static partial class RunChecks
             }
         }
         Console.WriteLine("PASS HeldRetriesSurvive");
+    }
+
+    private static async Task HeldRetryRotationAndReleaseAsync()
+    {
+        var clock = new CompletionClock();
+        using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "retry-rotation-" + Guid.NewGuid().ToString("N")), Settings, clock);
+        var fx = Build(suppliedStore: store);
+        await FirstSyncAsync(fx.Run(), fx);
+        store.AddNotices([new(fx.Pair.PairId, 30, NoticeKind.UserDecision, "held", "hold", QuarantineFailure.NoticeKey,
+            Quarantine: new(Side.A, null, null, true))]);
+        for (var i = 0; i < 300; i++)
+        {
+            var path = $"held/{i:D4}.txt";
+            store.SaveSyncRetry(fx.Pair.PairId, new(path, "sync", 3, "unchanged error", DateTimeOffset.MinValue));
+        }
+        store.SaveSyncRetry(fx.Pair.PairId, new("ready.txt", "sync", 1, "ordinary debt", DateTimeOffset.MinValue.AddSeconds(1)));
+        var run = new SyncRun(store, fx.Executor, fx.Provider, Settings, clock);
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        Require(store.SyncRetryAt(fx.Pair.PairId, "ready.txt") is not null, "ordinary debt starts behind the bounded held page");
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        Require(store.SyncRetryAt(fx.Pair.PairId, "ready.txt") is null &&
+            store.ReadSyncRetries(fx.Pair.PairId).All(r => r.Attempts == 3 && r.LastError == "unchanged error" && r.RetryAfter > clock.Now),
+            "held rows rotate without an attempt or error rewrite and ordinary debt settles");
+
+        var retryPath = "held/0000.txt";
+        store.AddNotices([new(fx.Pair.PairId, 40, NoticeKind.Info, retryPath, "retained failure", "sync-retry")]);
+        var noticeId = store.OpenNotices(fx.Pair.PairId).Single(n => n.ReasonKey == "sync-retry").NoticeId;
+        foreach (var notice in store.OpenNotices(fx.Pair.PairId).Where(n => n.Quarantine is not null))
+            store.CloseNotice(notice.NoticeId!, "released");
+        clock.Now = clock.Now.AddMinutes(6);
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        Require(store.SyncRetryAt(fx.Pair.PairId, retryPath) is null && !store.OpenNotices(fx.Pair.PairId).Any(n => n.NoticeId == noticeId),
+            "after release successful evaluation closes the retained failure notice");
+    }
+
+    private static async Task HeldRetryExclusionAndContainersAsync()
+    {
+        foreach (var scenario in new[] { "excluded", "container", "rebuildable" })
+        {
+            using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "retry-scope-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System);
+            var fx = Build(suppliedStore: store);
+            await FirstSyncAsync(fx.Run(), fx);
+            var path = scenario == "rebuildable" ? "junction/gone" : "folder";
+            if (scenario == "rebuildable")
+            {
+                fx.A.Seed("junction", "", ItemKind.Folder);
+                fx.Provider.AddInventory(fx.Pair.A, new ScriptedInventory(fx.A) { LinkPath = "junction" });
+            }
+            else store.SavePair(fx.Pair with { Excluded = [scenario == "excluded" ? path : path + "/child"] });
+            if (scenario == "excluded")
+                store.AddNotices([new(fx.Pair.PairId, 30, NoticeKind.UserDecision, path, "hold", QuarantineFailure.NoticeKey,
+                    Quarantine: new(Side.A, null, null, true))]);
+            IReadOnlyList<SyncAction>? reviewed = scenario == "rebuildable"
+                ? [new SyncAction("reviewed", 2, ActionKind.Hold, Side.B, path, null, null, null, false, null) { RebuildableRemove = true }]
+                : null;
+            if (scenario == "excluded") fx.Provider.AddInventory(fx.Pair.B, new RecoveryEvidenceInventory(fx.B));
+            if (scenario == "excluded")
+                store.StoreDeletionEvidence(fx.Pair.PairId, fx.Pair.B.RootId, [new(path, DateTimeOffset.FromUnixTimeSeconds(1_700_000_000))]);
+            store.SaveSyncRetry(fx.Pair.PairId, new(path, "sync", 1, "pending", DateTimeOffset.MinValue,
+                Held: scenario == "excluded" ? new(path, Side.A) : null, ReviewedActions: reviewed));
+            store.AddNotices([new(fx.Pair.PairId, 40, NoticeKind.Info, path, "pending", "sync-retry")]);
+            await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            Require(store.SyncRetryAt(fx.Pair.PairId, path) is null &&
+                !store.OpenNotices(fx.Pair.PairId).Any(n => n.ReasonKey == "sync-retry"),
+                scenario + ": real exclusion or successful absence evaluation retires retry and notice");
+            Require(store.DeletionEvidenceRows(fx.Pair.PairId, fx.Pair.B.RootId).Count == 0 &&
+                fx.WriterA.Deletes == 0 && fx.WriterB.Deletes == 0,
+                "true exclusion retires held evidence without executing a delete");
+        }
     }
 
     private static async Task HeldIntentsDoNotStarveAsync()

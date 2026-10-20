@@ -78,14 +78,21 @@ internal sealed class LinkExclusions
             .Where(root => !string.Equals(root.Provider, SyncProviders.Local, StringComparison.OrdinalIgnoreCase))
             .SelectMany(root => store.LiveFlagged(root.RootId, ItemFlags.Link)).Select(item => item.Path);
         return new(Flagged(ItemFlags.Link), stubsLeftAlone ? Flagged(ItemFlags.Placeholder) : Array.Empty<string>(),
-            pending: store.LiveFlagged(pair.A.RootId, ItemFlags.Quarantined)
+            pending: HoldPaths(store, pair),
+            nonLocalLinks: nonLocalLinks, rehash: new RehashProtection(store, pair));
+    }
+
+    // Evidence observations may inspect links/stubs, but must not retire debt under a real hold.
+    internal static LinkExclusions HoldsOf(IStateStore store, PairDef pair) =>
+        new([], [], pending: HoldPaths(store, pair));
+
+    private static IEnumerable<string> HoldPaths(IStateStore store, PairDef pair) =>
+        store.LiveFlagged(pair.A.RootId, ItemFlags.Quarantined)
                 .Concat(store.LiveFlagged(pair.B.RootId, ItemFlags.Quarantined))
                 .SelectMany(item => new[] { item.Path, DropboxNameMapping.MatchPath(item) })
                 .Concat(store.DefenderGrantHoldPaths(pair.A.RootId)).Concat(store.DefenderGrantHoldPaths(pair.B.RootId))
                 .Concat(HasRootDecisionHold(store, pair.PairId) ? new[] { string.Empty } : Array.Empty<string>())
-                .Concat(store.OpenNotices(pair.PairId).Where(n => PlanNotices.HasPathScope(n) && n.Quarantine is not null).Select(n => n.Path)),
-            nonLocalLinks: nonLocalLinks, rehash: new RehashProtection(store, pair));
-    }
+                .Concat(store.OpenNotices(pair.PairId).Where(n => PlanNotices.HasPathScope(n) && n.Quarantine is not null).Select(n => n.Path));
 
     /// <summary>
     /// This run's protection: the state before the scan unioned with the state after it, so a link or stub that
