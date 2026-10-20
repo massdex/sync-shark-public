@@ -39,13 +39,64 @@ public static class NoticeChoices
     public const string CopyLink = "create-regular-copy";
     public const string CopyLinkOutsideRoot = "create-regular-copy-confirm-outside-root";
     public const string MakeAvailableOffline = "make-available-offline";
+    public const string ConfirmLargeDownload = "confirm-large-download";
     public const string ExportDocx = "export-docx";
     public const string ExportMarkdown = "export-markdown";
     public const string ExportPdf = "export-pdf";
+    public const string ExportHtml = "export-html";
+
+    // A notice written before export_info was read carries no ExportInfo; these are its legacy buttons only.
+    private static readonly IReadOnlyList<string> LegacyExportFormats = ["docx", "markdown", "pdf"];
+
+    /// <summary>The provider format one export choice names, or null when the choice is not an export action.</summary>
+    public static string? ExportFormat(string choice) => choice switch
+    {
+        ExportDocx => "docx",
+        ExportMarkdown => "markdown",
+        ExportPdf => "pdf",
+        ExportHtml => "html",
+        _ => null
+    };
+
+    /// <summary>The choice for one provider export format; an unknown format has no safe button.</summary>
+    public static string? ExportChoice(string format) => format.ToLowerInvariant() switch
+    {
+        "docx" => ExportDocx,
+        "markdown" => ExportMarkdown,
+        "pdf" => ExportPdf,
+        "html" => ExportHtml,
+        _ => null
+    };
+
+    private static string ExportLabel(string format) => format.ToLowerInvariant() switch
+    {
+        "docx" => "DOCX",
+        "markdown" => "Markdown",
+        "pdf" => "PDF",
+        "html" => "HTML",
+        _ => format
+    };
+
+    private static IReadOnlyList<SyncNoticeOption> ExportOptions(Notice notice)
+    {
+        var formats = notice.ExportInfo is { } info ? info.Formats : LegacyExportFormats;
+        return formats.Select(format => (Format: format, Choice: ExportChoice(format)))
+            .Where(item => item.Choice is not null)
+            .Select(item => new SyncNoticeOption(item.Choice!, "Export as " + ExportLabel(item.Format) + "…")).ToArray();
+    }
+
     public const string CheckHistoryAgain = "check-history-again";
     public const string ReviewDeletion = "review-deletion";
     public const string OpenStorage = "open-storage";
     public const string ReviewReserve = "review-reserve";
+    public const string PreviewMatches = "preview-matches";
+    public const string ChooseFolder = "choose-folder";
+    public const string RemoveRule = "remove-rebuildable-rule";
+    public const string KeepRule = "keep-rebuildable-rule";
+
+    /// <summary>One rebuildable rule whose scoped prefix matched no folder during prepare. Identity is the
+    /// category and prefix stored on the notice, not its path.</summary>
+    public const string RebuildableRuleKey = "rebuildable-prefix-unmatched";
     public const string Exclude = "exclude";
     public const string OpenFolderSettings = "open-folder-settings";
     public const string OpenRecoverySettings = "open-recovery-settings";
@@ -77,9 +128,9 @@ public static class NoticeChoices
 
     public static bool IsAutoSyncFailure(Notice notice) => notice.ReasonKey?.StartsWith("autosync-failed", StringComparison.Ordinal) == true;
 
-    public static bool IsRetryNotice(Notice notice) => notice.RetainedVersion is null && (notice.FreeSpace is not null || notice.Repair is not null || notice.ReasonKey is "deletion-evidence-pending" or "links-excluded" or "link-item" or "stubs-left-alone" or "online-only-item" or "unreadable" or ItemBlocked or "dropbox-storage-full" or "export-required" || IsPairRetryNotice(notice) || notice.ReasonKey is "sync-retry" or "deletion-review" or "planning-degraded" or "recovery-unavailable" || IsRemovalAttention(notice) || IsRemovalReview(notice));
+    public static bool IsRetryNotice(Notice notice) => notice.RetainedVersion is null && (notice.FreeSpace is not null || notice.Repair is not null || notice.RebuildableRule is not null || notice.ReasonKey is "deletion-evidence-pending" or "links-excluded" or "link-item" or "stubs-left-alone" or "online-only-item" or "unreadable" or ItemBlocked or "dropbox-storage-full" or "export-required" || IsPairRetryNotice(notice) || notice.ReasonKey is "sync-retry" or "deletion-review" or "planning-degraded" or "recovery-unavailable" || IsRemovalAttention(notice) || IsRemovalReview(notice));
 
-    public static bool IsRetryChoice(string choice) => choice is ShowTarget or SyncTargetSeparately or CopyLink or CopyLinkOutsideRoot or CopyLinkAgain or RemoveLinkStaging or CheckHistoryAgain or ReviewDeletion or OpenStorage or ReviewReserve or ExportDocx or ExportMarkdown or ExportPdf or MakeAvailableOffline or Rename or ShowRemaining or OpenDropbox or RepairHelp or RetryNow or Exclude or Ignore or DeleteReviewed or KeepRestore or OpenFolderSettings or OpenRecoverySettings or Dismiss or ReviewRemoval or ReviewRemovalA or ReviewRemovalB or ConfirmRemoval or RemovalNextPage or RemovalPreviousPage;
+    public static bool IsRetryChoice(string choice) => choice is ShowTarget or SyncTargetSeparately or CopyLink or CopyLinkOutsideRoot or CopyLinkAgain or RemoveLinkStaging or ConfirmLargeDownload or PreviewMatches or ChooseFolder or RemoveRule or KeepRule or ExportHtml or CheckHistoryAgain or ReviewDeletion or OpenStorage or ReviewReserve or ExportDocx or ExportMarkdown or ExportPdf or MakeAvailableOffline or Rename or ShowRemaining or OpenDropbox or RepairHelp or RetryNow or Exclude or Ignore or DeleteReviewed or KeepRestore or OpenFolderSettings or OpenRecoverySettings or Dismiss or ReviewRemoval or ReviewRemovalA or ReviewRemovalB or ConfirmRemoval or RemovalNextPage or RemovalPreviousPage;
     public const string QuarantineRetry = "quarantine-retry";
     public const string QuarantineIgnore = "quarantine-ignore";
     public const string QuarantineExclude = "quarantine-exclude";
@@ -171,6 +222,9 @@ public static class NoticeChoices
             ? [new(OpenStorage, "Open storage"), new(ReviewReserve, "Review the reserve"),
                new(OpenRecoverySettings, "Choose another Recovery location"), new(OpenFolderSettings, "Review destination folder"),
                new(RetryNow, "Check space again"), new(Ignore, "Ignore; exclude this path")]
+            : notice.RebuildableRule is not null
+            ? [new(RetryNow, "Check again"), new(PreviewMatches, "Preview matches"), new(ChooseFolder, "Choose folder…", RequestsName: true),
+               new(RemoveRule, "Remove rule"), new(KeepRule, "Keep rule (ignore this notice)")]
             : notice.ReasonKey == "deletion-evidence-pending"
             ? [new(CheckHistoryAgain, "Check history again"), new(ReviewDeletion, "Review deletion evidence"),
                new(Ignore, "Keep; exclude from sync")]
@@ -183,15 +237,15 @@ public static class NoticeChoices
                new(RemoveLinkStaging, "Remove staging (manual cleanup guidance)"),
                new(RetryNow, "Retry copy (rebuild; re-confirm excluded target)"), new(Ignore, "Leave link; exclude from sync")]
             : notice.ReasonKey == "stubs-left-alone"
-            ? [new(ShowRemaining, "Review online-only files (50 per page)")]
+            ? [new(ShowRemaining, "Review online-only files (50 per page)"), new(RetryNow, "Check again"), new(Ignore, "Leave all online-only")]
             : notice.ReasonKey == "online-only-item"
-            ? [new(MakeAvailableOffline, "Make available offline"), new(Ignore, "Leave online-only"),
+            ? [new(notice.Repair?.Item.Size > OnlineOnlyHydration.ConfirmationBytes && notice.Detail.StartsWith("This downloads ", StringComparison.Ordinal) ? ConfirmLargeDownload : MakeAvailableOffline,
+                   notice.Repair?.Item.Size > OnlineOnlyHydration.ConfirmationBytes && notice.Detail.StartsWith("This downloads ", StringComparison.Ordinal) ? "Confirm large download" : "Make available offline"), new(Ignore, "Leave online-only"),
                new(RetryNow, "Check this file again")]
             : notice.ReasonKey == DropboxQuota.NoticeKey
             ? [new(RetryNow, "Retry uploads"), new(Ignore, "Ignore; keep uploads suspended")]
             : notice.ReasonKey == "export-required"
-            ? [new(ExportDocx, "Export as DOCX…"), new(ExportMarkdown, "Export as Markdown…"), new(ExportPdf, "Export as PDF (if supported)…"),
-               new(OpenDropbox, "Open in Dropbox"), new(RepairHelp, "Why / repair guidance"),
+            ? [.. ExportOptions(notice), new(OpenDropbox, "Open in Dropbox"), new(RepairHelp, "Why / repair guidance"),
                new(RetryNow, "Retry this item"), new(Ignore, "Ignore; exclude this path from sync")]
             : notice.FolderInspection
             ? [new(ShowRemaining, "Show remaining items"), new(RetryNow, "Review removal again"), new(Ignore, "Keep folder; exclude from sync")]
@@ -255,6 +309,10 @@ public static class NoticeChoices
         UseOtherVersion => "Restored the other version; the displaced current version remains recoverable.",
         SaveOtherVersionAsCopy => "Saved the other version as a separate copy at your request.",
         Dismiss => "Dismissed; no files changed.",
+        PreviewMatches => "Listed candidate folder paths under the current inventory. No files were changed.",
+        ChooseFolder => "The rule's prefix was updated. Run prepare again to detect its folders; no files were changed.",
+        RemoveRule => "Removed the rebuildable rule. No files were deleted or moved.",
+        KeepRule => "Kept. This rule will not be raised again unless it changes; no files were changed.",
         ReviewRebind => RebindPending,
         PausePair => "Pair turned off for future sync. A current run may finish. Enable it in Folder Pairs to resume; files and bindings are unchanged.",
         LeaveAsIs => "Left as is. Files and bindings are unchanged.",

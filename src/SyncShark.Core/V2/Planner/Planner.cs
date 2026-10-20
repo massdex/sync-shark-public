@@ -165,8 +165,19 @@ public static partial class Planner
             }
             var exportRequired = (row.A?.Flags.HasFlag(ItemFlags.RequiresExport) ?? false) ||
                 (row.B?.Flags.HasFlag(ItemFlags.RequiresExport) ?? false);
-            AddNotice(ctx, 30, NoticeKind.Info, PrimaryPath(row),
-                exportRequired ? PlanNotices.ExportRequired : PlanNotices.CannotRead); // rule 30
+            if (!exportRequired)
+            {
+                AddNotice(ctx, 30, NoticeKind.Info, PrimaryPath(row), PlanNotices.CannotRead); // rule 30
+                return;
+            }
+            // Offer exactly the formats the provider reported for this item; the notice persists those formats so
+            // the action needs no rescan. Older rows without export facts leave the field null (legacy guidance).
+            var exportItem = new[] { row.A, row.B }.FirstOrDefault(item =>
+                item is not null && item.Flags.HasFlag(ItemFlags.RequiresExport));
+            var exportNotice = new Notice(ctx.PairId, 30, NoticeKind.Info, PrimaryPath(row),
+                PlanNotices.ExportRequired.Detail, PlanNotices.ExportRequired.Key,
+                ExportInfo: DropboxExportFacts.ForItem(exportItem));
+            if (ctx.NoticeKeys.Add(exportNotice)) ctx.Notices.Add(exportNotice);
             return;
         }
         // a path the reviewed prepare saw on both sides is ordinary ongoing sync when it becomes

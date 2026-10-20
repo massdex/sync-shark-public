@@ -298,6 +298,7 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
                 inventoryCursors: plan.InventoryCursors.Select(entry =>
                     new FirstSyncChoicesState.StoredInventoryCursor(entry.Key, entry.Value)).ToArray(),
                 inventoryScope: plan.InventoryScope);
+            RaiseRebuildableRuleNotices(pair, choices.Rebuildables, rebuildables.Detected);
             return Preparation(pair, plan, effects, FirstSyncChoices.Digest(choices, rebuildables.Selected, plan.HeldDeletions),
                 RebuildableReport(rebuildables.Detected, choices.Rebuildables, rebuildables.Selected)) with { Warnings = warnings };
         }
@@ -363,6 +364,12 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
             // prepare recorded, or there is nothing to apply that the user reviewed.
             var prepared = FirstSyncChoicesState.Load(_productRoot, pairId, _store) ?? throw new SyncCliReviewException(
                 "No usable first-sync prepare exists for this pair — run prepare again.");
+            // Choose folder rewrote the rule's prefix after the prepare had already detected its folders. The
+            // frozen set still describes the old prefix, so refuse until a prepare detects folders under the new one.
+            if (prepared.NeedsReprepare)
+                throw new SyncCliReviewException(
+                    "Choose folder changed this rule's prefix, but its folders were detected under the old prefix. " +
+                    "Run prepare again to detect folders under the new prefix; nothing was applied.");
             // Apply re-previews with the same choices and exactly the rebuildable set the prepare froze (never a fresh
             // detection); the run drops any path that no longer qualifies.
             var rebuildables = prepared.Rebuildables
@@ -429,7 +436,11 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
                 preview.Continuation);
             // The record only authorizes a first sync, so once that is done the record goes. The exclusions were
             // already saved by the run, inside the same completion step that marked the first sync done.
-            if (_store.FirstSyncDone(pairId)) FirstSyncChoicesState.Clear(_productRoot, pairId, _store);
+            if (_store.FirstSyncDone(pairId))
+            {
+                FirstSyncChoicesState.Clear(_productRoot, pairId, _store);
+                CloseRebuildableRuleNotices(pairId);
+            }
             return Result(pair, report, effects) with { Warnings = warnings };
         }
         catch (SyncRunRefusedException error)
@@ -552,7 +563,7 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
                     FirstSyncChoicesState.Clear(_productRoot, pairId, _store);
                     // Partial first-sync applies also own baselines and deletion evidence (decision 81).
                     var verificationIntents = _store.SavePairIncluded(pair, pair with { Excluded = excluded });
-                    warnings = [$"Re-included history was forgotten. Files deleted on one side while excluded will be copied back; newer differing files win, with ties or unknown times held. {verificationIntents} retained intents require verify-only reconciliation; none will be blindly replayed."];
+                    warnings = [$"Re-included history was forgotten. Files deleted on one side while excluded will be copied back, except items with an unresolved deletion hold are re-checked and need your decision first; newer differing files win, with ties or unknown times held. {verificationIntents} retained intents require verify-only reconciliation; none will be blindly replayed."];
                 }
             }
             var saved = RequirePair(pairId);

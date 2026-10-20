@@ -24,6 +24,9 @@ public sealed partial class SqliteStateStore : IStateStore
     private readonly Dictionary<long, (long PairNo, Side Side)[]> _rootSides = new();
     private bool _disposed;
 
+    /// <summary>Test-only: how many one-time legacy identity sweeps this store has run.</summary>
+    internal int LegacyFoldPassesForTest => _notices.LegacyFoldPasses;
+
     private SqliteStateStore(SqliteConnection connection, V2Settings settings, TimeProvider clock)
     {
         _connection = connection;
@@ -201,6 +204,15 @@ public sealed partial class SqliteStateStore : IStateStore
         if (offset < 0 || limit is < 1 or > 200) throw new ArgumentOutOfRangeException(nameof(limit));
         var rootNo = RootNo(rootId);
         return rootNo is null ? Array.Empty<ItemState>() : _reads.LiveChildrenPage(rootNo.Value, directory, offset, limit);
+    });
+
+    public IReadOnlyList<string> RebuildableFoldersUnder(string rootId, string prefix, IReadOnlyList<string> names,
+        int offset, int limit) => InStore(() =>
+    {
+        if (offset < 0 || limit is < 1 or > 200) throw new ArgumentOutOfRangeException(nameof(limit));
+        var rootNo = RootNo(rootId);
+        return rootNo is null ? Array.Empty<string>()
+            : _reads.RebuildableFoldersUnder(rootNo.Value, prefix, names, offset, limit);
     });
 
     public IReadOnlyList<ItemState> LiveFlaggedPage(string rootId, ItemFlags flags, ItemState? after, int limit, long? afterDirNo = null) => InStore(() =>

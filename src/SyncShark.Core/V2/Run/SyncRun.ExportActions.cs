@@ -1,3 +1,5 @@
+using System.Globalization;
+
 namespace Massdex.SyncShark.V2;
 
 public sealed partial class SyncRun
@@ -6,7 +8,14 @@ public sealed partial class SyncRun
 
     private async Task<string> ExportNoticeDocumentAsync(PairDef pair, Notice notice, string choice, CancellationToken ct)
     {
-        var format = choice switch { NoticeChoices.ExportDocx => "docx", NoticeChoices.ExportMarkdown => "markdown", NoticeChoices.ExportPdf => "pdf", _ => throw new ArgumentException("Unknown export format.") };
+        var format = NoticeChoices.ExportFormat(choice) ?? throw new ArgumentException("Unknown export format.");
+        // The buttons came from the provider's own export_info. A stale or fabricated choice must not export a
+        // format the provider never offered; the notice stays open with its remaining options.
+        if (notice.ExportInfo is { } offered && !offered.Formats.Contains(format, StringComparer.OrdinalIgnoreCase))
+            throw new SyncRunRefusedException(
+                "That format is not offered for this document. Choose one of: " +
+                (offered.Formats.Count > 0 ? string.Join(", ", offered.Formats) : "Open in Dropbox") +
+                ". Nothing was changed.");
         var cloudSide = pair.A.Provider == SyncProviders.Dropbox ? Side.A : Side.B;
         var cloud = cloudSide == Side.A ? pair.A : pair.B;
         var local = cloudSide == Side.A ? pair.B : pair.A;
@@ -16,15 +25,40 @@ public sealed partial class SyncRun
         await _endpoints.PrepareAsync(pair, ct).ConfigureAwait(false);
         var cloudWriter = _endpoints.Writer(cloud);
         var localWriter = _endpoints.Writer(local);
+        // Refuse before writing the progress text: a refusal inside the guarded block would leave "Exporting as…"
+        // as the notice's text.
+        if (ExportDocumentForTest is null && cloudWriter is not DropboxWriter)
+            throw new SyncRunRefusedException("This provider cannot export here. Open the document in Dropbox instead.");
         var original = await cloudWriter.ObserveAsync(notice.Path, ct).ConfigureAwait(false);
         if (original is null || !original.Flags.HasFlag(ItemFlags.RequiresExport))
             throw new SyncRunRefusedException("This document changed or no longer needs export. Retry sync to refresh the notice.");
+        // A notice written before export_info was read has no captured facts. The fresh observation carries them,
+        // so validate against those and refresh the notice with the provider's real list.
+        var refreshed = notice.ExportInfo is null;
+        notice = refreshed
+            ? notice with { ExportInfo = DropboxExportFacts.ForItem(original) }
+            : notice;
+        if (notice.ExportInfo is { } fresh && !fresh.Formats.Contains(format, StringComparer.OrdinalIgnoreCase))
+        {
+            // A stale legacy button must not stay stale after we learned the provider's real formats: write the
+            // refreshed list back before refusing, so the notice offers exactly what the provider supports.
+            if (refreshed) _store.AddNotices([notice]);
+            throw new SyncRunRefusedException(
+                "That format is not offered for this document. Choose one of: " +
+                (fresh.Formats.Count > 0 ? string.Join(", ", fresh.Formats) : "Open in Dropbox") +
+                ". Nothing was changed.");
+        }
         var extension = format == "markdown" ? "md" : format;
-        // Separate local file, not a replacement for the cloud-native original. Every explicit export
-        // requests a new copy; a crash cannot overwrite an earlier export or an occupied destination.
+        // Separate local file, not a replacement for the cloud-native original. The exported name keeps the
+        // document's name, so the user can tell where it came from; a suffix keeps every export create-only.
         var mapped = DropboxNameMapping.MatchPath(original);
-        var parent = mapped.LastIndexOf('/') is var cut && cut >= 0 ? mapped[..(cut + 1)] : "";
-        var destination = parent + "Export-" + Guid.NewGuid().ToString("N") + "." + extension;
+        var cut = mapped.LastIndexOf('/');
+        var parent = cut >= 0 ? mapped[..(cut + 1)] : "";
+        var leaf = cut >= 0 ? mapped[(cut + 1)..] : mapped;
+        var dot = leaf.LastIndexOf('.');
+        var stem = dot > 0 ? leaf[..dot] : leaf;
+        var baseName = stem + " (exported " + _time.GetUtcNow().ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + ")";
+        var destination = await UniqueExportNameAsync(parent, baseName, extension, cloudWriter, localWriter, ct).ConfigureAwait(false);
         var include = BuildPredicates(pair, PairInclude.ForAction);
         if (!(cloudSide == Side.A ? include.A : include.B)(notice.Path) ||
             !include.A(destination) || !include.B(destination) ||
@@ -35,8 +69,7 @@ public sealed partial class SyncRun
         {
             await using var content = ExportDocumentForTest is { } export
                 ? await export(cloud, original, format, ct).ConfigureAwait(false)
-                : cloudWriter is DropboxWriter writer ? await writer.ExportDocumentAsync(original, format, ct).ConfigureAwait(false)
-                : throw new SyncRunRefusedException("This provider cannot export here. Open the document in Dropbox instead.");
+                : await ((DropboxWriter)cloudWriter).ExportDocumentAsync(original, format, ct).ConfigureAwait(false);
             if (!content.CanSeek || content.Length > ExportBoundedStream.Limit)
                 throw new IOException("The exported document exceeds the bounded staging limit.");
             if (!SameRepairItem(await cloudWriter.ObserveAsync(notice.Path, ct).ConfigureAwait(false), original))
@@ -64,8 +97,27 @@ public sealed partial class SyncRun
         }
         catch (Exception error) when (RunFailure(error, ct))
         {
-            _store.AddNotices([notice with { Detail = "Export was not verified: " + error.Message + " Choose another export format, Retry, Ignore, or Open in Dropbox. Any already-created copy stays untouched." }]);
+            // One notice, same identity and options: the failure only refreshes its display text. The action must
+            // stay retryable and offer the provider's formats again, never a fabricated success or a second notice.
+            _store.AddNotices([notice with { Detail = "Export was not verified: " + BlockerDiagnostic.Describe(error) + " Choose another export format, Retry, Ignore, or Open in Dropbox. Any already-created copy stays untouched." }]);
             return "Export was not verified. See this notice for the reason and available alternatives.";
         }
+    }
+
+    // Bounded unique-name probe on both sides; the ordinary create-only write below still checks again under the
+    // executor, so a concurrent creation can never be overwritten.
+    private static async Task<string> UniqueExportNameAsync(string parent, string baseName, string extension,
+        IEndpointWriter cloudWriter, IEndpointWriter localWriter, CancellationToken ct)
+    {
+        for (var attempt = 1; attempt <= 100; attempt++)
+        {
+            var candidate = parent + baseName + (attempt == 1 ? string.Empty : " " + attempt.ToString(CultureInfo.InvariantCulture)) + "." + extension;
+            if (await cloudWriter.ObserveAsync(candidate, ct).ConfigureAwait(false) is null &&
+                await localWriter.ObserveAsync(candidate, ct).ConfigureAwait(false) is null)
+                return candidate;
+        }
+        // Never refuse an export because a busy name ran out of numeric candidates: a random suffix is unique
+        // enough for the bounded probe, and the create-only write below still refuses to overwrite anything.
+        return parent + baseName + " " + Guid.NewGuid().ToString("N")[..12] + "." + extension;
     }
 }

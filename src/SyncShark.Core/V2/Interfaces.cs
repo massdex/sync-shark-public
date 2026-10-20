@@ -73,6 +73,20 @@ public interface IStateStore : IDisposable
     /// <summary>Direct children only; production uses the directory index, never a subtree inventory.</summary>
     IReadOnlyList<ItemState> LiveChildren(string rootId, string directory);
 
+    /// <summary>
+    /// Bounded folder paths under a prefix whose leaf name is one of <paramref name="names"/> (an empty list means
+    /// any folder). This is a preview of candidates for a rebuildable rule; it never loads a subtree.
+    /// </summary>
+    IReadOnlyList<string> RebuildableFoldersUnder(string rootId, string prefix, IReadOnlyList<string> names,
+        int offset, int limit)
+    {
+        var rows = prefix.Length == 0 ? Live(rootId) : LiveUnder(rootId, [prefix]);
+        return rows.Where(item => item.Kind == ItemKind.Folder &&
+                (names.Count == 0 || names.Contains(item.Path[(item.Path.LastIndexOf('/') + 1)..], StringComparer.OrdinalIgnoreCase)))
+            .Select(item => item.Path).OrderBy(path => path, StringComparer.Ordinal)
+            .Skip(offset).Take(limit).ToArray();
+    }
+
     /// <summary>Bounded direct-child page. Persistent stores must limit rows before decoding.</summary>
     IReadOnlyList<ItemState> LiveChildrenPage(string rootId, string directory, int offset, int limit) =>
         LiveChildren(rootId, directory).OrderBy(item => item.Path, StringComparer.Ordinal).Skip(offset).Take(limit).ToArray();
@@ -215,10 +229,15 @@ public interface IStateStore : IDisposable
     {
         if (SyncRetryAt(pairId, path) is { } retry) SaveSyncRetry(pairId, retry with { RetryAfter = DateTimeOffset.MinValue });
     }
+    void SuspendHeldRetry(string pairId, SyncRetry retry);
     SyncRetry? SyncRetryAt(string pairId, string path);
     IReadOnlyList<SyncRetry> DueSyncRetries(string pairId, DateTimeOffset now, int limit);
     int CountSyncRetries(string pairId);
-    bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants);
+    bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants, bool restoredOnly = false);
+
+    /// <summary>Whether any restored evidence hold is still active (not dormant). One check per run, never per item.</summary>
+    bool HasActiveRestoredRetries(string pairId) =>
+        ReadSyncRetries(pairId).Any(retry => retry.ReprobeEvidence && retry.RetryAfter < DateTimeOffset.MaxValue);
 
     /// <summary>Several results in one transaction (the Executor's group commit, B-124); the default commits each.</summary>
     void CommitResults(string pairId, long gen, IReadOnlyList<(SyncAction Action, ActionResult Result)> results)

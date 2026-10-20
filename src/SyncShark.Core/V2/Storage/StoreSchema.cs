@@ -156,6 +156,13 @@ internal static class StoreSchema
           payload TEXT NOT NULL, PRIMARY KEY(root_id,ordinal));
         """;
 
+    // One row per (pair, reason) whose pre-fa93b15f path-bearing notice ids have already been folded. This is
+    // additive, presence-guarded feature storage: no version bump and no existing row changes.
+    private const string LegacyFoldDdl = """
+        CREATE TABLE IF NOT EXISTS notice_legacy_fold(pair_no INTEGER NOT NULL, reason_key TEXT NOT NULL,
+          PRIMARY KEY(pair_no,reason_key)) WITHOUT ROWID;
+        """;
+
     private const string RehashDdl = """
         CREATE TABLE IF NOT EXISTS local_rehash(root_no INTEGER NOT NULL, object_id TEXT NOT NULL,
           last_attempt INTEGER NOT NULL, reason TEXT NOT NULL, PRIMARY KEY(root_no, object_id)) WITHOUT ROWID;
@@ -286,6 +293,7 @@ internal static class StoreSchema
         if (fromVersion < 10) Execute(connection, null, ObservationDdl);
         Execute(connection, null, RehashDdl);
         Execute(connection, null, RetryDdl);
+        Execute(connection, null, LegacyFoldDdl);
         EnsureFeatureSchema(connection, fromVersion);
     }
 
@@ -352,7 +360,7 @@ internal static class StoreSchema
     private static readonly string[] ExpectedNames =
     [
         "journal_volume", "dir", "root", "pair", "generation", "file_state", "tombstone", "sync_point", "pending_effect", "sync_retry", "sync_retry_due", "recovery",
-        "notice", "local_gap", "local_gap_item", "gap_ready", "gap_failed", "gap_waiting", "gap_results", "local_rehash", "rehash_retry", "deletion_evidence", "dir_key", "dir_mapped_key", "fs_obj", "fs_flagged", "fs_refused", "sp_a_obj", "sp_b_obj", "sp_a_dir", "sp_b_dir",
+        "notice", "notice_legacy_fold", "local_gap", "local_gap_item", "gap_ready", "gap_failed", "gap_waiting", "gap_results", "local_rehash", "rehash_retry", "deletion_evidence", "dir_key", "dir_mapped_key", "fs_obj", "fs_flagged", "fs_refused", "sp_a_obj", "sp_b_obj", "sp_a_dir", "sp_b_dir",
 
         "removal_review", "pe_unresolved", "rc_pair", "nt_open", "prepare_header", "prepare_row", "prepare_lookup", "prepare_cursor",
         "quarantine_upgrade", "defender_deferral_batch", "fs_quarantine", "defender_deferral", "defender_deferral_updated", "defender_grant", "defender_grant_path",
@@ -437,6 +445,7 @@ internal static class StoreSchema
         Execute(connection, transaction, RetryDdl);
         EnsureGapSchema(connection, transaction);
         MigrateRunSummary(connection, transaction);
+        Execute(connection, transaction, LegacyFoldDdl);
         Execute(connection, transaction, FlaggedIndexDdl);
         Execute(connection, transaction, QuarantineDdl);
         Execute(connection, transaction, "INSERT INTO quarantine_upgrade VALUES('grant-backfill');");
@@ -474,6 +483,7 @@ internal static class StoreSchema
         Execute(connection, null, ClassificationDdl);
         Execute(connection, null, ObservationDdl);
         EnsureFeatureSchema(connection, version);
+        Execute(connection, null, LegacyFoldDdl);
         var names = new HashSet<string>(StringComparer.Ordinal);
         using (var command = Command(connection, null,
             "SELECT name FROM sqlite_master WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%';"))

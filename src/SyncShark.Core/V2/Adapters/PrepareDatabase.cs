@@ -57,6 +57,17 @@ internal sealed partial class PrepareDatabase(SqliteStateStore store, PrepareHea
         return result;
     }
 
+    /// <summary>Rewrites only the published metadata (choices, frozen rebuildables, digest); review rows are untouched.</summary>
+    internal void UpdateSmall(FirstSyncChoicesState.Prepared small)
+    {
+        var metadata = JsonSerializer.Serialize(small with
+        {
+            DeleteVictims = [], HeldDeletions = [], Matched = [], CarriedIgnoredDeletes = [],
+            InventoryCursors = [], InventoryScope = null
+        }, Json);
+        _store.UpdatePrepareMetadata(_header.PairId, _header.Generation, metadata, small.Digest);
+    }
+
     internal void UpdateInventoryCursors(IReadOnlyDictionary<string, string> cursors, string scope)
     {
         if (_store.Pair(_header.PairId) is not { } pair) return;

@@ -27,7 +27,7 @@ public sealed partial class V2CliRuntime
         var preview = await reader(pair, relative, ct).ConfigureAwait(false);
         return preview with { Warnings = preview.Warnings.Concat([
             "Including forgets this pair's old baselines and deletion evidence only inside the newly included folders. " +
-            "Files deleted on one side while excluded are copied back. Retained intents are verified without replay " +
+            "Files deleted on one side while excluded are copied back, except items with an unresolved deletion hold are re-checked and need your decision first. Retained intents are verified without replay " +
             "and cannot restore the forgotten baselines; the newer differing file wins, with ties or unknown times held."]).ToArray() };
     }
 }

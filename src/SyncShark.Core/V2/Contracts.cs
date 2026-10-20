@@ -199,7 +199,7 @@ public sealed record SyncRetry(string Path, string Kind, int Attempts, string La
     DateTimeOffset RetryAfter, PrepareMatch? Match = null, HeldDeletion? Held = null,
     IReadOnlyList<SyncAction>? ReviewedActions = null, bool HeldReviewed = false,
     IReadOnlyList<SyncAction>? ProposedActions = null, ItemState? HeldExpected = null,
-    IReadOnlyList<string>? ReadRoots = null, Notice? PendingNotice = null);
+    IReadOnlyList<string>? ReadRoots = null, Notice? PendingNotice = null, bool ReprobeEvidence = false, bool EvidenceReleased = false);
 
 /// <summary>The kind of notice raised to the user.</summary>
 public enum NoticeKind { Info, KeepBoth, EditBeatsDelete, AutoConflict, UserDecision }
@@ -210,7 +210,8 @@ public enum NoticeKind { Info, KeepBoth, EditBeatsDelete, AutoConflict, UserDeci
 /// </summary>
 public sealed record Notice(string PairId, int Rule, NoticeKind Kind, string Path, string Detail, string ReasonKey,
     string? NoticeId = null, FreeSpaceNoticeMetadata? FreeSpace = null,
-    RetainedNoticeVersion? RetainedVersion = null, QuarantineNotice? Quarantine = null, DefenderHistoryNotice? DefenderHistory = null, ConflictNoticeVersions? ConflictVersions = null, ConflictNoticeOperation? ConflictOperation = null, IReadOnlyList<Side>? RemovalSides = null, string? RemovalOriginReason = null, NoticeRepair? Repair = null, bool FolderInspection = false, bool? UploadSuspended = null, Side? UploadQuotaSide = null, long? UploadQuotaNeedBytes = null);
+    RetainedNoticeVersion? RetainedVersion = null, QuarantineNotice? Quarantine = null, DefenderHistoryNotice? DefenderHistory = null, ConflictNoticeVersions? ConflictVersions = null, ConflictNoticeOperation? ConflictOperation = null, IReadOnlyList<Side>? RemovalSides = null, string? RemovalOriginReason = null, NoticeRepair? Repair = null, bool FolderInspection = false, bool? UploadSuspended = null, Side? UploadQuotaSide = null, long? UploadQuotaNeedBytes = null,
+    NoticeRebuildableRule? RebuildableRule = null, NoticeExportInfo? ExportInfo = null);
 
 public sealed record DefenderHistoryNotice(string RootId, string Batch, long Count, string Cause, RootDef? ReviewedRoot = null,
     DefenderSharedRelease? SharedRelease = null);
@@ -273,10 +274,19 @@ public sealed record ConflictNoticeVersions(ItemState A, ItemState B, Baseline? 
     string? CopyOnA = null, string? CopyOnB = null, SyncAction? Incoming = null,
     ItemState? PendingOccupantSource = null);
 
+/// <summary>The formats the cloud provider itself said it supports for one document. An empty list means the
+/// provider reported no export_info at all, so no export button is offered; null means an older notice whose
+/// formats were never captured.</summary>
+public sealed record NoticeExportInfo(string? DefaultFormat, IReadOnlyList<string> Formats);
+
 /// <summary>Identity-bound repair evidence, stored in the existing notice detail payload.</summary>
 /// <param name="RetainedStaging">Bounded (20) list of excluded staging folders this link's attempts created; never deleted.</param>
 public sealed record NoticeRepair(Side Side, ItemState Item, string? Destination = null,
     IReadOnlyList<string>? RetainedStaging = null);
+
+/// <summary>A first-sync rebuildable rule whose scoped prefix matched no folder. The category and prefix are the
+/// rule's stable identity: changing either is a different rule, so a kept notice is not raised again for it.</summary>
+public sealed record NoticeRebuildableRule(string Category, string Prefix);
 
 /// <summary>Exact per-item provenance for explicitly recovering a newest-wins loser, never a path-based guess.</summary>
 public sealed record RetainedNoticeVersion(string ActionId, Side Side, ItemState Loser, ItemState Winner);

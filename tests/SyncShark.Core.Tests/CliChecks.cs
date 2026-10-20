@@ -1201,17 +1201,24 @@ internal static partial class CliChecks
             Massdex.SyncShark.V2.NoticeChoices.ExportDocx, Massdex.SyncShark.V2.NoticeChoices.ExportMarkdown,
             Massdex.SyncShark.V2.NoticeChoices.ExportPdf, Massdex.SyncShark.V2.NoticeChoices.CheckHistoryAgain,
             Massdex.SyncShark.V2.NoticeChoices.ReviewDeletion, Massdex.SyncShark.V2.NoticeChoices.OpenStorage,
-            Massdex.SyncShark.V2.NoticeChoices.ReviewReserve })
+            Massdex.SyncShark.V2.NoticeChoices.ReviewReserve,
+            Massdex.SyncShark.V2.NoticeChoices.PreviewMatches, Massdex.SyncShark.V2.NoticeChoices.ChooseFolder,
+            Massdex.SyncShark.V2.NoticeChoices.RemoveRule, Massdex.SyncShark.V2.NoticeChoices.KeepRule })
         {
             var action = SyncCliRegistry.Parse(["--cli", "conflicts", "resolve", "--pair", "pair-a",
                 "--path", "Folder/Item", "--choice", choice, "--key", "notice-a", "--generation", "0", "--yes"]);
             Require(action.Choice == choice && Massdex.SyncShark.V2.NoticeChoices.IsRetryChoice(choice),
-                "offline and export actions share the exact-target CLI notice route");
+                "offline, export and rebuildable-rule actions share the exact-target CLI notice route");
         }
         var confirmation = SyncCliRegistry.Parse(["--cli", "conflicts", "resolve", "--pair", "pair-a",
             "--path", "link", "--choice", Massdex.SyncShark.V2.NoticeChoices.CopyLinkOutsideRoot,
             "--name", "D:/Target", "--key", "notice-a", "--generation", "0", "--yes"]);
         Require(confirmation.Name == "D:/Target", "link confirmation carries the exact target path");
+        var chooseFolder = SyncCliRegistry.Parse(["--cli", "conflicts", "resolve", "--pair", "pair-a",
+            "--path", "typo", "--choice", Massdex.SyncShark.V2.NoticeChoices.ChooseFolder,
+            "--name", "Folder/Sub", "--key", "notice-a", "--generation", "0", "--yes"]);
+        Require(chooseFolder.Name == "Folder/Sub",
+            "choose folder carries the user supplied pair-relative folder path");
         await LocalPathArgumentChecksAsync();
         foreach (var choice in new[] { "review-removal", "review-removal-a", "review-removal-b", "confirm-removal", "removal-next-page", "removal-previous-page" })
         {

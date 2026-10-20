@@ -561,6 +561,7 @@ internal static partial class RunChecks
         public bool Fail { get; init; }
         public bool ProviderOutage { get; init; }
         public bool Pause { get; set; }
+        public bool LookupFailure { get; init; }
         public bool CancelWithoutCaller { get; init; }
         public IReadOnlyDictionary<string, DateTimeOffset?> Cached { get; init; } = new Dictionary<string, DateTimeOffset?>();
         public DateTimeOffset? Deleted { get; init; }
@@ -589,7 +590,7 @@ internal static partial class RunChecks
             if (CancelWithoutCaller) throw new OperationCanceledException("Evidence probe cancelled internally");
             foreach (var path in paths)
                 resolved(ResolvedPath?.Invoke(path) ?? path, new SyncRemoteDeletionEvidence(Cached.TryGetValue(path, out var cached) ? cached : Deleted,
-                    "probed Dropbox deletion", ContentHash: HistoryHashes.GetValueOrDefault(path)));
+                    "probed Dropbox deletion", LookupFailed: LookupFailure, ContentHash: HistoryHashes.GetValueOrDefault(path)));
         }
         public Task<Snapshot> FullAsync(long gen, Func<string, bool> include, IProgress<string> progress,
             CancellationToken ct) => inner.FullAsync(gen, include, progress, ct);

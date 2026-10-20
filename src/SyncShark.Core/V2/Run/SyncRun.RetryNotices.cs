@@ -24,7 +24,7 @@ public sealed partial class SyncRun
             var notice = saved.Value.Notice;
             if (NoticeChoices.IsPairRetryNotice(notice)) return ApplyPairNoticeChoice(pairId, noticeId, choice, ct);
             // Specialized blockers need their durable action path, not only a retry timestamp.
-            if (notice.ReasonKey == DropboxQuota.NoticeKey || notice.Repair is not null) return false;
+            if (notice.ReasonKey == DropboxQuota.NoticeKey || notice.Repair is not null || notice.RebuildableRule is not null) return false;
             if (choice != NoticeChoices.RetryNow) return false;
             if (notice.ReasonKey is "planning-degraded" or "recovery-unavailable")
             {
@@ -51,7 +51,8 @@ public sealed partial class SyncRun
     // One shared authority for app and CLI. These choices change scheduling or exclusion policy,
     // never turn an uncertain effect into deletion permission or mark an effect successful.
     internal async Task<string> ApplyRetryNoticeChoiceAsync(string pairId, string noticeId, string choice, CancellationToken ct,
-        Action<PairDef, PairDef>? saveNarrowerPair = null, Action<SyncAction, ActionResult>? removalResult = null, IProgress<RunProgress>? progress = null, Notice? acceptedExclusion = null, NoticeActionInput? input = null)
+        Action<PairDef, PairDef>? saveNarrowerPair = null, Action<SyncAction, ActionResult>? removalResult = null, IProgress<RunProgress>? progress = null, Notice? acceptedExclusion = null, NoticeActionInput? input = null,
+        Func<PairDef, RebuildableChoice, RebuildableChoice?, string>? updateRebuildableRule = null)
     {
         string? observationSession = null;
         PairDef? observedPair = null;
@@ -104,7 +105,7 @@ public sealed partial class SyncRun
                 if (_store.Pair(pairId) is not { } current || current.A != observation.Pair.A || current.B != observation.Pair.B)
                     throw new SyncRunRefusedException("The folder roots changed during review. Refresh the review; nothing was removed.");
             }
-            return await ApplyRetryNoticeChoiceCoreAsync(pairId, noticeId, choice, ct, saveNarrowerPair, removalResult, observationSession, observedPair, acceptedExclusion, input);
+            return await ApplyRetryNoticeChoiceCoreAsync(pairId, noticeId, choice, ct, saveNarrowerPair, removalResult, observationSession, observedPair, acceptedExclusion, input, updateRebuildableRule);
         }
         finally
         {
@@ -119,7 +120,8 @@ public sealed partial class SyncRun
     }
 
     private Task<string> ApplyRetryNoticeChoiceCoreAsync(string pairId, string noticeId, string choice, CancellationToken ct,
-        Action<PairDef, PairDef>? saveNarrowerPair, Action<SyncAction, ActionResult>? removalResult, string? observationSession, PairDef? observedPair, Notice? acceptedExclusion, NoticeActionInput? input) =>
+        Action<PairDef, PairDef>? saveNarrowerPair, Action<SyncAction, ActionResult>? removalResult, string? observationSession, PairDef? observedPair, Notice? acceptedExclusion, NoticeActionInput? input,
+        Func<PairDef, RebuildableChoice, RebuildableChoice?, string>? updateRebuildableRule) =>
         RunExclusiveAsync(null, async (_, token) =>
         {
             token.ThrowIfCancellationRequested();
@@ -132,10 +134,17 @@ public sealed partial class SyncRun
                 (acceptedExclusion is not null && (NoticeChoices.IsPairRetryNotice(notice) ||
                     choice is not (NoticeChoices.Ignore or NoticeChoices.Exclude) || notice.NoticeId != noticeId)))
                 throw new SyncRunRefusedException("That retry notice or option is no longer available. Refresh notices.");
-            if (input?.Name is not null && choice is not (NoticeChoices.Rename or NoticeChoices.CopyLinkOutsideRoot or NoticeChoices.CopyLinkAgain or NoticeChoices.ShowRemaining) || input?.Offset is > 0 && choice != NoticeChoices.ShowRemaining)
-                throw new SyncRunRefusedException("Name is for Rename, exact link target confirmation, or a link page cursor; offset is only for non-link remaining items.");
+            if (input?.Name is not null && choice is not (NoticeChoices.Rename or NoticeChoices.ChooseFolder or NoticeChoices.CopyLinkOutsideRoot or NoticeChoices.CopyLinkAgain or NoticeChoices.ShowRemaining) ||
+                input?.Offset is > 0 && choice is not (NoticeChoices.ShowRemaining or NoticeChoices.PreviewMatches))
+                throw new SyncRunRefusedException("Name is for Rename, Choose folder, exact link target confirmation, or a link page cursor; offset is only for Show remaining items or paged previews.");
+            if (input?.PageToken is not null && choice != NoticeChoices.ShowRemaining)
+                throw new SyncRunRefusedException("Page token is only for Show remaining items.");
+            if (notice.ReasonKey == "stubs-left-alone" && input?.Offset is > 0)
+                throw new SyncRunRefusedException("Use the returned page token, not an offset, for online-only files.");
             noticeId = notice.NoticeId!; // A legacy id resolves to the canonical notice before any effect or closure.
             var pair = _store.Pair(pairId) ?? throw new SyncRunRefusedException("The pair is no longer available.");
+            if (notice.RebuildableRule is not null)
+                return HandleRebuildableRuleChoice(pair, notice, choice, input, updateRebuildableRule);
             if (notice.ReasonKey == DropboxQuota.NoticeKey)
             {
                 if (choice == NoticeChoices.RetryNow)
@@ -152,14 +161,25 @@ public sealed partial class SyncRun
                 return "Notice ignored. Uploads remain suspended until a quota check finds free space. No files were excluded or deleted.";
             }
             if (choice == NoticeChoices.Rename) return await RenameNoticeItemAsync(pair, notice, input?.Name, token);
-            if (choice is NoticeChoices.ExportDocx or NoticeChoices.ExportMarkdown or NoticeChoices.ExportPdf)
+            if (choice is NoticeChoices.ExportDocx or NoticeChoices.ExportMarkdown or NoticeChoices.ExportPdf or NoticeChoices.ExportHtml)
                 return await ExportNoticeDocumentAsync(pair, notice, choice, token);
             if (choice is NoticeChoices.ShowTarget or NoticeChoices.SyncTargetSeparately or NoticeChoices.CopyLink or NoticeChoices.CopyLinkOutsideRoot or NoticeChoices.CopyLinkAgain or NoticeChoices.RemoveLinkStaging || notice.ReasonKey == "link-item" && choice == NoticeChoices.RetryNow)
                 return await LinkNoticeActionAsync(pair, notice, choice, token, input);
-            if (choice == NoticeChoices.MakeAvailableOffline) return await MakeNoticeAvailableOfflineAsync(pair, notice, token);
+            if (choice is NoticeChoices.MakeAvailableOffline or NoticeChoices.ConfirmLargeDownload)
+                return await MakeNoticeAvailableOfflineAsync(pair, notice, token, choice == NoticeChoices.ConfirmLargeDownload);
             if (choice == NoticeChoices.ShowRemaining) return notice.ReasonKey == "stubs-left-alone"
-                ? ShowOnlineOnlyItems(pair, input?.Offset ?? 0) : notice.ReasonKey == "links-excluded"
+                ? ShowOnlineOnlyItems(pair, input?.PageToken) : notice.ReasonKey == "links-excluded"
                 ? ShowLinkItems(pair, input) : RemainingItems(pair, notice, input?.Offset ?? 0);
+            if (notice.ReasonKey == "stubs-left-alone")
+            {
+                if (choice == NoticeChoices.Ignore)
+                {
+                    _store.CloseNotice(noticeId, choice);
+                    return "Summary ignored. Online-only files remain protected; no paths were excluded or deleted.";
+                }
+                RaiseLinksSummary(pair, LeftAlone(pair));
+                return "Availability checked. Review online-only files to download individual items; scanning never downloads them.";
+            }
             if (choice == NoticeChoices.OpenDropbox)
             {
                 var cloud = new[] { pair.A, pair.B }.FirstOrDefault(root => root.Provider == SyncProviders.Dropbox)
@@ -254,7 +274,9 @@ public sealed partial class SyncRun
                     if (saveNarrowerPair is not null) saveNarrowerPair(pair, pair with { Excluded = paths });
                     else _store.SavePair(pair with { Excluded = paths });
                 }
-                _store.ClearSyncRetry(pairId, notice.Path);
+                var retry = _store.SyncRetryAt(pairId, notice.Path);
+                if (retry?.Held is not null) _store.SuspendHeldRetry(pairId, retry);
+                else _store.ClearSyncRetry(pairId, notice.Path);
                 // Retain pending effects for verify-only reconciliation under the normal exclusion policy.
             }
             _store.CloseNotice(noticeId, choice);
