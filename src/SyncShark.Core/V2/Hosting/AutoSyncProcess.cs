@@ -34,15 +34,20 @@ public static class AutoSyncProcess
                 ? installed : running;
     }
 
-    public static bool StopsForExistingOwner(int exitCode) => exitCode == (int)SyncCliExitCode.Busy;
+    public static bool IsExistingOwnerExit(int exitCode) => exitCode == (int)SyncCliExitCode.Busy;
 
     public static void RecordExistingOwnerNotice(string path)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         // One overwrite-only spool notice: the other owner holds the database, so never open it here.
         File.WriteAllText(path, "AutoSync startup is blocked because the GUI or another maintenance owner holds the product lock. " +
-            "Automatic relaunch has stopped. Close that owner safely, then Retry with autosync start. " +
-            "Ignore by leaving AutoSync stopped; disable GUI Start With Windows to avoid competing logon owners.");
+            "Automatic relaunch will retry with backoff (up to five minutes). Let maintenance finish or close the owner safely. " +
+            "Retry immediately with autosync stop then autosync start, or Ignore by running autosync stop; disable GUI Start With Windows to avoid competing logon owners.");
+    }
+
+    public static void ClearExistingOwnerNotice(string path)
+    {
+        if (File.Exists(path)) File.WriteAllText(path, string.Empty);
     }
 
     public static string RegisterStartup(string executable, bool enabled)

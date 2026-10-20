@@ -25,19 +25,34 @@ internal static class BackgroundHostEntry
             PilotInstanceLock? authority = null;
             await using var host = AutoSyncBackgroundHost.Start(
                 AutoSyncHostProtocol.PipeName(SyncSharkRuntimePaths.InstanceLockFile),
-                () => authority = PilotInstanceLock.Acquire(SyncSharkRuntimePaths.InstanceLockFile),
+                () =>
+                {
+                    authority = PilotInstanceLock.Acquire(SyncSharkRuntimePaths.InstanceLockFile);
+                    try { AutoSyncProcess.ClearExistingOwnerNotice(ProcessEntry.ExistingOwnerNoticePath); }
+                    catch (Exception noticeError) { Console.Error.WriteLine("Could not clear the startup notice: " + noticeError.Message); }
+                    return authority;
+                },
                 () => new ProductionAutoSyncEngine(authority!, SyncDataLocation.ProductRoot));
             await host.Completion.ConfigureAwait(false);
             return 0;
         }
+        catch (AutoSyncHostReservationException)
+        {
+            // FirstPipeInstance can lose after the initial status probe. Never acquire a
+            // second store/engine; attach to the winning starter as it becomes ready.
+            return await AttachToOwnerAsync(client);
+        }
         catch (IOException error) when (error.InnerException is System.ComponentModel.Win32Exception { NativeErrorCode: 32 or 33 })
         {
-            // Another starter may have won between the observation and exclusive acquisition.
-            var attached = await client.TrySendAsync(AutoSyncHostClient.Request("status"), TimeSpan.FromSeconds(5));
-            if (attached is not null) return 0;
-            Console.Error.WriteLine("The product is owned by another window or maintenance operation. Close it safely, then start AutoSync again. No competing engine was opened.");
-            return (int)SyncCliExitCode.Busy;
+            return await AttachToOwnerAsync(client);
         }
+    }
+
+    private static async Task<int> AttachToOwnerAsync(AutoSyncHostClient client)
+    {
+        var attached = await client.TrySendAsync(AutoSyncHostClient.Request("status"), TimeSpan.FromSeconds(5));
+        if (attached is not null) return 0;
+        return (int)SyncCliExitCode.Busy;
     }
 
     internal static async Task<AutoSyncHostReply> StartAsync(CancellationToken ct)
@@ -50,8 +65,6 @@ internal static class BackgroundHostEntry
         {
             if (await client.TrySendAsync(AutoSyncHostClient.Request("status"), TimeSpan.FromSeconds(1), ct) is { } reply)
             {
-                try { if (File.Exists(ProcessEntry.ExistingOwnerNoticePath)) File.WriteAllText(ProcessEntry.ExistingOwnerNoticePath, string.Empty); }
-                catch (Exception noticeError) { Console.Error.WriteLine("Could not clear the startup notice: " + noticeError.Message); }
                 return reply;
             }
             if (process.HasExited) break;

@@ -200,6 +200,9 @@ public interface IStateStore : IDisposable
     /// <summary>Closes a notice with the user's choice recorded on it.</summary>
     void CloseNotice(string noticeId, string? choice);
 
+    /// <summary>Atomically reopens the accepted notice and appends a choice failure to its original detail.</summary>
+    void RecordNoticeChoiceFailure(Notice original, string failure);
+
     /// <summary>Closes/resets one pair's notice family, including ignored occurrences after recovery.
     /// Production performs an indexed SQL update, not a load of the pair's item notices.</summary>
     void CloseNoticeFamily(string pairId, string reasonPrefix, string? exceptReason = null)

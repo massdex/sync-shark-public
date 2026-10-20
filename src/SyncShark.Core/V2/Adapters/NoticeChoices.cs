@@ -37,6 +37,13 @@ public static class NoticeChoices
 
     public static bool IsRetryNotice(Notice notice) => IsPairRetryNotice(notice) || notice.ReasonKey is "sync-retry" or "deletion-review" || IsRemovalAttention(notice);
 
+    /// <summary>Only ordinary item exclusions may outlive the requesting client while waiting for a run.</summary>
+    public static bool CanQueueExclusion(Notice notice, string? path, string? choice) =>
+        notice.RetainedVersion is null && choice is Ignore or Exclude &&
+        !IsPairRetryNotice(notice) && IsRetryNotice(notice) &&
+        !string.IsNullOrEmpty(path) && PairPath.Same(notice.Path, path) &&
+        Options(notice).Any(option => option.Choice == choice);
+
     public static bool IsRetryChoice(string choice) => choice is RetryNow or Exclude or Ignore or DeleteReviewed or KeepRestore or OpenFolderSettings or Dismiss;
 
     public static bool IsRetainedVersionChoice(string choice) =>

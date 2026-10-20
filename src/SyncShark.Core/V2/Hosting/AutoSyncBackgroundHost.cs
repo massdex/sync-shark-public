@@ -58,7 +58,12 @@ public sealed class AutoSyncBackgroundHost : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(acquireAuthority);
         ArgumentNullException.ThrowIfNull(createEngine);
         ArgumentNullException.ThrowIfNull(trustedPeer);
-        var first = NewListener(pipeName, first: true);
+        NamedPipeServerStream first;
+        try { first = NewListener(pipeName, first: true); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            throw new AutoSyncHostReservationException(error);
+        }
         IDisposable? authority = null;
         try
         {
@@ -260,3 +265,7 @@ public sealed class AutoSyncBackgroundHost : IAsyncDisposable
         }
     }
 }
+
+/// <summary>Address reservation failed before any store authority or engine was acquired.</summary>
+public sealed class AutoSyncHostReservationException(Exception inner)
+    : IOException("The AutoSync pipe could not be reserved; check for an existing host.", inner);

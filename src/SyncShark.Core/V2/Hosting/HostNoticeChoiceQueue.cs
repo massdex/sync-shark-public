@@ -18,7 +18,8 @@ internal sealed class HostNoticeChoiceQueue(IStateStore store,
             return await _execute(request, ct).ConfigureAwait(false);
         var selected = invocation.PairId is not null && invocation.Key is not null
             ? _store.NoticeById(invocation.PairId, invocation.Key) : null;
-        if (selected is not { Closed: false } || NoticeChoices.IsPairRetryNotice(selected.Value.Notice))
+        if (selected is not { Closed: false } ||
+            !NoticeChoices.CanQueueExclusion(selected.Value.Notice, invocation.Path, invocation.Choice?.ToLowerInvariant()))
             return await _execute(request, ct).ConfigureAwait(false);
         Task<object> work;
         lock (_pendingGate)
@@ -57,11 +58,8 @@ internal sealed class HostNoticeChoiceQueue(IStateStore store,
             RunOutput.Observe(error);
             try
             {
-                // Explicit failed choice recovery must reopen this item even if a previous
-                // partial write closed it as Ignore. Never reuse the pair-outage identity.
-                _store.CloseNotice(notice.NoticeId!, "choice-failed");
-                _store.AddNotices([notice with { Detail = "The queued item choice could not be saved: " +
-                    error.Message + ". Check disk space and store access, then Retry the item or choose Ignore again." }]);
+                _store.RecordNoticeChoiceFailure(notice, "The queued item choice could not be saved: " +
+                    error.Message + ". Check disk space and store access, then Retry the item or choose Ignore again.");
             }
             catch (Exception noticeError) { RunOutput.Observe(noticeError); }
         }

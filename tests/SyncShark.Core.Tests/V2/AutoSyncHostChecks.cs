@@ -9,7 +9,9 @@ internal static class AutoSyncHostChecks
 {
     public static async Task RunAsync()
     {
-        await QueuedItemChoiceAsync();
+        await QueuedItemChoiceAsync(partialClose: false);
+        await QueuedItemChoiceAsync(partialClose: true);
+        await InvalidItemChoicesAsync();
         await SingleOwnerAndSharedClientsAsync();
         await ReadsNeverLaunchAsync();
         await GuiAdapterSharesHostAsync();
@@ -35,23 +37,28 @@ internal static class AutoSyncHostChecks
         Require(AutoSyncProcess.SelectStartupExecutable("running", "2.0.0", "installed", "3.0.0", false) == "running", "newer version alone does not declare AutoSync support");
         Require(AutoSyncProcess.SelectStartupExecutable("running", "2.0.0+new", "installed", "2.0.0+old", false) == "running", "unknown revision order uses running build");
         Require(AutoSyncProcess.SelectStartupExecutable("running", "2.0.0+UNBOUND", "installed", "2.0.0+UNBOUND", false) == "running", "UNBOUND versions are not comparable");
-        Require(AutoSyncProcess.StopsForExistingOwner((int)SyncCliExitCode.Busy) &&
-            !AutoSyncProcess.StopsForExistingOwner((int)SyncCliExitCode.Failed), "owner contention stops supervision, ordinary crashes still retry");
+        Require(AutoSyncProcess.IsExistingOwnerExit((int)SyncCliExitCode.Busy) &&
+            !AutoSyncProcess.IsExistingOwnerExit((int)SyncCliExitCode.Failed), "owner contention is distinguished from ordinary crashes");
         var ownerNotice = Path.Combine(Path.GetTempPath(), "supervisor-notice-" + Guid.NewGuid().ToString("N"), "notice.txt");
         AutoSyncProcess.RecordExistingOwnerNotice(ownerNotice);
         AutoSyncProcess.RecordExistingOwnerNotice(ownerNotice);
         Require(File.ReadAllText(ownerNotice).Contains("Retry", StringComparison.Ordinal) && Directory.GetFiles(Path.GetDirectoryName(ownerNotice)!).Length == 1,
             "owner contention records one actionable deduplicated notice without opening the store");
+        Require(File.ReadAllText(ownerNotice).Contains("Automatic relaunch will retry", StringComparison.Ordinal),
+            "owner notice describes ongoing capped-backoff retries");
+        AutoSyncProcess.ClearExistingOwnerNotice(ownerNotice);
+        Require(File.ReadAllText(ownerNotice).Length == 0, "successful ownership clears the stale notice");
         Require(AutoSyncProcess.StartupCommand(Path.Combine(Path.GetTempPath(), "Product", "SyncShark.exe"))
             .EndsWith("--core v2 --autosync-supervisor", StringComparison.Ordinal), "startup explicitly selects v2 and supervises crashes");
         if (OperatingSystem.IsWindows()) await AutoSyncProcessChecks.RunAsync();
         Console.WriteLine("AutoSync host checks passed (fake transport peers and isolated empty temp composition only).");
     }
 
-    private static async Task QueuedItemChoiceAsync()
+    private static async Task QueuedItemChoiceAsync(bool partialClose)
     {
-        using var store = new InMemoryStateStore();
-        store.AddNotices([new Notice("pair-1", 0, NoticeKind.Info, "file.txt", "item failed", "sync-retry"),
+        var root = Path.Combine(Path.GetTempPath(), "queued-choice-" + Guid.NewGuid().ToString("N"));
+        using var store = OpenChoiceStore(root);
+        store.AddNotices([new Notice("pair-1", 0, NoticeKind.Info, "file.txt", "Item failed because access was denied. Fix permissions, then Retry.", "sync-retry"),
             new Notice("pair-1", 0, NoticeKind.Info, "", "outage", "autosync-failed")]);
         var notice = store.OpenNotices("pair-1").Single(n => n.Path == "file.txt");
         var outage = store.OpenNotices("pair-1").Single(n => n.Path == "");
@@ -64,7 +71,7 @@ internal static class AutoSyncHostChecks
             workToken = ct;
             entered.SetResult();
             await release.Task;
-            store.CloseNotice(notice.NoticeId!, NoticeChoices.Ignore); // partial failure after closing
+            if (partialClose) store.CloseNotice(notice.NoticeId!, NoticeChoices.Ignore); // partial failure after closing
             return new HostCliOutput(6, "", "simulated settings write failure");
         });
         var engine = new ChoiceEngine(queue);
@@ -87,6 +94,69 @@ internal static class AutoSyncHostChecks
         catch (IOException) { }
         Require(store.NoticeById("pair-1", notice.NoticeId!) is { Closed: false }, "failed choice reopens its own item notice even after partial Ignore");
         Require(store.NoticeById("pair-1", outage.NoticeId!) is { Closed: true }, "failed item choice never reopens an ignored pair outage");
+        var recovered = store.NoticeById("pair-1", notice.NoticeId!)!.Value.Notice;
+        Require(recovered.Detail.StartsWith(notice.Detail + "\n\n", StringComparison.Ordinal) &&
+            recovered.Detail.Contains("simulated settings write failure", StringComparison.Ordinal),
+            "SQLite recovery retains original why/fix text and appends the failure");
+        using var reopened = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System);
+        Require(reopened.NoticeById("pair-1", notice.NoticeId!) is { Closed: false } saved &&
+            saved.Notice.Detail == recovered.Detail, "recovery is durable in the real SQLite store");
+    }
+
+    private static SqliteStateStore OpenChoiceStore(string root)
+    {
+        var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System);
+        store.SavePair(new PairDef("pair-1", "Pair A",
+            new RootDef("ra", "Local", null, Path.Combine(root, "a"), "local-a"),
+            new RootDef("rb", "Dropbox", "account-fixture", "/b", "remote-b"), [], [], true));
+        return store;
+    }
+
+    private static async Task InvalidItemChoicesAsync()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "invalid-choice-" + Guid.NewGuid().ToString("N"));
+        using var store = OpenChoiceStore(root);
+        var item = new ItemState("retained.txt", ItemKind.File, "item-fixture", "v1", "hash", 1,
+            DateTimeOffset.UnixEpoch, ItemFlags.None);
+        store.AddNotices([
+            new Notice("pair-1", 0, NoticeKind.Info, "retry.txt", "Original why and fix", "sync-retry"),
+            new Notice("pair-1", 0, NoticeKind.Info, "ordinary.txt", "Original information", "ordinary"),
+            new Notice("pair-1", 0, NoticeKind.Info, "retained.txt", "Original version explanation", "retained")
+                { RetainedVersion = new RetainedNoticeVersion("action-fixture", Side.B, item, item) },
+            new Notice("pair-1", NoticeChoices.DeletionReviewRestoreOnlyRule, NoticeKind.Info,
+                "review.txt", "Original deletion explanation", "deletion-review")]);
+        var retry = store.OpenNotices("pair-1").Single(n => n.Path == "retry.txt");
+        var retained = store.OpenNotices("pair-1").Single(n => n.Path == "retained.txt");
+        foreach (var test in new[] {
+            (Notice: retry, Path: "wrong.txt", Choice: NoticeChoices.Ignore),
+            (Notice: retry, Path: "retry.txt", Choice: NoticeChoices.DeleteReviewed),
+            (Notice: retained, Path: "retained.txt", Choice: NoticeChoices.Ignore),
+            (Notice: store.OpenNotices("pair-1").Single(n => n.Path == "ordinary.txt"), Path: "ordinary.txt", Choice: NoticeChoices.Ignore),
+            (Notice: store.OpenNotices("pair-1").Single(n => n.Path == "review.txt"), Path: "review.txt", Choice: NoticeChoices.Exclude) })
+        {
+            var release = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var client = new CancellationTokenSource();
+            CancellationToken observed = default;
+            var queue = new HostNoticeChoiceQueue(store, (_, ct) => { observed = ct; return release.Task; });
+            var request = AutoSyncHostClient.Request("cli") with { CliArgs =
+                ["--cli", "conflicts", "resolve", "--pair", "pair-1", "--path", test.Path,
+                    "--key", test.Notice.NoticeId!, "--generation", "0", "--choice", test.Choice, "--yes"] };
+            var pending = queue.ExecuteAsync(request, client.Token);
+            Require(!pending.IsCompleted && observed == client.Token, "invalid choice executes directly, never returns queued");
+            release.SetException(new SyncCliReviewException("Choice not accepted"));
+            try { await pending; throw new InvalidOperationException("Expected direct refusal"); }
+            catch (SyncCliReviewException) { }
+            await queue.StopAsync(() => Task.CompletedTask);
+            Require(store.NoticeById("pair-1", test.Notice.NoticeId!) is { Closed: false } unchanged &&
+                unchanged.Notice == test.Notice, "invalid choice leaves the original SQLite notice untouched");
+        }
+        // Defensive recovery also handles a retained-version row without relying on Add's no-op semantics.
+        store.CloseNotice(retained.NoticeId!, "partial-choice");
+        store.RecordNoticeChoiceFailure(retained, "simulated failure");
+        Require(store.NoticeById("pair-1", retained.NoticeId!) is { Closed: false } restored &&
+            restored.Notice.RetainedVersion == retained.RetainedVersion &&
+            restored.Notice.Detail.StartsWith(retained.Detail, StringComparison.Ordinal),
+            "atomic recovery cannot permanently close or strip retained-version evidence");
     }
 
     private sealed class ChoiceEngine(HostNoticeChoiceQueue queue) : IAutoSyncHostEngine
@@ -122,7 +192,7 @@ internal static class AutoSyncHostChecks
                 () => { secondFactoryCalled = true; return new Lease(); }, () => new FakeEngine(), _ => true);
             throw new InvalidOperationException("A second listener was admitted.");
         }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        catch (AutoSyncHostReservationException) { }
         Require(!secondFactoryCalled, "second start never creates an authority or engine");
         var cli = Client(address);
         var gui = Client(address);
