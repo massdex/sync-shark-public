@@ -19,6 +19,9 @@ internal static partial class RunChecks
                 for (var repeat = 0; repeat < 2; repeat++)
                     first = await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, summary.NoticeId!, NoticeChoices.ShowRemaining, default);
                 Require(store.OpenNotices(fx.Pair.PairId).Count(n => n.ReasonKey == "link-item") == 50, "link page is bounded and deduplicated");
+                var openLinks = store.OpenLinkNotices(fx.Pair.PairId);
+                Require(openLinks.Count == 50 && openLinks.All(n => n.ReasonKey == "link-item"),
+                    "link lookup filters by reason, not Defender review root");
                 await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, summary.NoticeId!, NoticeChoices.ShowRemaining, default,
                     input: new(first.Split("Next cursor (--name): ")[1].Trim()));
                 Require(store.OpenNotices(fx.Pair.PairId).Count(n => n.ReasonKey == "link-item") == 7, "keyset second page keeps only current links open");

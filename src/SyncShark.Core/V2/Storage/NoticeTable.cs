@@ -185,7 +185,7 @@ internal sealed partial class NoticeTable
     }
 
     /// <summary>Open link-item notices for one pair, filtered by reason in SQL.</summary>
-    public IReadOnlyList<Notice> OpenLinks(long pairNo) => Open(pairNo, "link-item");
+    public IReadOnlyList<Notice> OpenLinks(long pairNo) => Open(pairNo, reasonKey: "link-item");
 
     /// <summary>Marks a notice closed with the user's choice; an unknown id is a no-op.</summary>
     public void Close(string noticeId, string? choice) =>

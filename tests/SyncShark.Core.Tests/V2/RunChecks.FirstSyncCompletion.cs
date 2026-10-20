@@ -47,7 +47,9 @@ internal static partial class RunChecks
         store.SaveSyncRetry(fx.Pair.PairId, new("skip.txt", "sync", 3, "unavailable", DateTimeOffset.MinValue));
         store.AddNotices([new Notice(fx.Pair.PairId, 40, NoticeKind.Info, "skip.txt", "retry", "sync-retry")]);
         var notice = store.OpenNotices(fx.Pair.PairId).Single(item => item.ReasonKey == "sync-retry");
-        await runtime.ResolveConflictAsync(fx.Pair.PairId, notice.Path, NoticeChoices.Exclude, notice.NoticeId, 0, null, default);
+        Require(NoticeChoices.Options(notice).Any(option => option.Choice == NoticeChoices.Ignore),
+            "retry notice offers Ignore as its path-exclusion action");
+        await runtime.ResolveConflictAsync(fx.Pair.PairId, notice.Path, NoticeChoices.Ignore, notice.NoticeId, 0, null, default);
         var result = await runtime.ApplyFirstSyncAsync(fx.Pair.PairId, null, true, null, _ => { }, default);
         Require(result.FirstSyncComplete && await fx.B.ObserveAsync("good.txt", default) is not null &&
             await fx.B.ObserveAsync("skip.txt", default) is null && await fx.A.ObserveAsync("skip.txt", default) is not null &&
