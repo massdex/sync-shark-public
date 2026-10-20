@@ -11,6 +11,7 @@ internal static partial class StorageChecks
         CompactMatchesSerializeIdentically();
         SnapshotFailureAndPartialAbsence(root);
         SnapshotNativeAbsence(root);
+        SnapshotReviewFollowups(root);
         SnapshotStoredKeyDrift(root);
         SnapshotInputMutationIsAtomic(root);
         SnapshotConcurrentRetry(root);
@@ -128,13 +129,19 @@ internal static partial class StorageChecks
                 ((ulong)info.FileIndexHigh << 32) | info.FileIndexLow), "aa");
         }
         using var lease = PilotDirectoryLease.Open(folder);
+        using var verifier = new LocalFileAbsence(folder, lease.Identity);
         File.Move(path, Path.Combine(folder, "blocked", "moved"));
-        Require(LocalFileAbsence.Check(folder, lease.Identity, item) == FileAbsence.Present,
+        Require(verifier.Check(item) == FileAbsence.Present,
             "native file ID finds a move into an unscanned subtree");
-        File.Delete(Path.Combine(folder, "blocked", "moved"));
-        Require(LocalFileAbsence.Check(folder, lease.Identity, item) == FileAbsence.Gone,
+        var outside = folder + "-sibling";
+        Directory.CreateDirectory(outside);
+        File.Move(Path.Combine(folder, "blocked", "moved"), Path.Combine(outside, "moved"));
+        Require(verifier.Check(item) == FileAbsence.Gone,
+            "same-volume move outside root, including a root-prefix sibling, is gone");
+        File.Delete(Path.Combine(outside, "moved"));
+        Require(verifier.Check(item) == FileAbsence.Gone,
             "native file ID confirms a genuine delete");
-        Require(LocalFileAbsence.Check(folder, lease.Identity, item with { ObjectId = "unknown" }) == FileAbsence.Unknown,
+        Require(verifier.Check(item with { ObjectId = "unknown" }) == FileAbsence.Unknown,
             "unverifiable identity never confirms deletion");
     }
 
@@ -155,8 +162,8 @@ internal static partial class StorageChecks
                 stage.Dispose();
                 Require(File.Exists(path + ".lease"), "failed cleanup retains an orphan marker without failing publication");
             }
-            SnapshotTemporary.Sweep(fixture.Connection);
-            Require(!File.Exists(path) && !File.Exists(path + ".lease"), "next startup sweeps the orphan");
+            fixture.Write([]);
+            Require(!File.Exists(path) && !File.Exists(path + ".lease"), "next snapshot sweeps the orphan without reopening the store");
         }
         else stage.Dispose();
     }

@@ -363,11 +363,11 @@ public sealed class LocalInventory : IInventorySource
         return new Snapshot(rootId, _side, gen, cursor, items, DecisionPaths(scan, include))
         {
             IncludesPath = include,
-            VerifyAbsence = item => LocalFileAbsence.Check(_root.RootPath, _rootIdentity, item)
+            OpenAbsenceVerifier = () => new LocalFileAbsence(_root.RootPath, _rootIdentity)
         };
     }
 
-    private Delta BuildDelta(long gen, string rootId, string cursor, string throughCursor, PilotLocalScan scan,
+    internal Delta BuildDelta(long gen, string rootId, string cursor, string throughCursor, PilotLocalScan scan,
         IReadOnlyList<string> paths, Func<string, bool> include, DateTimeOffset scanTime, IReadOnlyList<string> extraIncomplete)
     {
         var decisionPaths = extraIncomplete.Count == 0
@@ -382,13 +382,16 @@ public sealed class LocalInventory : IInventorySource
             changes.Add(new Change(ChangeKind.Upsert, state.ObjectId, state.Path, state, null));
         }
         var absence = new Snapshot(rootId, _side, gen, throughCursor, [], decisionPaths)
-            { VerifyAbsence = item => LocalFileAbsence.Check(_root.RootPath, _rootIdentity, item) };
+            { OpenAbsenceVerifier = () => new LocalFileAbsence(_root.RootPath, _rootIdentity) };
+        using var verifier = decisionPaths.Count == 0 ? null : absence.OpenAbsenceVerifier!();
+        var checking = verifier is null ? absence : absence with { VerifyAbsence = verifier.Check };
+        var seenIds = changes.Select(change => change.ObjectId).ToHashSet(StringComparer.Ordinal);
         changes.AddRange(LocalDeletes.Build(_known, rootId, paths, scan,
             path => include(path) && !LocalItems.IsExcluded(path, _productOwnedRelative) &&
                 !LocalItems.InsideAny(path, decisionPaths),
-            scanTime, absence.CanCloseAbsent));
+            scanTime, row => seenIds.Contains(row.ObjectId) || checking.CanCloseAbsent(row)));
         return new Delta(rootId, _side, gen, cursor, throughCursor, changes, false, decisionPaths)
-            { IncludesPath = include, PendingDeletionEvidence = absence.PendingDeletionEvidence };
+            { IncludesPath = include, PendingDeletionEvidence = absence.PendingDeletionEvidence, DisplacementEvidence = absence };
     }
 
     private static IReadOnlyList<string> DecisionPaths(PilotLocalScan scan, Func<string, bool> include) =>
