@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AssemblyName>SyncShark.Core.Tests</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/SyncShark.Core/SyncShark.Core.csproj" />
+    <Compile Include="../SyncShark.Core.Tests/FilesOnDemandNativeChecks.cs" Link="FilesOnDemandNativeChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/FilesOnDemandStorageChecks.cs" Link="FilesOnDemandStorageChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/CloudFilesLifetimeChecks.cs" Link="CloudFilesLifetimeChecks.cs" />
+  </ItemGroup>
+</Project>
