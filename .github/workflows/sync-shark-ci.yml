@@ -1,0 +1,185 @@
+name: Sync Shark CI
+
+on:
+  push:
+    branches:
+      - 'claude-code/v2-*'
+      - 'main'
+  workflow_dispatch:
+
+# One run per branch: a new commit cancels the run it supersedes.
+concurrency:
+  group: sync-shark-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CONFIGURATION: Debug
+  DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false'
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Personal paths, account names and the owner's SID must never reach a
+      # tracked file again; docs/ and AGENTS.md are excluded.
+      - name: Reject personal literals
+        shell: pwsh
+        run: ./tools/ci/check-personal-literals.ps1
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/packages.lock.json', 'Directory.Build.props', 'global.json') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      # apps/SyncShark builds native Explorer and Discovery helpers through the
+      # pinned Zig 0.16.0 toolchain; the runner does not ship it.
+      - name: Install Zig 0.16.0
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zipPath = Join-Path $env:RUNNER_TEMP 'zig-0.16.0.zip'
+          Invoke-WebRequest -Uri 'https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip' -OutFile $zipPath
+          $expected = '68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e'
+          $actual = (Get-FileHash -Algorithm SHA256 -Path $zipPath).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "Zig archive checksum mismatch: $actual" }
+          $extractRoot = Join-Path $env:RUNNER_TEMP 'zig'
+          Expand-Archive -Path $zipPath -DestinationPath $extractRoot -Force
+          $zig = Get-ChildItem -Path $extractRoot -Filter 'zig.exe' -Recurse -File | Select-Object -First 1
+          if ($null -eq $zig) { throw 'zig.exe was not found in the extracted toolchain.' }
+          "ZIG_EXE=$($zig.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          & $zig.FullName version
+
+      - name: Build Core
+        shell: pwsh
+        run: |
+          dotnet build 'src/SyncShark.Core/SyncShark.Core.csproj' -c $env:CONFIGURATION --nologo
+          exit $LASTEXITCODE
+
+      # The test project targets net8.0 (not net8.0-windows) but naturally uses
+      # Windows identity APIs on the Windows-only host checks. Keep the one
+      # platform-compatibility rule quiet so the runner's full analyzer set does
+      # not turn its Windows-only calls into errors.
+      - name: Build tests
+        shell: pwsh
+        run: |
+          dotnet build 'tests/SyncShark.Core.Tests/SyncShark.Core.Tests.csproj' -c $env:CONFIGURATION --nologo -p:NoWarn=CA1416
+          exit $LASTEXITCODE
+
+      # The product build owns its output allocation through SyncSharkBuildRoot;
+      # the native setup script refuses an output outside it.
+      - name: Build app
+        shell: pwsh
+        run: |
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE 'build\ci'
+          dotnet build 'apps/SyncShark/SyncShark.csproj' -c $env:CONFIGURATION --nologo `
+            -p:SyncSharkBuildRoot=$buildRoot `
+            -p:SyncSharkZigPath=$env:ZIG_EXE
+          exit $LASTEXITCODE
+
+      - name: Upload test binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-shark-tests
+          path: tests/SyncShark.Core.Tests/bin/${{ env.CONFIGURATION }}/net8.0
+          if-no-files-found: error
+          retention-days: 7
+
+  tests:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: nested-pair
+            flag: --excluded-nested-pair-partition-checks
+            takes-root: true
+          - suite: corresponding-overlap
+            flag: --corresponding-included-overlap-checks
+            takes-root: true
+          - suite: storage
+            flag: --v2-storage-checks
+            takes-root: true
+          - suite: dropbox
+            flag: --v2-dropbox-checks
+            takes-root: true
+          - suite: cli
+            flag: --cli-checks
+            takes-root: true
+          - suite: runcli
+            flag: --v2-runcli-checks
+            takes-root: false
+          - suite: run
+            flag: --v2-run-checks
+            takes-root: false
+          - suite: executor
+            flag: --v2-executor-checks
+            takes-root: false
+          - suite: planner
+            flag: --v2-planner-checks
+            takes-root: false
+          - suite: held
+            flag: --v2-held-recovery
+            takes-root: false
+          - suite: notices
+            flag: --v2-notice-restore-checks
+            takes-root: false
+          - suite: local-offline
+            flag: --v2-local-offline-checks
+            takes-root: true
+            drive: c
+          # Real NTFS USN journal checks. runner.temp is on the runner's D:
+          # volume, which has no usable journal; keep these roots on C:.
+          - suite: local-journal
+            flag: --v2-local-journal-checks
+            takes-root: true
+            drive: c
+          - suite: autosync
+            flag: --v2-autosync-checks
+            takes-root: false
+    steps:
+      - name: Download test binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: sync-shark-tests
+          path: tests/SyncShark.Core.Tests/bin/${{ env.CONFIGURATION }}/net8.0
+
+      - name: Run ${{ matrix.suite }} checks
+        shell: pwsh
+        env:
+          SYNCSHARK_TEST_ROOT: '${{ runner.temp }}\${{ matrix.suite }}'
+          TEMP: '${{ runner.temp }}\${{ matrix.suite }}'
+          TMP: '${{ runner.temp }}\${{ matrix.suite }}'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # TEMP/TMP/SYNCSHARK_TEST_ROOT point at this per-suite scratch folder.
+          $scratch = Join-Path $env:RUNNER_TEMP '${{ matrix.suite }}'
+          New-Item -ItemType Directory -Force -Path $scratch | Out-Null
+          # The suite's own root must not pre-exist: some suites refuse a
+          # directory that already exists.
+          $base = if ('${{ matrix.drive }}' -eq 'c') { $env:LOCALAPPDATA } else { $env:RUNNER_TEMP }
+          $root = Join-Path $base 'syncshark-ci\${{ matrix.suite }}-root'
+          $exe = Join-Path $env:GITHUB_WORKSPACE 'tests\SyncShark.Core.Tests\bin\${{ env.CONFIGURATION }}\net8.0\SyncShark.Core.Tests.exe'
+          if (-not (Test-Path $exe)) { throw "Test executable not found: $exe" }
+          $testArgs = @('${{ matrix.flag }}')
+          if ('${{ matrix.takes-root }}' -eq 'true') { $testArgs += $root }
+          Write-Host "Running: $exe $($testArgs -join ' ')"
+          & $exe @testArgs
+          $code = $LASTEXITCODE
+          Write-Host "Exit code: $code"
+          exit $code
