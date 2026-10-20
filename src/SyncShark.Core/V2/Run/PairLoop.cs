@@ -210,8 +210,7 @@ internal sealed class PairLoop
             _backoff = TimeSpan.Zero; // A bounded backlog is draining; don't exponentially slow useful progress.
         _last = report with { CompletedUtc = _in.Time.GetUtcNow() };
         if (report.Outcome == RunOutcomes.Stopped) return;
-        if (report.Outcome is RunOutcomes.Complete or RunOutcomes.Partial &&
-                report.FailureCount == 0 && report.Failures.Count == 0)
+        if (report.ProviderReached || report.Outcome is RunOutcomes.Complete or RunOutcomes.Partial)
         {
             _consecutiveFailures = 0;
             try
@@ -220,7 +219,7 @@ internal sealed class PairLoop
             }
             catch (Exception error) { RunOutput.Observe(error); }
         }
-        if (report.Outcome == RunOutcomes.Failed)
+        if (report.Outcome == RunOutcomes.Failed && !report.ProviderReached)
         {
             var failure = report.Failures.FirstOrDefault(f => f.FailureHResult is unchecked((int)0x80070070) or unchecked((int)0x80070027))
                 ?? report.Failures.FirstOrDefault();

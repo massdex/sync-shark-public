@@ -25,13 +25,24 @@ public static class AutoSyncProcess
         string installed, string? installedVersion, bool thisBuild)
     {
         if (thisBuild) return running;
-        if (string.Equals(runningVersion, installedVersion, StringComparison.Ordinal) && !string.IsNullOrEmpty(runningVersion))
-            return installed;
-        // Unknown or equal numeric versions with different revision labels are not evidence of
-        // a newer installed build. Prefer the executable whose capabilities the caller is using.
-        static Version? Parse(string? value) => Version.TryParse(value?.Split('-', '+')[0], out var version) ? version : null;
-        return Parse(runningVersion) is { } current && Parse(installedVersion) is { } candidate && candidate > current
-            ? installed : running;
+        // A larger product version alone says nothing about shared-host support. Only an
+        // identical, commit-bound build is safe without an explicit capability declaration.
+        static bool Bound(string? value) => value is not null &&
+            System.Text.RegularExpressions.Regex.IsMatch(value, @"\+[0-9a-fA-F]{40}$");
+        return Bound(runningVersion) && Bound(installedVersion) &&
+            string.Equals(runningVersion, installedVersion, StringComparison.Ordinal)
+                ? installed : running;
+    }
+
+    public static bool StopsForExistingOwner(int exitCode) => exitCode == (int)SyncCliExitCode.Busy;
+
+    public static void RecordExistingOwnerNotice(string path)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        // One overwrite-only spool notice: the other owner holds the database, so never open it here.
+        File.WriteAllText(path, "AutoSync startup is blocked because the GUI or another maintenance owner holds the product lock. " +
+            "Automatic relaunch has stopped. Close that owner safely, then Retry with autosync start. " +
+            "Ignore by leaving AutoSync stopped; disable GUI Start With Windows to avoid competing logon owners.");
     }
 
     public static string RegisterStartup(string executable, bool enabled)

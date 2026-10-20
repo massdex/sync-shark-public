@@ -9,6 +9,7 @@ internal static class AutoSyncHostChecks
 {
     public static async Task RunAsync()
     {
+        await QueuedItemChoiceAsync();
         await SingleOwnerAndSharedClientsAsync();
         await ReadsNeverLaunchAsync();
         await GuiAdapterSharesHostAsync();
@@ -30,13 +31,69 @@ internal static class AutoSyncHostChecks
             Require(writer.Truncated && writer.ToString() == new string('a', 700) + new string('b', 300), "lazy buffer growth preserves ordered tail");
         }
         Require(AutoSyncProcess.SelectStartupExecutable("running", "2.0.0", "installed", "1.0.0", false) == "running", "older installed build is never selected");
-        Require(AutoSyncProcess.SelectStartupExecutable("running", "2.0.0", "installed", "2.0.0", false) == "installed", "same version uses installed build");
-        Require(AutoSyncProcess.SelectStartupExecutable("running", "2.0.0", "installed", "3.0.0", false) == "installed", "newer installed build is selected");
+        Require(AutoSyncProcess.SelectStartupExecutable("running", "2.0.0+" + new string('a', 40), "installed", "2.0.0+" + new string('a', 40), false) == "installed", "exact commit-bound version uses installed build");
+        Require(AutoSyncProcess.SelectStartupExecutable("running", "2.0.0", "installed", "3.0.0", false) == "running", "newer version alone does not declare AutoSync support");
         Require(AutoSyncProcess.SelectStartupExecutable("running", "2.0.0+new", "installed", "2.0.0+old", false) == "running", "unknown revision order uses running build");
+        Require(AutoSyncProcess.SelectStartupExecutable("running", "2.0.0+UNBOUND", "installed", "2.0.0+UNBOUND", false) == "running", "UNBOUND versions are not comparable");
+        Require(AutoSyncProcess.StopsForExistingOwner((int)SyncCliExitCode.Busy) &&
+            !AutoSyncProcess.StopsForExistingOwner((int)SyncCliExitCode.Failed), "owner contention stops supervision, ordinary crashes still retry");
+        var ownerNotice = Path.Combine(Path.GetTempPath(), "supervisor-notice-" + Guid.NewGuid().ToString("N"), "notice.txt");
+        AutoSyncProcess.RecordExistingOwnerNotice(ownerNotice);
+        AutoSyncProcess.RecordExistingOwnerNotice(ownerNotice);
+        Require(File.ReadAllText(ownerNotice).Contains("Retry", StringComparison.Ordinal) && Directory.GetFiles(Path.GetDirectoryName(ownerNotice)!).Length == 1,
+            "owner contention records one actionable deduplicated notice without opening the store");
         Require(AutoSyncProcess.StartupCommand(Path.Combine(Path.GetTempPath(), "Product", "SyncShark.exe"))
             .EndsWith("--core v2 --autosync-supervisor", StringComparison.Ordinal), "startup explicitly selects v2 and supervises crashes");
         if (OperatingSystem.IsWindows()) await AutoSyncProcessChecks.RunAsync();
         Console.WriteLine("AutoSync host checks passed (fake transport peers and isolated empty temp composition only).");
+    }
+
+    private static async Task QueuedItemChoiceAsync()
+    {
+        using var store = new InMemoryStateStore();
+        store.AddNotices([new Notice("pair-1", 0, NoticeKind.Info, "file.txt", "item failed", "sync-retry"),
+            new Notice("pair-1", 0, NoticeKind.Info, "", "outage", "autosync-failed")]);
+        var notice = store.OpenNotices("pair-1").Single(n => n.Path == "file.txt");
+        var outage = store.OpenNotices("pair-1").Single(n => n.Path == "");
+        store.CloseNotice(outage.NoticeId!, NoticeChoices.Ignore);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        CancellationToken workToken = default;
+        var queue = new HostNoticeChoiceQueue(store, async (_, ct) =>
+        {
+            workToken = ct;
+            entered.SetResult();
+            await release.Task;
+            store.CloseNotice(notice.NoticeId!, NoticeChoices.Ignore); // partial failure after closing
+            return new HostCliOutput(6, "", "simulated settings write failure");
+        });
+        var engine = new ChoiceEngine(queue);
+        var address = Address();
+        await using var host = AutoSyncBackgroundHost.Start(address, () => new Lease(), () => engine, _ => true);
+        var request = AutoSyncHostClient.Request("cli") with { CliArgs =
+            ["--cli", "conflicts", "resolve", "--pair", "pair-1", "--path", "file.txt", "--key", notice.NoticeId!,
+                "--generation", "0", "--choice", "ignore", "--yes", "--json"] };
+        using var bound = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var reply = await Client(address).TrySendAsync(request, TimeSpan.FromSeconds(2), bound.Token);
+        await entered.Task;
+        var output = reply!.Data!.Value.Deserialize<HostCliOutput>(AutoSyncHostProtocol.Json)!;
+        Require(JsonDocument.Parse(output.Stdout).RootElement.GetProperty("queued").GetBoolean(), "host returns queued before the item choice finishes");
+        bound.Cancel();
+        Require(!workToken.CanBeCanceled, "accepted queued work is independent of client cancellation");
+        var stopped = queue.StopAsync(() => throw new IOException("simulated AutoSync stop failure"));
+        Require(!stopped.IsCompleted, "even a failing AutoSync stop drains accepted choices");
+        release.SetResult();
+        try { await stopped; throw new InvalidOperationException("stop failure was swallowed"); }
+        catch (IOException) { }
+        Require(store.NoticeById("pair-1", notice.NoticeId!) is { Closed: false }, "failed choice reopens its own item notice even after partial Ignore");
+        Require(store.NoticeById("pair-1", outage.NoticeId!) is { Closed: true }, "failed item choice never reopens an ignored pair outage");
+    }
+
+    private sealed class ChoiceEngine(HostNoticeChoiceQueue queue) : IAutoSyncHostEngine
+    {
+        public Task<object> ExecuteAsync(AutoSyncHostRequest request, CancellationToken ct) => queue.ExecuteAsync(request, ct);
+        public Task StopAsync() => queue.StopAsync(() => Task.CompletedTask);
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private static string Address() => "SyncShark.HostCheck." + Guid.NewGuid().ToString("N");

@@ -56,6 +56,12 @@ internal static class ProcessEntry
                     using var child = AutoSyncProcess.StartDetached(Environment.ProcessPath ?? throw new IOException("Executable unavailable."), supervisor: false, warning: Console.Error.WriteLine);
                     child.WaitForExit();
                     if (started.Elapsed >= TimeSpan.FromMinutes(10)) delay = TimeSpan.FromSeconds(5);
+                    if (AutoSyncProcess.StopsForExistingOwner(child.ExitCode))
+                    {
+                        try { AutoSyncProcess.RecordExistingOwnerNotice(ExistingOwnerNoticePath); }
+                        catch (Exception error) { try { Console.Error.WriteLine(error.Message); } catch (Exception) { } }
+                        return child.ExitCode;
+                    }
                     if (child.ExitCode == 0) return 0; // explicit safe stop/attach is not a crash
                 }
                 catch (Exception error)
@@ -70,6 +76,8 @@ internal static class ProcessEntry
         }
         finally { mutex.ReleaseMutex(); }
     }
+
+    internal static string ExistingOwnerNoticePath => Path.Combine(SyncDataLocation.ProductRoot, "autosync-owner-notice.txt");
 
     private static string SupervisorStopName => @"Local\" +
         AutoSyncHostProtocol.PipeName(SyncSharkRuntimePaths.InstanceLockFile) + ".stop-supervisor";

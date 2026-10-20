@@ -10,9 +10,7 @@ public sealed class ProductionAutoSyncEngine : IAutoSyncHostEngine
     private readonly AutoSync _auto;
     private readonly SemaphoreSlim _preferencesGate = new(1, 1);
     private readonly HttpClient _http;
-    private readonly object _pendingGate = new();
-    private readonly Dictionary<Task, Task> _pendingChoices = [];
-    private bool _stopping;
+    private readonly HostNoticeChoiceQueue _choices;
 
     public ProductionAutoSyncEngine(PilotInstanceLock authority, string root)
     {
@@ -25,6 +23,7 @@ public sealed class ProductionAutoSyncEngine : IAutoSyncHostEngine
             _composition = EngineComposition.Open(new EngineHostInputs(root, authority.StateAuthority, _http),
                 V2Settings.Default, TimeProvider.System);
             _cli = V2CliRuntime.Borrow(authority, _composition, root);
+            _choices = new HostNoticeChoiceQueue(_composition.Store, ExecuteCliAsync);
             _auto = _composition.StartAutoSync(Paused,
                 () => TimeSpan.FromMinutes(_automation.Load().IntervalMinutes));
         }
@@ -92,61 +91,9 @@ public sealed class ProductionAutoSyncEngine : IAutoSyncHostEngine
             case "logs":
                 return _composition.Store.ReadRunHistoryAfter(request.After, request.Limit);
             case "cli":
-                return await ExecuteOrQueueCliAsync(request, cancellationToken).ConfigureAwait(false);
+                return await _choices.ExecuteAsync(request, cancellationToken).ConfigureAwait(false);
             default: throw new InvalidDataException("Unknown host operation.");
         }
-    }
-
-    private async Task<object> ExecuteOrQueueCliAsync(AutoSyncHostRequest request, CancellationToken ct)
-    {
-        var invocation = SyncCliRegistry.Parse(request.CliArgs!);
-        if (invocation.Command != "conflicts resolve" ||
-            invocation.Choice?.ToLowerInvariant() is not (NoticeChoices.Ignore or NoticeChoices.Exclude))
-            return await ExecuteCliAsync(request, ct).ConfigureAwait(false);
-        Task<object> work;
-        lock (_pendingGate)
-        {
-            if (_stopping || _pendingChoices.Count >= 64)
-                throw new SyncCliUsageException("Notice choices are still draining. The notice is unchanged; retry shortly.");
-            // Execute synchronously through validation/capture, then let the SAME runtime wait on
-            // its run gate. A client disconnect or safe stop must not cancel accepted exclusions.
-            var args = request.CliArgs!.ToList();
-            var timeout = args.IndexOf("--timeout-seconds");
-            if (timeout >= 0) args.RemoveRange(timeout, 2);
-            work = ExecuteCliAsync(request with { CliArgs = args.ToArray() }, CancellationToken.None);
-            if (!work.IsCompleted)
-            {
-                _pendingChoices.Add(work, Task.CompletedTask);
-                _pendingChoices[work] = ObserveChoiceAsync(work, invocation.PairId!);
-            }
-        }
-        if (work.IsCompleted) return await work.ConfigureAwait(false);
-        var detail = $"Queued behind the active run of pair {invocation.PairId}. The exclusion will apply at the safe point independently of the client deadline; no files are deleted.";
-        return new HostCliOutput(0, invocation.Json
-            ? System.Text.Json.JsonSerializer.Serialize(new { queued = true, pairId = invocation.PairId, detail })
-            : detail, string.Empty);
-    }
-
-    private async Task ObserveChoiceAsync(Task<object> work, string pairId)
-    {
-        await Task.Yield(); // publish the observer before it can remove its entry
-        try
-        {
-            if (await work.ConfigureAwait(false) is HostCliOutput { ExitCode: not 0 } result)
-                throw new IOException(result.Stderr + result.Stdout);
-        }
-        catch (Exception error)
-        {
-            RunOutput.Observe(error);
-            try
-            {
-                _composition.Store.AddNotices([new Notice(pairId, 0, NoticeKind.Info, string.Empty,
-                    "A queued notice choice could not be saved: " + error.Message +
-                    ". Check store access and disk space, then Retry the original item choice; Ignore dismisses this notice.", "autosync-failed")]);
-            }
-            catch (Exception noticeError) { RunOutput.Observe(noticeError); }
-        }
-        finally { lock (_pendingGate) _pendingChoices.Remove(work); }
     }
 
     private async Task<object> ExecuteCliAsync(AutoSyncHostRequest request, CancellationToken cancellationToken)
@@ -198,16 +145,7 @@ public sealed class ProductionAutoSyncEngine : IAutoSyncHostEngine
         _composition.Store.SavePair(pair with { Enabled = enabled });
     }
 
-    public async Task StopAsync()
-    {
-        lock (_pendingGate) _stopping = true;
-        await _auto.StopAsync().ConfigureAwait(false);
-        // Stop the run first, then drain accepted choices before the store can be disposed.
-        Task[] pending;
-        lock (_pendingGate) pending = _pendingChoices.Values.ToArray();
-        try { await Task.WhenAll(pending).ConfigureAwait(false); }
-        catch (Exception error) { RunOutput.Observe(error); }
-    }
+    public Task StopAsync() => _choices.StopAsync(() => _auto.StopAsync());
 
     public ValueTask DisposeAsync()
     {

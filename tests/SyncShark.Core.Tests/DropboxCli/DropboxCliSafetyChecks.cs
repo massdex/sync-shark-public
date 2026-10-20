@@ -56,7 +56,7 @@ internal static class DropboxCliSafetyChecks
         Require(replace.Exit == 2 && h.Wire.Requests.Count == 0, "get onto an existing --out needs --yes");
         Require(await File.ReadAllTextAsync(existing) == "keep-me", "get left the existing file unchanged");
 
-        var accountRefusal = await h.RunAsync("dropbox", "ls", "--account", "connection-000000000000000000000000",
+        var accountRefusal = await h.RunAsync("dropbox", "ls", "--account", "connection-fixture-1",
             "--path", "/", "--json");
         Require(accountRefusal.Exit == 4, "an unknown account is a missing target");
 

@@ -271,8 +271,7 @@ public sealed partial class SyncRun : ISyncRun
     {
         try
         {
-            if (report.Outcome is RunOutcomes.Complete or RunOutcomes.Partial &&
-                report.FailureCount == 0 && report.Failures.Count == 0)
+            if (report.ProviderReached || report.Outcome is RunOutcomes.Complete or RunOutcomes.Partial)
                 _store.CloseNoticeFamily(report.PairId, "autosync-failed");
         }
         catch (Exception error) { RunOutput.Observe(error); }
@@ -1156,6 +1155,6 @@ public sealed partial class SyncRun : ISyncRun
             : tally.Done == 0 && tally.Failed > 0 ? RunOutcomes.Failed
             : RunOutcomes.Partial;
         return new RunReport(pairId, outcome, tally.Done, tally.Failed, held, tally.Uploaded, tally.Downloaded,
-            tally.Deleted, tally.Moved, tally.KeptBoth, tally.Failures) { Skipped = tally.Skipped, Uncertain = tally.Uncertain };
+            tally.Deleted, tally.Moved, tally.KeptBoth, tally.Failures) { Skipped = tally.Skipped, Uncertain = tally.Uncertain, ProviderReached = !cancelled };
     }
 }

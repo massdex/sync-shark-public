@@ -1710,7 +1710,7 @@ internal static partial class CliChecks
                 secondaryItems.All(item => !item!["relativePath"]!.GetValue<string>().StartsWith("item-", StringComparison.Ordinal)),
             "legacy observations without recorded account identity remain in All Accounts and are not attributed from the pair's current binding");
 
-        var unknownAccount = await fixture.RunAsync("--cli", "activity", "list", "--account", "connection-000000000000000000000000");
+        var unknownAccount = await fixture.RunAsync("--cli", "activity", "list", "--account", "connection-unknown-fixture");
         Expect("activity list --account unknown fails 4", unknownAccount, 4);
 
         var limited = await fixture.RunAsync("--cli", "activity", "list", "--limit", "1", "--json");

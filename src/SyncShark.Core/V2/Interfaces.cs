@@ -366,6 +366,9 @@ public sealed record RunProgress(string Phase, string? Path, long Done, long Tot
 public sealed record RunReport(string PairId, string Outcome, int Done, int Failed, int Held, int Uploaded,
     int Downloaded, int Deleted, int Moved, int KeptBoth, IReadOnlyList<ActionResult> Failures)
 {
+    /// <summary>Inventory/planning reached the provider; individual effect failures have their own notices.</summary>
+    public bool ProviderReached { get; init; }
+
     /// <summary>Effects whose commit could not be confirmed, including those outside the failure sample.</summary>
     public int Uncertain { get; init; }
 

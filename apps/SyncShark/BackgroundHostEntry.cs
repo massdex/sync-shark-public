@@ -30,7 +30,7 @@ internal static class BackgroundHostEntry
             await host.Completion.ConfigureAwait(false);
             return 0;
         }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        catch (IOException error) when (error.InnerException is System.ComponentModel.Win32Exception { NativeErrorCode: 32 or 33 })
         {
             // Another starter may have won between the observation and exclusive acquisition.
             var attached = await client.TrySendAsync(AutoSyncHostClient.Request("status"), TimeSpan.FromSeconds(5));
@@ -49,7 +49,11 @@ internal static class BackgroundHostEntry
         for (var attempt = 0; attempt < 30; attempt++)
         {
             if (await client.TrySendAsync(AutoSyncHostClient.Request("status"), TimeSpan.FromSeconds(1), ct) is { } reply)
+            {
+                try { if (File.Exists(ProcessEntry.ExistingOwnerNoticePath)) File.WriteAllText(ProcessEntry.ExistingOwnerNoticePath, string.Empty); }
+                catch (Exception noticeError) { Console.Error.WriteLine("Could not clear the startup notice: " + noticeError.Message); }
                 return reply;
+            }
             if (process.HasExited) break;
         }
         throw new IOException("The host did not become ready. Check for an existing GUI or maintenance owner; no mutation was replayed.");
@@ -74,6 +78,11 @@ internal static class BackgroundHostEntry
         if (auto)
         {
             var command = invocation.Command[9..];
+            if (command is "start" or "status")
+            {
+                try { if (File.Exists(ProcessEntry.ExistingOwnerNoticePath)) error.WriteLine(File.ReadAllText(ProcessEntry.ExistingOwnerNoticePath)); }
+                catch (Exception noticeError) { error.WriteLine("Could not read the startup notice: " + noticeError.Message); }
+            }
             if (command == "stop") ProcessEntry.StopSupervisor();
             if (command is "install-startup" or "uninstall-startup")
             {

@@ -108,8 +108,12 @@ internal static partial class AutoSyncChecks
             await Fail(i % 2 == 0 ? new IOException("socket unavailable") : new HttpRequestException("network unavailable"));
             Require(rig._store.OpenNotices("p1").Count == 0, "each cause change preserves Ignore in one outage");
         }
+        var beforeRecovery = rig.Run.Runs("p1");
+        rig.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Failed, 0,
+            new ActionResult("item", Outcome.Failed, null, null, null, "item permission denied")) with { ProviderReached = true });
         rig.Clock.Advance(rig.State("p1").RetryAt!.Value - rig.Clock.GetUtcNow());
-        await rig.ParkedAsync(AutoStatus.Idle);
+        await Until(() => rig.Run.Runs("p1") == beforeRecovery + 1 && rig.State("p1").RetryAt > rig.Clock.GetUtcNow() &&
+            rig.Clock.ActiveTimers == 1, "provider recovery with failed items is parked");
         for (var i = 0; i < 3; i++) await Fail(new HttpRequestException("second outage"));
         Require(rig._store.OpenNotices("p1").Count == 1, "success resets Ignore for the next outage");
         Pass("OutageCauseChangesStayIgnored");
