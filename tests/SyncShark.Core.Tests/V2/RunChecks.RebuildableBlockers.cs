@@ -115,8 +115,8 @@ internal static partial class RunChecks
             "check again closes the notice when the rule's markers now match, changing no file");
 
         var remove = Build();
-        remove.A.Seed("a/package.json", "{}");
-        remove.A.Seed("a/node_modules", "", ItemKind.Folder);
+        var removeSource = remove.A.Seed("a/package.json", "{}");
+        var removeFolder = remove.A.Seed("a/node_modules", "", ItemKind.Folder);
         var removeRoot = Path.Combine(root, "remove");
         Directory.CreateDirectory(removeRoot);
         var removeRuntime = new V2CliRuntime(null, remove.Store, remove.Run(), new EndpointRootProbe(remove.Provider), removeRoot);
@@ -130,10 +130,23 @@ internal static partial class RunChecks
             remove.Store.NoticeById(remove.Pair.PairId, removeNotice.NoticeId!) is { Closed: true } &&
             FirstSyncChoicesState.Load(removeRoot, remove.Pair.PairId, remove.Store)!.RebuildableChoices!.Count == 0,
             "remove rule drops only the retained rule and closes the notice");
+        Require(remove.WriterA.Calls == 0 && remove.WriterB.Calls == 0,
+            "remove rule changes no file before ordinary sync");
         var removeApplied = await removeRuntime.ApplyFirstSyncAsync(remove.Pair.PairId, """{"rebuildables":[]}""",
             false, null, _ => { }, CancellationToken.None);
-        Require(removeApplied.FirstSyncComplete, "the apply accepts the corrected choices after Remove rule");
-        Require(remove.WriterA.Calls == 0 && remove.WriterB.Calls == 0, "remove rule deletes or moves no file");
+        Require(removeApplied.FirstSyncComplete && removeApplied.Failed == 0,
+            "the apply accepts the corrected choices after Remove rule");
+        // Apply performs ordinary first-sync copies to the empty B endpoint. Calls includes Put and MkDir,
+        // so assert no effects at removal above, and no destructive effects across both removal and apply here.
+        Require(remove.WriterA.Moves == 0 && remove.WriterB.Moves == 0 &&
+            remove.WriterA.Deletes == 0 && remove.WriterB.Deletes == 0 &&
+            remove.WriterA.Preserves == 0 && remove.WriterB.Preserves == 0,
+            "remove rule deletes or moves no file");
+        Require(await remove.A.ObserveAsync(removeSource.Path, default) == removeSource &&
+            await remove.A.ObserveAsync(removeFolder.Path, default) == removeFolder &&
+            await remove.B.ObserveAsync(removeSource.Path, default) is { } copied && copied.Hash == removeSource.Hash &&
+            await remove.B.ObserveAsync(removeFolder.Path, default) is { Kind: ItemKind.Folder },
+            "ordinary sync after removing the rule retains the source and copies its file and folder");
     }
 
     // Keep dismisses exactly that rule identity; a changed prefix (or category) is a new rule and may raise again.
