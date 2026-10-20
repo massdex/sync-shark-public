@@ -29,7 +29,7 @@ internal static class RetainedBridgeRepairChecks
         var backupHash = Hash(backup);
         File.Copy(backup, candidate, false);
         var db = new SyncAuthorityDatabase(candidate);
-        var pair = (await db.LoadPairSetAsync(readOnly: true)).Pairs.Single(item => item.Id == "96e949c039a782947896");
+        var pair = (await db.LoadPairSetAsync(readOnly: true)).Pairs.Single(item => item.Id == "f00d0000000000000007");
         var oldOperationId = await Scalar(candidate,
             "SELECT operation_id FROM operation WHERE pair_id=$pair AND status='ready' AND kind='create_local' LIMIT 1;", pair.Id);
         var old = await db.LoadOperationAsync(oldOperationId) ?? throw new InvalidDataException("Missing retained operation.");

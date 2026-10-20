@@ -16,7 +16,7 @@ internal static class RetainedRetryPreviewChecks
     {
         var stage = Path.Combine(DiagnosticPaths.RequireRoot(), "build", "root682-cloned-state-live",
             "real-provider-state-capacity");
-        const string pair = "267aa6c5f2a06620f27e";
+        const string pair = "f00d0000000000000028";
         var path = Path.Combine(stage, "vNext", "state", "syncshark.db");
         using var originalOwner = PilotInstanceLock.AcquireForMaintenance(SyncSharkRuntimePaths.InstanceLockFile);
         using var stageOwner = PilotInstanceLock.Acquire(Path.Combine(stage, "state", SyncSharkRuntimePaths.InstanceLockFileName));
