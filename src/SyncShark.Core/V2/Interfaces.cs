@@ -295,7 +295,10 @@ public static class SyncDirectDownloadCheckpoint
 {
     public const string Kind = "local-download";
     internal const string NoticePrefix = "Download recovery: ";
+    internal const string DateNoticePrefix = "Download date: ";
     internal static Notice? NoticeFor(string pairId, SyncAction action, ActionResult result) =>
+        result.Reason?.StartsWith(DateNoticePrefix, StringComparison.Ordinal) == true
+            ? new Notice(pairId, action.Rule, NoticeKind.Info, action.Path, result.Reason, "local-download-date") :
         result.Reason?.StartsWith(NoticePrefix, StringComparison.Ordinal) == true
             ? new Notice(pairId, action.Rule, NoticeKind.Info, action.Path, result.Reason, "local-download-recovery")
             : null;

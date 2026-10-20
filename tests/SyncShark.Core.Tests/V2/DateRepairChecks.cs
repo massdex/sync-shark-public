@@ -37,6 +37,7 @@ internal static class DateRepairChecks
             var action = new SyncAction("adopt-" + name, 0, ActionKind.Adopt, Side.A, name, null, cloud, local, false, name);
             store.CommitResult(pair.PairId, gen, action, new ActionResult(action.ActionId, Outcome.Done, local, cloud, null, null));
         }
+        foreach (var b in store.Baselines(pair.PairId)) DateProvenanceChecks.Seed(store, pair, b.A, Path.Combine(root, "state"));
         store.WriteSnapshot(new Snapshot(pair.A.RootId, Side.A, gen, "dates-cursor",
             store.Baselines(pair.PairId).Select(b => b.A).ToArray(), []));
         store.AddNotices([new Notice(pair.PairId, 0, NoticeKind.Info, "", "Pair information", "pair-excluded")]);
@@ -101,6 +102,7 @@ internal static class DateRepairChecks
         LocalChecks.Require(failed && File.GetLastWriteTimeUtc(Path.Combine(localRoot, "fix")) == original.UtcDateTime &&
             store.Baselines(pair.PairId, ["fix"]).Single().A.Mtime == original,
             "database failure restores filesystem time and rolls back the baseline");
+        await DateProvenanceChecks.RunAsync(Path.Combine(root, "provenance"));
         await DateRepairRangeChecks.RunAsync(Path.Combine(root, "range"));
         await DateRepairReviewChecks.RunAsync(Path.Combine(root, "review"));
         Console.WriteLine("v2 date repair checks passed.");

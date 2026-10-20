@@ -3,7 +3,7 @@ namespace Massdex.SyncShark.V2;
 public sealed partial class V2CliRuntime
 {
     internal async Task<DateRepairReport> RepairDatesAsync(string pairId, bool dryRun, CancellationToken ct,
-        DateOnly? localDate = null, string after = "", DateOnly? from = null, DateOnly? to = null)
+        DateOnly? localDate = null, string after = "", DateRepairBound? from = null, DateRepairBound? to = null, string? excludeList = null, bool reportMismatch = false)
     {
         var pair = RequirePair(pairId);
         if (_store is not SqliteStateStore sqlite)
@@ -26,11 +26,11 @@ public sealed partial class V2CliRuntime
         return await DateRepair.RunAsync(sqlite, pair,
             (_, _) => throw new InvalidOperationException("Date repair uses bounded metadata pages, not individual root checks."),
             _productRoot, dryRun, _composition?.Endpoints.ProductOwnedRelative(pair) ?? [], ct, localDate, after, PageLock,
-            async (paths, token) =>
+            async (paths, failed, token) =>
             {
-                var entries = await client.ReadMetadataPageAsync(paths, token);
+                var entries = await client.ReadMetadataPageAsync(paths, token, failed);
                 return entries.ToDictionary(row => row.Key, row => row.Value is { ClientModifiedUtc: not null } entry
                     ? DropboxItems.ToItem(entry) : null);
-            }, from, to).ConfigureAwait(false);
+            }, from, to, excludeList, reportMismatch).ConfigureAwait(false);
     }
 }

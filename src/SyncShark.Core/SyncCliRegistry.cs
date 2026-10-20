@@ -31,7 +31,7 @@ public static class SyncCliRegistry
         , "--description", "--choices", "--group", "--filter", "--seconds", "--side",
         "--categories", "--severity", "--entity", "--run", "--order", "--type", "--since", "--after", "--before",
         "--source", "--destination", "--bytes", "--sha256", "--local-root", "--source-sha256", "--draft",
-        "--keep", "--token", "--archive", "--local-date", "--from", "--to",
+        "--keep", "--token", "--archive", "--local-date", "--from", "--to", "--exclude-list",
         RepeatableExclude,
         ..DropboxCliCatalog.ValueOptions
     ];
@@ -117,11 +117,14 @@ public static class SyncCliRegistry
             "no local or remote file is touched",
             "the product state and the exclusive product lock", "direct", "--pair,--archive,--drop-unfinished,--yes",
             Mutating: true, RequiresYes: true, RequiresPair: true),
-        new("dates repair", "dates repair --pair <exact-id> [--dry-run] [--yes] [--local-date yyyy-MM-dd | --from yyyy-MM-dd --to yyyy-MM-dd] [--after <key>]", SyncCliRequestKind.State, "yes",
+        new("dates repair", "dates repair --pair <exact-id> [--dry-run] [--yes] [--local-date yyyy-MM-dd | --from <local-date-or-time> --to <local-date-or-time>] [--exclude-list <file>] [--after <key>]", SyncCliRequestKind.State, "yes",
             "repairs newer local download timestamps only after verifying identical baseline and Dropbox content; " +
             "logs every date change, never changes content or uploads; --dry-run reports without changing dates",
-            "the v2 store and exclusive product/run locks", "direct", "--pair,--dry-run,--yes,--local-date,--from,--to,--after",
+            "the v2 store and exclusive product/run locks", "direct", "--pair,--dry-run,--yes,--local-date,--from,--to,--exclude-list,--after",
             Mutating: true, RequiresPair: true),
+        new("dates report-mismatch", "dates report-mismatch --pair <exact-id> [--local-date yyyy-MM-dd | --from <local-date-or-time> --to <local-date-or-time>] [--exclude-list <file>] [--after <key>]",
+            SyncCliRequestKind.State, "none", "read-only date mismatch report; writes a CSV path list, never changes file dates or content; missing write provenance is unknown, not proof of a user edit",
+            "the v2 store and exclusive product/run locks", "direct", "--pair,--local-date,--from,--to,--exclude-list,--after", RequiresPair: true),
         new("pairs rescan", "pairs rescan --pair <exact-id> [--side a|b|both] --yes", SyncCliRequestKind.State, "yes",
             "forgets the pair's stored scan cursors for the chosen side(s) so its next run re-reads those roots in " +
             "full; baselines, live rows and tombstones are untouched and no file is changed",
@@ -828,7 +831,7 @@ public static class SyncCliRegistry
             exactVersion is null || !System.Text.RegularExpressions.Regex.IsMatch(exactVersion,
                 @"^[0-9]+\.[0-9]+\.[0-9]+$", System.Text.RegularExpressions.RegexOptions.CultureInvariant)))
             throw new SyncCliUsageException("updates apply requires --update <exact-version>, for example 0.3.35.");
-        if (command == "dates repair")
+        if (command is "dates repair" or "dates report-mismatch")
         {
             DateOnly? Day(string option)
             {
@@ -837,7 +840,7 @@ public static class SyncCliRegistry
                     throw new SyncCliUsageException(option + " requires a local calendar date in yyyy-MM-dd format.");
                 return day;
             }
-            _ = V2.DateRepair.UtcRange(Day("--local-date"), Day("--from"), Day("--to"), TimeZoneInfo.Local);
+            _ = V2.DateRepair.UtcRange(Day("--local-date"), V2.DateRepairBound.Parse(options.GetValueOrDefault("--from")), V2.DateRepairBound.Parse(options.GetValueOrDefault("--to")), TimeZoneInfo.Local);
         }
         if (command == "dates repair" && !options.ContainsKey("--dry-run") && !options.ContainsKey("--yes"))
             throw new SyncCliUsageException("Use dates repair --pair <id> --dry-run to review, or add --yes to repair dates.");
@@ -1036,13 +1039,14 @@ public static class SyncCliRegistry
                 return await operations.RemovePairAsync(invocation.PairId!, invocation.Value("--archive")!,
                     invocation.Flag("--drop-unfinished"), cancellationToken);
             case "dates repair":
+            case "dates report-mismatch":
                 if (runtime is not V2.V2CliRuntime v2Dates)
                     throw new SyncCliUnsupportedException("Date repair is available in core v2. Select v2 and retry.");
-                return await v2Dates.RepairDatesAsync(invocation.PairId!, invocation.Flag("--dry-run"), cancellationToken,
+                return await v2Dates.RepairDatesAsync(invocation.PairId!, invocation.Command == "dates report-mismatch" || invocation.Flag("--dry-run"), cancellationToken,
                     invocation.Value("--local-date") is { } date ? DateOnly.ParseExact(date, "yyyy-MM-dd", CultureInfo.InvariantCulture) : null,
                     invocation.Value("--after") ?? "",
-                    invocation.Value("--from") is { } from ? DateOnly.ParseExact(from, "yyyy-MM-dd", CultureInfo.InvariantCulture) : null,
-                    invocation.Value("--to") is { } to ? DateOnly.ParseExact(to, "yyyy-MM-dd", CultureInfo.InvariantCulture) : null);
+                    V2.DateRepairBound.Parse(invocation.Value("--from")), V2.DateRepairBound.Parse(invocation.Value("--to")),
+                    invocation.Value("--exclude-list"), invocation.Command == "dates report-mismatch");
             case "pairs rescan":
                 return await operations.RescanPairAsync(invocation.PairId!, invocation.Value("--side"),
                     cancellationToken);

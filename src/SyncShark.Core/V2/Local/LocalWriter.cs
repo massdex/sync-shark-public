@@ -211,11 +211,23 @@ public sealed class LocalWriter : IEndpointWriter, ISyncTransferResourceEndpoint
         if (current is { Kind: PilotEntryKind.File } && current.Id == stage.ObjectId &&
             current.Size == source.Size && string.Equals(current.ContentHash, sourceHash, StringComparison.OrdinalIgnoreCase))
         {
-            current = await _store.StampPublishedDownloadAsync(action.Path, stage.ObjectId, source.Size,
-                sourceHash, source.Mtime, ct).ConfigureAwait(false);
-            return ResumeDone(action, LocalItems.FromStore(current, targetFull), recovery) with
+            var observed = LocalItems.FromStore(current, targetFull);
+            string? dateFailure = null;
+            try
             {
-                Reason = needsRecovery && recovery is null ? SyncDirectDownloadCheckpoint.NoticePrefix +
+                current = await _store.StampPublishedDownloadAsync(action.Path, stage.ObjectId, source.Size,
+                    sourceHash, source.Mtime, ct).ConfigureAwait(false);
+                observed = LocalItems.FromStore(current, targetFull);
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                dateFailure = "Date could not be set; will retry through dates repair. " + error.Message;
+            }
+            return ResumeDone(action, observed, recovery) with
+            {
+                Reason = dateFailure is not null ? SyncDirectDownloadCheckpoint.DateNoticePrefix + dateFailure +
+                    (needsRecovery && recovery is null ? " Recovery copy unavailable at " + stage.RecoveryPath : "") :
+                    needsRecovery && recovery is null ? SyncDirectDownloadCheckpoint.NoticePrefix +
                     "Download published, but its Recovery copy is unavailable at " + stage.RecoveryPath +
                     ". Keep the current file; inspect backups if the old version is needed." : null
             };

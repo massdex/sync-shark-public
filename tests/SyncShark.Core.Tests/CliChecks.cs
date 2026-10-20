@@ -439,9 +439,11 @@ internal static partial class CliChecks
                 SyncCliRegistry.Rows.Single(row => row.Command == "attention list").Effect.Contains(
                     "current pending count", StringComparison.Ordinal),
             "The one help/capability registry distinguishes current work from preserved retired history.");
+        Require(!SyncCliRegistry.Rows.Single(row => row.Command == "dates report-mismatch").Mutating,
+            "date mismatch export is read-only");
         var dates = SyncCliRegistry.Parse(["--cli", "dates", "repair", "--pair", "test", "--dry-run",
-            "--from", "2026-10-17", "--to", "2026-10-19"]);
-        Require(dates.Value("--from") == "2026-10-17" && dates.Value("--to") == "2026-10-19",
+            "--from", "2026-10-17T14:00", "--to", "2026-10-17T17:00", "--exclude-list", "exclude.txt"]);
+        Require(dates.Value("--from") == "2026-10-17T14:00" && dates.Value("--to") == "2026-10-17T17:00" && dates.Value("--exclude-list") == "exclude.txt",
             "dates repair exposes inclusive local date range");
         PairRemoveRegistryChecks();
         await CliDeadlineChecks.RunAsync();

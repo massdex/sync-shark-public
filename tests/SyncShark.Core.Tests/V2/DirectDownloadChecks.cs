@@ -243,6 +243,20 @@ internal static class DirectDownloadChecks
         var (stagePath, stageObjectId) = await WriteStageAsync(setup.Root, content);
         var action = CrashAction("act-published-date", victim, content, stagePath, stageObjectId, setup.Recovery);
         File.Move(stagePath, Path.Combine(setup.Root, "file.txt")); // an older writer published without its source date
+        SyncLocalEndpointStore.BeforeStampPublishedDownloadForTest = () => throw new IOException("sharing violation fixture");
+        try
+        {
+            var deferred = await ReconcileAsync(setup.Writer, action, setup.Root);
+            LocalChecks.Require(deferred.Outcome == Outcome.Done && deferred.Reason!.Contains("Date could not be set; will retry"),
+                "date failure never leaves a completed download uncertain");
+            using var notices = new InMemoryStateStore();
+            RegisterPair(notices, setup.Root);
+            var notice = SyncDirectDownloadCheckpoint.NoticeFor(PairId, action, deferred)!;
+            notices.AddNotices([notice, notice]);
+            LocalChecks.Require(notices.OpenNotices(PairId).Count == 1 && notice.Kind == NoticeKind.Info,
+                "date failure has one deduplicated informational notice");
+        }
+        finally { SyncLocalEndpointStore.BeforeStampPublishedDownloadForTest = null; }
         var result = await ReconcileAsync(setup.Writer, action, setup.Root);
         LocalChecks.Require(result is { Outcome: Outcome.Done } &&
             File.GetLastWriteTimeUtc(Path.Combine(setup.Root, "file.txt")) == action.Source!.Mtime.UtcDateTime &&

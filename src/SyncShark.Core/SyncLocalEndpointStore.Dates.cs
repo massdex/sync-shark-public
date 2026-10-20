@@ -2,11 +2,13 @@ namespace Massdex.SyncShark;
 
 public sealed partial class SyncLocalEndpointStore
 {
+    internal static Action? BeforeStampPublishedDownloadForTest { get; set; }
     // A checkpoint can describe an already-published download from an older build. Verify under the
     // same exclusive, identity-bound authority as publication before reconciling its metadata.
     internal async Task<PilotRemoteEntry> StampPublishedDownloadAsync(string relativePath, string objectId,
         long size, string hash, DateTimeOffset time, CancellationToken ct)
     {
+        BeforeStampPublishedDownloadForTest?.Invoke();
         using var root = OpenRoot();
         using var path = new HeldPath(root, relativePath);
         path.Parent.VerifyBinding();
