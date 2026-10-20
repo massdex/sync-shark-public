@@ -89,7 +89,7 @@ internal static class JournalSizingChecks
             await JournalSizing.ApplyCoreAsync(reopened, replacement, JournalSizing.Enlarge, success, CancellationToken.None, _ => [2, 0, 0, 0, ++queries * gb, 0, 100 * gb, 456]);
             Require(success.Calls == 1 && reopened.OpenNotices(null).Count == 0, "successful fake enlargement closes the notice");
         }
-        Require(JournalSizing.Observe(first with { LongestGapHours = 100 }, 1, 200, now.AddHours(1)).LongestGapHours == 90,
+        Require(JournalSizing.Observe(first with { LongestGapHours = 100 }, 1, 200, now.AddHours(24)).LongestGapHours == 90,
             "longest gap decays after normal activity");
         using (var gate = new SemaphoreSlim(0, 1))
         {
@@ -101,7 +101,7 @@ internal static class JournalSizingChecks
                 SyncDiscoveryClient.Status.Contains("Retry"), "bounded check reports busy retry rather than stale ready");
         }
         using (var oldWorker = new MemoryStream())
-            Require(!await SyncDiscoveryClient.ReadJournalReplyAsync(oldWorker, CancellationToken.None), "old worker EOF falls back");
+            Require(await SyncDiscoveryClient.ReadJournalReplyAsync(oldWorker, CancellationToken.None) == 1, "old worker EOF falls back");
         foreach (uint code in new uint[] { 0, 112, 183 })
         {
             using var reply = new MemoryStream();
@@ -110,20 +110,20 @@ internal static class JournalSizingChecks
             System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(4), 5);
             System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(8), code);
             reply.Write(bytes); reply.Position = 0;
-            Require(await SyncDiscoveryClient.ReadJournalReplyAsync(reply, CancellationToken.None) == (code == 0), "distinct no-change reply is not success");
+            Require(await SyncDiscoveryClient.ReadJournalReplyAsync(reply, CancellationToken.None) == code, "worker result code survives decoding");
         }
         var retryClock = new Clock(new DateTimeOffset(2090, 1, 1, 0, 0, 0, TimeSpan.Zero));
         int attempts = 0;
-        Task<bool> Fail(CancellationToken _) { attempts++; return Task.FromResult(false); }
-        Require(!await SyncDiscoveryClient.TryGrowJournalCoreAsync(Fail, retryClock), "maintenance failure falls back");
-        Require(!await SyncDiscoveryClient.TryGrowJournalCoreAsync(Fail, retryClock) && attempts == 1, "failure cooldown avoids repeated worker starts");
+        Task<uint?> Fail(CancellationToken _) { attempts++; return Task.FromResult<uint?>(1); }
+        Require(await SyncDiscoveryClient.TryGrowJournalCoreAsync(Fail, retryClock) == 1, "maintenance failure falls back");
+        Require(await SyncDiscoveryClient.TryGrowJournalCoreAsync(Fail, retryClock) is null && attempts == 1, "failure cooldown avoids repeated worker starts");
         retryClock.Now = retryClock.Now.AddHours(1);
-        Require(!await SyncDiscoveryClient.TryGrowJournalCoreAsync(Fail, retryClock) && attempts == 2, "maintenance retries after one hour");
+        Require(await SyncDiscoveryClient.TryGrowJournalCoreAsync(Fail, retryClock) == 1 && attempts == 2, "maintenance retries after one hour");
         retryClock.Now = retryClock.Now.AddHours(1);
-        var held = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var held = new TaskCompletionSource<uint?>(TaskCreationOptions.RunContinuationsAsynchronously);
         var holding = SyncDiscoveryClient.TryGrowJournalCoreAsync(_ => held.Task, retryClock);
-        Require(!await SyncDiscoveryClient.TryGrowJournalCoreAsync(Fail, retryClock) && attempts == 2, "busy maintenance falls back without queuing");
-        held.SetResult(true); Require(await holding, "maintenance releases gate after success");
+        Require(await SyncDiscoveryClient.TryGrowJournalCoreAsync(Fail, retryClock) is null && attempts == 2, "busy maintenance falls back without queuing");
+        held.SetResult(0); Require(await holding == 0, "maintenance releases gate after success");
         await SyncDiscoveryClient.ResetAfterSetupAsync();
         using (var store = SqliteStateStore.Open(folder + "-silent", StorageChecks.Fast, clock))
         {
@@ -136,21 +136,21 @@ internal static class JournalSizingChecks
             Require(store.OpenNotices(null).Count == 0, "silent resize starts before any notice appears");
             var pending = store.PendingJournal(789)!;
             Require(pending.State.NoticePair == "p1", "pending silent request belongs to volume across pairs");
-            var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var done = new TaskCompletionSource<uint?>(TaskCreationOptions.RunContinuationsAsynchronously);
             int calls = 0;
-            Task<bool> Grow(SyncDiscoveryRoot _, long __) { calls++; return done.Task; }
+            Task<uint?> Grow(SyncDiscoveryRoot _, long __) { calls++; return done.Task; }
             var rootIdentity = new SyncDiscoveryRoot(@"C:\a", 789, 456);
             var maintenance = JournalSizing.MaintainAsync(store, pending, rootIdentity, Grow, Query);
             await JournalSizing.MaintainAsync(store, pending, rootIdentity, Grow, Query);
             Require(calls == 1 && store.OpenNotices(null).Count == 0, "concurrent roots deduplicate silent work without notices");
-            size = gb; done.SetResult(true); await maintenance;
+            size = gb; done.SetResult(0); await maintenance;
             Require(store.PendingJournal(789) is null && store.OpenNotices(null).Count == 0, "verified silent success never publishes a notice");
             clock.Now = clock.Now.AddDays(2); size = 32 * 1024 * 1024; ObserveSilent();
             pending = store.PendingJournal(789)!;
-            await JournalSizing.MaintainAsync(store, pending, rootIdentity, (_, _) => Task.FromResult(true), Query);
+            await JournalSizing.MaintainAsync(store, pending, rootIdentity, (_, _) => Task.FromResult<uint?>(0), Query);
             Require(store.PendingJournal(789) is not null && store.OpenNotices(null).Single().Detail.Contains("did not grow"),
-                "success reply without observed growth leaves a free-space explanation");
-            await JournalSizing.MaintainAsync(store, pending, rootIdentity, (_, _) => Task.FromResult(false), Query);
+                "success reply without observed growth leaves a no-growth explanation");
+            await JournalSizing.MaintainAsync(store, pending, rootIdentity, (_, _) => Task.FromResult<uint?>(1), Query);
             var notice = store.OpenNotices(null).Single();
             Require(NoticeChoices.Options(notice).Count == 3 && notice.Detail.Contains("failed"), "failure retains UAC Not now Never choices");
             await JournalSizing.MaintainAsync(store, pending, rootIdentity,
@@ -158,6 +158,62 @@ internal static class JournalSizingChecks
             Require(store.OpenNotices(null).Count == 1, "old worker fallback keeps one notice");
             await JournalSizing.MaintainAsync(store, pending, rootIdentity, (_, _) => throw new ObjectDisposedException("fake"), Query);
             Require(store.OpenNotices(null).Single().Detail.Contains("ObjectDisposedException"), "unexpected background failure becomes a notice");
+        }
+        var remembered = first with { LongestGapHours = 720 };
+        for (var i = 1; i <= 100; i++) remembered = JournalSizing.Observe(remembered, 1, 100 + i, now.AddMinutes(i));
+        Require(remembered.LongestGapHours > 710, "minute observations retain long absence history");
+        Require(SyncSharkJournalNative.Target(gb, 40 * gb, 2 * gb, false) == 2 * gb - SyncSharkJournalNative.Delta,
+            "attended cap includes allocation overhead");
+        Require(SyncSharkJournalNative.Target(gb, 40 * gb, 2 * gb, false, 3 * gb) == gb,
+            "attended oversized delta cannot underflow or shrink");
+        var legacy = folder + "-v12";
+        using (var store = SqliteStateStore.Open(legacy, StorageChecks.Fast, clock)) store.SavePair(Pair("p1"));
+        using (var raw = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + SqliteStateStore.DatabasePath(legacy)))
+        {
+            raw.Open();
+            using var cmd = raw.CreateCommand();
+            cmd.CommandText = "DROP TABLE journal_volume; PRAGMA user_version=12;"; cmd.ExecuteNonQuery();
+        }
+        for (int i = 0; i < 2; i++)
+        {
+            using var store = SqliteStateStore.Open(legacy, StorageChecks.Fast, clock);
+            store.ObserveJournal("p1", "C:", 789, 1, 100, 32 * 1024 * 1024, 100 * gb, true, clock.GetUtcNow(), true);
+            Require(store.PendingJournal(789) is not null, "v12 open gains optional table and second open preserves it");
+        }
+        using (var store = SqliteStateStore.Open(folder + "-results", StorageChecks.Fast, clock))
+        {
+            store.SavePair(Pair("p1")); store.SavePair(Pair("p2"));
+            void Observe(long size = 32 * 1024 * 1024, string pair = "p1", bool gap = true) =>
+                store.ObserveJournal(pair, "C:", 789, 1, 100, size, 100 * gb, gap, clock.GetUtcNow(), true);
+            long[] Query(string _) => [1, 0, 100, 0, 32 * 1024 * 1024, 0, 100 * gb, 789];
+            var identity = new SyncDiscoveryRoot(@"C:\a", 789, 456);
+            Observe(); var pending = store.PendingJournal(789)!;
+            await JournalSizing.MaintainAsync(store, pending, identity, (_, _) => Task.FromResult<uint?>(null), Query);
+            Require(store.PendingJournal(789) is not null && store.OpenNotices(null).Count == 0, "busy/cooldown publishes no notice");
+            await JournalSizing.MaintainAsync(store, pending, identity, (_, _) => Task.FromResult<uint?>(112), Query);
+            Require(store.OpenNotices(null).Single().Detail.Contains("Not enough free space") &&
+                store.OpenNotices(null).Single().Detail.Contains("Retry"), "disk-full notice explains free-space resolution");
+            await JournalSizing.MaintainAsync(store, pending, identity, (_, _) => Task.FromResult<uint?>(183), Query);
+            Require(store.PendingJournal(789) is null && store.OpenNotices(null).Count == 0, "already-large reply resolves pending and notice");
+            clock.Now = clock.Now.AddDays(2); Observe(); pending = store.PendingJournal(789)!;
+            await JournalSizing.MaintainAsync(store, pending, identity, (_, _) => throw new Exception("must not call worker"),
+                _ => [1, 0, 100, 0, gb, 0, 100 * gb, 789]);
+            Require(store.PendingJournal(789) is null, "already-large query resolves without worker");
+            clock.Now = clock.Now.AddDays(2); Observe(); pending = store.PendingJournal(789)!;
+            Observe(2 * gb); // New larger pending target while the old request is in flight.
+            store.FinishSilentJournal(pending, true, "");
+            Require(store.PendingJournal(789)!.State.Requested == 4 * gb, "stale completion cannot clear changed request");
+            pending = store.PendingJournal(789)!;
+            store.SavePair(Pair("p1") with { Enabled = false });
+            store.ArchiveAndRemovePair("p1", folder + "-pair-archive", true);
+            Observe(2 * gb, "p2");
+            Require(store.PendingJournal(789)!.State.NoticePair == "p2", "removed presentation pair falls back to current pair");
+            store.FinishSilentJournal(pending, false, "stale failure");
+            Require(store.OpenNotices(null).Count == 0, "stale pair completion cannot publish notice");
+            store.FinishSilentJournal(store.PendingJournal(789)!, false, "pending failure");
+            Require(store.OpenNotices(null).Count == 1, "current pair can publish its failure");
+            Observe(4 * gb, "p2", false);
+            Require(store.PendingJournal(789) is null && store.OpenNotices(null).Count == 0, "observation clears satisfied request");
         }
         Console.WriteLine("Adaptive journal sizing checks passed (fake OS only).");
     }

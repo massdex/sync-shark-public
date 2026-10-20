@@ -11,6 +11,11 @@ public sealed partial class SqliteStateStore
         var old = ReadJournal(serial);
         var state = JournalSizing.Observe(old, journal, next, now);
         var target = JournalSizing.Target(state, maximum, free, gap);
+        // Resolve pair identities before opening the write transaction (a removed owner is a cache miss).
+        if (state.Requested > 0 && (state.NoticePair is null || PairNo(state.NoticePair) is null))
+            state = state with { NoticePair = pairId };
+        var presentationNo = RequirePair(pairId);
+        var ownerNo = state.NoticePair is { } owner ? PairNo(owner) : null;
         using var transaction = _connection.BeginTransaction();
         // Drive letters can be reused. Retire the previous presentation, never transfer its approval.
         StoreSchema.Execute(_connection, transaction,
@@ -20,8 +25,16 @@ public sealed partial class SqliteStateStore
         StoreSchema.Execute(_connection, transaction,
             "UPDATE journal_volume SET volume='' WHERE volume=$v AND serial<>$s;", ("$v", volume), ("$s", serial));
         // A single volume-owned row chooses one presentation pair, not one notice per pair.
-        var prior = state.NoticePair is { } owner && PairNo(owner) is { } ownerNo
-            ? _notices.ById(ownerNo, ShortId.Make("n", owner, "0", RowCodec.Key(volume), JournalSizing.Key(serial)), transaction) : null;
+        var prior = ownerNo is { } number
+            ? _notices.ById(number, ShortId.Make("n", state.NoticePair!, "0", RowCodec.Key(volume), JournalSizing.Key(serial)), transaction) : null;
+        if (state.Requested > 0 && maximum >= state.Requested)
+        {
+            if (state.NoticePair is { } resolvedPair && ownerNo is { } resolvedNo)
+                _notices.CloseResolved(transaction, resolvedNo,
+                    ShortId.Make("n", resolvedPair, "0", RowCodec.Key(volume), JournalSizing.Key(serial)), JournalSizing.Enlarge);
+            state = state with { Requested = 0 };
+            prior = null;
+        }
         if (target > maximum && !state.Never && (state.NotBefore is null || now >= state.NotBefore) &&
             (prior is null || prior.Value.Closed))
         {
@@ -29,7 +42,7 @@ public sealed partial class SqliteStateStore
             if (!deferNotice)
             {
                 var presentation = state.NoticePair!;
-                _notices.Add(transaction, RequirePair(presentation), new Notice(presentation, 0, NoticeKind.Info, volume,
+                _notices.Add(transaction, presentation == pairId ? presentationNo : ownerNo!.Value, new Notice(presentation, 0, NoticeKind.Info, volume,
                 $"Windows' change history on {volume} is too small; enlarge to {target / (double)JournalSizing.Minimum:0.##} GB. Sync continues, using a full scan when history is missing.",
                 JournalSizing.Key(serial)), now.ToUnixTimeMilliseconds());
             }

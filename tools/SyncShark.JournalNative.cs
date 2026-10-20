@@ -36,10 +36,12 @@ public static class SyncSharkJournalNative
                 drive.AvailableFreeSpace, (long)serial };
         }
     }
-    public static long Target(long current, long free, long requested, bool install)
+    public static long Target(long current, long free, long requested, bool install, long currentDelta = Delta)
     {
         if (requested <= 0 || requested > 8 * GiB) throw new ArgumentOutOfRangeException("requested");
-        return Math.Max(current, install ? Math.Max(GiB, requested) : Math.Min(requested, Math.Max(0, free) / 20));
+        var cap = Math.Min(8 * GiB, Math.Max(0, free) / 20);
+        var delta = Math.Max(Delta, currentDelta);
+        return Math.Max(current, install ? Math.Max(GiB, requested) : Math.Min(requested, cap > delta ? cap - delta : 0));
     }
     public static void Grow(string volume, long expectedSerial, long requested, bool install)
     {
@@ -47,7 +49,7 @@ public static class SyncSharkJournalNative
         var current = Query(volume);
         if (current == null) { if (install) return; throw new IOException("The NTFS journal is unavailable. Refresh the notice."); }
         if (current[7] != expectedSerial) throw new IOException("The volume changed. Refresh the notice.");
-        var target = Target(current[4], current[6], requested, install);
+        var target = Target(current[4], current[6], requested, install, current[5]);
         if (target <= current[4] && (!install || current[5] >= Delta)) return;
         using (var handle = Open(volume, true))
         {
@@ -57,7 +59,8 @@ public static class SyncSharkJournalNative
             if (!Control(handle, 0x000900f4, null, 0, bytes, bytes.Length, out returned, IntPtr.Zero) || returned < 56)
                 throw new Win32Exception(Marshal.GetLastWin32Error());
             if (BitConverter.ToInt64(bytes, 0) != current[0]) throw new IOException("The journal changed. Refresh the notice.");
-            target = Math.Max(target, BitConverter.ToInt64(bytes, 40));
+            target = Target(BitConverter.ToInt64(bytes, 40), new DriveInfo(volume + "\\").AvailableFreeSpace,
+                requested, install, BitConverter.ToInt64(bytes, 48));
             if (target <= BitConverter.ToInt64(bytes, 40) && (!install || BitConverter.ToInt64(bytes, 48) >= Delta)) return;
             var input = new byte[16];
             Buffer.BlockCopy(BitConverter.GetBytes(target), 0, input, 0, 8);

@@ -83,7 +83,18 @@ static DWORD typed_pages(SsdCatalog *c,DWORD total,ULONGLONG parent,DWORD attrs)
 static DWORD file_pages(SsdCatalog *c,DWORD total,ULONGLONG parent) {
     return typed_pages(c,total,parent,FILE_ATTRIBUTE_NORMAL);
 }
+static void journal_sizing_checks(void) {
+    ULONGLONG target=0,gb=1073741824ULL,delta=134217728ULL;
+    check(ssd_journal_target(gb,gb,delta,100*gb,&target)==ERROR_ALREADY_EXISTS && target==gb,"Journal already large enough");
+    check(ssd_journal_target(2*gb,gb,delta,20*gb,&target)==ERROR_DISK_FULL && target==gb,"Journal cap includes allocation delta");
+    check(!ssd_journal_target(2*gb,gb,delta,20*(2*gb+delta),&target) && target==2*gb,"Journal target exactly at cap");
+    check(!ssd_journal_target(8*gb,gb,delta,1000*gb,&target) && target==8*gb-delta,"Journal absolute cap includes delta");
+    check(ssd_journal_target(2*gb,gb,8*gb,100*gb,&target)==ERROR_DISK_FULL,"Oversized delta cannot underflow");
+    check(!ssd_journal_target(2*gb,gb,2*delta,20*(2*gb+delta),&target) && target==2*gb-delta,"Existing allocation delta retained");
+}
 int wmain(int argc,WCHAR **argv) {
+    journal_sizing_checks();
+    if(argc==2 && !wcscmp(argv[1],L"--journal-sizing-only")){printf("%lu journal sizing assertions passed.\n",passes);return 0;}
     if(argc!=2 || wcslen(argv[1])>1800)return 2;
     /* The caller allocates one fresh directory inside its registered build root.
        No raw volume, pipe, task, protected install, provider or user file is touched. */

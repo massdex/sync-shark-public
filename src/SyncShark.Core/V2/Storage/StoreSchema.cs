@@ -5,8 +5,8 @@ namespace Massdex.SyncShark.V2;
 /// <summary>Owns the v2 state database DDL, constants, pragmas and schema verification.</summary>
 internal static class StoreSchema
 {
-    /// <summary>The schema version written to and required by <c>PRAGMA user_version</c>; any schema change bumps it.</summary>
-    public const int Version = 13;
+    /// <summary>The schema version written to and required by <c>PRAGMA user_version</c>; integration assigns version bumps; additive preview tables are presence-guarded.</summary>
+    public const int Version = 12;
 
     /// <summary>The state database path relative to the app data root.</summary>
     public const string DatabaseRelativePath = @"v2\state.db";
@@ -280,6 +280,7 @@ internal static class StoreSchema
             throw new StateDamagedException($"v2 state schema version {version}, expected {Version}.");
         // Additive feature storage is presence-guarded on every compatible open, not gated by a version bump.
         Execute(connection, null, RetryDdl);
+        Execute(connection, null, JournalDdl); // Additive preview table: presence-guarded on every compatible open.
         var names = new HashSet<string>(StringComparer.Ordinal);
         using (var command = Command(connection, null,
             "SELECT name FROM sqlite_master WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%';"))

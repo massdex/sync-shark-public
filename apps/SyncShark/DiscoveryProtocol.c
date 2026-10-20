@@ -66,3 +66,17 @@ DWORD ssd_reply_end(DWORD count,const USN_JOURNAL_DATA *before,const USN_JOURNAL
     }
     return 76;
 }
+
+/* Pure grow-only sizing policy, including the allocation overhead in both caps. */
+DWORD ssd_journal_target(ULONGLONG requested,ULONGLONG current_max,ULONGLONG current_delta,ULONGLONG free_bytes,ULONGLONG *target) {
+    if(!target || !requested || requested>8589934592ULL)return ERROR_INVALID_PARAMETER;
+    *target=current_max;
+    if(requested<=current_max)return ERROR_ALREADY_EXISTS;
+    ULONGLONG cap=free_bytes/20;
+    if(cap>8589934592ULL)cap=8589934592ULL;
+    ULONGLONG delta=current_delta>134217728ULL?current_delta:134217728ULL;
+    cap=cap>delta?cap-delta:0;
+    if(cap<=current_max)return ERROR_DISK_FULL;
+    *target=requested<cap?requested:cap;
+    return ERROR_SUCCESS;
+}

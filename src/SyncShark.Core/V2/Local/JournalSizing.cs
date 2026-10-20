@@ -29,7 +29,7 @@ public static class JournalSizing
         var rate = comparable ? (next - previous.NextUsn) / hours : 0;
         return previous with { JournalId = journal, NextUsn = next, Observed = now,
             BytesPerHour = comparable ? Math.Max(rate, previous.BytesPerHour * 0.9) : 0,
-            LongestGapHours = Math.Max(hours, previous.LongestGapHours * 0.9) };
+            LongestGapHours = Math.Max(hours, previous.LongestGapHours * Math.Pow(0.9, hours / 24)) };
     }
 
     public static long Target(JournalSizingState state, long current, long free, bool gap)
@@ -72,7 +72,7 @@ public static class JournalSizing
 
     // Injectable OS boundary: deterministic checks never touch a real journal or worker.
     internal static async Task MaintainAsync(SqliteStateStore store, SqliteStateStore.JournalPending pending,
-        SyncDiscoveryRoot root, Func<SyncDiscoveryRoot, long, Task<bool>> grow, Func<string, long[]?> query)
+        SyncDiscoveryRoot root, Func<SyncDiscoveryRoot, long, Task<uint?>> grow, Func<string, long[]?> query)
     {
         if (!Silent.TryAdd(root.VolumeSerial, 0)) return;
         var active = false;
@@ -83,12 +83,24 @@ public static class JournalSizing
             if (current is null || current.Volume != pending.Volume || current.State.Requested != pending.State.Requested ||
                 current.State.NoticePair != pending.State.NoticePair) return;
             var before = query(pending.Volume);
-            var success = await grow(root, pending.State.Requested).ConfigureAwait(false);
-            var after = query(pending.Volume);
-            var grew = success && before is not null && after is not null &&
+            if (before is not null && before[7] == pending.Serial && before[4] >= pending.State.Requested)
+            {
+                store.FinishSilentJournal(pending, true, "");
+                return;
+            }
+            var result = await grow(root, pending.State.Requested).ConfigureAwait(false);
+            if (result is null) return; // Busy/cooldown: no attempt, no notice. Retry on the next observation.
+            if (result == 183)
+            {
+                store.FinishSilentJournal(pending, true, "");
+                return;
+            }
+            var after = result == 0 ? query(pending.Volume) : null;
+            var grew = result == 0 && before is not null && after is not null &&
                 before[7] == pending.Serial && after[7] == pending.Serial && before[0] == after[0] && after[4] > before[4];
-            store.FinishSilentJournal(pending, grew, success
-                ? "Windows' change history did not grow; there may not be enough free space. Free up space and retry."
+            store.FinishSilentJournal(pending, grew, result == 112
+                ? $"Not enough free space to enlarge Windows' change history toward {pending.State.Requested / (double)Minimum:0.##} GB. Free up disk space and Retry, or Ignore."
+                : result == 0 ? "Windows' change history did not grow. Retry or Ignore."
                 : "Windows' change history is too small and automatic enlargement is unavailable or failed.");
         }
         catch (Exception error)

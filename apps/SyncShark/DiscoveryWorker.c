@@ -4,6 +4,7 @@
 #include <shellapi.h>
 #include <stdio.h>
 #include <wchar.h>
+#include <strsafe.h>
 
 static const WCHAR worker_path[]=L"C:\\Program Files\\Massdex\\SyncShark\\SyncSharkDiscovery.exe";
 static const WCHAR manifest_path[]=L"C:\\Program Files\\Massdex\\SyncShark\\discovery-manifest.json";
@@ -134,28 +135,23 @@ static DWORD grow_journal(Worker *w) {
         {error=GetLastError();goto reply;}
     if(serial!=w->request.volume_serial || wcscmp(fs,L"NTFS")){error=ERROR_NOT_SUPPORTED;goto reply;}
     /* The admitted GUID, not an elevated-token drive-letter mapping. */
-    wcscpy(mount,ssd_admission_volume(w->admission));wcscat(mount,L"\\");
+    if(FAILED(StringCchCopyW(mount,ARRAYSIZE(mount),ssd_admission_volume(w->admission))) ||
+        FAILED(StringCchCatW(mount,ARRAYSIZE(mount),L"\\"))){error=ERROR_INVALID_DRIVE;goto reply;}
     ULARGE_INTEGER free_bytes;
     if(!GetDiskFreeSpaceExW(mount,&free_bytes,NULL,NULL)){error=GetLastError();goto reply;}
     USN_JOURNAL_DATA current={0};
     if(!DeviceIoControl(volume,FSCTL_QUERY_USN_JOURNAL,NULL,0,&current,sizeof(current),&bytes,NULL))error=GetLastError();
     else {
-        ULONGLONG cap=free_bytes.QuadPart/20;
-        if(cap>8589934592ULL)cap=8589934592ULL;
         ULONGLONG delta=current.AllocationDelta>134217728ULL?current.AllocationDelta:134217728ULL;
-        ULONGLONG target=w->request.journal_maximum;
-        if(target<=current.MaximumSize)error=ERROR_ALREADY_EXISTS;
-        else {
-            if(target>(cap>delta?cap-delta:0))target=cap>delta?cap-delta:0;
-            if(target<=current.MaximumSize)error=ERROR_DISK_FULL;
+        ULONGLONG target=0;
+        error=ssd_journal_target(w->request.journal_maximum,current.MaximumSize,current.AllocationDelta,free_bytes.QuadPart,&target);
+        if(!error) {
+            CREATE_USN_JOURNAL_DATA request={0};request.MaximumSize=target;request.AllocationDelta=delta;
+            if(!DeviceIoControl(volume,FSCTL_CREATE_USN_JOURNAL,&request,sizeof(request),NULL,0,&bytes,NULL))error=GetLastError();
             else {
-                CREATE_USN_JOURNAL_DATA request={0};request.MaximumSize=target;request.AllocationDelta=delta;
-                if(!DeviceIoControl(volume,FSCTL_CREATE_USN_JOURNAL,&request,sizeof(request),NULL,0,&bytes,NULL))error=GetLastError();
-                else {
-                    USN_JOURNAL_DATA after={0};
-                    if(!DeviceIoControl(volume,FSCTL_QUERY_USN_JOURNAL,NULL,0,&after,sizeof(after),&bytes,NULL))error=GetLastError();
-                    else if(after.UsnJournalID!=current.UsnJournalID)error=ERROR_JOURNAL_ENTRY_DELETED;
-                }
+                USN_JOURNAL_DATA after={0};
+                if(!DeviceIoControl(volume,FSCTL_QUERY_USN_JOURNAL,NULL,0,&after,sizeof(after),&bytes,NULL))error=GetLastError();
+                else if(after.UsnJournalID!=current.UsnJournalID)error=ERROR_JOURNAL_ENTRY_DELETED;
             }
         }
     }

@@ -1068,6 +1068,12 @@ if (args is ["--v2-host-checks"])
     return 0;
 }
 
+if (args is ["--v2-journal-sizing-checks", var sizingRoot])
+{
+    await Massdex.SyncShark.V2.JournalSizingChecks.RunAsync(Path.GetFullPath(sizingRoot));
+    return 0;
+}
+
 if (args is ["--v2-dates-checks", var datesRoot])
 {
     await Massdex.SyncShark.V2.DateRepairChecks.RunAsync(Path.GetFullPath(datesRoot));
