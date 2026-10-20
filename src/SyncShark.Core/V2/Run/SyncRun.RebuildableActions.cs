@@ -12,13 +12,58 @@ public sealed partial class SyncRun
             ?? throw new SyncRunRefusedException("This notice is not a rebuildable rule. Refresh notices; nothing was changed.");
         return choice switch
         {
+            NoticeChoices.RetryNow => CheckRebuildableRuleAgain(pair, notice, rule, update),
             NoticeChoices.PreviewMatches => PreviewRebuildableRuleMatches(pair, rule, input?.Offset ?? 0),
             NoticeChoices.ChooseFolder => ChooseRebuildableFolder(pair, notice, rule, input?.Name, update),
             NoticeChoices.RemoveRule => RemoveRebuildableRule(pair, notice, rule, update),
             NoticeChoices.KeepRule => KeepRebuildableRule(notice),
             _ => throw new SyncRunRefusedException(
-                "Choose Preview matches, Choose folder, Remove rule or Keep. Nothing was changed.")
+                "Choose Check again, Preview matches, Choose folder, Remove rule or Keep. Nothing was changed.")
         };
+    }
+
+    // Check again re-runs the rule's own detection against the current inventory. It uses the same bounded
+    // name query as Preview matches, then revalidates each candidate with the category's real markers, so a mere
+    // name match is never reported as detected. A detected folder closes the notice; otherwise it stays open.
+    private string CheckRebuildableRuleAgain(PairDef pair, Notice notice, NoticeRebuildableRule rule,
+        Func<PairDef, RebuildableChoice, RebuildableChoice?, string>? update)
+    {
+        var sides = RebuildableSelection.Sides(pair) ?? throw new SyncRunRefusedException(
+            "This pair has no single local side, so rebuildable rules do not apply here. Nothing was changed.");
+        var local = sides.Local == Side.A ? pair.A : pair.B;
+        var include = BuildPredicates(pair, PairInclude.ForAction);
+        var includeLocal = sides.Local == Side.A ? include.A : include.B;
+        var names = RebuildableDetector.FolderNames(rule.Category);
+        // One bounded page is enough: any detected folder means the rule now matches.
+        var candidates = _store.RebuildableFoldersUnder(local.RootId, rule.Prefix, names, 0, RebuildablePreviewSize + 1)
+            .Where(includeLocal);
+        var readText = RebuildableDetector.DiskReader(local.RootPath);
+        foreach (var candidate in candidates)
+        {
+            var folder = _store.Live(local.RootId, [candidate])
+                .FirstOrDefault(item => item.Kind == ItemKind.Folder);
+            if (folder is null) continue;
+            // The marker checks read the candidate's own children and its siblings, exactly like a prepare scan.
+            var items = _store.LiveChildren(local.RootId, candidate)
+                .Concat(_store.LiveChildren(local.RootId, RowCodec.Split(candidate).Parent))
+                .Append(folder)
+                .DistinctBy(item => item.Path, StringComparer.Ordinal)
+                .ToArray();
+            if (RebuildableDetector.Detect(items, readText).Any(detected =>
+                    PairPath.Same(detected.Path, candidate) &&
+                    string.Equals(detected.Category, rule.Category, StringComparison.OrdinalIgnoreCase)))
+            {
+                // Same guard as Choose folder: the retained review was frozen under the old prefix and does not
+                // contain this folder, so an apply must wait for a fresh prepare that detects it (C1).
+                update?.Invoke(pair, new RebuildableChoice(rule.Category, rule.Prefix),
+                    new RebuildableChoice(rule.Category, rule.Prefix));
+                _store.CloseNotice(notice.NoticeId!, NoticeChoices.RetryNow);
+                return $"Found a '{rule.Category}' folder under '{rule.Prefix}/'. Run prepare again to include it " +
+                    "in the first-sync review; no files were changed.";
+            }
+        }
+        return $"Still no '{rule.Category}' folders under '{rule.Prefix}/'. Run prepare again after the inventory " +
+            "changes; the notice stays open and no files were changed.";
     }
 
     // A bounded SQL page of candidate folder paths: LIMIT is applied in the database, never over a loaded subtree.
@@ -34,8 +79,9 @@ public sealed partial class SyncRun
         var names = RebuildableDetector.FolderNames(rule.Category);
         // One extra row tells the caller there is a next page without a second count query.
         var found = _store.RebuildableFoldersUnder(local.RootId, rule.Prefix, names, offset, RebuildablePreviewSize + 1);
+        // The extra row is a raw-row signal; excluded rows must not hide that a further page exists.
+        var more = found.Count > RebuildablePreviewSize;
         var candidates = found.Where(includeLocal).ToArray();
-        var more = candidates.Length > RebuildablePreviewSize;
         var paths = candidates.Take(RebuildablePreviewSize).ToArray();
         var lines = new List<string>
         {

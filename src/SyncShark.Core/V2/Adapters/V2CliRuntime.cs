@@ -347,6 +347,12 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
             // prepare recorded, or there is nothing to apply that the user reviewed.
             var prepared = FirstSyncChoicesState.Load(_productRoot, pairId, _store) ?? throw new SyncCliReviewException(
                 "No usable first-sync prepare exists for this pair — run prepare again.");
+            // Choose folder rewrote the rule's prefix after the prepare had already detected its folders. The
+            // frozen set still describes the old prefix, so refuse until a prepare detects folders under the new one.
+            if (prepared.NeedsReprepare)
+                throw new SyncCliReviewException(
+                    "Choose folder changed this rule's prefix, but its folders were detected under the old prefix. " +
+                    "Run prepare again to detect folders under the new prefix; nothing was applied.");
             // Apply re-previews with the same choices and exactly the rebuildable set the prepare froze (never a fresh
             // detection); the run drops any path that no longer qualifies.
             var rebuildables = prepared.Rebuildables

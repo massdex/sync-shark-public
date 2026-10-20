@@ -70,6 +70,7 @@ internal sealed partial class DropboxWire
 
     private async Task<HttpResponseMessage> StartSessionAsync(HttpRequestMessage request, CancellationToken token)
     {
+        UploadSessionStarted?.Invoke();
         var session = "session-" + (++_ids).ToString(CultureInfo.InvariantCulture);
         _sessions[session] = await request.Content!.ReadAsByteArrayAsync(token);
         return Json(new { session_id = session });

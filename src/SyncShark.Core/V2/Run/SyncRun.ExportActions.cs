@@ -25,9 +25,29 @@ public sealed partial class SyncRun
         await _endpoints.PrepareAsync(pair, ct).ConfigureAwait(false);
         var cloudWriter = _endpoints.Writer(cloud);
         var localWriter = _endpoints.Writer(local);
+        // Refuse before writing the progress text: a refusal inside the guarded block would leave "Exporting as…"
+        // as the notice's text.
+        if (ExportDocumentForTest is null && cloudWriter is not DropboxWriter)
+            throw new SyncRunRefusedException("This provider cannot export here. Open the document in Dropbox instead.");
         var original = await cloudWriter.ObserveAsync(notice.Path, ct).ConfigureAwait(false);
         if (original is null || !original.Flags.HasFlag(ItemFlags.RequiresExport))
             throw new SyncRunRefusedException("This document changed or no longer needs export. Retry sync to refresh the notice.");
+        // A notice written before export_info was read has no captured facts. The fresh observation carries them,
+        // so validate against those and refresh the notice with the provider's real list.
+        var refreshed = notice.ExportInfo is null;
+        notice = refreshed
+            ? notice with { ExportInfo = DropboxExportFacts.ForItem(original) }
+            : notice;
+        if (notice.ExportInfo is { } fresh && !fresh.Formats.Contains(format, StringComparer.OrdinalIgnoreCase))
+        {
+            // A stale legacy button must not stay stale after we learned the provider's real formats: write the
+            // refreshed list back before refusing, so the notice offers exactly what the provider supports.
+            if (refreshed) _store.AddNotices([notice]);
+            throw new SyncRunRefusedException(
+                "That format is not offered for this document. Choose one of: " +
+                (fresh.Formats.Count > 0 ? string.Join(", ", fresh.Formats) : "Open in Dropbox") +
+                ". Nothing was changed.");
+        }
         var extension = format == "markdown" ? "md" : format;
         // Separate local file, not a replacement for the cloud-native original. The exported name keeps the
         // document's name, so the user can tell where it came from; a suffix keeps every export create-only.
@@ -49,8 +69,7 @@ public sealed partial class SyncRun
         {
             await using var content = ExportDocumentForTest is { } export
                 ? await export(cloud, original, format, ct).ConfigureAwait(false)
-                : cloudWriter is DropboxWriter writer ? await writer.ExportDocumentAsync(original, format, ct).ConfigureAwait(false)
-                : throw new SyncRunRefusedException("This provider cannot export here. Open the document in Dropbox instead.");
+                : await ((DropboxWriter)cloudWriter).ExportDocumentAsync(original, format, ct).ConfigureAwait(false);
             if (!content.CanSeek || content.Length > ExportBoundedStream.Limit)
                 throw new IOException("The exported document exceeds the bounded staging limit.");
             if (!SameRepairItem(await cloudWriter.ObserveAsync(notice.Path, ct).ConfigureAwait(false), original))
@@ -97,7 +116,8 @@ public sealed partial class SyncRun
                 await localWriter.ObserveAsync(candidate, ct).ConfigureAwait(false) is null)
                 return candidate;
         }
-        throw new SyncRunRefusedException(
-            "No free export name is available beside this document. Remove or rename an older export, or open the document in Dropbox; nothing was changed.");
+        // Never refuse an export because a busy name ran out of numeric candidates: a random suffix is unique
+        // enough for the bounded probe, and the create-only write below still refuses to overwrite anything.
+        return parent + baseName + " " + Guid.NewGuid().ToString("N")[..12] + "." + extension;
     }
 }

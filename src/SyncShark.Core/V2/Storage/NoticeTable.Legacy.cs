@@ -6,24 +6,73 @@ namespace Massdex.SyncShark.V2;
 internal sealed partial class NoticeTable
 {
     private const string AliasPrefix = "notice-alias:";
-    // The identity probe reads open notices only, bounded: a notice table is item-sized, never inventory-sized.
-    private const int IdentityProbeLimit = 64;
 
-    // The exact primary key still wins. A legacy id embeds the path the item had when the notice was written, so an
-    // item that has since moved is found by its stable object identity (side + object id, the stored object key)
-    // instead. Every matching legacy row is folded into one canonical row, never duplicated.
+    /// <summary>Test-only: how many one-time legacy identity sweeps this store has run.</summary>
+    internal int LegacyFoldPasses { get; private set; }
+
+    // Legacy repair rows written before fa93b15f carry a path-bearing id. Once the item moves, the stored id no
+    // longer matches the item's canonical identity. The refused-name fold therefore runs once per (pair, reason):
+    // one pass decodes the open rows, rewrites those whose id differs, and records a durable marker. Later adds do
+    // no scan, so the steady-state cost is O(1) rather than a JSON decode of every open same-reason notice.
     private void MigrateLegacyRepair(SqliteTransaction transaction, long pairNo, string canonicalId, Notice notice)
     {
         if (notice.Repair is not { } repair || notice.RetainedVersion is not null) return;
+        // Only the pre-fa93b15f refused-name notices used the path-bearing legacy id; newer repair notices never did.
+        if (notice.ReasonKey is "provider-name-refused" or "windows-name-invalid")
+        {
+            if (LegacyFoldDone(transaction, pairNo, notice.ReasonKey)) return;
+            FoldLegacyRepairRows(transaction, pairNo, notice.PairId, notice.Rule, notice.ReasonKey);
+            MarkLegacyFoldDone(transaction, pairNo, notice.ReasonKey);
+            return;
+        }
         var legacyId = ShortId.Make("n", notice.PairId, notice.Rule.ToString(CultureInfo.InvariantCulture),
             RowCodec.Key(notice.Path), notice.ReasonKey, repair.Side.ToString(), repair.Item.ObjectId);
         var candidates = new List<(string Id, Notice Notice)>();
         var exact = ById(pairNo, legacyId, transaction);
         if (exact is { } exactRow && exactRow.Notice.NoticeId == legacyId) candidates.Add((legacyId, exactRow.Notice));
-        // Only the pre-fa93b15f refused-name notices used the path-bearing legacy id; newer repair notices never did.
-        if (notice.ReasonKey is "provider-name-refused" or "windows-name-invalid")
-            candidates.AddRange(FindLegacyByIdentity(transaction, pairNo, notice, repair, canonicalId, legacyId));
         if (candidates.Count == 0) return;
+        FoldLegacyRepair(transaction, pairNo, canonicalId, notice, candidates);
+    }
+
+    // One pass over the open rows of a (pair, rule, reason): recompute each row's canonical identity from its own
+    // stored repair evidence and fold the rows whose stored id differs. No row window, so a moved item is found
+    // however many same-reason notices share the table. Plain-text or corrupt details decode with no Repair and
+    // are skipped, never an error.
+    private void FoldLegacyRepairRows(SqliteTransaction transaction, long pairNo, string pairId, int rule, string reason)
+    {
+        LegacyFoldPasses++;
+        var stored = new List<(string Id, Notice Notice)>();
+        using (var command = StoreSchema.Command(_connection, transaction,
+            "SELECT notice_id,kind,path,detail FROM notice " +
+            "WHERE pair_no=$p AND rule=$rule AND reason_key=$reason AND state='open' ORDER BY notice_id;"))
+        {
+            command.Parameters.AddWithValue("$p", pairNo);
+            command.Parameters.AddWithValue("$rule", rule);
+            command.Parameters.AddWithValue("$reason", reason);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                var id = reader.GetString(0);
+                var row = NoticeDetailCodec.Decode(new Notice(pairId, rule,
+                    Enum.Parse<NoticeKind>(reader.GetString(1)), reader.GetString(2), reader.GetString(3), reason, id));
+                if (row.Repair is not null && row.RetainedVersion is null) stored.Add((id, row));
+            }
+        }
+        foreach (var (id, row) in stored)
+        {
+            var canonical = CanonicalRepairId(pairId, rule, reason, row.Repair!);
+            if (string.Equals(id, canonical, StringComparison.Ordinal)) continue;
+            FoldLegacyRepair(transaction, pairNo, canonical, row, [(id, row)]);
+        }
+    }
+
+    private static string CanonicalRepairId(string pairId, int rule, string reason, NoticeRepair repair) =>
+        ShortId.Make("n", pairId, rule.ToString(CultureInfo.InvariantCulture), reason,
+            repair.Side.ToString(), repair.Item.ObjectId);
+
+    private void FoldLegacyRepair(SqliteTransaction transaction, long pairNo, string canonicalId, Notice notice,
+        IReadOnlyList<(string Id, Notice Notice)> candidates)
+    {
         foreach (var candidate in candidates)
             if (!IsSameProblem(transaction, candidate.Id, pairNo, notice))
                 throw new InvalidDataException("Legacy notice identity collision.");
@@ -67,35 +116,15 @@ internal sealed partial class NoticeTable
                 ("$alias", AliasPrefix + canonicalId), ("$old", candidate.Id), ("$p", pairNo));
     }
 
-    // Bounded probe of open notices for the same rule and reason whose stored repair carries this exact object
-    // identity. The category-plus-prefix id never appears: only the stable (side, object id) does.
-    private IReadOnlyList<(string Id, Notice Notice)> FindLegacyByIdentity(SqliteTransaction transaction, long pairNo,
-        Notice notice, NoticeRepair repair, string canonicalId, string exactLegacyId)
-    {
-        var found = new List<(string Id, Notice Notice)>();
-        using var command = StoreSchema.Command(_connection, transaction,
-            "SELECT notice_id,rule,kind,path,detail,reason_key FROM notice " +
-            "WHERE pair_no=$p AND rule=$rule AND reason_key=$reason AND state='open' " +
-            "AND notice_id<>$canonical AND notice_id<>$exact ORDER BY notice_id LIMIT $limit;");
-        command.Parameters.AddWithValue("$p", pairNo);
-        command.Parameters.AddWithValue("$rule", notice.Rule);
-        command.Parameters.AddWithValue("$reason", notice.ReasonKey);
-        command.Parameters.AddWithValue("$canonical", canonicalId);
-        command.Parameters.AddWithValue("$exact", exactLegacyId);
-        command.Parameters.AddWithValue("$limit", IdentityProbeLimit);
-        using var reader = command.ExecuteReader();
-        while (reader.Read())
-        {
-            var id = reader.GetString(0);
-            var candidate = NoticeDetailCodec.Decode(new Notice(notice.PairId, (int)reader.GetInt64(1),
-                Enum.Parse<NoticeKind>(reader.GetString(2)), reader.GetString(3), reader.GetString(4),
-                reader.GetString(5), id));
-            if (candidate.Repair is { } stored && stored.Side == repair.Side &&
-                string.Equals(stored.Item.ObjectId, repair.Item.ObjectId, StringComparison.Ordinal))
-                found.Add((id, candidate));
-        }
-        return found;
-    }
+    private bool LegacyFoldDone(SqliteTransaction transaction, long pairNo, string reason) =>
+        StoreSchema.Scalar(_connection, transaction,
+            "SELECT 1 FROM notice_legacy_fold WHERE pair_no=$p AND reason_key=$r;",
+            ("$p", pairNo), ("$r", reason)) is not null;
+
+    private void MarkLegacyFoldDone(SqliteTransaction transaction, long pairNo, string reason) =>
+        StoreSchema.Execute(_connection, transaction,
+            "INSERT INTO notice_legacy_fold(pair_no,reason_key) VALUES($p,$r) ON CONFLICT DO NOTHING;",
+            ("$p", pairNo), ("$r", reason));
 
     private string ResolveLegacyAlias(long pairNo, string noticeId, SqliteTransaction? transaction)
     {

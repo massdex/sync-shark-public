@@ -3509,7 +3509,12 @@ public sealed partial class DropboxPilotClient(
         }
         throw new DropboxApiException(response.StatusCode,
             $"Dropbox download refused (HTTP {(int)response.StatusCode}; {code}). {detail} " +
-            "No download bytes were accepted from this response.");
+            "No download bytes were accepted from this response.")
+        {
+            // Preserve the structured missing-source proof for the adapter's narrow mismatch mapping.
+            // Unknown, restricted and malformed refusals must remain failures, never inferred from HTTP 409 alone.
+            WriteErrorTag = code == "path/not_found" ? "not_found" : null
+        };
     }
 
     private sealed class LeaveOpenReadStream(Stream inner) : Stream

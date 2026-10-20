@@ -358,6 +358,12 @@ internal sealed class InMemoryStateStore : IStateStore
                 if (_deletionEvidence.TryGetValue(previous.PairId + "\n" + root, out var evidence))
                     foreach (var path in evidence.Keys.Where(item => paths.Any(prefix =>
                         PairPath.IsSelfOrUnder(item, prefix))).ToArray()) evidence.Remove(path);
+            // Mirror SavePairIncluded: removing an exclusion reverses its Ignore, so a fresh problem at the path
+            // may raise its notice again.
+            foreach (var notice in _notices.Where(item => item.PairId == previous.PairId && item.NoticeId is not null &&
+                         paths.Any(prefix => PairPath.IsSelfOrUnder(item.Path, prefix))).ToArray())
+                if (_closedNotices.TryGetValue(notice.NoticeId!, out var choice) && choice == NoticeChoices.Ignore)
+                    _closedNotices[notice.NoticeId!] = null;
             var affected = UnresolvedIntents(previous.PairId).Where(action =>
                 new[] { action.Path, action.FromPath, action.Source?.Path, action.ExpectedTarget?.Path }
                     .OfType<string>().Any(footprint => paths.Any(path =>

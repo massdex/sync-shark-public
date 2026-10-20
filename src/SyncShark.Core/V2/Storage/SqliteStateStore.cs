@@ -23,6 +23,9 @@ public sealed partial class SqliteStateStore : IStateStore
     private readonly Dictionary<long, (long PairNo, Side Side)[]> _rootSides = new();
     private bool _disposed;
 
+    /// <summary>Test-only: how many one-time legacy identity sweeps this store has run.</summary>
+    internal int LegacyFoldPassesForTest => _notices.LegacyFoldPasses;
+
     private SqliteStateStore(SqliteConnection connection, V2Settings settings, TimeProvider clock)
     {
         _connection = connection;

@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 
 namespace Massdex.SyncShark.V2;
@@ -71,6 +72,29 @@ public sealed partial class SqliteStateStore
                 "DELETE FROM sync_retry WHERE pair_no=$p " +
                 "AND (path_key=$k OR substr(path_key,1,length($k)+1)=$k||'/');",
                 ("$p", pairNo), ("$k", key));
+            // An Ignore on this path was the request to stop syncing it. Removing the exclusion reverses that
+            // request, so clear the dismissal: a fresh problem at the path (for example pending deletion evidence)
+            // must be visible again instead of staying suppressed by the old ignore.
+            // The pair-root quota and online-only summaries are never exclusion paths, so clearing their Ignore
+            // would defeat a deliberate dismissal. A path that is still under another retained exclusion stays
+            // excluded, so its Ignore is not reversed either.
+            var clearIgnore = new StringBuilder(
+                "UPDATE notice SET choice=NULL WHERE pair_no=$p AND state='closed' AND choice=$ignore " +
+                "AND reason_key NOT IN ($quota,$stubs) " +
+                "AND (path=$raw COLLATE NOCASE OR (substr(path,1,length($raw)+1)) = ($raw||'/') COLLATE NOCASE)");
+            var clearParameters = new List<(string Name, object? Value)>
+            {
+                ("$p", pairNo), ("$raw", path), ("$ignore", NoticeChoices.Ignore),
+                ("$quota", DropboxQuota.NoticeKey), ("$stubs", LinkExclusions.StubReason.Key)
+            };
+            for (var index = 0; index < included.Excluded.Count; index++)
+            {
+                var name = "$kept" + index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                clearIgnore.Append($" AND NOT (path={name} COLLATE NOCASE OR " +
+                    $"substr(path,1,length({name})+1)=({name}||'/') COLLATE NOCASE)");
+                clearParameters.Add((name, included.Excluded[index]));
+            }
+            StoreSchema.Execute(_connection, transaction, clearIgnore.ToString(), clearParameters.ToArray());
         }
         StoreSchema.Execute(_connection, transaction, "UPDATE pair SET def_json=$j WHERE pair_no=$p;",
             ("$j", JsonSerializer.Serialize(included, RowCodec.Json)), ("$p", pairNo));

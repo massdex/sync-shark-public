@@ -5,7 +5,7 @@ namespace Massdex.SyncShark.V2;
 // Optional per-path metadata uses the existing detail column; old plain-text rows remain readable.
 internal static class NoticeDetailCodec
 {
-    private const string Prefix = "sync-shark-notice-v1:";
+    internal const string Prefix = "sync-shark-notice-v1:";
     private sealed record Payload(string Detail, FreeSpaceNoticeMetadata? FreeSpace,
         RetainedNoticeVersion? RetainedVersion = null, NoticeRepair? Repair = null, bool FolderInspection = false, bool? UploadSuspended = null, Side? UploadQuotaSide = null, long? UploadQuotaNeedBytes = null,
         NoticeRebuildableRule? RebuildableRule = null, NoticeExportInfo? ExportInfo = null);

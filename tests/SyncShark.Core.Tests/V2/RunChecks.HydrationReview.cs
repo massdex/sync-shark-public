@@ -104,6 +104,9 @@ internal static partial class RunChecks
         var run = fx.Run();
         var plan = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), default);
         await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), default, ReviewedHeld(plan));
+        // The fixture completes the first sync explicitly so the later re-inclusion can use the ordinary run path;
+        // the apply left the item's deletion evidence pending, which is the state under test.
+        fx.Store.MarkFirstSyncDone(fx.Pair.PairId);
         var notice = fx.Store.OpenNotices(fx.Pair.PairId).Single(n => n.ReasonKey == "deletion-evidence-pending");
         await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, notice.NoticeId!, NoticeChoices.Ignore, default);
         var excluded = fx.Store.Pair(fx.Pair.PairId)!;
@@ -111,5 +114,7 @@ internal static partial class RunChecks
         await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
         Require(fx.WriterA.Deletes == 0 && fx.WriterB.Deletes == 0 && await fx.A.ObserveAsync("held.txt", default) is not null,
             "Ignore then reinclude never grants deletion authority without fresh evidence");
+        Require(fx.Store.OpenNotices(fx.Pair.PairId).Any(n => n.ReasonKey == "deletion-evidence-pending" && n.Path == "held.txt"),
+            "removing the exclusion lets fresh evidence raise the deletion-evidence notice again");
     }
 }

@@ -32,7 +32,8 @@ internal sealed partial class NoticeTable
         }
         var noticeId = notice.RetainedVersion is { } retained ? RetainedId(notice.PairId, retained.ActionId) :
             notice.RebuildableRule is { } rule ? ShortId.Make("n", notice.PairId,
-                notice.Rule.ToString(CultureInfo.InvariantCulture), notice.ReasonKey, rule.Category, RowCodec.Key(rule.Prefix)) :
+                notice.Rule.ToString(CultureInfo.InvariantCulture), notice.ReasonKey,
+                rule.Category.ToLowerInvariant(), RowCodec.Key(rule.Prefix)) :
             notice.Repair is { } repair ? ShortId.Make("n", notice.PairId, notice.Rule.ToString(CultureInfo.InvariantCulture),
                 notice.ReasonKey, repair.Side.ToString(), repair.Item.ObjectId) :
             ShortId.Make("n", notice.PairId, notice.Rule.ToString(CultureInfo.InvariantCulture),

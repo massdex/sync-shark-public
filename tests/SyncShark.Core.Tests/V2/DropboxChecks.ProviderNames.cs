@@ -13,6 +13,7 @@ internal static partial class DropboxChecks
             await ProviderNamesRunAsync(Path.Combine(root, reasonShape ? "reason" : "path"), reasonShape);
         await QuotaHoldAsync(Path.Combine(root, "quota"), explicitRetry: false);
         await QuotaHoldAsync(Path.Combine(root, "quota-explicit"), explicitRetry: true);
+        await QuotaStagingGateAsync();
         ProviderNamesStaleSourceBatch(Path.Combine(root, "stale-source"));
         await ProviderNamesWritesAsync();
         await RunChecks.ProviderNamesTransientAsync(Path.Combine(root, "parallel"));

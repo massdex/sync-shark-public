@@ -121,9 +121,19 @@ internal static partial class RunChecks
         Require(store.OpenNotices(fx.Pair.PairId).Count == 1, "legacy migration replay never duplicates notices");
     }
 
+    // C6: run the export-notice checks on the in-memory double and on the real SQLite table.
     private static async Task ExportBlockerChecksAsync()
     {
-        var fx = Build();
+        await ExportBlockerChecksAsync(null);
+        var folder = Path.Combine(Path.GetTempPath(), "export-blockers-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+        await ExportBlockerChecksAsync(store);
+    }
+
+    private static async Task ExportBlockerChecksAsync(IStateStore? supplied)
+    {
+        var fx = Build(suppliedStore: supplied);
         var paper = fx.B.Seed("Document.paper", "cloud-native") with { Flags = ItemFlags.RequiresExport | ItemFlags.Unreadable };
         fx.Provider.AddWriter(fx.Pair.B, new SignalingWriter(fx.WriterB)
         { AfterObserve = item => item?.Path == paper.Path ? item with { Flags = paper.Flags } : item });

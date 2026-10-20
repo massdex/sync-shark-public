@@ -143,6 +143,9 @@ public sealed partial class SqliteStateStore
             foreach (var affectedPair in invalidatePrepares ?? []) DeletePrepare(transaction, affectedPair);
             foreach (var table in pairTables)
                 StoreSchema.Execute(_connection, transaction, $"DELETE FROM {table} WHERE pair_no=$p;", ("$p", pairNo));
+            // Operational metadata, not user data: never archived, but a removed pair must not leave a marker behind
+            // for a reused pair number.
+            StoreSchema.Execute(_connection, transaction, "DELETE FROM notice_legacy_fold WHERE pair_no=$p;", ("$p", pairNo));
             StoreSchema.Execute(_connection, transaction, "DELETE FROM pair WHERE pair_no=$p;", ("$p", pairNo));
             // Enclosing roots must perform a full scan of the newly admitted subtree.
             foreach (var rootId in others.SelectMany(p => new[] { p.A, p.B })

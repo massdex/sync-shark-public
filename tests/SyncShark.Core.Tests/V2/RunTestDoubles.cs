@@ -441,12 +441,15 @@ internal sealed class RecordingStore : IStateStore
     }
 
     public string? FailNoticePath { get; set; }
+    public Action<IReadOnlyList<Notice>>? NoticesAdded { get; set; }
+    public (Notice Notice, bool Closed)? NoticeById(string pairId, string noticeId) => _inner.NoticeById(pairId, noticeId);
     public void AddNotices(IEnumerable<Notice> n)
     {
         var notices = n.ToArray();
         if (FailNoticePath is not null && notices.Any(notice => notice.Path == FailNoticePath))
             throw new InvalidOperationException("injected notice write failure");
         _inner.AddNotices(notices);
+        NoticesAdded?.Invoke(notices);
     }
 
     public IReadOnlyList<Notice> OpenNotices(string? pairId) => _inner.OpenNotices(pairId);

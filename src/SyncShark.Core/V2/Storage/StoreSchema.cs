@@ -103,6 +103,13 @@ internal static class StoreSchema
         CREATE INDEX IF NOT EXISTS sync_retry_due ON sync_retry(pair_no,retry_after,path_key);
         """;
 
+    // One row per (pair, reason) whose pre-fa93b15f path-bearing notice ids have already been folded. This is
+    // additive, presence-guarded feature storage: no version bump and no existing row changes.
+    private const string LegacyFoldDdl = """
+        CREATE TABLE IF NOT EXISTS notice_legacy_fold(pair_no INTEGER NOT NULL, reason_key TEXT NOT NULL,
+          PRIMARY KEY(pair_no,reason_key)) WITHOUT ROWID;
+        """;
+
     private const string RehashDdl = """
         CREATE TABLE IF NOT EXISTS local_rehash(root_no INTEGER NOT NULL, object_id TEXT NOT NULL,
           last_attempt INTEGER NOT NULL, reason TEXT NOT NULL, PRIMARY KEY(root_no, object_id)) WITHOUT ROWID;
@@ -135,6 +142,7 @@ internal static class StoreSchema
         using var final = connection.BeginTransaction();
         Execute(connection, final, RehashDdl);
         Execute(connection, final, RetryDdl);
+        Execute(connection, final, LegacyFoldDdl);
         Execute(connection, final, $"PRAGMA user_version={Version};");
         final.Commit();
     }
@@ -170,7 +178,7 @@ internal static class StoreSchema
     private static readonly string[] ExpectedNames =
     [
         "dir", "root", "pair", "generation", "file_state", "tombstone", "sync_point", "pending_effect", "sync_retry", "sync_retry_due", "recovery",
-        "notice", "local_rehash", "rehash_retry", "deletion_evidence", "dir_key", "dir_mapped_key", "fs_obj", "fs_flagged", "fs_refused", "sp_a_obj", "sp_b_obj", "sp_a_dir", "sp_b_dir",
+        "notice", "notice_legacy_fold", "local_rehash", "rehash_retry", "deletion_evidence", "dir_key", "dir_mapped_key", "fs_obj", "fs_flagged", "fs_refused", "sp_a_obj", "sp_b_obj", "sp_a_dir", "sp_b_dir",
 
         "pe_unresolved", "rc_pair", "nt_open", "prepare_header", "prepare_row", "prepare_lookup", "prepare_cursor",
         "deletion_classification", "deletion_classification_path", "observation_checkpoint",
@@ -248,6 +256,7 @@ internal static class StoreSchema
         Execute(connection, transaction, Ddl);
         Execute(connection, transaction, RehashDdl);
         Execute(connection, transaction, RetryDdl);
+        Execute(connection, transaction, LegacyFoldDdl);
         Execute(connection, transaction, FlaggedIndexDdl);
         Execute(connection, transaction, PrepareDdl);
         Execute(connection, transaction, ClassificationDdl);
@@ -276,6 +285,7 @@ internal static class StoreSchema
             throw new StateDamagedException($"v2 state schema version {version}, expected {Version}.");
         // Additive feature storage is presence-guarded on every compatible open, not gated by a version bump.
         Execute(connection, null, RetryDdl);
+        Execute(connection, null, LegacyFoldDdl);
         var names = new HashSet<string>(StringComparer.Ordinal);
         using (var command = Command(connection, null,
             "SELECT name FROM sqlite_master WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%';"))

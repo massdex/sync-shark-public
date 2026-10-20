@@ -163,7 +163,7 @@ public sealed partial class DropboxPilotClient
                 if (ignoreRules is null || !SyncIgnorePolicy.IsIgnored(entry.RelativePath,
                         entry.Kind == PilotEntryKind.Directory, ignoreRules))
                     throw new DropboxApiException(HttpStatusCode.Conflict,
-                        "Dropbox folder contains a nonignored item; it was not deleted.");
+                        "Dropbox folder contains a nonignored item; it was not deleted.") { WriteErrorTag = "conflict" };
             }
         }
         CheckChildren(listing.RootElement);

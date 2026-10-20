@@ -82,6 +82,7 @@ internal sealed partial class DropboxWire : HttpMessageHandler
     public Dictionary<string, string> NameWriteErrors { get; } = new(StringComparer.Ordinal);
     public List<string> AttemptedWritePaths { get; } = [];
     public bool UploadRefusalUsesReason { get; set; }
+    public Action? UploadSessionStarted { get; set; }
 
     /// <summary>Every list_folder scope, to distinguish subtree pruning from result filtering.</summary>
     public List<(string Path, bool Recursive)> ListRequests { get; } = new();

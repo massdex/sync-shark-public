@@ -57,6 +57,12 @@ internal static class FirstSyncChoicesState
         // excludes large held sets, whose authorization remains in the filtered SQLite rows.
         public string? NarrowedChoicesDigest { get; init; }
         public IReadOnlyList<string> NarrowedIgnoreRules { get; init; } = [];
+        /// <summary>
+        /// Set when a review action rewrote the choices without re-detecting the folders they cover (Choose folder).
+        /// The retained review no longer describes what the new rule applies to, so an apply must wait for a prepare
+        /// that detects folders under the new prefix.
+        /// </summary>
+        public bool NeedsReprepare { get; init; }
     }
 
     /// <summary>
@@ -115,9 +121,11 @@ internal static class FirstSyncChoicesState
     }
 
     /// <summary>
-    /// Replaces or removes one scoped rebuildable rule in the retained prepare, recomputing the digest so a later
-    /// apply must present the corrected choices. Returns false when no usable prepare or no such rule exists.
-    /// This changes only review metadata; it never deletes or moves a file.
+    /// Replaces or removes one scoped rebuildable rule in the retained prepare. Remove rule recomputes the digest,
+    /// because the removed rule matched nothing. Choose folder rewrites the rule but does not re-detect, so it marks
+    /// the retained review as needing a fresh prepare instead of rebinding the digest: the frozen folder set was
+    /// detected under the old prefix and must not authorize an apply under the new one. Returns false when no usable
+    /// prepare or no such rule exists. This changes only review metadata; it never deletes or moves a file.
     /// </summary>
     public static bool UpdateRebuildableRule(string productRoot, string pairId, IStateStore? store,
         RebuildableChoice current, RebuildableChoice? replacement)
@@ -127,6 +135,8 @@ internal static class FirstSyncChoicesState
         var choices = (prepared.RebuildableChoices ?? []).ToList();
         var index = choices.FindIndex(choice => SameRule(choice, current));
         if (index < 0) return false;
+        // A new prefix is a new scope; the prepare must detect its folders before an apply.
+        var needsReprepare = replacement is not null;
         if (replacement is null) choices.RemoveAt(index);
         else choices[index] = new RebuildableChoice(replacement.Id, replacement.Prefix.TrimEnd('/'));
         var frozen = prepared.Rebuildables.Select(entry => new RebuildableFolder(entry.Category, entry.Path, 0, 0))
@@ -138,18 +148,21 @@ internal static class FirstSyncChoicesState
                 string.Equals(choice.Side, "A", StringComparison.Ordinal) ? Side.A : Side.B,
                 string.Equals(choice.Action, FirstSyncChoices.RemoveAction, StringComparison.Ordinal))).ToArray(),
             choices);
-        var digest = prepared.NarrowedChoicesDigest is null
-            ? FirstSyncChoices.Digest(parsed, frozen, prepared.HeldDeletions)
-            : FirstSyncChoices.Digest(parsed, []);
+        var digest = needsReprepare ? null
+            : prepared.NarrowedChoicesDigest is null
+                ? FirstSyncChoices.Digest(parsed, frozen, prepared.HeldDeletions)
+                : FirstSyncChoices.Digest(parsed, []);
         var marker = "'" + current.Id + "' under '" + current.Prefix.TrimEnd('/') + "/'";
         var warnings = (prepared.Warnings ?? []).Where(warning => !warning.Contains(marker, StringComparison.Ordinal)).ToArray();
         var updated = prepared with
         {
-            Digest = prepared.NarrowedChoicesDigest is null ? digest : prepared.Digest,
-            NarrowedChoicesDigest = prepared.NarrowedChoicesDigest is null ? null : digest,
+            Digest = needsReprepare ? prepared.Digest : prepared.NarrowedChoicesDigest is null ? digest! : prepared.Digest,
+            NarrowedChoicesDigest = needsReprepare ? prepared.NarrowedChoicesDigest
+                : prepared.NarrowedChoicesDigest is null ? null : digest,
             Rebuildables = frozen.Select(folder => new StoredRebuildable(folder.Category, folder.Path)).ToArray(),
             RebuildableChoices = choices,
-            Warnings = warnings
+            Warnings = warnings,
+            NeedsReprepare = prepared.NeedsReprepare || needsReprepare
         };
         if (prepared.Database is { } database) database.UpdateSmall(updated);
         else WritePrepared(productRoot, pairId, updated);

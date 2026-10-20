@@ -127,8 +127,8 @@ public static class NoticeChoices
                new(OpenRecoverySettings, "Choose another Recovery location"), new(OpenFolderSettings, "Review destination folder"),
                new(RetryNow, "Check space again"), new(Ignore, "Ignore; exclude this path")]
             : notice.RebuildableRule is not null
-            ? [new(PreviewMatches, "Preview matches"), new(ChooseFolder, "Choose folder…", RequestsName: true),
-               new(RemoveRule, "Remove rule"), new(KeepRule, "Keep")]
+            ? [new(RetryNow, "Check again"), new(PreviewMatches, "Preview matches"), new(ChooseFolder, "Choose folder…", RequestsName: true),
+               new(RemoveRule, "Remove rule"), new(KeepRule, "Keep rule (ignore this notice)")]
             : notice.ReasonKey == "deletion-evidence-pending"
             ? [new(CheckHistoryAgain, "Check history again"), new(ReviewDeletion, "Review deletion evidence"),
                new(Ignore, "Keep this copy; stop syncing this path")]
