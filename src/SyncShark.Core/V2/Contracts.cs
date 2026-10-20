@@ -378,6 +378,9 @@ public sealed record RecoveryRecord(string RecoveryId, string PairId, string Act
 public sealed record ActionResult(string ActionId, Outcome Outcome, ItemState? NewA, ItemState? NewB,
     RecoveryRef? Recovery, string? Reason)
 {
+    /// <summary>Original failure code for run-level classification; no exception or provider payload retained.</summary>
+    public int? FailureHResult { get; init; }
+
     /// <summary>Fresh reconciliation proved only a temporary wait; null requires ordinary review.</summary>
     public int? RetryAfterSeconds { get; init; }
 

@@ -52,6 +52,16 @@ public partial class App : System.Windows.Application
             Shutdown(2);
             return;
         }
+        // Reversible opt-in while the remaining full-window screens are converted to IPC.
+        // This branch must precede the legacy product lock and preference stores.
+        if (useCoreV2 && args.Length == 0 && Environment.GetEnvironmentVariable("SYNCSHARK_SHARED_AUTOSYNC") == "1")
+        {
+            base.OnStartup(e);
+            ShutdownMode = ShutdownMode.OnMainWindowClose;
+            MainWindow = new SharedAutoSyncWindow();
+            MainWindow.Show();
+            return;
+        }
         if (args.Length == 3 && args[0] == "--move-data")
         {
             base.OnStartup(e);
@@ -96,7 +106,8 @@ public partial class App : System.Windows.Application
         {
             if (!ExistingWindowActivation.TryRaise(explorerRequest))
                 AppDialogWindow.Inform(null, "Sync Shark is already running",
-                    "The existing Sync Shark window is still available from the notification area.", exception.Message);
+                    useCoreV2 ? "Another GUI or the shared background host owns Sync Shark. Use SYNCSHARK_SHARED_AUTOSYNC=1 to open the client, or run autosync stop before opening this legacy window."
+                        : "The existing Sync Shark window is still available from the notification area.", exception.Message);
             Shutdown();
             return;
         }

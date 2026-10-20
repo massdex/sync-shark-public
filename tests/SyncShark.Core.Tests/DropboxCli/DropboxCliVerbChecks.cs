@@ -442,7 +442,7 @@ internal static class DropboxCliVerbChecks
                 "v2 whoami is authenticated and rooted at the retained account");
 
             var unknown = await SyncCliRegistry.DispatchAsync(v2, SyncCliRegistry.Parse(
-                    ["--cli", "dropbox", "ls", "--account", "connection-000000000000000000000000", "--path", "/",
+                    ["--cli", "dropbox", "ls", "--account", "connection-fixture-1", "--path", "/",
                         "--json"]), TextWriter.Null, CancellationToken.None)
                 .ContinueWith(task => task.Exception?.GetBaseException());
             Require(unknown is SyncCliTargetException && wire.Requests.Count == 3,

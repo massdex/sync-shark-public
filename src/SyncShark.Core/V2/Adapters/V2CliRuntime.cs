@@ -16,6 +16,10 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
     private readonly string _productRoot;
     // The production composition owns the store and the long-poll HTTP client; the runtime disposes it as a whole.
     private EngineComposition? _composition;
+    private bool _borrowed;
+
+    internal static V2CliRuntime Borrow(PilotInstanceLock authority, EngineComposition composition, string root) =>
+        new(authority, composition.Store, composition.Run, composition.Roots, root) { _borrowed = true };
 
     // The Dropbox endpoints' client: one per process, like the v1 CLI. Its timeout sits above the explicit batch
     // operation timeout, so a slow finish_batch_v2 or delete_batch is bounded by that timeout, never by the
@@ -706,6 +710,7 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
     /// <inheritdoc />
     public async ValueTask DisposeAsync()
     {
+        if (_borrowed) return; // The host, not a disconnected client, owns the engine and authority lease.
         if (_composition is not null) _composition.Dispose();
         else _store.Dispose();
         _dropboxHttp?.Dispose();

@@ -525,6 +525,7 @@ internal sealed class InMemoryStateStore : IStateStore
                     known.RetainedVersion?.ActionId == notice.RetainedVersion?.ActionId);
                 if (same is not null)
                 {
+                    if (NoticeChoices.IsRetryNotice(notice) && _closedNotices.GetValueOrDefault(same.NoticeId!) == "ignore") continue;
                     if (notice.RetainedVersion is null) _closedNotices.Remove(same.NoticeId!);
                     // These standing notices refresh their current details without changing problem identity.
                     if ((notice.Kind == NoticeKind.UserDecision && notice.Detail.Contains(ProviderNameRefusedException.Detail, StringComparison.Ordinal)) || notice.FreeSpace is not null ||
@@ -569,9 +570,59 @@ internal sealed class InMemoryStateStore : IStateStore
         }
     }
 
+    public void CloseNoticeFamily(string pairId, string reasonPrefix, string? exceptReason = null)
+    {
+        lock (_gate)
+            foreach (var n in _notices.Where(n => n.PairId == pairId && n.ReasonKey?.StartsWith(reasonPrefix, StringComparison.Ordinal) == true && n.ReasonKey != exceptReason))
+                _closedNotices[n.NoticeId!] = "resolved";
+    }
+
     public void CloseNotice(string noticeId, string? choice)
     {
         lock (_gate) _closedNotices[noticeId] = choice;
+    }
+
+    private readonly List<RunSummary> _runHistory = [];
+    private long _runSequence;
+
+    public Action<RunSummary>? BeforeRecordSummary { get; set; }
+
+    public void RecordRunSummary(RunSummary summary)
+    {
+        lock (_gate)
+        {
+            BeforeRecordSummary?.Invoke(summary);
+            if (_runHistory.Any(row => row.RunId == summary.RunId)) return;
+            _runHistory.Add(summary with { Seq = ++_runSequence });
+        }
+    }
+
+    public IReadOnlyList<RunSummary> ReadRunHistory(string? pairId = null, int limit = 50, long before = 0)
+    {
+        lock (_gate)
+            return _runHistory
+                .Where(row => pairId is null || row.PairId == pairId)
+                .Where(row => before == 0 || row.Seq < before)
+                .OrderByDescending(row => row.Seq).Take(limit).ToArray();
+    }
+
+    public IReadOnlyList<RunSummary> ReadRunHistoryAfter(long after, int limit = 50)
+    {
+        lock (_gate)
+            return _runHistory.Where(row => row.Seq > after).OrderBy(row => row.Seq).Take(limit).ToArray();
+    }
+
+    public IReadOnlyList<RunSummary> ReadRunHistoryPage(string? pairId, int limit, int offset)
+    {
+        lock (_gate)
+            return _runHistory
+                .Where(row => pairId is null || row.PairId == pairId)
+                .OrderByDescending(row => row.Seq).Skip(offset).Take(limit).ToArray();
+    }
+
+    public RunSummary? RunSummaryById(string runId)
+    {
+        lock (_gate) return _runHistory.FirstOrDefault(row => row.RunId == runId);
     }
 
     /// <summary>The choice recorded when a notice was closed, or null when it is still open; a test-only reader.</summary>

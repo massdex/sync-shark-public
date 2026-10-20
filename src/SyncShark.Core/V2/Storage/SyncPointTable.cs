@@ -39,18 +39,26 @@ internal sealed class SyncPointTable
         return Baselines(pairId, rows);
     }
 
-    internal IReadOnlyList<Baseline> DateRepairPage(string pairId, long pairNo, string after, int limit,
-        Side side, DateOnly? localDate)
+    internal IReadOnlyList<Baseline> DateRepairPage(string pairId, long pairNo, long localRootNo, long cloudRootNo,
+        string after, int limit, Side side, DateOnly? localDate, DateRepairBound? from, DateRepairBound? to, bool mismatch)
     {
-        var local = side == Side.A ? "a_mtime" : "b_mtime";
-        var cloud = side == Side.A ? "b_mtime" : "a_mtime";
-        var start = localDate?.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc).Ticks ?? 0;
-        var end = localDate?.AddDays(1).ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc).Ticks ?? DateTime.MaxValue.Ticks;
+        var local = side == Side.A ? "a" : "b";
+        var cloud = side == Side.A ? "b" : "a";
+        string Dir(string s) => s == "a" ? "sp.a_dir" : "COALESCE(sp.b_dir,sp.a_dir)";
+        string Name(string s) => s == "a" ? "sp.a_name" : "COALESCE(sp.b_name,sp.a_name)";
+        string Key(string s) => s == "a" ? "sp.a_name_key" : "COALESCE(sp.b_name_key,sp.a_name_key)";
+        var (start, end) = DateRepair.UtcRange(localDate, from, to, TimeZoneInfo.Local);
+        var gap = $"lf.mtime-COALESCE(cf.mtime,sp.{cloud}_mtime)";
+        if (mismatch) gap = $"abs({gap})";
+        // Indexed path joins: the baseline supplies correspondence, not the current local download date.
         return Baselines(pairId, Query(null,
-            $"SELECT {Columns} FROM {From} WHERE sp.pair_no=$p AND sp.object_key>$after AND sp.kind=0 " +
-            $"AND sp.{local}-sp.{cloud}>=$gap AND sp.{local}>=$start AND sp.{local}<$end " +
-            "ORDER BY sp.object_key LIMIT $limit;", [("$p", pairNo), ("$after", after), ("$limit", limit),
-                ("$gap", TimeSpan.TicksPerDay), ("$start", start), ("$end", end)]));
+            $"SELECT {Columns} FROM {From} " +
+            $"JOIN file_state lf ON lf.root_no=$lr AND lf.dir_no={Dir(local)} AND lf.name_key={Key(local)} AND lf.name={Name(local)} " +
+            $"LEFT JOIN file_state cf ON cf.root_no=$cr AND cf.dir_no={Dir(cloud)} AND cf.name_key={Key(cloud)} AND cf.name={Name(cloud)} " +
+            $"WHERE sp.pair_no=$p AND sp.object_key>$after AND sp.kind=0 AND lf.kind=0 " +
+            $"AND {gap}>=$gap AND lf.mtime>=$start AND lf.mtime<$end " +
+            "ORDER BY sp.object_key LIMIT $limit;", [("$p", pairNo), ("$lr", localRootNo), ("$cr", cloudRootNo),
+                ("$after", after), ("$limit", limit), ("$gap", TimeSpan.TicksPerDay), ("$start", start), ("$end", end)]));
     }
 
     /// <summary>Exact indexed path lookups, never descendants; includes compact same-path B baselines.</summary>

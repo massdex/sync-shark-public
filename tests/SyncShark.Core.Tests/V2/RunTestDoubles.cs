@@ -96,11 +96,16 @@ internal sealed class CountingWriter : IEndpointWriter, IRecoveryAvailability
 
     public CountingWriter(FakeEndpoint inner) => _inner = inner;
 
-    public int Puts { get; private set; }
-    public int Moves { get; private set; }
-    public int Deletes { get; private set; }
-    public int MkDirs { get; private set; }
-    public int Preserves { get; private set; }
+    private int _puts;
+    public int Puts => Volatile.Read(ref _puts);
+    private int _moves;
+    public int Moves => Volatile.Read(ref _moves);
+    private int _deletes;
+    public int Deletes => Volatile.Read(ref _deletes);
+    private int _mkDirs;
+    public int MkDirs => Volatile.Read(ref _mkDirs);
+    private int _preserves;
+    public int Preserves => Volatile.Read(ref _preserves);
     public int Calls => Puts + Moves + Deletes + MkDirs + Preserves;
     public Action<string>? OnRead { get; set; }
 
@@ -133,7 +138,7 @@ internal sealed class CountingWriter : IEndpointWriter, IRecoveryAvailability
     public async Task<ItemState> PutAsync(SyncAction a, Stream content, CancellationToken ct)
     {
         await ParkUnlessFirstAsync(ct).ConfigureAwait(false);
-        Puts++;
+        Interlocked.Increment(ref _puts);
         if ((PutFailure?.Invoke(a) ?? PutError) is { } error) throw error;
         return await _inner.PutAsync(a, content, ct).ConfigureAwait(false);
     }
@@ -141,27 +146,27 @@ internal sealed class CountingWriter : IEndpointWriter, IRecoveryAvailability
     public async Task<ItemState> MoveAsync(SyncAction a, CancellationToken ct)
     {
         await ParkUnlessFirstAsync(ct).ConfigureAwait(false);
-        Moves++;
+        Interlocked.Increment(ref _moves);
         return await _inner.MoveAsync(a, ct).ConfigureAwait(false);
     }
 
     public async Task DeleteAsync(SyncAction a, CancellationToken ct)
     {
         await ParkUnlessFirstAsync(ct).ConfigureAwait(false);
-        Deletes++;
+        Interlocked.Increment(ref _deletes);
         await _inner.DeleteAsync(a, ct).ConfigureAwait(false);
     }
 
     public async Task<ItemState> MkDirAsync(string path, CancellationToken ct)
     {
         await ParkUnlessFirstAsync(ct).ConfigureAwait(false);
-        MkDirs++;
+        Interlocked.Increment(ref _mkDirs);
         return await _inner.MkDirAsync(path, ct).ConfigureAwait(false);
     }
 
     public Task<RecoveryRef> PreserveAsync(ItemState victim, string actionId, CancellationToken ct)
     {
-        Preserves++;
+        Interlocked.Increment(ref _preserves);
         return _inner.PreserveAsync(victim, actionId, ct);
     }
 
@@ -457,6 +462,19 @@ internal sealed class RecordingStore : IStateStore
     public IReadOnlyList<RecoveryRecord> Recoveries(string pairId) => _inner.Recoveries(pairId);
 
     public void CloseNotice(string noticeId, string? choice) => _inner.CloseNotice(noticeId, choice);
+
+    public void RecordRunSummary(RunSummary summary) => _inner.RecordRunSummary(summary);
+
+    public IReadOnlyList<RunSummary> ReadRunHistory(string? pairId = null, int limit = 50, long before = 0) =>
+        _inner.ReadRunHistory(pairId, limit, before);
+
+    public IReadOnlyList<RunSummary> ReadRunHistoryAfter(long after, int limit = 50) =>
+        _inner.ReadRunHistoryAfter(after, limit);
+
+    public IReadOnlyList<RunSummary> ReadRunHistoryPage(string? pairId, int limit, int offset) =>
+        _inner.ReadRunHistoryPage(pairId, limit, offset);
+
+    public RunSummary? RunSummaryById(string runId) => _inner.RunSummaryById(runId);
 
     public void StoreDeletionEvidence(string pairId, string rootId, IReadOnlyList<DeletionEvidenceRecord> results) =>
         _inner.StoreDeletionEvidence(pairId, rootId, results);

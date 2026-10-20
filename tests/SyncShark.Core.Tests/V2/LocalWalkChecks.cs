@@ -24,6 +24,7 @@ internal static class LocalWalkChecks
         await FlushFailurePreservesOutcomeAsync(paused: true);
         await FlushFailurePreservesOutcomeAsync(paused: false);
         await NoJournalAsync();
+        await TransientCheckpointKeepsCursorAsync();
         await SameRootWaitsAsync();
         BatchAndCompactRows();
     }
@@ -301,6 +302,20 @@ internal static class LocalWalkChecks
         var snapshot = await inventory.FullAsync(1, _ => true, null!, CancellationToken.None);
         LocalChecks.Require(snapshot.Items.Count == 2 && sql.LocalWalkPageCount("root-local") == 0,
             "non-journal volumes still complete normal full inventories");
+    }
+
+    private static async Task TransientCheckpointKeepsCursorAsync()
+    {
+        var root = Fresh("transient-checkpoint");
+        LocalChecks.Seed(root, "file.txt", "payload");
+        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System);
+        var gen = sql.BeginGeneration("root-local", "full");
+        sql.CompleteGeneration(gen, Start.Cursor, true);
+        var inventory = Inventory(root, sql, Start);
+        inventory.WalkCheckpointForTest = () => null; // unreadable, not a deleted journal
+        var snapshot = await inventory.FullAsync(sql.BeginGeneration("root-local", "full"), _ => true, null!, default);
+        LocalChecks.Require(snapshot.CursorAfter == Start.Cursor && ((ILocalGapStore)sql).GapEpoch("root-local") is null,
+            "transient full-walk checkpoint failure retains saved cursor without starting an untrusted gap");
     }
 
     private static async Task SameRootWaitsAsync()

@@ -432,6 +432,11 @@ internal static partial class CliChecks
 
     internal static async Task RunAsync(string root, string? capabilitiesPath = null)
     {
+        foreach (var command in new[] { "install-startup", "uninstall-startup" })
+        {
+            var invocation = SyncCliRegistry.Parse(["--cli", "autosync", command]);
+            Require(invocation.Command == "autosync " + command, "startup capability parses without opening state or changing registration");
+        }
         Require(SyncCliRegistry.Rows.Single(row => row.Command == "queue list").Effect.Contains(
                     "current pairs", StringComparison.Ordinal) &&
                 SyncCliRegistry.Rows.Single(row => row.Command == "queue list").Effect.Contains(
@@ -439,6 +444,12 @@ internal static partial class CliChecks
                 SyncCliRegistry.Rows.Single(row => row.Command == "attention list").Effect.Contains(
                     "current pending count", StringComparison.Ordinal),
             "The one help/capability registry distinguishes current work from preserved retired history.");
+        Require(!SyncCliRegistry.Rows.Single(row => row.Command == "dates report-mismatch").Mutating,
+            "date mismatch export is read-only");
+        var dates = SyncCliRegistry.Parse(["--cli", "dates", "repair", "--pair", "test", "--dry-run",
+            "--from", "2026-10-17T14:00", "--to", "2026-10-17T17:00", "--exclude-list", "exclude.txt"]);
+        Require(dates.Value("--from") == "2026-10-17T14:00" && dates.Value("--to") == "2026-10-17T17:00" && dates.Value("--exclude-list") == "exclude.txt",
+            "dates repair exposes inclusive local date range");
         PairRemoveRegistryChecks();
         await CliDeadlineChecks.RunAsync();
         Require(SyncCliRegistry.Rows.Single(row => row.Command == "pairs edit").Effect.Contains(
@@ -1715,7 +1726,7 @@ internal static partial class CliChecks
                 secondaryItems.All(item => !item!["relativePath"]!.GetValue<string>().StartsWith("item-", StringComparison.Ordinal)),
             "legacy observations without recorded account identity remain in All Accounts and are not attributed from the pair's current binding");
 
-        var unknownAccount = await fixture.RunAsync("--cli", "activity", "list", "--account", "connection-000000000000000000000000");
+        var unknownAccount = await fixture.RunAsync("--cli", "activity", "list", "--account", "connection-unknown-fixture");
         Expect("activity list --account unknown fails 4", unknownAccount, 4);
 
         var limited = await fixture.RunAsync("--cli", "activity", "list", "--limit", "1", "--json");

@@ -9,6 +9,8 @@ internal static partial class RunChecks
 {
     public static async Task RunAsync()
     {
+        await ItemIgnoreWaitsForSettingsSaveAsync();
+        await HistoryFailureDoesNotFailCompletedRunAsync();
         PairMissing_Refused();
         DisabledPair_Refused();
         FirstSyncNotDone_Refused();
@@ -169,6 +171,83 @@ internal static partial class RunChecks
         Console.WriteLine("PASS FirstSync_PreviewIsEffectFree");
     }
 
+    internal static async Task PairNoticeIgnoreDoesNotWaitForRunAsync()
+    {
+        var fx = Build();
+        fx.Store.MarkFirstSyncDone(fx.Pair.PairId);
+        fx.A.Seed("one.txt", "one"); fx.A.Seed("two.txt", "two");
+        fx.WriterB.ParkAfterFirstEffect = true;
+        var run = fx.Run();
+        var pending = run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        try
+        {
+            await fx.WriterB.FirstEffectCommitted.Task.WaitAsync(GateTimeout);
+            fx.Store.AddNotices([new Notice(fx.Pair.PairId, 0, NoticeKind.Info, "", "Reconnect and Retry", "autosync-failed-account-access")]);
+            var notice = fx.Store.OpenNotices(fx.Pair.PairId).Single(n => NoticeChoices.IsPairRetryNotice(n));
+            var runtime = new V2CliRuntime(null, fx.Store, run, new EndpointRootProbe(fx.Provider), Path.GetTempPath());
+            await runtime.ResolveConflictAsync(fx.Pair.PairId, "", NoticeChoices.Ignore, notice.NoticeId, 0, null, default).WaitAsync(TimeSpan.FromSeconds(2));
+            Require(fx.Store.NoticeById(fx.Pair.PairId, notice.NoticeId!) is { Closed: true }, "pair Ignore closes the notice");
+            Require(!pending.IsCompleted && fx.Store.Pair(fx.Pair.PairId)!.Excluded.Count == 0,
+                "Ignore responds while the run remains active and never excludes the root");
+        }
+        finally { await run.StopAsync(); await pending; }
+        Console.WriteLine("PASS pair notice Ignore bypasses the active run gate");
+    }
+
+    internal static async Task ItemIgnoreWaitsForSettingsSaveAsync()
+    {
+        var fx = Build();
+        var run = fx.Run();
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim();
+        // This uses the production run gate and deliberately saves the stale run-start pair
+        // exactly as PersistRebuildables does. No timing assumptions or real providers.
+        var pending = Task.Run(() => run.UpdatePairSettingsAsync(() =>
+        {
+            var snapshot = fx.Store.Pair(fx.Pair.PairId)!;
+            started.SetResult();
+            if (!release.Wait(GateTimeout)) throw new TimeoutException("test run was not released");
+            fx.Store.SavePair(snapshot with { Excluded = ["generated"] });
+        }, default));
+        await started.Task.WaitAsync(GateTimeout);
+        fx.Store.AddNotices([new Notice(fx.Pair.PairId, 0, NoticeKind.Info, "failed.txt", "Retry this item", "sync-retry")]);
+        var notice = fx.Store.OpenNotices(fx.Pair.PairId).Single();
+        var runtime = new V2CliRuntime(null, fx.Store, run, new EndpointRootProbe(fx.Provider), Path.GetTempPath());
+        var ignored = runtime.ResolveConflictAsync(fx.Pair.PairId, "failed.txt", NoticeChoices.Ignore, notice.NoticeId, 0, null, default);
+        try
+        {
+            Require(!ignored.IsCompleted, "item Ignore waits behind the active run gate");
+            // A run may also resolve the original notice while the user's exclusion is queued.
+            fx.Store.CloseNotice(notice.NoticeId!, "resolved");
+        }
+        finally { release.Set(); }
+        await pending.WaitAsync(GateTimeout);
+        await ignored.WaitAsync(GateTimeout);
+        var exclusions = fx.Store.Pair(fx.Pair.PairId)!.Excluded;
+        Require(exclusions.Contains("generated") && exclusions.Contains("failed.txt"), "both run settings and queued exclusion survive");
+        Console.WriteLine("PASS ItemIgnoreWaitsForSettingsSave");
+    }
+
+    internal static async Task HistoryFailureDoesNotFailCompletedRunAsync()
+    {
+        using var store = new InMemoryStateStore { BeforeRecordSummary = _ => throw new IOException("history write unavailable") };
+        var fx = Build(suppliedStore: store);
+        fx.A.Seed("file.txt", "content");
+        var report = await FirstSyncAsync(fx.Run(), fx);
+        Require(report.Outcome == RunOutcomes.Complete && report.Done == 1, "history failure leaves the successful run outcome unchanged");
+        var notice = store.OpenNotices(fx.Pair.PairId).Single(n => n.ReasonKey == "run-history-unavailable");
+        Require(NoticeChoices.Options(notice).Any(o => o.Choice == NoticeChoices.RetryNow), "history failure offers a retry notice");
+        await MirrorAsync(fx);
+        var empty = await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        Require(empty.Done == 0 && store.OpenNotices(fx.Pair.PairId).Any(n => n.ReasonKey == "run-history-unavailable"),
+            "an empty poll does not clear a history failure without a successful history write");
+        store.BeforeRecordSummary = null;
+        fx.A.Seed("another.txt", "more content");
+        await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        Require(store.OpenNotices(fx.Pair.PairId).All(n => n.ReasonKey != "run-history-unavailable"), "a later summary write clears the history notice");
+        Console.WriteLine("PASS HistoryFailureDoesNotFailCompletedRun");
+    }
+
     private static async Task FirstSync_ApplyThenIncrementalIsEmptyAsync()
     {
         var fx = Build();
@@ -181,6 +260,12 @@ internal static partial class RunChecks
         await MirrorAsync(fx);
         var again = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
         Require(again.Done == 0 && again.Outcome == RunOutcomes.Complete, "the next run finds nothing to do");
+        // each finished run leaves exactly one bounded summary, newest first.
+        var history = fx.Store.ReadRunHistory(null, 10);
+        Require(history.Count == 1 && history.All(row => row.PairId == fx.Pair.PairId &&
+                row.Outcome == RunOutcomes.Complete && row.CompletedUtc >= row.StartedUtc),
+            "meaningful runs retain a summary; empty successful safety polls do not flood history");
+        Require(history[0].Seq > 0, "retained summary has a unique sequence");
         Console.WriteLine("PASS FirstSync_ApplyThenIncrementalIsEmpty");
     }
 
@@ -485,6 +570,8 @@ internal static partial class RunChecks
         fx.Provider.AddInventory(fx.Pair.B, new ScriptedInventory(fx.B) { ChangesError = new EndpointAccessException("revoked") });
         await ExpectAsync<EndpointAccessException>(() =>
             run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None));
+        Require(fx.Store.ReadRunHistory(fx.Pair.PairId, 1).Single().Outcome == RunOutcomes.Failed,
+            "a failed run leaves a retained summary");
         Console.WriteLine("PASS AccessLost_ScanPropagates");
     }
 
@@ -631,7 +718,7 @@ internal static partial class RunChecks
         fx.Recorder!.ResetCounters();
         var report = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
         Require(report.Done == 0 && report.Outcome == RunOutcomes.Complete, "a steady-state run has nothing to do");
-        Require(fx.Recorder.ChangeRows == 0, "a steady-state run writes no rows");
+        Require(fx.Recorder.ChangeRows == 0, "a steady-state run writes no sync-state rows (its run summary is history)");
         Console.WriteLine("PASS Incremental_NoChanges_WritesNothing");
     }
 
@@ -966,6 +1053,8 @@ internal static partial class RunChecks
         Require(report.Outcome == RunOutcomes.Stopped, "a stopped run reports stopped");
         Require(fx.Store.Cursor(fx.Pair.A.RootId) == before, "a stopped run does not advance the cursor");
         Require(fx.Store.Baselines(fx.Pair.PairId).Count > 0, "finished work is kept");
+        Require(fx.Store.ReadRunHistory(fx.Pair.PairId, 1).Single().Outcome == RunOutcomes.Stopped,
+            "a stopped run leaves a retained summary");
         Console.WriteLine("PASS Stop_KeepsFinishedWork");
     }
 

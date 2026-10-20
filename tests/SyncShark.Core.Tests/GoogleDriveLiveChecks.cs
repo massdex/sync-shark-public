@@ -10,9 +10,9 @@ internal static class GoogleDriveLiveChecks
 {
     // The exact-fixture sharing inspect is an opt-in test harness read only. These are the approved
     // acceptance identities, and the mode refuses anything else before it opens product state.
-    internal const string ApprovedSharingConnectionId = "gdrive-connection-a00000000000000000000000";
-    internal const string ApprovedSharingFolderId = "1AHj7vZxy2f9f2TrJaPA-bsMTgdjZB0Lp";
-    internal const string ApprovedSharingFileId = "1BaiZWwgU5gRPofYRkTkfNfSigXc9_LfG";
+    internal static string ApprovedSharingConnectionId => Environment.GetEnvironmentVariable("SYNCSHARK_LIVE_GOOGLE_CONNECTION") ?? "gdrive-connection-fixture-2";
+    internal static string ApprovedSharingFolderId => Environment.GetEnvironmentVariable("SYNCSHARK_LIVE_GOOGLE_FOLDER") ?? "folder-test-fixture";
+    internal static string ApprovedSharingFileId => Environment.GetEnvironmentVariable("SYNCSHARK_LIVE_GOOGLE_FILE") ?? "file-test-fixture";
 
     // The expected live acceptance account is never committed. Each live mode skips visibly
     // (and stays on exit code 0) when the operator has not supplied it.

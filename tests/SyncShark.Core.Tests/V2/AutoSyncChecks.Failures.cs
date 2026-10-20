@@ -6,13 +6,117 @@ internal static partial class AutoSyncChecks
 {
     private static async Task FailureChecksAsync()
     {
+        await LoopExceptionAndNoticeRecoveryAsync();
+        await ImmediateAccessNoticeAsync();
+        await ImmediateDiskFullReportAsync();
+        await OutageCauseChangesStayIgnoredAsync();
         await ForeignCancellation_RetriesAsync();
-        await AccessFault_HeldWithoutRearmAsync();
+        await AccessFault_RetriesAtSafetyPollAsync();
         await DyingWatches_BoundedRebuildsAsync();
         await SlowCancelWatches_NeverOverlapAsync();
         await RealRunGate_PausedQueuedNeverScansAsync();
         await ThrowingWatch_IsDeadWatchAsync();
         await ZeroSafetyPoll_UsesMinimumAsync();
+    }
+
+    internal static async Task LoopExceptionAndNoticeRecoveryAsync()
+    {
+        await using var rig = await Rig.StartedAsync();
+        rig.ThrowEligibility = true;
+        rig.Auto.Kick("p1");
+        await Until(() => !rig.ThrowEligibility && rig.Clock.ActiveTimers == 1, "unexpected loop fault backs off");
+        rig.Clock.Advance(Settings.MinSafetyPoll);
+        await rig.ParkedAsync(AutoStatus.Waiting);
+        rig.Clock.Advance(Settings.ChangeQuietWindow);
+        await rig.ParkedAsync(AutoStatus.Idle);
+        Require(rig.Run.Runs("p1") == 2, "pair loop survives an unexpected exception without a Kick");
+        for (var i = 0; i < 4; i++) rig.Run.Then(new IOException("test provider unavailable"));
+        rig.WatchA.Signal();
+        await rig.ParkedAsync(AutoStatus.Waiting);
+        rig.Clock.Advance(Settings.ChangeQuietWindow);
+        await Until(() => rig.Run.Runs("p1") == 3 && rig.State("p1").RetryAt > rig.Clock.GetUtcNow() && rig.Clock.ActiveTimers == 1, "first failed run waits");
+        Require(rig._store.OpenNotices("p1").Count == 0, "one transient failure is silent");
+        for (var i = 1; i < 4; i++)
+        {
+            var expected = 3 + i;
+            rig.Clock.Advance(rig.State("p1").RetryAt!.Value - rig.Clock.GetUtcNow());
+            await Until(() => rig.Run.Runs("p1") == expected && rig.State("p1").RetryAt > rig.Clock.GetUtcNow() && rig.Clock.ActiveTimers == 1, "failed run retries");
+        }
+        var notices = rig._store.OpenNotices("p1");
+        Require(notices.Count == 1 && NoticeChoices.Options(notices[0]).Select(o => o.Choice).SequenceEqual(new[] { NoticeChoices.RetryNow, NoticeChoices.Ignore }),
+            "repeated failures dedupe with Retry and Ignore, never root exclusion");
+        rig.Clock.Advance(SafetyPoll);
+        await rig.ParkedAsync(AutoStatus.Idle);
+        Require(rig._store.OpenNotices("p1").Count == 0, "success automatically clears the outage notice");
+        Pass("LoopExceptionAndNoticeRecovery");
+    }
+
+    internal static async Task ImmediateAccessNoticeAsync()
+    {
+        await using var rig = new Rig(["p1"]);
+        rig.Run.Then(new EndpointAccessException("account authorization was revoked"));
+        await rig.StartAsync();
+        await rig.ParkedAsync(AutoStatus.Held);
+        var notice = rig._store.OpenNotices("p1").Single();
+        Require(notice.ReasonKey == "autosync-failed" && notice.Detail.Contains("Reconnect", StringComparison.Ordinal),
+            "first auth failure immediately explains the reconnect fix");
+        Pass("ImmediateAccessNotice");
+    }
+
+    internal static async Task ImmediateDiskFullReportAsync()
+    {
+        await using var rig = new Rig(["p1"]);
+        rig.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Failed, 0,
+            new ActionResult("effect", Outcome.Failed, null, null, null, "disk full")
+                { FailureHResult = unchecked((int)0x80070070) }));
+        await rig.StartAsync();
+        await rig.ParkedAsync(AutoStatus.Waiting);
+        Require(rig._store.OpenNotices("p1").Single().Detail.Contains("disk-full", StringComparison.Ordinal),
+            "a failed report preserves disk-full classification and raises it immediately");
+        Pass("ImmediateDiskFullReport");
+    }
+
+    internal static async Task OutageCauseChangesStayIgnoredAsync()
+    {
+        await using var rig = await Rig.StartedAsync();
+        async Task Fail(Exception error)
+        {
+            var before = rig.Run.Runs("p1");
+            rig.Run.Then(error);
+            if (rig.State("p1").RetryAt is { } retryAt)
+            {
+                // Waiting already describes the previous failure's backoff. A Kick followed by
+                // Parked(Waiting) can observe that OLD wait before the Kick is consumed, then
+                // advance the clock before the new debounce timer exists. Exercise automatic
+                // retries instead: the previous Fail has joined the parked retry timer.
+                rig.Clock.Advance(retryAt - rig.Clock.GetUtcNow());
+            }
+            else
+            {
+                rig.WatchA.Signal();
+                await rig.ParkedAsync(AutoStatus.Waiting);
+                rig.Clock.Advance(Settings.ChangeQuietWindow);
+            }
+            await Until(() => rig.Run.Runs("p1") == before + 1 && rig.State("p1").RetryAt > rig.Clock.GetUtcNow() &&
+                rig.Clock.ActiveTimers == 1, "failure is parked");
+        }
+        for (var i = 0; i < 3; i++) await Fail(new HttpRequestException("network unavailable"));
+        var notice = rig._store.OpenNotices("p1").Single();
+        rig._store.CloseNotice(notice.NoticeId!, NoticeChoices.Ignore);
+        for (var i = 0; i < 4; i++)
+        {
+            await Fail(i % 2 == 0 ? new IOException("socket unavailable") : new HttpRequestException("network unavailable"));
+            Require(rig._store.OpenNotices("p1").Count == 0, "each cause change preserves Ignore in one outage");
+        }
+        var beforeRecovery = rig.Run.Runs("p1");
+        rig.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Failed, 0,
+            new ActionResult("item", Outcome.Failed, null, null, null, "item permission denied")) with { ProviderReached = true });
+        rig.Clock.Advance(rig.State("p1").RetryAt!.Value - rig.Clock.GetUtcNow());
+        await Until(() => rig.Run.Runs("p1") == beforeRecovery + 1 && rig.State("p1").RetryAt > rig.Clock.GetUtcNow() &&
+            rig.Clock.ActiveTimers == 1, "provider recovery with failed items is parked");
+        for (var i = 0; i < 3; i++) await Fail(new HttpRequestException("second outage"));
+        Require(rig._store.OpenNotices("p1").Count == 1, "success resets Ignore for the next outage");
+        Pass("OutageCauseChangesStayIgnored");
     }
 
     private static async Task ThrowingWatch_IsDeadWatchAsync()
@@ -83,21 +187,21 @@ internal static partial class AutoSyncChecks
         Pass("ForeignCancellation_Retries");
     }
 
-    private static async Task AccessFault_HeldWithoutRearmAsync()
+    private static async Task AccessFault_RetriesAtSafetyPollAsync()
     {
         await using var rig = await Rig.StartedAsync();
         rig.WatchA.Fail(new EndpointAccessException("revoked", new HttpRequestException("401")));
         await Until(() => rig.Status("p1") == AutoStatus.Held, "a watch that lost access holds the pair");
         Require(rig.State("p1").Reason?.Key == AutoSyncReasons.AccountAccess.Key,
             "the access error survives unwrapping (not its inner provider error)");
-        rig.Clock.Advance(SafetyPoll * 3);
-        Require(rig.Watches.Created == 2 && rig.Run.Runs("p1") == 1, "no re-arm and no run until Kick");
-        rig.Auto.Kick("p1");
+        await Until(() => rig.Clock.ActiveTimers == 1, "auth hold has a safety timer");
+        rig.Clock.Advance(SafetyPoll);
+
         await rig.ParkedAsync(AutoStatus.Waiting);
         rig.Clock.Advance(Settings.ChangeQuietWindow);
         await rig.ParkedAsync(AutoStatus.Idle);
-        Require(rig.Run.Runs("p1") == 2, "Kick (reconnect) re-arms and runs once");
-        Pass("AccessFault_HeldWithoutRearm");
+        Require(rig.Run.Runs("p1") == 2, "auth hold automatically retries at the safety poll");
+        Pass("AccessFault_RetriesAtSafetyPoll");
     }
 
     private static async Task DyingWatches_BoundedRebuildsAsync()

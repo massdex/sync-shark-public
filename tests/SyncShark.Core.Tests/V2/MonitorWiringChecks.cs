@@ -9,7 +9,7 @@ namespace Massdex.SyncShark.V2;
 /// </summary>
 internal static class MonitorWiringChecks
 {
-    private const string Connection = "connection-a00000000000000000000000";
+    private const string Connection = "connection-fixture-3";
     private static readonly TimeSpan SettleBound = TimeSpan.FromSeconds(2);
 
     public static async Task RunAsync(string root)
@@ -129,7 +129,7 @@ internal static class MonitorWiringChecks
         preferences = new UiPreferences("System");
         await Task.Yield();
         Require(Projected(host, "p1") == "Paused", "a lapsed account pause leaves the pair parked until a Kick");
-        host.KickAutoSyncForAccount("connection-b00000000000000000000000");
+        host.KickAutoSyncForAccount("connection-fixture-5");
         await Task.Yield();
         Require(Projected(host, "p1") == "Paused", "a Kick for another account does not wake this account's pair");
         host.KickAutoSyncForAccount(Connection);

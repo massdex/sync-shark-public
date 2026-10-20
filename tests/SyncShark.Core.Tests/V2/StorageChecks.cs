@@ -85,6 +85,7 @@ internal static partial class StorageChecks
         ProviderCheckpoint_ReopenUncertainDone(root);
         Both(root, "notices", NoticesIdempotent);
         PruneRemovesHistory(root);
+        RunHistoryChecks(root);
         PairRemovalChecks(root);
         ShortIdDeterministic();
         StorageChecksScale.Run(root);

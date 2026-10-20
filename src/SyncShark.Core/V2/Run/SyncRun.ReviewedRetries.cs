@@ -25,8 +25,10 @@ public sealed partial class SyncRun
                         "The reviewed removal no longer matches its saved item or contents. Nothing was removed or copied back." + NoticeChoices.RemovalAttentionHelp,
                         actions.Any(FolderDelete.Expands) ? "reviewed-folder-grew" : "reviewed-removal-skipped",
                         RemovalSides: actions.Select(action => action.Target).Distinct().ToArray());
-                    _store.ClearSyncRetry(pair.PairId, retry.Path);
+                    _store.SaveSyncRetry(pair.PairId, retry with { PendingNotice = notice });
                     WriteNotices([notice]);
+                    if (_store.SyncRetryAt(pair.PairId, retry.Path)?.PendingNotice is null)
+                        _store.ClearSyncRetry(pair.PairId, retry.Path);
                     changedHolds.Add(retry.Path);
                     changedNotices.Add(notice);
                 }

@@ -13,7 +13,7 @@ public sealed partial class V2CliRuntime
         throw NotInV2();
 
     /// <inheritdoc />
-    public Task<SyncCliSettingsData> LoadSettingsAsync(CancellationToken cancellationToken) => throw NotInV2();
+    public Task<SyncCliSettingsData> LoadSettingsAsync(CancellationToken cancellationToken) => LoadHostSettingsAsync(cancellationToken);
 
     /// <inheritdoc />
     public Task<object> ExecuteAppActionAsync(SyncCliInvocation invocation, CancellationToken cancellationToken) =>
@@ -32,9 +32,34 @@ public sealed partial class V2CliRuntime
         throw NotInV2();
 
     /// <inheritdoc />
-    public Task<SyncCliAccountActionData> ConnectAccountAsync(bool reauthorize, string? accountId,
-        Action<string> progress, CancellationToken cancellationToken, string provider = SyncProviders.Dropbox) =>
-        throw NotInV2();
+    public async Task<SyncCliAccountActionData> ConnectAccountAsync(bool reauthorize, string? accountId,
+        Action<string> progress, CancellationToken cancellationToken, string provider = SyncProviders.Dropbox)
+    {
+        if (!reauthorize || accountId is null)
+            throw new SyncCliUsageException("Choose an existing account with accounts reauthorize --account <id> --yes.");
+        var authority = _instanceLock?.StateAuthority ?? throw NotInV2();
+        var connection = ConnectionRecords().SingleOrDefault(item => item.ConnectionId == accountId)
+            ?? throw new SyncCliTargetException("No account has that exact identity.");
+        if (connection.Provider != SyncProviders.Dropbox)
+            throw new SyncCliUnsupportedException("This core supports Dropbox reconnect. Google Drive reconnect still uses the existing account window.");
+        await _authorizationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            progress("Opening Dropbox authorization; the retained account identity must match.");
+            var coordinator = new DropboxConnectionCoordinator(SharedHttp, new DropboxLoopbackReceiver(),
+                DropboxCredentialsFactory(), new DropboxConnectionStore(authority));
+            var binding = await coordinator.ConnectAsync(uri =>
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(uri.AbsoluteUri) { UseShellExecute = true })?.Dispose();
+                return Task.CompletedTask;
+            }, reauthorize: true, cancellationToken: cancellationToken, connectionId: accountId).ConfigureAwait(false);
+            return new SyncCliAccountActionData(binding.ConnectionId, "reauthorize",
+                "Verified the same Dropbox account and saved its protected credential. Automatic sync will re-check affected pairs.", false);
+        }
+        finally { _authorizationGate.Release(); }
+    }
+
+    private readonly SemaphoreSlim _authorizationGate = new(1, 1);
 
     /// <inheritdoc />
     public Task<SyncCliAccountActionData> DisconnectAccountAsync(string accountId, CancellationToken cancellationToken) =>
@@ -72,7 +97,16 @@ public sealed partial class V2CliRuntime
 
     /// <inheritdoc />
     public Task<SyncCliConflictDetailData> LoadConflictAsync(string pairId, string relativePath, string? accountId,
-        CancellationToken cancellationToken) => throw NotInV2();
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        RequirePair(pairId);
+        var matches = _store.OpenNotices(pairId).Where(n => PairPath.Same(n.Path, relativePath) &&
+            (accountId is null || AccountOf(n.PairId) == accountId)).ToArray();
+        if (matches.Length == 0) throw new SyncCliTargetException("No open notice matches that path.");
+        if (matches.Length > 1) throw new SyncCliAmbiguousTargetException("Several notices match; use conflicts list and the exact notice key to resolve.");
+        return Task.FromResult(new SyncCliConflictDetailData(Project(matches[0]), false, false, matches[0].Detail, null, null));
+    }
 
     /// <inheritdoc />
     public Task<SyncCliRecoveryActionData> RestoreRecoveryAsync(string pairId, string key, bool asCopy,
@@ -110,7 +144,12 @@ public sealed partial class V2CliRuntime
         CancellationToken cancellationToken) => throw NotInV2();
 
     /// <inheritdoc />
-    public Task<SyncCliControlData> SetRunPauseAsync(bool paused, CancellationToken cancellationToken) => throw NotInV2();
+    public async Task<SyncCliControlData> SetRunPauseAsync(bool paused, CancellationToken cancellationToken)
+    {
+        await SetPauseAsync(PauseScopes.Global, null, paused, null, paused, cancellationToken);
+        if (paused) await _run.StopAsync();
+        return new SyncCliControlData(paused ? "paused" : "resumed", true, "Global automatic syncing preference saved; a pause reaches the active run's safe point.");
+    }
 
     /// <inheritdoc />
     public Task<SyncCliControlData> CancelRunAsync(string runId, CancellationToken cancellationToken) => throw NotInV2();
@@ -118,11 +157,12 @@ public sealed partial class V2CliRuntime
     /// <inheritdoc />
     public Task<SyncCliPauseData> SetPauseAsync(string scope, string? target, bool paused, int? minutes,
         bool untilResumed, CancellationToken cancellationToken, DateTimeOffset? untilUtc = null,
-        bool untilTomorrow = false, string? timeZoneId = null) => throw NotInV2();
+        bool untilTomorrow = false, string? timeZoneId = null) =>
+        SaveHostPauseAsync(scope, target, paused, minutes, untilResumed, cancellationToken, untilUtc, untilTomorrow, timeZoneId);
 
     /// <inheritdoc />
     public Task<SyncCliSettingsData> SaveSettingsAsync(string settingsJson, CancellationToken cancellationToken) =>
-        throw NotInV2();
+        SaveHostSettingsAsync(settingsJson, cancellationToken);
 
     /// <inheritdoc />
     public Task<SyncCliFolderTreeData> LoadFoldersAsync(string pairId, CancellationToken cancellationToken) =>

@@ -1,6 +1,6 @@
 namespace Massdex.SyncShark.V2;
 
-// Decisions 86/87 folder choices: frozen SQLite snapshot, bounded pages, no replay, pending arrival and restore.
+// Decisions 87/88 folder choices: frozen SQLite snapshot, bounded pages, no replay, pending arrival and restore.
 internal static partial class RunChecks
 {
     private static async Task<(SqliteStateStore Store, Fixture Fx, Notice Notice)> FolderReplaceAsync(string name,

@@ -57,6 +57,12 @@ public sealed partial class SqliteStateStore
         StoreSchema.Scalar(_connection, null,
             "SELECT 1 FROM sync_retry WHERE pair_no=$p AND path_key=$k;",
             ("$p", RequirePair(pairId)), ("$k", RowCodec.Key(path))) is not null);
+    public void RequestSyncRetryNow(string pairId, string path) => InStore(() =>
+    {
+        // Read/modify/write under the same store gate: never resurrect a row completed by a worker.
+        if (SyncRetryAt(pairId, path) is { } retry)
+            SaveSyncRetry(pairId, retry with { RetryAfter = DateTimeOffset.MinValue });
+    });
 
     public void SaveSyncRetry(string pairId, SyncRetry retry) => InStore(() =>
         StoreSchema.Execute(_connection, null,

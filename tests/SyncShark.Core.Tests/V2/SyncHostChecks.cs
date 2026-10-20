@@ -1,10 +1,12 @@
+using System.Text.Json;
+
 namespace Massdex.SyncShark.V2;
 
 /// <summary>Checks the v2 host's mapped, empty ("E"), not-in-v2 ("X") and pass-through members against fakes.</summary>
 internal static class SyncHostChecks
 {
-    private const string ConnectionA = "connection-a00000000000000000000000";
-    private const string ConnectionB = "connection-b00000000000000000000000";
+    private const string ConnectionA = "connection-fixture-3";
+    private const string ConnectionB = "connection-fixture-4";
 
     public static async Task RunAsync()
     {
@@ -38,6 +40,7 @@ internal static class SyncHostChecks
         await Sharing_PairScoped_NotInV2_AccountForwards();
         await FolderSelectionPage_EmptyButValid();
         await Disconnect_RefusedWhileV2PairUsesAccount();
+        await History_MapsRetainedSummaries();
         Console.WriteLine("v2 host checks passed.");
     }
 
@@ -486,6 +489,36 @@ internal static class SyncHostChecks
             "the pending count respects the account scope");
         var attention = await host.LoadPairIdsNeedingAttentionAsync();
         Require(attention.Count == 1 && attention.Contains("p2"), "only a held decision needs attention");
+    }
+
+    // the window's Runs surface reads retained run summaries through the v2 host.
+    private static async Task History_MapsRetainedSummaries()
+    {
+        var store = new InMemoryStateStore();
+        store.SavePair(PairDefOf("p1", "Alpha"));
+        var started = new DateTimeOffset(2026, 10, 20, 8, 0, 0, TimeSpan.Zero);
+        store.RecordRunSummary(new RunSummary(0, "run1", "p1", started, started.AddSeconds(5),
+            RunOutcomes.Partial, 3, 2, 1, 0, 0, 0, 1, 0, 0, 0, 0));
+        var host = Host(store);
+        var row = (await host.LoadRunHistoryAsync(50, 0)).Single();
+        Require(row.Id == "run1" && row.Kind == "run_pair" && row.Status == "blocked" &&
+            row.StartedUtc == started && row.CompletedUtc == started.AddSeconds(5),
+            "a retained summary maps its identity, kind, status and times");
+        using (var request = JsonDocument.Parse(row.RequestJson))
+            Require(request.RootElement.GetProperty("pairIds")[0].GetString() == "p1",
+                "the retained request names its pair");
+        using (var result = JsonDocument.Parse(row.ResultJson!))
+        {
+            var pair = result.RootElement.GetProperty("pairs")[0];
+            Require(pair.GetProperty("uploaded").GetInt32() == 2 &&
+                pair.GetProperty("downloaded").GetInt32() == 1 &&
+                pair.GetProperty("blocked").GetInt32() == 0 && pair.GetProperty("conflicts").GetInt32() == 1 &&
+                pair.GetProperty("needsVerification").GetInt32() == 0 &&
+                pair.GetProperty("notAttempted").GetInt32() == 0 && pair.GetProperty("failed").GetInt32() == 0,
+                "the retained result carries the counts the Runs classifier reads");
+        }
+        Require((await host.LoadRunByIdAsync("run1"))?.Id == "run1" &&
+            (await host.LoadRunByIdAsync("missing")) is null, "one retained run is readable by id");
     }
 
     private static async Task NotInV2_CommandsThrow_QueriesEmpty()

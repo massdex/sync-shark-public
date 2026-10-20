@@ -993,7 +993,7 @@ public sealed partial class DropboxPilotClient(
 
     // Read-only bounded-page API: account/root checked once, exact item identity/path still checked per response.
     internal async Task<IReadOnlyDictionary<string, PilotRemoteEntry?>> ReadMetadataPageAsync(
-        IReadOnlyList<string> paths, CancellationToken cancellationToken)
+        IReadOnlyList<string> paths, CancellationToken cancellationToken, Action<string, Exception>? onFailure = null)
     {
         if (paths.Count > 128) throw new ArgumentOutOfRangeException(nameof(paths));
         await using var verification = SyncProviderAccountVerificationScope.Begin(cancellationToken);
@@ -1001,7 +1001,11 @@ public sealed partial class DropboxPilotClient(
         var result = new System.Collections.Concurrent.ConcurrentDictionary<string, PilotRemoteEntry?>();
         await Parallel.ForEachAsync(paths.Distinct(), new ParallelOptions
             { MaxDegreeOfParallelism = 4, CancellationToken = cancellationToken }, async (path, token) =>
-                result[path] = await FindEntryInVerifiedRootAsync(path, token));
+            {
+                try { result[path] = await FindEntryInVerifiedRootAsync(path, token); }
+                catch (Exception error) when (onFailure is not null && error is not OperationCanceledException and not OutOfMemoryException)
+                { onFailure(path, error); }
+            });
         return result;
     }
 

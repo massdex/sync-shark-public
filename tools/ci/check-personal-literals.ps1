@@ -19,9 +19,11 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction Sile
 # No Git metadata, ignore rules or extension filters apply.
 # Synthetic user-path placeholders only: You, Fixture, user, <user> (case-insensitive).
 # SIDs with any 7+ digit domain component or the known private prefix are refused.
+$connectionPattern = '(?:gdrive-)?' + 'connection-' + '(?!0+\b)[0-9a-f]{16,}'
 if ($ExportRoot) {
     if (-not $NoExclusions -or $Staged) { throw 'Export scans require -NoExclusions and cannot use -Staged.' }
     $patterns = @(
+        $connectionPattern,
         ('yuv' + 'al'), ('Appl' + 'iances'), ('\bCod' + 'ex\b'),
         ('[A-Z]:[\\/]+Users(?>[\\/]+)(?!(?:You|Fixture|user|<user>)(?:[\\/]|$))[^\s"]+'),
         ('S-1-' + '5-21-(?:4004|(?:\d+-){0,3}\d{7,})'),
@@ -100,6 +102,16 @@ try {
             exit 1
         }
     }
+
+    # PCRE supplies the negative lookahead that exempts an all-zero synthetic id.
+    $connectionArgs = @('grep', '-n', '-I', '-i', '-P')
+    if ($Staged) { $connectionArgs += '--cached' }
+    $connectionArgs += @($connectionPattern, '--') + $pathspecs
+    $connectionHits = & git @connectionArgs
+    if ($LASTEXITCODE -eq 0 -and $connectionHits) {
+        $found = $true
+        $connectionHits | ForEach-Object { Write-Host "  $_" }
+    } elseif ($LASTEXITCODE -gt 1) { throw 'Connection-id guard could not execute.' }
 
     if ($found) {
         Write-Host ''

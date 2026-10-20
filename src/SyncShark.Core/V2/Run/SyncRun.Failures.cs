@@ -150,12 +150,12 @@ public sealed partial class SyncRun
 
     private static bool RunFailure(Exception error, CancellationToken ct) =>
         !(error is OperationCanceledException && ct.IsCancellationRequested) &&
-        error is not (StateDamagedException or SyncRunRefusedException or EndpointAccessException) &&
+        error is not (PairPausedException or StateDamagedException or SyncRunRefusedException or EndpointAccessException) &&
         !(error is Microsoft.Data.Sqlite.SqliteException sql && StoreSchema.IsDamaged(sql));
 
     // Never reinterpret cancellation, lost endpoint authority or damaged persistence as a
     // successful item. Those conditions cannot be repaired by skipping an individual file.
     private static bool ScopeFailure(Exception error, CancellationToken ct) =>
-        error is not (OperationCanceledException or EndpointAccessException or StateDamagedException or TimeoutException) &&
+        error is not (PairPausedException or OperationCanceledException or EndpointAccessException or StateDamagedException or TimeoutException) &&
         !ProviderTransientFailure.IsTransient(error, ct) && error is not Microsoft.Data.Sqlite.SqliteException;
 }

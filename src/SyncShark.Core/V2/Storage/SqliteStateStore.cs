@@ -17,6 +17,7 @@ public sealed partial class SqliteStateStore : IStateStore
     private readonly IntentTable _intents;
     private readonly RecoveryTable _recoveries;
     private readonly NoticeTable _notices;
+    private readonly RunSummaryTable _runHistory;
     private readonly DeletionEvidenceTable _deletionEvidence;
     private readonly Dictionary<string, long> _rootNo = new(StringComparer.Ordinal);
     private readonly Dictionary<string, long> _pairNo = new(StringComparer.Ordinal);
@@ -39,6 +40,7 @@ public sealed partial class SqliteStateStore : IStateStore
         _intents = new IntentTable(connection);
         _recoveries = new RecoveryTable(connection);
         _notices = new NoticeTable(connection);
+        _runHistory = new RunSummaryTable(connection);
         _deletionEvidence = new DeletionEvidenceTable(connection, settings.StoreBatchRows);
         Load();
     }
@@ -465,6 +467,25 @@ public sealed partial class SqliteStateStore : IStateStore
 
     public void CloseNotice(string noticeId, string? choice) => InStore(() => _notices.Close(noticeId, choice));
 
+    public void CloseNoticeFamily(string pairId, string reasonPrefix, string? exceptReason = null) => InStore(() =>
+    {
+        if (PairNo(pairId) is { } pairNo) _notices.CloseFamily(pairNo, reasonPrefix, exceptReason);
+    });
+
+    public void RecordRunSummary(RunSummary summary) => InStore(() =>
+        _runHistory.Record(summary, NowMs(), _settings.HistoryRetention, _settings.RunSummaryMaximumRows));
+
+    public IReadOnlyList<RunSummary> ReadRunHistory(string? pairId = null, int limit = 50, long before = 0) =>
+        InStore(() => _runHistory.Read(pairId, limit, before));
+
+    public IReadOnlyList<RunSummary> ReadRunHistoryAfter(long after, int limit = 50) =>
+        InStore(() => _runHistory.ReadAfter(after, limit));
+
+    public IReadOnlyList<RunSummary> ReadRunHistoryPage(string? pairId, int limit, int offset) =>
+        InStore(() => _runHistory.Page(pairId, limit, offset));
+
+    public RunSummary? RunSummaryById(string runId) => InStore(() => _runHistory.ById(runId));
+
     public void StoreDeletionEvidence(string pairId, string rootId, IReadOnlyList<DeletionEvidenceRecord> results) =>
         InStore(() =>
     {
@@ -504,6 +525,7 @@ public sealed partial class SqliteStateStore : IStateStore
             ("$proceed", (long)DefenderConsent.Proceed), ("$released", (long)DefenderConsent.Released));
         StoreSchema.Execute(_connection, transaction,
             "DELETE FROM choice_merge WHERE NOT EXISTS (SELECT 1 FROM notice n WHERE n.notice_id=choice_merge.notice_id AND n.state='open');");
+        _runHistory.Prune(transaction, NowMs(), _settings.HistoryRetention, _settings.RunSummaryMaximumRows);
         StoreSchema.Execute(_connection, transaction, "DROP TABLE IF EXISTS used;");
         StoreSchema.Execute(_connection, transaction,
             "CREATE TEMP TABLE used AS SELECT DISTINCT dir_no FROM file_state " +
@@ -534,6 +556,9 @@ public sealed partial class SqliteStateStore : IStateStore
 
     /// <summary>The query plans of the hot case-insensitive lookups; a probe proving they are indexed.</summary>
     internal IReadOnlyList<string> HotQueryPlans() => InStore(() => _reads.Plans().Concat(_points.Plans()).ToArray());
+
+    /// <summary>The query plans of run-history paging; a probe proving the sequence order and pair index are used.</summary>
+    internal IReadOnlyList<string> RunHistoryQueryPlans() => InStore(() => _runHistory.Plans());
 
     /// <summary>The deletion tombstones recorded for a root; a probe, since no interface member reads them yet.</summary>
     internal IReadOnlyList<(string Path, string ObjectId, DateTimeOffset DeletedAt)> Tombstones(string rootId) => InStore(() =>
@@ -693,5 +718,8 @@ public sealed partial class SqliteStateStore : IStateStore
             throw new ArgumentOutOfRangeException(nameof(settings), settings.HistoryRetention, "HistoryRetention must be positive.");
         if (settings.RecoveryRetention <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(settings), settings.RecoveryRetention, "RecoveryRetention must be positive.");
+        if (settings.RunSummaryMaximumRows <= 0)
+            throw new ArgumentOutOfRangeException(nameof(settings), settings.RunSummaryMaximumRows,
+                "RunSummaryMaximumRows must be positive.");
     }
 }

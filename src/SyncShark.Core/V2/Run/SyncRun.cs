@@ -153,11 +153,11 @@ public sealed partial class SyncRun : ISyncRun
     internal Task<RunReport> ApplyAsync(string pairId, Plan approved, IProgress<RunProgress> progress,
         CancellationToken ct, IReadOnlySet<string>? reviewedDeletes, RebuildableResolution? rebuildables) =>
         RunExclusiveAsync(progress,
-            (sink, token) => ApplyCoreAsync(pairId, approved, sink, reviewedDeletes, rebuildables, token), ct);
+            (sink, token) => ApplyCoreAsync(pairId, approved, sink, reviewedDeletes, rebuildables, token), ct, pairId);
 
     /// <inheritdoc />
     public Task<RunReport> IncrementalAsync(string pairId, IProgress<RunProgress> progress, CancellationToken ct) =>
-        RunExclusiveAsync(progress, (sink, token) => IncrementalCoreAsync(pairId, null, null, sink, token), ct);
+        RunExclusiveAsync(progress, (sink, token) => IncrementalCoreAsync(pairId, null, null, sink, token), ct, pairId);
 
     /// <inheritdoc />
     public async Task StopAsync()
@@ -191,7 +191,7 @@ public sealed partial class SyncRun : ISyncRun
     // the whole run gets the shared byte-progress seam's process messages and the quiet-run heartbeat, and hands the
     // body that pump's sink (a no-op when the caller passed none) rather than the raw sink.
     private async Task<T> RunExclusiveAsync<T>(IProgress<RunProgress>? progress,
-        Func<IProgress<RunProgress>, CancellationToken, Task<T>> body, CancellationToken ct)
+        Func<IProgress<RunProgress>, CancellationToken, Task<T>> body, CancellationToken ct, string? historyPairId = null)
     {
         // The pump and the in-flight table open before the gate, so a run queued behind another is still visible
         // (the gate wait is itself a tracked operation) rather than silently blocked.
@@ -213,7 +213,8 @@ public sealed partial class SyncRun : ISyncRun
             ct.ThrowIfCancellationRequested();
         }
         using var instrumentation = RunInstrumentation.Begin(_settings, _time);
-        var queued = _time.GetUtcNow() - queuedAt;
+        var startedAt = _time.GetUtcNow();
+        var queued = startedAt - queuedAt;
         if (queued >= TimeSpan.FromSeconds(1))
             activity.Progress.Report(new RunProgress("Queued", null, 0, 0) { Message = $"Run queued for {queued.TotalSeconds:N1}s" });
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -235,11 +236,31 @@ public sealed partial class SyncRun : ISyncRun
             var space = FreeSpacePresentation.Group(_store.OpenNotices(report.PairId));
             foreach (var summary in space)
                 activity.Progress.Report(new RunProgress("Pending", null, 0, 0) { Message = summary.Detail });
-            return (T)(object)(report with { Diagnostics = instrumentation?.Snapshot(), FreeSpacePending = space });
+            var completed = report with
+            {
+                CompletedUtc = _time.GetUtcNow(),
+                Diagnostics = instrumentation?.Snapshot(),
+                FreeSpacePending = space
+            };
+            // the run owns its retained outcome. Only the bounded counts are stored; the live
+            // report keeps its failure examples for the caller and nothing else is written.
+            RecordSummarySafely(completed, startedAt);
+            return (T)(object)completed;
         }
         catch (PairPausedException paused) when (typeof(T) == typeof(RunReport))
         {
-            return (T)(object)(paused.Report ?? new RunReport(paused.PairId, RunOutcomes.Paused, 0, 0, 0, 0, 0, 0, 0, 0, []));
+            var report = (paused.Report ?? new RunReport(paused.PairId, RunOutcomes.Paused, 0, 0, 0, 0, 0, 0, 0, 0, []))
+                with { CompletedUtc = _time.GetUtcNow(), Diagnostics = instrumentation?.Snapshot() };
+            RecordSummarySafely(report, startedAt);
+            return (T)(object)report;
+        }
+        catch (Exception error)
+        {
+            if (historyPairId is not null)
+                RecordSummarySafely(new RunReport(historyPairId,
+                    error is OperationCanceledException && linked.IsCancellationRequested ? RunOutcomes.Stopped : RunOutcomes.Failed,
+                    0, error is OperationCanceledException && linked.IsCancellationRequested ? 0 : 1, 0, 0, 0, 0, 0, 0, []), startedAt);
+            throw;
         }
         finally
         {
@@ -250,6 +271,36 @@ public sealed partial class SyncRun : ISyncRun
             }
             done.TrySetResult();
             _gate.Release();
+        }
+    }
+
+    private void RecordSummarySafely(RunReport report, DateTimeOffset startedAt)
+    {
+        try
+        {
+            if (report.ProviderReached || report.Outcome is RunOutcomes.Complete or RunOutcomes.Partial)
+                _store.CloseNoticeFamily(report.PairId, "autosync-failed");
+        }
+        catch (Exception error) { RunOutput.Observe(error); }
+        // Empty successful safety polls do not evict meaningful history.
+        if (report.Outcome == RunOutcomes.Complete && report.Done == 0 && report.FailureCount == 0 &&
+            report.Held == 0 && report.Deferred == 0 && report.Skipped == 0)
+            return;
+        try
+        {
+            _store.RecordRunSummary(RunSummary.Of(Guid.NewGuid().ToString("N"), report, startedAt, _time.GetUtcNow()));
+            _store.CloseNoticeFamily(report.PairId, "run-history-unavailable");
+        }
+        catch (Exception error)
+        {
+            RunOutput.Observe(error);
+            try
+            {
+                _store.AddNotices([new Notice(report.PairId, 0, NoticeKind.Info, string.Empty,
+                    "Run effects retain their original outcome, but history could not be saved: " + error.Message +
+                    ". Check disk space and store diagnostics. Retry on the next run, or Ignore this notice.", "run-history-unavailable")]);
+            }
+            catch (Exception noticeError) { RunOutput.Observe(noticeError); }
         }
     }
 
@@ -347,8 +398,13 @@ public sealed partial class SyncRun : ISyncRun
     {
         var saved = statuses.Select(status => status.Path).ToArray();
         if (saved.Length == 0) return;
-        var merged = pair.Excluded.Concat(saved).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        if (merged.Length != pair.Excluded.Count) _store.SavePair(pair with { Excluded = merged });
+        UpdatePairSettings(() =>
+        {
+            var current = _store.Pair(pair.PairId);
+            if (current is null) return;
+            var merged = current.Excluded.Concat(saved).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            if (merged.Length != current.Excluded.Count) _store.SavePair(current with { Excluded = merged });
+        });
     }
 
     private async Task<(Plan Plan, RebuildableResolution Rebuildables)> PreviewBodyAsync(string pairId,
@@ -1117,7 +1173,9 @@ public sealed partial class SyncRun : ISyncRun
         Advance(scan.B);
         void Advance(SideScan side)
         {
-            var complete = !side.IncompleteSubtrees.Contains(string.Empty) && side.PendingDeletionEvidence.Keys.All(side.ReleasedDeletionEvidence.Contains);
+            // Targeted read debt permits a valid newer checkpoint, but an incomplete full
+            // listing with no checkpoint must not erase the previously committed cursor.
+            var complete = (!side.Full || side.Complete || side.CursorAfter.Length > 0) && !side.IncompleteSubtrees.Contains(string.Empty) && side.PendingDeletionEvidence.Keys.All(side.ReleasedDeletionEvidence.Contains);
             _store.CompleteGeneration(side.Gen, side.CursorAfter, complete);
             // Observation coverage advances with effect replay, never merely with ingestion. A crash
             // between these writes can cause extra hydration, but cannot skip unfinished changes.
@@ -1143,6 +1201,6 @@ public sealed partial class SyncRun : ISyncRun
             : tally.Done == 0 && tally.Failed > 0 ? RunOutcomes.Failed
             : RunOutcomes.Partial;
         return new RunReport(pairId, outcome, tally.Done, tally.Failed, held, tally.Uploaded, tally.Downloaded,
-            tally.Deleted, tally.Moved, tally.KeptBoth, tally.Failures) { Skipped = tally.Skipped, Uncertain = tally.Uncertain };
+            tally.Deleted, tally.Moved, tally.KeptBoth, tally.Failures) { Skipped = tally.Skipped, Uncertain = tally.Uncertain, ProviderReached = !cancelled };
     }
 }

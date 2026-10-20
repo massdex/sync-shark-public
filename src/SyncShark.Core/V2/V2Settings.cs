@@ -67,6 +67,12 @@ public sealed record V2Settings(
         MinSafetyPoll: TimeSpan.FromMinutes(1));
 
     /// <summary>
+    /// Maximum retained run summaries . Retention also expires summaries older than
+    /// <see cref="HistoryRetention"/>, so history never grows past this cap.
+    /// </summary>
+    public int RunSummaryMaximumRows { get; init; } = 10_000;
+
+    /// <summary>
     /// How long a run's progress sink may stay silent before the run reports a "Still working" heartbeat (RQ-090).
     /// Zero disables the heartbeat.
     /// </summary>

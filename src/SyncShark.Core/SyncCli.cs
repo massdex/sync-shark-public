@@ -696,8 +696,10 @@ public static class SyncCli
                     text.AppendLine($"Retained run: {run.RunId}. Detailed log: activity list --log --run {run.RunId}");
                 break;
             case V2.DateRepairReport dates:
-                text.AppendLine($"Date repair {(dates.DryRun ? "dry-run" : "complete")}: examined={dates.Examined} " +
-                    $"eligible={dates.Eligible} changed={dates.Changed} skipped={dates.Skipped}");
+                text.AppendLine($"{(dates.CsvFile is null ? "Date repair" : "Date mismatch report")} {(dates.DryRun ? "read-only" : "complete")}: examined={dates.Examined} " +
+                    $"eligible={dates.Eligible} changed={dates.Changed} skipped={dates.Skipped} " +
+                    $"missing-write-history={dates.MissingWriteHistory} local-date-not-written={dates.LocalDateNotWritten}");
+                if (dates.CsvFile is not null) text.AppendLine($"Mismatches: {dates.Mismatches}. CSV: {dates.CsvFile}");
                 foreach (var example in dates.Examples)
                     text.AppendLine($"  {example.Path}: {example.OldUtc:O} -> {example.NewUtc:O} ({example.Outcome})");
                 text.AppendLine($"Report: {dates.ReportFile}");
@@ -808,7 +810,7 @@ public sealed record SyncCliInvocation(SyncCliRequestKind Kind, string Command, 
     IReadOnlyDictionary<string, string?>? Options = null, bool RequiresPair = false, int? Minutes = null,
     string? LocalRoot = null, string? Name = null, int? Priority = null, bool Enable = false,
     bool Disable = false, string? Description = null, string? Choices = null, bool AllowRecommended = false,
-    IReadOnlyList<string>? Excludes = null, bool Verbose = false)
+    IReadOnlyList<string>? Excludes = null, bool Verbose = false, IReadOnlyList<string>? ProvenanceLogs = null, IReadOnlyList<string>? ProvenancePrefixes = null)
 {
     public string? Value(string name) =>
         Options is not null && Options.TryGetValue(name, out var value) ? value : null;

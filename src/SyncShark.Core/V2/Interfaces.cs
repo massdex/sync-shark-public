@@ -196,6 +196,10 @@ public interface IStateStore : IDisposable
     bool SyncRetryExists(string pairId, string path) => SyncRetryAt(pairId, path) is not null;
     void SaveSyncRetry(string pairId, SyncRetry retry);
     void ClearSyncRetry(string pairId, string path);
+    void RequestSyncRetryNow(string pairId, string path)
+    {
+        if (SyncRetryAt(pairId, path) is { } retry) SaveSyncRetry(pairId, retry with { RetryAfter = DateTimeOffset.MinValue });
+    }
     SyncRetry? SyncRetryAt(string pairId, string path);
     IReadOnlyList<SyncRetry> DueSyncRetries(string pairId, DateTimeOffset now, int limit);
     int CountSyncRetries(string pairId);
@@ -287,6 +291,28 @@ public interface IStateStore : IDisposable
 
     /// <summary>Drops an ended operation's snapshot in bounded batches; Recovery records are untouched.</summary>
     void ForgetChoiceVictims(string operationId) { }
+    /// <summary>Closes/resets one pair's notice family, including ignored occurrences after recovery.
+    /// Production performs an indexed SQL update, not a load of the pair's item notices.</summary>
+    void CloseNoticeFamily(string pairId, string reasonPrefix, string? exceptReason = null)
+    {
+        foreach (var notice in OpenNotices(pairId).Where(n => n.ReasonKey?.StartsWith(reasonPrefix, StringComparison.Ordinal) == true && n.ReasonKey != exceptReason))
+            if (notice.NoticeId is { } id) CloseNotice(id, "resolved");
+    }
+
+    /// <summary>Retains one finished run's bounded summary; a repeated run id is idempotent.</summary>
+    void RecordRunSummary(RunSummary summary) { }
+
+    /// <summary>Retained run summaries, newest first; <paramref name="before"/> is an exclusive sequence cursor (0 = newest).</summary>
+    IReadOnlyList<RunSummary> ReadRunHistory(string? pairId = null, int limit = 50, long before = 0) => [];
+
+    /// <summary>Retained run summaries, oldest first, after a sequence cursor (0 = the oldest retained row).</summary>
+    IReadOnlyList<RunSummary> ReadRunHistoryAfter(long after, int limit = 50) => [];
+
+    /// <summary>A newest-first page positioned by ordinal offset, for the window's Load More paging.</summary>
+    IReadOnlyList<RunSummary> ReadRunHistoryPage(string? pairId, int limit, int offset) => [];
+
+    /// <summary>One retained summary by its run id, or null when it is unknown or has expired.</summary>
+    RunSummary? RunSummaryById(string runId) => null;
 
     void Prune();
 
@@ -392,7 +418,10 @@ public static class SyncDirectDownloadCheckpoint
 {
     public const string Kind = "local-download";
     internal const string NoticePrefix = "Download recovery: ";
+    internal const string DateNoticePrefix = "Download date: ";
     internal static Notice? NoticeFor(string pairId, SyncAction action, ActionResult result) =>
+        result.Reason?.StartsWith(DateNoticePrefix, StringComparison.Ordinal) == true
+            ? new Notice(pairId, action.Rule, NoticeKind.Info, action.Path, result.Reason, "local-download-date") :
         result.Reason?.StartsWith(NoticePrefix, StringComparison.Ordinal) == true
             ? new Notice(pairId, action.Rule, NoticeKind.Info, action.Path, result.Reason, "local-download-recovery")
             : null;
@@ -436,6 +465,9 @@ public sealed record RunProgress(string Phase, string? Path, long Done, long Tot
 public sealed record RunReport(string PairId, string Outcome, int Done, int Failed, int Held, int Uploaded,
     int Downloaded, int Deleted, int Moved, int KeptBoth, IReadOnlyList<ActionResult> Failures)
 {
+    /// <summary>Inventory/planning reached the provider; individual effect failures have their own notices.</summary>
+    public bool ProviderReached { get; init; }
+
     /// <summary>Effects whose commit could not be confirmed, including those outside the failure sample.</summary>
     public int Uncertain { get; init; }
 

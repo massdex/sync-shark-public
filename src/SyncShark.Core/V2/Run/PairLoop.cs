@@ -15,7 +15,7 @@ internal sealed class PairLoop
     private TaskCompletionSource _kick = NewKick();
     private CancellationTokenSource? _runSource;
     private NoticeReason? _held;
-    private bool _heldUntilKick;
+    private int _consecutiveFailures;
     private DateTimeOffset _lastIdleAnnounce = DateTimeOffset.MinValue;
     private DateTimeOffset? _retryAt;
     private TimeSpan _backoff;
@@ -45,17 +45,28 @@ internal sealed class PairLoop
         {
             while (!stop.IsCancellationRequested)
             {
-                var pair = _in.Store.Pair(_pairId);
-                if (pair is null) return;
-                if (_in.Ineligible(pair) is { } blocked)
+                try
                 {
-                    DisposeWatches();
-                    Publish(blocked.Status, blocked.Reason);
-                    await WaitAsync([], _in.SafetyInterval(), stop).ConfigureAwait(false);
-                    continue;
+                    var pair = _in.Store.Pair(_pairId);
+                    if (pair is null) return;
+                    if (_in.Ineligible(pair) is { } blocked)
+                    {
+                        DisposeWatches();
+                        Publish(blocked.Status, blocked.Reason);
+                        await WaitAsync([], null, stop).ConfigureAwait(false);
+                        continue;
+                    }
+                    if (await ReadyToRunAsync(pair, stop).ConfigureAwait(false))
+                        await RunOnceAsync(stop).ConfigureAwait(false);
                 }
-                if (await ReadyToRunAsync(pair, stop).ConfigureAwait(false))
-                    await RunOnceAsync(stop).ConfigureAwait(false);
+                catch (OperationCanceledException) when (stop.IsCancellationRequested) { throw; }
+                catch (Exception error)
+                {
+                    RecordFailure(error);
+                    // Never retire a worker because a watch, store read or callback failed.
+                    DisposeWatches();
+                    await Task.Delay(_in.Settings.MinSafetyPoll, _in.Time, stop).ConfigureAwait(false);
+                }
             }
         }
         catch (OperationCanceledException) when (stop.IsCancellationRequested)
@@ -64,7 +75,8 @@ internal sealed class PairLoop
         }
         finally
         {
-            DisposeWatches();
+            try { DisposeWatches(); }
+            catch (Exception error) { RecordFailure(error); }
         }
     }
 
@@ -74,8 +86,8 @@ internal sealed class PairLoop
         if (_held is not null)
         {
             Publish(AutoStatus.Held, _held);
-            // Watch problems are retried at the safety poll; access and refusals wait for the user (Kick).
-            var wake = await WaitAsync([], _heldUntilKick ? null : _in.SafetyInterval(), stop).ConfigureAwait(false);
+            // All holds retry at the safety poll; reconnect or Retry can wake them sooner.
+            var wake = await WaitAsync([], _in.SafetyInterval(), stop).ConfigureAwait(false);
             if (wake.Kind == WakeKind.Timeout) _held = null;
             return false;
         }
@@ -154,17 +166,17 @@ internal sealed class PairLoop
 
     private async Task RunOnceAsync(CancellationToken stop)
     {
-        var source = CancellationTokenSource.CreateLinkedTokenSource(stop);
-        lock (_lock)
-        {
-            // Admission: a pause or turn-off that landed after the last check cancels before Run takes its gate;
-            // one that lands later reaches this source through Kick, and Run re-checks the token under its gate.
-            _runSource = source;
-            if (_in.Ineligible(_in.Store.Pair(_pairId)) is not null) source.Cancel();
-        }
-        Publish(AutoStatus.Running, null);
+        using var source = CancellationTokenSource.CreateLinkedTokenSource(stop);
         try
         {
+            lock (_lock)
+            {
+                // Admission: a pause or turn-off that landed after the last check cancels before Run takes its gate;
+                // one that lands later reaches this source through Kick, and Run re-checks the token under its gate.
+                _runSource = source;
+                if (_in.Ineligible(_in.Store.Pair(_pairId)) is not null) source.Cancel();
+            }
+            Publish(AutoStatus.Running, null);
             AfterReport(await _in.Run.IncrementalAsync(_pairId, NoProgress, source.Token).ConfigureAwait(false));
             _deadWatchRebuilds = 0;
         }
@@ -176,15 +188,15 @@ internal sealed class PairLoop
         {
             Hold(error);
         }
-        catch (Exception)
+        catch (Exception error)
         {
             // Any other failure, including a cancellation our token did not ask for (a provider timeout), retries.
+            RecordFailure(error);
             ScheduleRetry();
         }
         finally
         {
             lock (_lock) _runSource = null;
-            source.Dispose();
         }
     }
 
@@ -198,6 +210,22 @@ internal sealed class PairLoop
             _backoff = TimeSpan.Zero; // A bounded backlog is draining; don't exponentially slow useful progress.
         _last = report with { CompletedUtc = _in.Time.GetUtcNow() };
         if (report.Outcome is RunOutcomes.Stopped or RunOutcomes.Paused) return;
+        if (report.ProviderReached || report.Outcome is RunOutcomes.Complete or RunOutcomes.Partial)
+        {
+            _consecutiveFailures = 0;
+            try
+            {
+                _in.Store.CloseNoticeFamily(_pairId, "autosync-failed");
+            }
+            catch (Exception error) { RunOutput.Observe(error); }
+        }
+        if (report.Outcome == RunOutcomes.Failed && !report.ProviderReached)
+        {
+            var failure = report.Failures.FirstOrDefault(f => f.FailureHResult is unchecked((int)0x80070070) or unchecked((int)0x80070027))
+                ?? report.Failures.FirstOrDefault();
+            RecordFailure(new IOException(failure?.Reason ?? "The run reported failure; inspect its item notices for details.",
+                failure?.FailureHResult ?? unchecked((int)0x80131620)));
+        }
         if (report.Outcome == RunOutcomes.Failed || report.FailureCount > 0 || report.Failures.Count > 0 || report.Deferred > 0 ||
             report.DeletionEvidencePending.Count > 0) ScheduleRetry();
         else _backoff = TimeSpan.Zero;
@@ -211,9 +239,37 @@ internal sealed class PairLoop
         _retryAt = _in.Time.GetUtcNow() + _backoff;
     }
 
+    private void RecordFailure(Exception error)
+    {
+        try
+        {
+            _consecutiveFailures++;
+            if (error is not (EndpointAccessException or StateDamagedException or SyncRunRefusedException) &&
+                error.HResult is not (unchecked((int)0x80070070) or unchecked((int)0x80070027)) && _consecutiveFailures < 3) return;
+            var cause = error is EndpointAccessException ? "account-access" :
+                error is StateDamagedException ? "store-damage" :
+                error is SyncRunRefusedException ? "blocked" :
+                error.HResult is unchecked((int)0x80070070) or unchecked((int)0x80070027) ? "disk-full" :
+                error is IOException ? "storage-or-network" :
+                error is HttpRequestException or OperationCanceledException ? "network" : "unexpected";
+            var why = error is SyncRunRefusedException refused ? refused.Reason?.Detail ?? refused.Message : error.Message;
+            var resolution = error is SyncRunRefusedException
+                ? "Address the stated pair or folder requirement, then choose Retry. This pair is held and automatically rechecked at the safety poll."
+                : error is EndpointAccessException
+                ? "Reconnect the account, then choose Retry."
+                : error is StateDamagedException
+                    ? "Check state-store diagnostics and restore a verified backup if needed, then choose Retry."
+                    : "Check connectivity and available disk space, then choose Retry. Automatic retries continue with bounded waits.";
+            _in.Store.AddNotices([new Notice(_pairId, 0, NoticeKind.Info, string.Empty,
+                $"Automatic sync could not finish ({cause}): {why}. {resolution} Ignore dismisses this notice without excluding files. Other pairs continue.",
+                "autosync-failed")]);
+        }
+        catch (Exception) { /* A damaged/unavailable notice store cannot terminate another pair or the host. */ }
+    }
+
     private void Hold(Exception error)
     {
-        _heldUntilKick = error is EndpointAccessException;
+        RecordFailure(error);
         _held = error switch
         {
             EndpointAccessException => AutoSyncReasons.AccountAccess,
@@ -248,12 +304,18 @@ internal sealed class PairLoop
 
     private void DisposeWatches()
     {
-        foreach (var watch in _watches) watch.Dispose();
+        var watches = _watches.ToArray();
         _watches.Clear();
+        foreach (var watch in watches)
+            try { watch.Dispose(); } catch (Exception error) { RunOutput.Observe(error); }
     }
 
     private void Publish(AutoStatus status, NoticeReason? reason) =>
-        _in.Publish(new PairAutoState(_pairId, status, reason, status == AutoStatus.Waiting ? _retryAt : null, _last));
+        _in.Publish(new PairAutoState(_pairId, status, reason, status == AutoStatus.Waiting ? _retryAt : null, _last)
+        {
+            NextRunUtc = status == AutoStatus.Idle ? _in.Time.GetUtcNow() + _in.SafetyInterval() :
+                status == AutoStatus.Waiting ? _retryAt ?? _in.Time.GetUtcNow() + _in.Settings.ChangeQuietWindow : null
+        });
 
     private static TaskCompletionSource NewKick() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 }

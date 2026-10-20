@@ -29,6 +29,7 @@ internal static partial class AutoSyncChecks
         await RetryAt_NotBypassedBySignalsAsync();
         await WatchFault_RebuildsAndHoldsAsync();
         await FailureChecksAsync();
+        await AutoSyncHostChecks.RunAsync();
         Console.WriteLine($"v2 autosync checks passed in {clock.ElapsedMilliseconds} ms.");
     }
 
@@ -147,8 +148,9 @@ internal static partial class AutoSyncChecks
             await rig.StartAsync();
             await Until(() => rig.Status("p1") == AutoStatus.Held, "the pair is held");
             Require(rig.State("p1").Reason?.Key == reason.Key, "held with reason " + reason.Key);
+            await rig.ParkedAsync(AutoStatus.Held);
             rig.Clock.Advance(SafetyPoll * 3);
-            if (error is SyncRunRefusedException)
+            if (error is SyncRunRefusedException or EndpointAccessException)
             {
                 await Until(() => rig.Run.Runs("p1") == 2, "ordinary refusal is re-evaluated on the safety poll");
                 await rig.ParkedAsync(AutoStatus.Idle);
@@ -333,7 +335,7 @@ internal static partial class AutoSyncChecks
     /// <summary>A store with enabled, first-synced pairs, and AutoSync over fakes and a manual clock.</summary>
     private sealed class Rig : IAsyncDisposable
     {
-        private readonly InMemoryStateStore _store = new();
+        internal readonly InMemoryStateStore _store = new();
         private readonly string[] _pairIds;
 
         public Rig(string[] pairIds, bool enabled = true)
@@ -344,7 +346,7 @@ internal static partial class AutoSyncChecks
                 _store.SavePair(RigPair(id, enabled));
                 _store.MarkFirstSyncDone(id);
             }
-            Auto = new AutoSync(_store, Run, Watches, Settings, pair => Paused || pair.PairId == PausedPair,
+            Auto = new AutoSync(_store, Run, Watches, Settings, pair => { if (ThrowEligibility) { ThrowEligibility = false; throw new IOException("eligibility fault"); } return Paused || pair.PairId == PausedPair; },
                 () => PollInterval, Clock);
         }
 
@@ -356,6 +358,7 @@ internal static partial class AutoSyncChecks
         public FakeChangeWatchSource Watches { get; } = new();
         public AutoSync Auto { get; }
         public volatile bool Paused;
+        public volatile bool ThrowEligibility;
         public volatile string? PausedPair;
 
         /// <summary>The edge's safety-poll interval as the rig reports it.</summary>

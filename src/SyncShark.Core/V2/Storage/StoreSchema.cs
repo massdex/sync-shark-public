@@ -7,8 +7,8 @@ internal static class StoreSchema
 {
     /// <summary>The schema version written to and required by <c>PRAGMA user_version</c>; any schema change bumps it.</summary>
     // Coordinated additive slots: v12 retry, v13 quarantine, v14 gap verification,
-    // v15 listing/pair pause, v16 local walk, v17 explicit conflict choices, v18 removal review, v19 journal sizing.
-    public const int Version = 19;
+    // v15 listing/pair pause, v16 local walk, v17 explicit conflict choices, v18 removal review, v19 journal sizing, v20 run summaries and notice-family index.
+    public const int Version = 20;
 
     /// <summary>The state database path relative to the app data root.</summary>
     public const string DatabaseRelativePath = @"v2\state.db";
@@ -204,6 +204,17 @@ internal static class StoreSchema
             "CREATE INDEX IF NOT EXISTS gap_results ON local_gap_item(root_no,result_seq,object_id) WHERE hash IS NOT NULL;");
     }
 
+    // one bounded summary per finished run. AUTOINCREMENT keeps the paging cursor unique and
+    // never reused after pruning, so two runs sharing a start millisecond still page exactly.
+    private const string RunSummaryDdl = """
+        CREATE TABLE IF NOT EXISTS run_summary(seq INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL UNIQUE,
+          pair_id TEXT NOT NULL, started INTEGER NOT NULL, completed INTEGER NOT NULL, outcome TEXT NOT NULL,
+          done INTEGER NOT NULL, uploaded INTEGER NOT NULL, downloaded INTEGER NOT NULL, deleted INTEGER NOT NULL,
+          moved INTEGER NOT NULL, kept_both INTEGER NOT NULL, held INTEGER NOT NULL, failed INTEGER NOT NULL,
+          uncertain INTEGER NOT NULL, skipped INTEGER NOT NULL, deferred INTEGER NOT NULL);
+        CREATE INDEX IF NOT EXISTS run_summary_pair ON run_summary(pair_id, seq);
+        """;
+
     private const string TemporaryDdl = """
         CREATE TEMP TABLE IF NOT EXISTS removal_observation(session TEXT NOT NULL, side TEXT NOT NULL,
           path_key TEXT NOT NULL, path TEXT NOT NULL, json TEXT NOT NULL,
@@ -293,6 +304,7 @@ internal static class StoreSchema
         Step(17, tx => Execute(connection, tx, ChoiceVictimDdl));
         Step(18, tx => Execute(connection, tx, RemovalReviewDdl));
         Step(19, tx => Execute(connection, tx, JournalDdl));
+        Step(20, tx => MigrateRunSummary(connection, tx));
 
         void Step(int version, Action<SqliteTransaction>? create)
         {
@@ -302,6 +314,12 @@ internal static class StoreSchema
             tx.Commit();
         }
     }
+
+    // Presence-guarded additive step, also run after the version chain on every compatible startup.
+    // At final26 integration this composes AFTER v12..v17/removal_review without changing their stamps.
+    private static void MigrateRunSummary(SqliteConnection connection, SqliteTransaction? transaction) =>
+        Execute(connection, transaction, RunSummaryDdl +
+            "CREATE INDEX IF NOT EXISTS nt_pair_reason ON notice(pair_no,reason_key);");
 
     private static void MigrateMappedDirectories(SqliteConnection connection)
     {
@@ -339,6 +357,7 @@ internal static class StoreSchema
         "removal_review", "pe_unresolved", "rc_pair", "nt_open", "prepare_header", "prepare_row", "prepare_lookup", "prepare_cursor",
         "quarantine_upgrade", "defender_deferral_batch", "fs_quarantine", "defender_deferral", "defender_deferral_updated", "defender_grant", "defender_grant_path",
         "choice_victim", "cv_op", "cv_item", "cv_scan", "choice_restore_receipt", "choice_merge",
+        "run_summary", "run_summary_pair", "nt_pair_reason",
         "deletion_classification", "deletion_classification_path", "observation_checkpoint",
         "listing_checkpoint", "listing_page", "pair_pause", "local_walk", "local_walk_page",
     ];
@@ -417,6 +436,7 @@ internal static class StoreSchema
         Execute(connection, transaction, RehashDdl);
         Execute(connection, transaction, RetryDdl);
         EnsureGapSchema(connection, transaction);
+        MigrateRunSummary(connection, transaction);
         Execute(connection, transaction, FlaggedIndexDdl);
         Execute(connection, transaction, QuarantineDdl);
         Execute(connection, transaction, "INSERT INTO quarantine_upgrade VALUES('grant-backfill');");

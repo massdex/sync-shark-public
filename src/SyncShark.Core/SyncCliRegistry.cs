@@ -31,7 +31,7 @@ public static class SyncCliRegistry
         , "--description", "--choices", "--group", "--filter", "--seconds", "--side",
         "--categories", "--severity", "--entity", "--run", "--order", "--type", "--since", "--after", "--before",
         "--source", "--destination", "--bytes", "--sha256", "--local-root", "--source-sha256", "--draft",
-        "--keep", "--token", "--archive", "--local-date",
+        "--keep", "--token", "--archive", "--local-date", "--from", "--to", "--exclude-list", "--audit-log", "--provenance-log", "--provenance-prefix",
         RepeatableExclude,
         ..DropboxCliCatalog.ValueOptions
     ];
@@ -47,6 +47,17 @@ public static class SyncCliRegistry
             "nothing", "state-free", None),
         new("capabilities", "capabilities", SyncCliRequestKind.Capabilities, "none",
             "prints the machine-readable capability inventory", "nothing", "state-free", None),
+        new("autosync start", "autosync start", SyncCliRequestKind.State, "explicit", "start or attach to the shared background host", "installed executable", "background-host", None, Mutating: true),
+        new("autosync install-startup", "autosync install-startup [--this-build]", SyncCliRequestKind.State, "explicit", "register stable installed logon startup; replace stale or legacy entries with a warning", "installed executable", "background-host", "--this-build", Mutating: true),
+        new("autosync uninstall-startup", "autosync uninstall-startup", SyncCliRequestKind.State, "explicit", "remove per-user logon startup; running host unchanged", "installed executable", "background-host", None, Mutating: true),
+        new("autosync stop", "autosync stop", SyncCliRequestKind.State, "explicit", "stop at a durable safe point", "running host", "background-host", None, Mutating: true),
+        new("autosync status", "autosync status", SyncCliRequestKind.State, "none", "host identity and pair scheduler state; never launches", "nothing", "background-host", None),
+        new("autosync enable", "autosync enable --pair <id>|--all", SyncCliRequestKind.State, "explicit", "enable a pair or automatic syncing globally", "running host", "background-host", "--pair,--all", Mutating: true),
+        new("autosync disable", "autosync disable --pair <id>|--all", SyncCliRequestKind.State, "explicit", "disable a pair or automatic syncing globally", "running host", "background-host", "--pair,--all", Mutating: true),
+        new("autosync interval", "autosync interval --minutes <1..1440>", SyncCliRequestKind.State, "explicit", "set the safety interval", "running host", "background-host", "--minutes", Mutating: true),
+        new("autosync history", "autosync history --pair <id> [--limit <1..200>] [--after <cursor>]", SyncCliRequestKind.State, "none", "bounded persisted run summaries", "running host", "background-host", "--pair,--limit,--after", RequiresPair: true),
+        new("autosync now", "autosync now --pair <id>", SyncCliRequestKind.State, "explicit", "signal one pair; active work is not replayed", "running host", "background-host", "--pair", Mutating: true, RequiresPair: true),
+        new("autosync logs", "autosync logs [--follow] [--limit <1..200>]", SyncCliRequestKind.State, "none", "bounded run summary log; follow polls without launching", "running host", "background-host", "--follow,--limit"),
         new("status", "status", SyncCliRequestKind.State, "none",
             "product, accounts, pairs, pending work, run state and last success", "the product state or the running application",
             "direct|running-application", None),
@@ -123,11 +134,19 @@ public static class SyncCliRegistry
             "no local or remote file is touched",
             "the product state and the exclusive product lock", "direct", "--pair,--archive,--drop-unfinished,--yes",
             Mutating: true, RequiresYes: true, RequiresPair: true),
-        new("dates repair", "dates repair --pair <exact-id> [--dry-run] [--yes] [--local-date yyyy-MM-dd] [--after <key>]", SyncCliRequestKind.State, "yes",
+        new("dates repair", "dates repair --pair <exact-id> [--dry-run] [--yes] [--local-date yyyy-MM-dd | --from <local-date-or-time> --to <local-date-or-time>] [--exclude-list <file>] [--after <key>] [--provenance-log <file> ...] [--provenance-prefix <relative-prefix> ...]", SyncCliRequestKind.State, "yes",
             "repairs newer local download timestamps only after verifying identical baseline and Dropbox content; " +
-            "logs every date change, never changes content or uploads; --dry-run reports without changing dates",
-            "the v2 store and exclusive product/run locks", "direct", "--pair,--dry-run,--yes,--local-date,--after",
+            "logs every date change, never changes content or uploads; --dry-run reports without changing dates; " +
+            "--provenance-log is repeatable; --provenance-prefix maps log paths under a relative pair folder (default .); " +
+            "give one prefix for all logs or one per log in matching order",
+            "the v2 store and exclusive product/run locks", "direct", "--pair,--dry-run,--yes,--local-date,--from,--to,--exclude-list,--after,--provenance-log,--provenance-prefix",
             Mutating: true, RequiresPair: true),
+        new("dates restore", "dates restore --audit-log <file> [--dry-run] [--yes]", SyncCliRequestKind.State, "yes",
+            "restores audited original dates only while repaired date, file identity and content still match",
+            "the v2 store and exclusive product/run locks", "direct", "--audit-log,--dry-run,--yes", Mutating: true),
+        new("dates report-mismatch", "dates report-mismatch --pair <exact-id> [--local-date yyyy-MM-dd | --from <local-date-or-time> --to <local-date-or-time>] [--exclude-list <file>] [--after <key>] [--provenance-log <file> ...] [--provenance-prefix <relative-prefix> ...]",
+            SyncCliRequestKind.State, "none", "read-only date mismatch report; writes a CSV path list, never changes file dates or content; missing write provenance is unknown, not proof of a user edit",
+            "the v2 store and exclusive product/run locks", "direct", "--pair,--local-date,--from,--to,--exclude-list,--after,--provenance-log,--provenance-prefix", RequiresPair: true),
         new("pairs rescan", "pairs rescan --pair <exact-id> [--side a|b|both] --yes", SyncCliRequestKind.State, "yes",
             "forgets the pair's stored scan cursors for the chosen side(s) so its next run re-reads those roots in " +
             "full; baselines, live rows and tombstones are untouched and no file is changed",
@@ -213,8 +232,8 @@ public static class SyncCliRegistry
             SyncCliRequestKind.State, "none", "one conflict's identities, sizes, hashes and retained-text flags",
             "the product state or the running application", "direct|running-application",
             "--pair,--path,--account", RequiresPair: true),
-        new("conflicts resolve", "conflicts resolve --pair <exact-id> --path <relative-path-or-volume> --choice <decision|enlarge-journal|journal-not-now|journal-never> --key <conflict-id> --generation <n> --yes [--timeout-seconds <seconds>]",
-            SyncCliRequestKind.State, "yes", "conflict notices support compare, merge=<relative-path-or-volume>, keep-a, keep-b, keep-both, rename-incoming=<relative-path-or-volume>, replace-existing, restore-existing, restore-as-copy and dismiss; removal notices support review-removal, removal-next-page, removal-previous-page and confirm-removal (generation 0); review and pages never delete; applies one guarded conflict or quarantine choice: quarantine-retry, quarantine-ignore, quarantine-exclude, quarantine-delete-dropbox, defender-exclude (attended UAC; two exact file and sibling-stage exclusions; never folders; generation 0 for notices; retained ignored key supports later retry), defender-verify (explicit read-only UAC verification of recorded exclusions; hidden or unavailable visibility stays held), defender-keep (confirmed current file only; existing exclusion; no UAC/settings change), defender-proceed-deletions and defender-keep-held (reviewed UNKNOWN-history batch only), defender-release-held (all Keep-held items), defender-release-item (one Keep-held item named by --path; shared items open a separate review), defender-exclude-held (exclude one held item), defender-release-all-pairs and defender-keep-shared-held (explicit shared-item review choices)",
+        new("conflicts resolve", "conflicts resolve --pair <exact-id> [--path <relative-path-or-volume>] --choice <decision|enlarge-journal|journal-not-now|journal-never> --key <conflict-id> --generation <n> --yes [--timeout-seconds <seconds>]",
+            SyncCliRequestKind.State, "yes", "conflict notices support compare, merge=<relative-path>, keep-a, keep-b, keep-both, rename-incoming=<relative-path>, replace-existing, restore-existing, restore-as-copy and dismiss; removal notices support review-removal, removal-next-page, removal-previous-page and confirm-removal (generation 0); review and pages never delete; applies one guarded conflict or quarantine choice: quarantine-retry, quarantine-ignore, quarantine-exclude, quarantine-delete-dropbox, defender-exclude (attended UAC; two exact file and sibling-stage exclusions; never folders; generation 0 for notices; retained ignored key supports later retry), defender-verify (explicit read-only UAC verification of recorded exclusions; hidden or unavailable visibility stays held), defender-keep (confirmed current file only; existing exclusion; no UAC/settings change), defender-proceed-deletions and defender-keep-held (reviewed UNKNOWN-history batch only), defender-release-held (all Keep-held items), defender-release-item (one Keep-held item named by --path; shared items open a separate review), defender-exclude-held (exclude one held item), defender-release-all-pairs and defender-keep-shared-held (explicit shared-item review choices)",
             "the product state or the running application", "direct|running-application",
             "--pair,--path,--choice,--key,--generation,--account,--yes,--timeout-seconds", Mutating: true, RequiresYes: true,
             RequiresPair: true),
@@ -708,6 +727,8 @@ public static class SyncCliRegistry
             : row.Options.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         var options = new Dictionary<string, string?>(StringComparer.Ordinal);
         var excludes = new List<string>();
+        var provenanceLogs = new List<string>();
+        var provenancePrefixes = new List<string>();
         while (next < tokens.Count)
         {
             var option = tokens[next++];
@@ -719,6 +740,13 @@ public static class SyncCliRegistry
                     ? $"The option {option} is not supported by '{command}'."
                     : $"Unknown option '{option}' for '{command}'. Allowed options: " +
                       (allowed.Length == 0 ? "none" : string.Join(", ", allowed)) + ".");
+            if (option is "--provenance-log" or "--provenance-prefix")
+            {
+                if (next >= tokens.Count || tokens[next].StartsWith("--", StringComparison.Ordinal))
+                    throw new SyncCliUsageException($"The option {option} requires a value.");
+                var values = option == "--provenance-log" ? provenanceLogs : provenancePrefixes;
+                values.Add(tokens[next++]); options[option] = values[0]; continue;
+            }
             if (option == RepeatableExclude)
             {
                 if (next >= tokens.Count || tokens[next].StartsWith("--", StringComparison.Ordinal))
@@ -737,6 +765,19 @@ public static class SyncCliRegistry
                 continue;
             }
             options[option] = null;
+        }
+
+        if (command.StartsWith("autosync ", StringComparison.Ordinal))
+        {
+            if (command is "autosync enable" or "autosync disable" &&
+                options.ContainsKey("--pair") == options.ContainsKey("--all"))
+                throw new SyncCliUsageException("Choose --pair <exact-id> or --all, not both.");
+            if (command == "autosync interval" && (!options.TryGetValue("--minutes", out var intervalText) ||
+                !int.TryParse(intervalText, out var interval) || interval is < 1 or > 1440))
+                throw new SyncCliUsageException("AutoSync interval requires --minutes 1..1440.");
+            if (options.TryGetValue("--after", out var cursorText) &&
+                (!long.TryParse(cursorText, out var cursor) || cursor < 0))
+                throw new SyncCliUsageException("History requires a nonnegative sequence cursor.");
         }
 
         if (options.TryGetValue("--timeout-seconds", out var timeoutText) &&
@@ -844,10 +885,22 @@ public static class SyncCliRegistry
             exactVersion is null || !System.Text.RegularExpressions.Regex.IsMatch(exactVersion,
                 @"^[0-9]+\.[0-9]+\.[0-9]+$", System.Text.RegularExpressions.RegexOptions.CultureInvariant)))
             throw new SyncCliUsageException("updates apply requires --update <exact-version>, for example 0.3.35.");
-        if (command == "dates repair" && options.TryGetValue("--local-date", out var localDateText) &&
-            (!DateOnly.TryParseExact(localDateText, "yyyy-MM-dd", CultureInfo.InvariantCulture,
-                DateTimeStyles.None, out var localDate) || localDate == DateOnly.MaxValue))
-            throw new SyncCliUsageException("--local-date requires a UTC calendar date in yyyy-MM-dd format.");
+        if (command == "dates restore" && string.IsNullOrWhiteSpace(options.GetValueOrDefault("--audit-log")))
+            throw new SyncCliUsageException("dates restore requires --audit-log <file>.");
+        if (command is "dates repair" or "dates report-mismatch")
+        {
+            _ = V2.DateProvenanceLog.Sources(provenanceLogs, provenancePrefixes);
+            DateOnly? Day(string option)
+            {
+                if (!options.TryGetValue(option, out var text)) return null;
+                if (!DateOnly.TryParseExact(text, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var day))
+                    throw new SyncCliUsageException(option + " requires a local calendar date in yyyy-MM-dd format.");
+                return day;
+            }
+            _ = V2.DateRepair.UtcRange(Day("--local-date"), V2.DateRepairBound.Parse(options.GetValueOrDefault("--from")), V2.DateRepairBound.Parse(options.GetValueOrDefault("--to")), TimeZoneInfo.Local);
+        }
+        if (command == "dates restore" && !options.ContainsKey("--dry-run") && !options.ContainsKey("--yes"))
+            throw new SyncCliUsageException("Use dates restore --audit-log <file> --dry-run to review, or add --yes to restore dates.");
         if (command == "dates repair" && !options.ContainsKey("--dry-run") && !options.ContainsKey("--yes"))
             throw new SyncCliUsageException("Use dates repair --pair <id> --dry-run to review, or add --yes to repair dates.");
         if (row.RequiresYes && (row.MutationOption is null || options.ContainsKey(row.MutationOption)) &&
@@ -946,7 +999,7 @@ public static class SyncCliRegistry
                 : null,
             options.ContainsKey("--enable"), options.ContainsKey("--disable"),
             options.GetValueOrDefault("--description"), options.GetValueOrDefault("--choices"),
-            options.ContainsKey("--allow-recommended"), excludes, verbose);
+            options.ContainsKey("--allow-recommended"), excludes, verbose, provenanceLogs, provenancePrefixes);
     }
 
     private static string RequireSelector(string? value, string option)
@@ -1046,12 +1099,20 @@ public static class SyncCliRegistry
             case "pairs remove":
                 return await operations.RemovePairAsync(invocation.PairId!, invocation.Value("--archive")!,
                     invocation.Flag("--drop-unfinished"), cancellationToken);
+            case "dates restore":
+                if (runtime is not V2.V2CliRuntime v2Restore)
+                    throw new SyncCliUnsupportedException("Date restore is available in core v2.");
+                return await v2Restore.RestoreDatesAsync(invocation.Value("--audit-log")!, invocation.Flag("--dry-run"), cancellationToken);
             case "dates repair":
+            case "dates report-mismatch":
                 if (runtime is not V2.V2CliRuntime v2Dates)
                     throw new SyncCliUnsupportedException("Date repair is available in core v2. Select v2 and retry.");
-                return await v2Dates.RepairDatesAsync(invocation.PairId!, invocation.Flag("--dry-run"), cancellationToken,
+                return await v2Dates.RepairDatesAsync(invocation.PairId!, invocation.Command == "dates report-mismatch" || invocation.Flag("--dry-run"), cancellationToken,
                     invocation.Value("--local-date") is { } date ? DateOnly.ParseExact(date, "yyyy-MM-dd", CultureInfo.InvariantCulture) : null,
-                    invocation.Value("--after") ?? "");
+                    invocation.Value("--after") ?? "",
+                    V2.DateRepairBound.Parse(invocation.Value("--from")), V2.DateRepairBound.Parse(invocation.Value("--to")),
+                    invocation.Value("--exclude-list"), invocation.Command == "dates report-mismatch",
+                    V2.DateProvenanceLog.Sources(invocation.ProvenanceLogs, invocation.ProvenancePrefixes));
             case "pairs rescan":
                 return await operations.RescanPairAsync(invocation.PairId!, invocation.Value("--side"),
                     cancellationToken);
@@ -1112,7 +1173,7 @@ public static class SyncCliRegistry
                 return await operations.LoadConflictAsync(invocation.PairId!, RequirePath(invocation),
                     invocation.AccountId, cancellationToken);
             case "conflicts resolve":
-                return await operations.ResolveConflictAsync(invocation.PairId!, RequirePath(invocation),
+                return await operations.ResolveConflictAsync(invocation.PairId!, invocation.Path ?? string.Empty,
                     RequireChoice(invocation), invocation.Key, invocation.Generation, invocation.AccountId,
                     cancellationToken, Progress);
             case "recovery list":

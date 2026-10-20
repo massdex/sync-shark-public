@@ -156,7 +156,7 @@ public sealed partial class LocalInventory : IInventorySource
                     System.Diagnostics.Trace.WriteLine("Local walk checkpoint discarded: " + error.Message);
                     sql.ForgetLocalWalk(rootId);
                     checkpoint = ReadWalkCheckpoint();
-                    cursor = checkpoint is null ? string.Empty : sql.BeginLocalWalk(_root, options, checkpoint);
+                    cursor = checkpoint is null ? _known.Cursor(rootId) ?? string.Empty : sql.BeginLocalWalk(_root, options, checkpoint);
                     scan = await ScanAsync(lease, ct, include, refreshPaths: null, p,
                         checkpoint is null ? null : new LocalWalkCheckpoint(sql, rootId, lease.Path)).ConfigureAwait(false);
                 }
@@ -549,7 +549,7 @@ public sealed partial class LocalInventory : IInventorySource
         // must remain untouched in storage until an explicit retry obtains fresh evidence.
         return new Snapshot(rootId, _side, gen, cursor, items, scan.Complete ? DecisionPaths(scan, include) : [string.Empty])
             { IncludesPath = path => include(path) && !UnderAny(path, heldPaths), IncompleteReasons = DecisionReasons(scan, include),
-                VerifyAbsence = item => LocalFileAbsence.Check(_root.RootPath, _rootIdentity, item) };
+                VerifyAbsence = item => VerifyScanAbsence(scan, item) };
     }
 
     internal Delta BuildDelta(long gen, string rootId, string cursor, string throughCursor, PilotLocalScan scan,
@@ -575,13 +575,24 @@ public sealed partial class LocalInventory : IInventorySource
         }
         var incompletePaths = decisionPaths.ToHashSet(StringComparer.OrdinalIgnoreCase);
         var absence = new Snapshot(rootId, _side, gen, throughCursor, [], decisionPaths)
-            { VerifyAbsence = item => LocalFileAbsence.Check(_root.RootPath, _rootIdentity, item) };
+            { VerifyAbsence = item => extraIncomplete.Count == 0 ? VerifyScanAbsence(scan, item) :
+                LocalFileAbsence.Check(_root.RootPath, _rootIdentity, item) };
         changes.AddRange(LocalDeletes.Build(_known, rootId, paths, scan,
             path => include(path) && !LocalItems.IsExcluded(path, _productOwnedRelative) &&
                 !UnderAny(path, heldPaths) && !UnderAny(path, incompletePaths),
             scanTime, absence.CanCloseAbsent));
         return new Delta(rootId, _side, gen, cursor, throughCursor, changes, false, decisionPaths)
             { IncludesPath = include, IncompleteReasons = DecisionReasons(scan, include), PendingDeletionEvidence = absence.PendingDeletionEvidence };
+    }
+
+    private FileAbsence VerifyScanAbsence(PilotLocalScan scan, ItemState item)
+    {
+        // History/Keep-held decisions protect their own scopes but do not mean enumeration
+        // missed a directory. A complete listing still proves absence in unrelated scopes.
+        // Real listing failures (including native quarantine failures) require identity proof.
+        if (scan.Complete && scan.Decisions.All(d => d.DefenderHistoryUnknown &&
+            d.QuarantineCode is null && !d.DefenderHistoryMatch)) return FileAbsence.Gone;
+        return LocalFileAbsence.Check(_root.RootPath, _rootIdentity, item);
     }
 
     private static IReadOnlyDictionary<string, string> DecisionReasons(PilotLocalScan scan, Func<string, bool> include) =>

@@ -68,7 +68,7 @@ public sealed partial class V2SyncHost
         Task.FromResult((Problems: (IReadOnlyList<SyncCommandProblem>)[], SuccessfulRunStartedUtcByPair:
             (IReadOnlyDictionary<string, DateTimeOffset>)new Dictionary<string, DateTimeOffset>()));
 
-    // ---- Activity and run-history queries not in v2 yet (E). ----
+    // ---- Activity and run-retry queries not in v2 yet (E); retained run history is in V2SyncHost.RunHistory.cs. ----
 
     /// <inheritdoc />
     public Task<IReadOnlyList<SyncAuthorityActivityProjection>> LoadActivityProjectionPageAsync(int limit, int offset,
@@ -87,16 +87,8 @@ public sealed partial class V2SyncHost
     public int ActivityLogPendingCount => 0;
 
     /// <inheritdoc />
-    public Task<IReadOnlyList<SyncAuthorityRunHistory>> LoadRunHistoryAsync(int limit = 50, int offset = 0,
-        CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<SyncAuthorityRunHistory>>([]);
-
-    /// <inheritdoc />
     public Task<IReadOnlyList<SyncAuthorityRunHistory>> LoadRunRetriesAsync(string runId,
         CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<SyncAuthorityRunHistory>>([]);
-
-    /// <inheritdoc />
-    public Task<SyncAuthorityRunHistory?> LoadRunByIdAsync(string runId, CancellationToken cancellationToken = default,
-        Action<string>? onReadProgress = null) => Task.FromResult<SyncAuthorityRunHistory?>(null);
 
     /// <inheritdoc />
     public Task<SyncActivityRetentionWindow> LoadActivityRetentionWindowAsync(

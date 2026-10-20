@@ -19,6 +19,32 @@ if (args is ["--v2-removal-review-checks"])
     return 0;
 }
 
+if (args is ["--autosync-host-child", var hostRoot, var hostAddress])
+    return await Massdex.SyncShark.V2.AutoSyncProcessChecks.ChildAsync(hostRoot, hostAddress);
+
+if (args is ["--v2-autosync-phase3-checks"])
+{
+    await Massdex.SyncShark.V2.AutoSyncChecks.LoopExceptionAndNoticeRecoveryAsync();
+    await Massdex.SyncShark.V2.AutoSyncChecks.ImmediateAccessNoticeAsync();
+    await Massdex.SyncShark.V2.AutoSyncChecks.ImmediateDiskFullReportAsync();
+    await Massdex.SyncShark.V2.AutoSyncChecks.OutageCauseChangesStayIgnoredAsync();
+    await Massdex.SyncShark.V2.RunChecks.ItemIgnoreWaitsForSettingsSaveAsync();
+    await Massdex.SyncShark.V2.RunChecks.PairNoticeIgnoreDoesNotWaitForRunAsync();
+    await Massdex.SyncShark.V2.RunChecks.HistoryFailureDoesNotFailCompletedRunAsync();
+    await Massdex.SyncShark.V2.AutoSyncHostChecks.RunAsync();
+    return 0;
+}
+if (args is ["--v2-autosync-process-checks"])
+{
+    await Massdex.SyncShark.V2.AutoSyncProcessChecks.RunAsync();
+    return 0;
+}
+if (args is ["--v2-review-deletes-checks"])
+{
+    await Massdex.SyncShark.V2.RunCliChecks.RunReviewDeleteChecksAsync();
+    return 0;
+}
+
 if (args is ["--v2-local-constituent-checks", var constituentRoot, var constituent])
 {
     await Massdex.SyncShark.V2.LocalChecks.RunConstituentAsync(constituentRoot, constituent);
@@ -1072,6 +1098,13 @@ if (args is ["--v2-notice-restore-checks"])
 if (args is ["--v2-run-checks"])
 {
     await Massdex.SyncShark.V2.RunChecks.RunAsync();
+    return 0;
+}
+
+if (args is ["--v2-run-history-checks", var runHistoryRoot])
+{
+    Massdex.SyncShark.V2.StorageChecks.RunHistoryChecks(Path.GetFullPath(runHistoryRoot));
+    await Massdex.SyncShark.V2.SyncHostChecks.RunAsync();
     return 0;
 }
 

@@ -24,14 +24,37 @@ public sealed partial class V2CliRuntime
             await JournalSizing.ApplyAsync(_store, journalNotice, choice, new AttendedElevatedAction(), cancellationToken);
             return new SyncCliRunData(pairId, pair.Name, 0, 0, 0, 0, 0, false);
         }
+        var selected = _store.NoticeById(pairId, conflictId);
+        if (selected is { Closed: false } &&
+            (NoticeChoices.IsPairRetryNotice(selected.Value.Notice) || PairPath.Same(selected.Value.Notice.Path, relativePath)) &&
+            _run.TryApplyImmediateNoticeChoice(pairId, conflictId, choice, cancellationToken))
+        {
+            if (!_borrowed && choice == NoticeChoices.RetryNow && _store.FirstSyncDone(pairId))
+            {
+                var report = await _run.IncrementalAsync(pairId, new RunProgressForwarder(Console.Error.WriteLine), cancellationToken);
+                return new SyncCliRunData(pairId, pair.Name, report.Uploaded, report.Downloaded, 0,
+                    report.KeptBoth, report.Held, report.Outcome == RunOutcomes.Stopped)
+                { Failed = report.Failed, Deleted = report.Deleted, Moved = report.Moved, NeedsVerification = report.Uncertain, Diagnostics = report.Diagnostics };
+            }
+            return new SyncCliRunData(pairId, pair.Name, 0, 0, 0, 0, 0, false);
+        }
+        if (selected is { Closed: false } && !NoticeChoices.IsPairRetryNotice(selected.Value.Notice) && string.IsNullOrEmpty(relativePath))
+            throw new SyncCliUsageException("--path is required for item notices.");
+        var acceptedExclusion = selected is { Closed: false } &&
+            choice is NoticeChoices.Ignore or NoticeChoices.Exclude &&
+            !NoticeChoices.IsPairRetryNotice(selected.Value.Notice) &&
+            NoticeChoices.IsRetryNotice(selected.Value.Notice) &&
+            PairPath.Same(selected.Value.Notice.Path, relativePath) &&
+            NoticeChoices.Options(selected.Value.Notice).Any(option => option.Choice == choice)
+                ? selected.Value.Notice : null;
         await WaitForDataLockAsync(_runGate, Console.Error.WriteLine, cancellationToken);
         try
         {
             var retained = _store.NoticeById(pairId, conflictId);
             // A held-notice item choice names the held item in --path; every other choice names the notice's own path.
             var itemChoice = NoticeChoices.IsHeldItemChoice(choice) && retained?.Notice.DefenderHistory?.Cause == DefenderReview.HeldCause;
-            var notice = retained is { } found && (itemChoice || PairPath.Same(found.Notice.Path, relativePath)) &&
-                (!found.Closed || _store.QuarantineRecoveryRetained(pairId, conflictId)) ? found.Notice : null;
+            var notice = acceptedExclusion ?? (retained is { } found && (itemChoice || PairPath.Same(found.Notice.Path, relativePath)) &&
+                (!found.Closed || _store.QuarantineRecoveryRetained(pairId, conflictId)) ? found.Notice : null);
             if ((notice?.Quarantine is not null || notice?.DefenderHistory is not null) && NoticeChoices.IsQuarantineChoice(choice))
             {
                 var held = await _run.ResolveQuarantineAsync(pairId, conflictId, choice, cancellationToken,
@@ -51,7 +74,9 @@ public sealed partial class V2CliRuntime
                         if (result.Outcome == Outcome.Done && action.ExpectedTarget?.Kind == ItemKind.File) removed++;
                         if (result.Outcome == Outcome.Failed) removalFailures++;
                         if (result.Outcome == Outcome.Uncertain) removalUncertain++;
-                    }, new RunProgressForwarder(Console.Error.WriteLine));
+                    }, new RunProgressForwarder(Console.Error.WriteLine), acceptedExclusion: acceptedExclusion);
+                if (NoticeChoices.IsPairRetryNotice(notice))
+                    return new SyncCliRunData(pairId, pair.Name, 0, 0, 0, 0, 0, false);
                 if (choice is not (NoticeChoices.RetryNow or NoticeChoices.DeleteReviewed or NoticeChoices.KeepRestore) || !_store.FirstSyncDone(pairId))
                     return new SyncCliRunData(pairId, pair.Name, 0, 0, 0, 0, 0, false)
                     { Deleted = removed, Failed = removalFailures, NeedsVerification = removalUncertain };

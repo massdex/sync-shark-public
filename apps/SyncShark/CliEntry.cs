@@ -50,9 +50,19 @@ internal static class CliEntry
                 return (int)SyncCliExitCode.Usage;
             }
             args = selection.Args;
+            if (!selection.UseV2 && args.Contains("autosync", StringComparer.Ordinal))
+            {
+                TryWrite(standardError, "AutoSync uses core v2. Core v1 remains selected and nothing was started. To switch explicitly, repeat with --cli --core v2 autosync <command>.");
+                return (int)SyncCliExitCode.Usage;
+            }
             if (selection.UseV2)
+            {
+                var hosted = Task.Run(() => BackgroundHostEntry.TryCliAsync(args, standardOutput, standardError,
+                    cancellation.Token)).GetAwaiter().GetResult();
+                if (hosted is { } code) return code;
                 return Task.Run(() => SyncCli.ExecuteAsync(args, standardOutput, standardError,
                     () => Massdex.SyncShark.V2.V2CliRuntime.AcquireProduction(args), cancellation.Token)).GetAwaiter().GetResult();
+            }
             // State-free commands never need a runtime. Everything else first asks the running
             // application, so the CLI works while the window or tray runtime owns the product, and only
             // falls back to the direct lock-owning path when no application is running.
@@ -69,6 +79,11 @@ internal static class CliEntry
             }
             return Task.Run(() => SyncCli.ExecuteAsync(args, standardOutput, standardError,
                 SyncCliRuntime.AcquireProduction, cancellation.Token)).GetAwaiter().GetResult();
+        }
+        catch (SyncCliUsageException error)
+        {
+            TryWrite(standardError, "Sync Shark (usage): " + error.Message);
+            return (int)SyncCliExitCode.Usage;
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {

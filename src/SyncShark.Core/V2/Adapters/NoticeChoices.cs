@@ -55,7 +55,11 @@ public static class NoticeChoices
     /// </summary>
     public const int DeletionReviewRestoreOnlyRule = 41;
 
-    public static bool IsRetryNotice(Notice notice) => notice.ReasonKey is "sync-retry" or "deletion-review" or "planning-degraded" or "recovery-unavailable" || IsRemovalAttention(notice) || IsRemovalReview(notice);
+    public static bool IsPairRetryNotice(Notice notice) => notice.ReasonKey == "run-history-unavailable" || IsAutoSyncFailure(notice);
+
+    public static bool IsAutoSyncFailure(Notice notice) => notice.ReasonKey?.StartsWith("autosync-failed", StringComparison.Ordinal) == true;
+
+    public static bool IsRetryNotice(Notice notice) => IsPairRetryNotice(notice) || notice.ReasonKey is "sync-retry" or "deletion-review" or "planning-degraded" or "recovery-unavailable" || IsRemovalAttention(notice) || IsRemovalReview(notice);
 
     public static bool IsRetryChoice(string choice) => choice is RetryNow or Exclude or Ignore or DeleteReviewed or KeepRestore or OpenFolderSettings or OpenRecoverySettings or Dismiss or ReviewRemoval or ReviewRemovalA or ReviewRemovalB or ConfirmRemoval or RemovalNextPage or RemovalPreviousPage;
     public const string QuarantineRetry = "quarantine-retry";
@@ -131,6 +135,8 @@ public static class NoticeChoices
             : IsRemovalAttention(notice) && notice.RemovalSides is null
             ? [new(ReviewRemoval, "Review removal"), new(ReviewRemovalA, "Review removal on A (left)"),
                new(ReviewRemovalB, "Review removal on B (right)"), new(OpenFolderSettings, "Open folder settings"), new(Dismiss, "Dismiss")]
+            : IsPairRetryNotice(notice)
+            ? [new(RetryNow, "Retry now"), new(Ignore, "Ignore this notice; keep syncing")]
             : IsRemovalAttention(notice)
             ? [new(ReviewRemoval, "Review removal"), new(OpenFolderSettings, "Open folder settings"), new(Dismiss, "Dismiss")]
             : notice.ReasonKey == "deletion-review" && notice.Rule == DeletionReviewRestoreOnlyRule

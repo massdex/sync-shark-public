@@ -316,7 +316,7 @@ public sealed partial class Executor : IExecutor
             if (await runner.RunAsync(action, ct).ConfigureAwait(false) is { } result)
                 await writer.WriteAsync(result, consumerGone).ConfigureAwait(false);
         }
-        catch (Exception error) when (error is not (OperationCanceledException or EndpointAccessException or StateDamagedException) &&
+        catch (Exception error) when (error is not (PairPausedException or OperationCanceledException or EndpointAccessException or StateDamagedException) &&
             error is not Microsoft.Data.Sqlite.SqliteException)
         {
             // The intent, if any, remains unresolved for next-run reconciliation. Do not

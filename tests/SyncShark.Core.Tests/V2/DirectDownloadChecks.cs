@@ -20,6 +20,7 @@ internal static class DirectDownloadChecks
         await ConcurrentReplacementIsNotOverwrittenAsync().ConfigureAwait(false);
         await CheckpointIsDurableBeforePreserveAsync().ConfigureAwait(false);
         await CrashAfterPreservePublishesTheVerifiedStageAsync().ConfigureAwait(false);
+        await AlreadyPublishedDownloadRepairsDateAsync().ConfigureAwait(false);
         await CrashAfterPreserveRestoresTheOriginalAsync().ConfigureAwait(false);
         await ExcludedCheckpointSettlesAsync().ConfigureAwait(false);
         await MovedRecoveryRootSettlesAsync().ConfigureAwait(false);
@@ -230,6 +231,37 @@ internal static class DirectDownloadChecks
         LocalChecks.Require(File.ReadAllText(Path.Combine(setup.Recovery, ".syncshark-recovery-" + PairId,
             LocalChecks.OperationId("act-crash-publish") + ".recovery")) == "old-bytes",
             "the archived original is untouched by resume");
+    }
+
+    private static async Task AlreadyPublishedDownloadRepairsDateAsync()
+    {
+        var setup = await LocalWriterChecks.SetupAsync("direct-resume-published-date");
+        LocalChecks.Seed(setup.Root, "file.txt", "old-bytes");
+        var victim = (await setup.Writer.ObserveAsync("file.txt", CancellationToken.None))!;
+        var content = LocalChecks.Bytes("published-new-bytes");
+        await setup.Writer.PreserveAsync(victim, "act-published-date", CancellationToken.None);
+        var (stagePath, stageObjectId) = await WriteStageAsync(setup.Root, content);
+        var action = CrashAction("act-published-date", victim, content, stagePath, stageObjectId, setup.Recovery);
+        File.Move(stagePath, Path.Combine(setup.Root, "file.txt")); // an older writer published without its source date
+        SyncLocalEndpointStore.BeforeStampPublishedDownloadForTest = () => throw new IOException("sharing violation fixture");
+        try
+        {
+            var deferred = await ReconcileAsync(setup.Writer, action, setup.Root);
+            LocalChecks.Require(deferred.Outcome == Outcome.Done && deferred.Reason!.Contains("Date could not be set; will retry"),
+                "date failure never leaves a completed download uncertain");
+            using var notices = new InMemoryStateStore();
+            RegisterPair(notices, setup.Root);
+            var notice = SyncDirectDownloadCheckpoint.NoticeFor(PairId, action, deferred)!;
+            notices.AddNotices([notice, notice]);
+            LocalChecks.Require(notices.OpenNotices(PairId).Count == 1 && notice.Kind == NoticeKind.Info,
+                "date failure has one deduplicated informational notice");
+        }
+        finally { SyncLocalEndpointStore.BeforeStampPublishedDownloadForTest = null; }
+        var result = await ReconcileAsync(setup.Writer, action, setup.Root);
+        LocalChecks.Require(result is { Outcome: Outcome.Done } &&
+            File.GetLastWriteTimeUtc(Path.Combine(setup.Root, "file.txt")) == action.Source!.Mtime.UtcDateTime &&
+            result.NewA!.Mtime == action.Source.Mtime,
+            "already-published checkpoint reconciles source date as well as content and baseline");
     }
 
     // Crash after the archive but before publish, with no surviving stage: reconcile restores the original from

@@ -11,7 +11,7 @@ internal static class DateRepairReviewChecks
         var pair = new PairDef("review", "review", LocalChecks.RootOf(files, "a"),
             new RootDef("b", SyncProviders.Dropbox, "account", "/test", "id:root"), [], [], true);
         store.SavePair(pair);
-        var old = new DateTimeOffset(2026, 10, 18, 0, 0, 0, TimeSpan.Zero);
+        var old = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(new DateTime(2026, 10, 18, 12, 0, 0), TimeZoneInfo.Local));
         var target = new DateTimeOffset(2015, 1, 1, 0, 0, 0, TimeSpan.Zero);
         var remote = new Dictionary<string, ItemState>();
         var gen = store.BeginGeneration("a", "test");
@@ -32,6 +32,7 @@ internal static class DateRepairReviewChecks
             var action = new SyncAction(name, 0, ActionKind.Adopt, Side.A, name, null, cloud, local, false, name);
             store.CommitResult(pair.PairId, gen, action, new ActionResult(name, Outcome.Done, local, cloud, null, null));
         }
+        foreach (var b in store.Baselines(pair.PairId)) DateProvenanceChecks.Seed(store, pair, b.A, Path.Combine(root, "state"));
         store.WriteSnapshot(new Snapshot("a", Side.A, gen, "review-cursor",
             store.Baselines(pair.PairId, remote.Keys.ToArray()).Select(row => row.A).ToArray(), []));
         File.SetLastWriteTimeUtc(Path.Combine(files, "000"), target.UtcDateTime); // crash after stamping, before commit
@@ -40,7 +41,7 @@ internal static class DateRepairReviewChecks
         var calls = 0;
         Task<ItemState?> Observe(string path, CancellationToken _)
         {
-            LocalChecks.Require(path is not ("132" or "133"), "SQL rejects matching dates and other UTC dates before remote calls");
+            LocalChecks.Require(path is not ("132" or "133"), "SQL rejects matching dates and other local dates before remote calls");
             Interlocked.Increment(ref calls);
             return Task.FromResult<ItemState?>(remote[path]);
         }
@@ -94,17 +95,20 @@ internal static class DateRepairReviewChecks
             [new PlanRow(baseline, live with { Hash = null }, remote["000"], new Evidence(false, false, true, true))],
             options);
         LocalChecks.Require(plan.Actions.Count == 0, "next sync planner emits no actions even if a scan omits cached hash");
-        // A network failure records the start of the uncompleted page, not the last scheduled worker.
+        var offline = await DateRepair.RunAsync(store, pair, (_, _) => throw new HttpRequestException("offline"), root, true,
+            [], CancellationToken.None, date, "129");
+        LocalChecks.Require(offline.Skipped == 2 && File.ReadAllText(offline.ReportFile).Contains("Dropbox lookup: offline"),
+            "per-item network failures are reported and the page completes");
         var failed = false;
         try
         {
-            await DateRepair.RunAsync(store, pair, (_, _) => throw new HttpRequestException("offline"), root, true,
-                [], CancellationToken.None, date, "129");
+            await DateRepair.RunAsync(store, pair, Observe, root, true, [], CancellationToken.None, date, "129",
+                withPageLock: _ => throw new SyncCliBusyException("exclusive run lock unavailable"));
         }
-        catch (HttpRequestException) { failed = true; }
+        catch (SyncCliBusyException) { failed = true; }
         LocalChecks.Require(failed && Directory.EnumerateFiles(Path.Combine(root, "v2", "logs"))
             .Any(path => File.ReadAllText(path).Contains("\"Outcome\":\"aborted\",\"After\":\"129\"")),
-            "network failure logs resumable page cursor");
+            "unavailable exclusive gate records a clear resumable cursor");
         var resumed = await DateRepair.RunAsync(store, pair, Observe, root, true, [], CancellationToken.None, date, "130");
         LocalChecks.Require(resumed.Examined == 1 && resumed.Skipped == 1, "resume cursor skips prior completed candidates");
         var originalError = new IOException("original failure");

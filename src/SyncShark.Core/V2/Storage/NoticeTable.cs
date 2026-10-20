@@ -183,6 +183,12 @@ internal sealed class NoticeTable
                 (hold.Target == Side.B ? hold.ExpectedTarget : hold.Source)?.ObjectId ?? "");
         return ShortId.Make("n", notice.PairId, rule, RowCodec.Key(notice.Path), notice.ReasonKey);
     }
+    public void CloseFamily(long pairNo, string prefix, string? exceptReason) =>
+        StoreSchema.Execute(_connection, null,
+            "UPDATE notice SET state='closed', choice='resolved' WHERE pair_no=$pair " +
+            "AND reason_key >= $prefix AND reason_key < $end " +
+            "AND ($except IS NULL OR reason_key <> $except) AND (state='open' OR choice='ignore');",
+            ("$pair", pairNo), ("$prefix", prefix), ("$end", prefix + "\uffff"), ("$except", exceptReason));
 
     internal static string RetainedId(string pairId, string actionId) => ShortId.Make("nv", pairId, actionId);
 

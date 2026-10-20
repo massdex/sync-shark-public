@@ -1,0 +1,98 @@
+using System.IO;
+using System.Runtime.CompilerServices;
+using Massdex.SyncShark.V2;
+
+namespace Massdex.SyncShark;
+
+/// <summary>Dispatch headless modes before constructing or JIT-loading a WPF Application.</summary>
+internal static class ProcessEntry
+{
+    [STAThread]
+    public static int Main(string[] args)
+    {
+        if (CliEntry.IsCliInvocation(args)) return CliEntry.Execute(args);
+        var selected = CoreSwitch.Select(args, Environment.GetEnvironmentVariable(CoreSwitch.EnvironmentVariable));
+        if (selected.Args is ["--background-host"] or ["--autosync-supervisor"])
+        {
+            if (selected.Error is not null || !selected.UseV2) return (int)SyncCliExitCode.Usage;
+            try
+            {
+                return selected.Args[0] == "--background-host"
+                    ? BackgroundHostEntry.RunAsync().GetAwaiter().GetResult()
+                    : Supervise();
+            }
+            catch (Exception) { return (int)SyncCliExitCode.Failed; }
+        }
+        return RunWindow();
+    }
+
+    private static int Supervise()
+    {
+        // Only one relauncher per store/user/session. A second starter observes the existing host.
+        using var mutex = new Mutex(false, @"Local\" + AutoSyncHostProtocol.PipeName(SyncSharkRuntimePaths.InstanceLockFile) + ".supervisor");
+        bool owned;
+        try { owned = mutex.WaitOne(0); } catch (AbandonedMutexException) { owned = true; }
+        using var stop = new EventWaitHandle(false, EventResetMode.ManualReset, SupervisorStopName);
+        if (!owned)
+        {
+            if (!stop.WaitOne(0)) return 0; // a healthy supervisor already owns this generation
+            // A quick restart must inherit ownership after the stopping generation drains.
+            while (!owned)
+            {
+                try { owned = mutex.WaitOne(TimeSpan.FromSeconds(1)); }
+                catch (AbandonedMutexException) { owned = true; }
+                if (!owned && !stop.WaitOne(0)) return 0; // another starter already took over
+            }
+        }
+        stop.Reset(); // this owner begins a new supervisor generation
+        var delay = TimeSpan.FromSeconds(5);
+        try
+        {
+            while (!stop.WaitOne(0))
+            {
+                try
+                {
+                    var started = System.Diagnostics.Stopwatch.StartNew();
+                    using var child = AutoSyncProcess.StartDetached(Environment.ProcessPath ?? throw new IOException("Executable unavailable."), supervisor: false, warning: Console.Error.WriteLine);
+                    child.WaitForExit();
+                    if (started.Elapsed >= TimeSpan.FromMinutes(10)) delay = TimeSpan.FromSeconds(5);
+                    if (AutoSyncProcess.StopsForExistingOwner(child.ExitCode))
+                    {
+                        try { AutoSyncProcess.RecordExistingOwnerNotice(ExistingOwnerNoticePath); }
+                        catch (Exception error) { try { Console.Error.WriteLine(error.Message); } catch (Exception) { } }
+                        return child.ExitCode;
+                    }
+                    if (child.ExitCode == 0) return 0; // explicit safe stop/attach is not a crash
+                }
+                catch (Exception error)
+                {
+                    try { Console.Error.WriteLine("AutoSync relaunch will retry: " + SyncCli.DescribeException(error)); }
+                    catch (Exception) { } // a detached diagnostic stream cannot terminate supervision
+                }
+                if (stop.WaitOne(delay)) return 0;
+                delay = TimeSpan.FromSeconds(Math.Min(delay.TotalSeconds * 2, 300));
+            }
+            return 0;
+        }
+        finally { mutex.ReleaseMutex(); }
+    }
+
+    internal static string ExistingOwnerNoticePath => Path.Combine(SyncDataLocation.ProductRoot, "autosync-owner-notice.txt");
+
+    private static string SupervisorStopName => @"Local\" +
+        AutoSyncHostProtocol.PipeName(SyncSharkRuntimePaths.InstanceLockFile) + ".stop-supervisor";
+
+    internal static void StopSupervisor()
+    {
+        try { using var stop = EventWaitHandle.OpenExisting(SupervisorStopName); stop.Set(); }
+        catch (WaitHandleCannotBeOpenedException) { } // no relauncher is running
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int RunWindow()
+    {
+        var app = new App();
+        app.InitializeComponent();
+        return app.Run();
+    }
+}

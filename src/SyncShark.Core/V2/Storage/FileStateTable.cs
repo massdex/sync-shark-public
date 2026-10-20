@@ -71,7 +71,9 @@ internal sealed class FileStateTable
             return Equals(version, StoreSchema.Scalar(_connection, null, "PRAGMA data_version;"));
         }
         using var incoming = SnapshotInput.Create(_connection, _dir, input, include, reading);
-        incoming.PrepareObjectLookup();
+        if (snapshot.IncompleteSubtrees.Count > 0 || StoreSchema.Scalar(_connection, reading,
+            "SELECT 1 FROM file_state INDEXED BY fs_quarantine WHERE root_no=$r AND (flags & 128)!=0 LIMIT 1;",
+            ("$r", rootNo)) is not null) incoming.PrepareObjectLookup();
         phase("stage");
         var now = _clock.GetUtcNow();
         Func<string, bool> suppressed = incoming.ContainsObject;
