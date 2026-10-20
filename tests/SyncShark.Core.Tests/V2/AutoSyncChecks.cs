@@ -18,6 +18,7 @@ internal static partial class AutoSyncChecks
         await SteadyStream_RunsAtMaxDelayAsync();
         await SignalDuringRun_ExactlyOneMoreAsync();
         await PausedOrOff_NoRunsUntilKickAsync();
+        await DurableResumeWithoutKickAsync();
         await Failed_RetryBacksOffAndResetsAsync();
         await RefusedOrAccess_HeldUntilKickAsync();
         await ClashingLayout_HeldAtStartupAsync();
@@ -106,6 +107,29 @@ internal static partial class AutoSyncChecks
             Require(off.Run.Entered.IsEmpty, "a pair turned off never runs");
         }
         Pass("PausedOrOff_NoRunsUntilKick");
+    }
+
+    private static async Task DurableResumeWithoutKickAsync()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "autosync-resume-" + Guid.NewGuid().ToString("N"));
+        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        store.SavePair(RigPair("p1", true));
+        store.MarkFirstSyncDone("p1");
+        store.SetPairPaused("p1", true);
+        var clock = new ManualClock();
+        var run = new FakeSyncRun();
+        var auto = new AutoSync(store, run, new FakeChangeWatchSource(), Settings, _ => false, () => SafetyPoll, clock);
+        auto.Start();
+        await Until(() => auto.States.Any(s => s.Status == AutoStatus.Paused) && clock.ActiveTimers == 1,
+            "durably paused pair parks with a safety timer");
+        store.SetPairPaused("p1", false); // direct CLI/store change, deliberately no Kick
+        clock.Advance(SafetyPoll);
+        await Until(() => auto.States.Any(s => s.Status == AutoStatus.Waiting) && clock.ActiveTimers == 1,
+            "safety poll observes durable resume without a Kick");
+        clock.Advance(Settings.ChangeQuietWindow);
+        await Until(() => run.Runs("p1") == 1, "resumed pair runs within one safety poll");
+        await auto.StopAsync();
+        Pass("DurableResumeWithoutKick");
     }
 
     private static async Task Failed_RetryBacksOffAndResetsAsync()

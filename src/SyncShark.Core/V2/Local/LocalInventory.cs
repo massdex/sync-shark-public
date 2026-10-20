@@ -123,9 +123,7 @@ public sealed partial class LocalInventory : IInventorySource
         var rootId = _root.RootId;
         if (_pairId is not null) JournalSizing.TryObserve(_known, _pairId, _root.RootPath, _volume, _rootFileId, null, _clock.GetUtcNow());
         PairPause.Check();
-        NtfsUsnJournal.TryReadCheckpoint(_root.RootPath, out var observedCheckpoint, out var journalDeleted);
-        var checkpoint = WalkCheckpointForTest is { } read ? read() : observedCheckpoint;
-        if (WalkCheckpointForTest is not null) journalDeleted = false; // the injected read models availability, not deletion
+        var (checkpoint, journalDeleted) = ReadWalkCheckpointState();
         var sql = _known as SqliteStateStore;
         if (checkpoint is null) { sql?.ForgetLocalWalk(rootId); sql = null; }
         var options = JsonSerializer.Serialize(new { _settings.ReplaceOnlineOnlyStubs,
@@ -515,10 +513,15 @@ public sealed partial class LocalInventory : IInventorySource
         }
     }
 
-    internal Func<NtfsUsnCheckpoint?>? WalkCheckpointForTest { get; set; }
+    internal Func<(NtfsUsnCheckpoint? Checkpoint, bool Deleted)>? WalkCheckpointForTest { get; set; }
     internal Action<string>? DirectoryCompletedForTest { get; set; }
-    private NtfsUsnCheckpoint? ReadWalkCheckpoint() => WalkCheckpointForTest is { } read ? read()
-        : NtfsUsnJournal.TryReadCheckpoint(_root.RootPath, out var checkpoint) ? checkpoint : null;
+    private NtfsUsnCheckpoint? ReadWalkCheckpoint() => ReadWalkCheckpointState().Checkpoint;
+    private (NtfsUsnCheckpoint? Checkpoint, bool Deleted) ReadWalkCheckpointState()
+    {
+        if (WalkCheckpointForTest is { } read) return read();
+        NtfsUsnJournal.TryReadCheckpoint(_root.RootPath, out var checkpoint, out var deleted);
+        return (checkpoint, deleted);
+    }
 
     private Task<PilotLocalScan> ScanAsync(PilotDirectoryLease lease, CancellationToken ct, Func<string, bool> include,
         IReadOnlyList<string>? refreshPaths, IProgress<string>? p, LocalWalkCheckpoint? walk = null, IReadOnlySet<string>? exactPaths = null)
@@ -536,6 +539,13 @@ public sealed partial class LocalInventory : IInventorySource
             refreshPaths: refreshPaths);
     }
 
+    private static bool UnderHeldDescendant(string path, IReadOnlySet<string> heldPaths)
+    {
+        if (path.Length == 0) return false;
+        var slash = path.LastIndexOf('/');
+        return UnderAny(slash < 0 ? "" : path[..slash], heldPaths);
+    }
+
     internal Snapshot BuildSnapshot(long gen, string rootId, string cursor, PilotLocalScan scan, Func<string, bool> include)
     {
         var items = new List<ItemState>();
@@ -549,8 +559,9 @@ public sealed partial class LocalInventory : IInventorySource
         // A handled quarantine is not a run-wide incomplete scan, but its unobserved subtree
         // must remain untouched in storage until an explicit retry obtains fresh evidence.
         return new Snapshot(rootId, _side, gen, cursor, items, scan.Complete ? DecisionPaths(scan, include) : [string.Empty])
-            { IncludesPath = path => include(path) && !UnderAny(path, heldPaths), IncompleteReasons = DecisionReasons(scan, include),
-                VerifyAbsence = item => VerifyScanAbsence(scan, item) };
+            { IncludesPath = path => include(path) && !UnderHeldDescendant(path, heldPaths), IncompleteReasons = DecisionReasons(scan, include),
+                VerifyAbsence = HasOnlyHistoryHolds(scan) ? _ => FileAbsence.Gone : null,
+                OpenAbsenceVerifier = HasOnlyHistoryHolds(scan) ? null : () => new LocalFileAbsence(_root.RootPath, _rootIdentity) };
     }
 
     internal Delta BuildDelta(long gen, string rootId, string cursor, string throughCursor, PilotLocalScan scan,
@@ -575,26 +586,25 @@ public sealed partial class LocalInventory : IInventorySource
             changes.Add(new Change(ChangeKind.Upsert, held.ObjectId, held.Path, held, null));
         }
         var incompletePaths = decisionPaths.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var historyOnly = extraIncomplete.Count == 0 && HasOnlyHistoryHolds(scan);
         var absence = new Snapshot(rootId, _side, gen, throughCursor, [], decisionPaths)
-            { VerifyAbsence = item => extraIncomplete.Count == 0 ? VerifyScanAbsence(scan, item) :
-                LocalFileAbsence.Check(_root.RootPath, _rootIdentity, item) };
+            { VerifyAbsence = historyOnly ? _ => FileAbsence.Gone : null,
+                OpenAbsenceVerifier = historyOnly ? null : () => new LocalFileAbsence(_root.RootPath, _rootIdentity) };
+        using var verifier = decisionPaths.Count == 0 ? null : absence.OpenAbsenceVerifier?.Invoke();
+        var checking = verifier is null ? absence : absence with { VerifyAbsence = verifier.Check };
+        var seenIds = changes.Select(change => change.ObjectId).ToHashSet(StringComparer.Ordinal);
         changes.AddRange(LocalDeletes.Build(_known, rootId, paths, scan,
             path => include(path) && !LocalItems.IsExcluded(path, _productOwnedRelative) &&
                 !UnderAny(path, heldPaths) && !UnderAny(path, incompletePaths),
-            scanTime, absence.CanCloseAbsent));
+            scanTime, row => seenIds.Contains(row.ObjectId) || checking.CanCloseAbsent(row)));
         return new Delta(rootId, _side, gen, cursor, throughCursor, changes, false, decisionPaths)
-            { IncludesPath = include, IncompleteReasons = DecisionReasons(scan, include), PendingDeletionEvidence = absence.PendingDeletionEvidence };
+            { IncludesPath = include, IncompleteReasons = DecisionReasons(scan, include),
+                PendingDeletionEvidence = absence.PendingDeletionEvidence, DisplacementEvidence = absence };
     }
 
-    private FileAbsence VerifyScanAbsence(PilotLocalScan scan, ItemState item)
-    {
-        // History/Keep-held decisions protect their own scopes but do not mean enumeration
-        // missed a directory. A complete listing still proves absence in unrelated scopes.
-        // Real listing failures (including native quarantine failures) require identity proof.
-        if (scan.Complete && scan.Decisions.All(d => d.DefenderHistoryUnknown &&
-            d.QuarantineCode is null && !d.DefenderHistoryMatch)) return FileAbsence.Gone;
-        return LocalFileAbsence.Check(_root.RootPath, _rootIdentity, item);
-    }
+    // History holds describe missing known items, not an unenumerated directory.
+    private static bool HasOnlyHistoryHolds(PilotLocalScan scan) => scan.Complete &&
+        scan.Decisions.All(d => d.DefenderHistoryUnknown && d.QuarantineCode is null && !d.DefenderHistoryMatch);
 
     private static IReadOnlyDictionary<string, string> DecisionReasons(PilotLocalScan scan, Func<string, bool> include) =>
         scan.Decisions.Where(decision => decision.RelativePath.Length == 0 || include(decision.RelativePath))

@@ -570,6 +570,17 @@ internal sealed class InMemoryStateStore : IStateStore
         }
     }
 
+    public void RecordNoticeChoiceFailure(Notice original, string failure)
+    {
+        lock (_gate)
+        {
+            var index = _notices.FindIndex(n => n.PairId == original.PairId && n.NoticeId == original.NoticeId);
+            if (index < 0) return;
+            _notices[index] = _notices[index] with { Detail = original.Detail + "\n\n" + failure };
+            _closedNotices.Remove(original.NoticeId!);
+        }
+    }
+
     public void CloseNoticeFamily(string pairId, string reasonPrefix, string? exceptReason = null)
     {
         lock (_gate)

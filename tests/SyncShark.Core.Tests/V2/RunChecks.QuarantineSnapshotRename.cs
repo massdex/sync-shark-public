@@ -109,7 +109,17 @@ internal static partial class RunChecks
                 var replacement = original with { ObjectId = "different-entity", Hash = new string('b', 64) };
                 var items = reuseOldName ? new[] { moved, replacement } : new[] { moved };
                 var snapshot = new Snapshot("ra", Side.A, store.BeginGeneration("ra", "rename"), "after", items, []);
-                if (mode == "partial") snapshot = snapshot with { IncompleteSubtrees = ["unrelated/locked"] };
+                if (mode == "partial")
+                {
+                    var checkedHeld = false;
+                    var absentHeld = snapshot with { Items = [], IncompleteSubtrees = ["unrelated/locked"],
+                        VerifyAbsence = _ => { checkedHeld = true; return FileAbsence.Unknown; } };
+                    store.WriteSnapshot(absentHeld);
+                    Require(!checkedHeld && absentHeld.PendingDeletionEvidence.Count == 0 &&
+                        store.Live("ra", [oldPath]).Single().Flags.HasFlag(ItemFlags.Quarantined),
+                        label + " held row needs no absence check or misleading deletion evidence");
+                    snapshot = snapshot with { IncompleteSubtrees = ["unrelated/locked"] };
+                }
                 if (mode == "incomplete")
                 {
                     store.WriteSnapshot(snapshot with { IncompleteSubtrees = [""] });
@@ -119,33 +129,41 @@ internal static partial class RunChecks
                 }
                 if (mode == "crash")
                 {
-                    var injected = false;
-                    bool Include(string path)
+                    void Sql(string text)
                     {
-                        if (path != oldPath) return true;
-                        // A separate read-only connection proves the NEW hold crossed a StoreBatch commit.
-                        using var connection = new SqliteConnection("Data Source=" + SqliteStateStore.DatabasePath(folder) + ";Mode=ReadOnly;Pooling=False");
+                        using var connection = new SqliteConnection("Data Source=" + SqliteStateStore.DatabasePath(folder) + ";Pooling=False");
                         connection.Open();
                         using var command = connection.CreateCommand();
-                        command.CommandText = "SELECT COUNT(*) FROM file_state f JOIN dir d ON d.dir_no=f.dir_no " +
-                            "WHERE f.object_id=$id AND d.path=$parent AND f.name='held.txt' AND (f.flags & 128)!=0;";
-                        command.Parameters.AddWithValue("$id", original.ObjectId);
-                        command.Parameters.AddWithValue("$parent", newPath[..newPath.LastIndexOf('/')]);
-                        if (Convert.ToInt64(command.ExecuteScalar()) == 0) return true;
-                        injected = true;
-                        throw new IOException("injected between snapshot batches");
+                        command.CommandText = text;
+                        command.ExecuteNonQuery();
                     }
-                    try
+                    Sql($"""
+                        CREATE TRIGGER fail_held_retirement BEFORE DELETE ON file_state
+                        WHEN OLD.object_id='held-entity' AND
+                          (SELECT path FROM dir WHERE dir_no=OLD.dir_no)='{oldPath[..oldPath.LastIndexOf('/')]}' AND
+                          EXISTS(SELECT 1 FROM file_state f JOIN dir d ON d.dir_no=f.dir_no
+                            WHERE f.object_id='held-entity' AND (f.flags & 128)!=0
+                              AND d.path='{newPath[..newPath.LastIndexOf('/')]}')
+                        BEGIN SELECT RAISE(ABORT, 'injected atomic publication failure'); END;
+                        """);
+                    var injected = false;
+                    try { store.WriteSnapshot(snapshot); }
+                    catch (SqliteException error) when (error.Message.Contains("injected atomic publication failure", StringComparison.Ordinal))
+                    { injected = true; }
+                    Require(injected, label + " fails inside publication after the new held row is written");
+                    void AssertRollback()
                     {
-                        store.WriteSnapshot(snapshot with { IncludesPath = Include });
-                        throw new InvalidOperationException("snapshot crash was not injected");
+                        var rows = store.Live("ra");
+                        Require(rows.Count == 1 && rows.Single().Path == oldPath &&
+                            rows.Single().ObjectId == original.ObjectId && rows.Single().Flags.HasFlag(ItemFlags.Quarantined) &&
+                            store.Tombstones("ra").Count == 0,
+                            label + " full rollback keeps only old held alias, no replacement, new alias or tombstone");
                     }
-                    catch (IOException error) when (error.Message == "injected between snapshot batches") { }
-                    Require(injected, label + " injected after a durable new-path hold and before old-alias retirement");
+                    AssertRollback();
                     store.Dispose();
                     store = SqliteStateStore.Open(folder, settings, TimeProvider.System);
-                    Require(store.Live("ra").Any(i => i.ObjectId == original.ObjectId && i.Flags.HasFlag(ItemFlags.Quarantined)),
-                        label + " hold survives reopening after committed-batch interruption");
+                    AssertRollback();
+                    Sql("DROP TRIGGER fail_held_retirement;");
                 }
                 store.WriteSnapshot(snapshot with { Gen = store.BeginGeneration("ra", "converge") });
                 var retained = store.Live("ra").Where(i => i.ObjectId == original.ObjectId).ToArray();

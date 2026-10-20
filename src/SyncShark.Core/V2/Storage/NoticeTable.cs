@@ -183,6 +183,18 @@ internal sealed class NoticeTable
                 (hold.Target == Side.B ? hold.ExpectedTarget : hold.Source)?.ObjectId ?? "");
         return ShortId.Make("n", notice.PairId, rule, RowCodec.Key(notice.Path), notice.ReasonKey);
     }
+    public void RecordChoiceFailure(SqliteTransaction transaction, long pairNo, Notice original, string failure)
+    {
+        var current = ById(pairNo, original.NoticeId!, transaction);
+        if (current is null) return;
+        // Preserve current structured version evidence, but restore the accepted why/fix text.
+        // One UPDATE also clears sticky Ignore; no close/add gap and no retained-version Add no-op.
+        var notice = current.Value.Notice with { Detail = original.Detail + "\n\n" + failure };
+        StoreSchema.Execute(_connection, transaction,
+            "UPDATE notice SET state='open', choice=NULL, detail=$detail WHERE notice_id=$id AND pair_no=$p;",
+            ("$detail", NoticeDetailCodec.Encode(notice)), ("$id", original.NoticeId), ("$p", pairNo));
+    }
+
     public void CloseFamily(long pairNo, string prefix, string? exceptReason) =>
         StoreSchema.Execute(_connection, null,
             "UPDATE notice SET state='closed', choice='resolved' WHERE pair_no=$pair " +

@@ -85,6 +85,13 @@ public static class NoticeChoices
 
     /// <summary>Held-notice choices that act on one named item; the request's path names that item, not the notice.</summary>
     public static bool IsHeldItemChoice(string choice) => choice is DefenderReleaseItem or DefenderExcludeHeld;
+    /// <summary>Only ordinary item exclusions may outlive the requesting client while waiting for a run.</summary>
+    public static bool CanQueueExclusion(Notice notice, string? path, string? choice) =>
+        notice.RetainedVersion is null && choice is Ignore or Exclude &&
+        !IsPairRetryNotice(notice) && IsRetryNotice(notice) &&
+        !string.IsNullOrEmpty(path) && PairPath.Same(notice.Path, path) &&
+        Options(notice).Any(option => option.Choice == choice);
+
 
     public static bool IsRetainedVersionChoice(string choice) =>
         choice is UseOtherVersion or SaveOtherVersionAsCopy or Dismiss;

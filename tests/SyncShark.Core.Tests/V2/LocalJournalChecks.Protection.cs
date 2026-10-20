@@ -113,13 +113,13 @@ internal static partial class LocalJournalChecks
         LocalChecks.Require(store.ProtectionIndex("root-local", ItemFlags.NeedsRehash) is null, "60k held paths select bounded batch mode");
         var queryCount = store.ProtectionBatchQueries;
         var overflowWatch = Stopwatch.StartNew();
-        var overflow = store.ProtectionBatch("root-local", ItemFlags.NeedsRehash, ["", "scale-1", "missing/path"]);
+        var overflow = store.ProtectionBatch("root-local", ItemFlags.NeedsRehash, ["", "synthetic-0000001", "missing/path"]);
         overflowWatch.Stop();
         Console.WriteLine($"60k protected overflow: 3 path batch={overflowWatch.ElapsedMilliseconds}ms, SQL commands={store.ProtectionBatchQueries-queryCount}");
         LocalChecks.Require(store.ProtectionBatchQueries == queryCount + 1, "one SQL command per overflow batch, not per path");
         LocalChecks.Require(overflow[0].Contains && !overflow[0].Covered && overflow[1].Covered && !overflow[2].Covered,
             "overflow batch protects root/self without protecting unrelated paths");
-        var realistic = Enumerable.Range(0, 1024).Select(n => n == 0 ? "scale-1" : $"clear-{n}").ToArray();
+        var realistic = Enumerable.Range(0, 1024).Select(n => n == 0 ? "synthetic-0000001" : $"clear-{n}").ToArray();
         overflowWatch.Restart(); queryCount = store.ProtectionBatchQueries;
         var realisticMatches = store.ProtectionBatch("root-local", ItemFlags.NeedsRehash, realistic);
         overflowWatch.Stop();
@@ -127,7 +127,7 @@ internal static partial class LocalJournalChecks
         LocalChecks.Require(realisticMatches.Count(match => match.Covered) == 1 && store.ProtectionBatchQueries == queryCount + 1,
             "realistic full batch gives exact answers in one command");
         LocalChecks.Require(store.ProtectionIndex("root-local", (ItemFlags)128)!.Count == 0 &&
-            !store.ProtectionBatch("root-local", (ItemFlags)128, ["scale-1"])[0].Covered,
+            !store.ProtectionBatch("root-local", (ItemFlags)128, ["synthetic-0000001"])[0].Covered,
             "flag parameter does not conflate independent holds");
         await OverflowConsumers(store, folder, held);
         Console.WriteLine("PASS bounded protection index and overflow batch");
@@ -141,21 +141,21 @@ internal static partial class LocalJournalChecks
             new RootDef("unused", SyncProviders.Dropbox, null, "/", "unused"), [], [], true);
         var protection = new RehashProtection(store, pair);
         var missedQueries = store.ProtectionBatchQueries;
-        LocalChecks.Require(protection.Touches("scale-1", false) &&
+        LocalChecks.Require(protection.Touches("synthetic-0000001", false) &&
             protection.Touches("SCALE-1/child", false) && protection.Touches("", true) &&
             !protection.Touches("missing/path", false) && store.ProtectionBatchQueries == missedQueries + 4,
             "unprepared overflow resolves exceptional paths safely without failing the run");
         var prepared = protection.ForPaths(["clear-prepared"]);
         missedQueries = store.ProtectionBatchQueries;
-        LocalChecks.Require(prepared.Touches("scale-1", false) && !prepared.Touches("clear-prepared", false) &&
+        LocalChecks.Require(prepared.Touches("synthetic-0000001", false) && !prepared.Touches("clear-prepared", false) &&
             store.ProtectionBatchQueries == missedQueries + 1,
             "prepared overflow miss falls back only for missing path; prepared hit adds no SQL");
         var links = LinkExclusions.Of(store, pair, false);
         var scope = new RunScope(store, _ => true, _ => true, links);
-        var rows = Enumerable.Range(0, 1025).Select(n => seed with { Path = n == 0 ? "scale-1" : $"clear-{n}" }).ToArray();
+        var rows = Enumerable.Range(0, 1025).Select(n => seed with { Path = n == 0 ? "synthetic-0000001" : $"clear-{n}" }).ToArray();
         var queries = store.ProtectionBatchQueries;
         var filtered = (IReadOnlyList<ItemState>)typeof(RunScope).GetMethod("Hide", hidden)!.Invoke(scope, [rows, Side.A])!;
-        LocalChecks.Require(filtered.Count == 1024 && filtered.All(row => row.Path != "scale-1"), "production row filtering protects overflow holds");
+        LocalChecks.Require(filtered.Count == 1024 && filtered.All(row => row.Path != "synthetic-0000001"), "production row filtering protects overflow holds");
         LocalChecks.Require(store.ProtectionBatchQueries - queries == 5, "row consumer uses five bounded batches for1025 rows");
         var mapped = seed with { Path = "provider-spelling", IdentityJson = "{\"dropboxWindowsPath\":\"scale-1\"}" };
         var mappedResult = (IReadOnlyList<ItemState>)typeof(RunScope).GetMethod("Hide", hidden)!
@@ -179,8 +179,8 @@ internal static partial class LocalJournalChecks
 
         var variants = new[]
         {
-            actions[0] with { Path = "clear-target", Source = seed with { Path = "scale-1" } },
-            actions[0] with { Path = "clear-target", Source = null, FromPath = "scale-1" },
+            actions[0] with { Path = "clear-target", Source = seed with { Path = "synthetic-0000001" } },
+            actions[0] with { Path = "clear-target", Source = null, FromPath = "synthetic-0000001" },
             actions[0] with { Path = "SCALE-1/child", Source = null },
             actions[0] with { Path = "", Source = null, Kind = ActionKind.Delete },
         };
@@ -197,7 +197,7 @@ internal static partial class LocalJournalChecks
         store.CommitResult(pair.PairId, store.BeginGeneration(pair.A.RootId, "run"), original,
             new ActionResult(original.ActionId, Outcome.Done, winner, other,
                 new RecoveryRef(Side.A, Path.Combine(folder, "not-read.recovery"), null, loser.Hash!, loser.Size), null));
-        store.AddNotices([new Notice(pair.PairId, 4, NoticeKind.AutoConflict, "scale-1", "overflow restore", "protection-restore",
+        store.AddNotices([new Notice(pair.PairId, 4, NoticeKind.AutoConflict, "synthetic-0000001", "overflow restore", "protection-restore",
             RetainedVersion: new RetainedNoticeVersion(original.ActionId, Side.A, loser, winner))]);
         var notice = store.OpenNotices(pair.PairId).Single(item => item.ReasonKey == "protection-restore");
         queries = store.ProtectionBatchQueries;

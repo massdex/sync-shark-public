@@ -41,11 +41,7 @@ public sealed partial class V2CliRuntime
         if (selected is { Closed: false } && !NoticeChoices.IsPairRetryNotice(selected.Value.Notice) && string.IsNullOrEmpty(relativePath))
             throw new SyncCliUsageException("--path is required for item notices.");
         var acceptedExclusion = selected is { Closed: false } &&
-            choice is NoticeChoices.Ignore or NoticeChoices.Exclude &&
-            !NoticeChoices.IsPairRetryNotice(selected.Value.Notice) &&
-            NoticeChoices.IsRetryNotice(selected.Value.Notice) &&
-            PairPath.Same(selected.Value.Notice.Path, relativePath) &&
-            NoticeChoices.Options(selected.Value.Notice).Any(option => option.Choice == choice)
+            NoticeChoices.CanQueueExclusion(selected.Value.Notice, relativePath, choice)
                 ? selected.Value.Notice : null;
         await WaitForDataLockAsync(_runGate, Console.Error.WriteLine, cancellationToken);
         try

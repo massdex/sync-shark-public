@@ -415,7 +415,7 @@ internal static class GoogleDriveLiveChecks
         string createdFileId;
         if (resumeKnownFixture)
         {
-            Require(folderId == "drive-fixture-folder" && entries.Count == 1 &&
+            Require(folderId == ApprovedSharingFolderId && entries.Count == 1 &&
                 entries[0].RelativePath == path && entries[0].Size <= 1024,
                 "exact retained owner fixture only");
             using var priorContent = new MemoryStream();
@@ -470,9 +470,9 @@ internal static class GoogleDriveLiveChecks
     private static async Task MetadataAsync(GoogleDrivePilotClient ordinary, GoogleDrivePilotClient racing,
         LiveRaceHandler handler, string folderId, IReadOnlyList<PilotRemoteEntry> entries, CancellationToken ct)
     {
-        const string id = "drive-fixture-file";
+        var id = ApprovedSharingFileId;
         const string original = "sync-check.txt";
-        Require(folderId == "drive-fixture-folder" && entries.Count == 1 &&
+        Require(folderId == ApprovedSharingFolderId && entries.Count == 1 &&
             entries[0].Id == id && entries[0].RelativePath == original,
             "exact retained fixture before one metadata acceptance, no automatic replay");
         var expectedBytes = Encoding.UTF8.GetBytes("Concurrent live edit must survive the stale request.\n");

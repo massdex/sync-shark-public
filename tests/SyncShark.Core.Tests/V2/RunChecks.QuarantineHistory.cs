@@ -5,6 +5,7 @@ internal static partial class RunChecks
     private static async Task QuarantineHistoryAsync(string root)
     {
         QuarantineSnapshotRenameChecks(root);
+        await QuarantineBlockedFolderRunAsync(root);
         await QuarantineReusedNameSyncAsync(root);
         await QuarantineRehashHoldAsync(root, false);
         await QuarantineRehashHoldAsync(root, true);
@@ -77,6 +78,56 @@ internal static partial class RunChecks
         var folder = store.Live("ra", ["folder"]).Single();
         store.ClearQuarantine("ra", folder);
         Require(store.Live("ra", ["folder/child.txt"]).Count == 1, "releasing folder hold cannot expose false deletion from failed scan");
+    }
+
+    // RQ-034: exercise the real full-run publisher, then release and reobserve the subtree.
+    private static async Task QuarantineBlockedFolderRunAsync(string root)
+    {
+        using var store = SqliteStateStore.Open(Path.Combine(root, "blocked-folder-run"), Settings, TimeProvider.System);
+        var fx = Build(suppliedStore: store);
+        fx.A.Seed("held", "", ItemKind.Folder);
+        fx.A.Seed("held/child.txt", "must survive");
+        var run = fx.Run();
+        await FirstSyncAsync(run, fx);
+        var child = store.Live("ra", ["held/child.txt"]).Single();
+        var inventory = new LocalInventory(fx.Pair.A with { RootPath = "F:/fixture", RootObjectId = "id:local:00000001:0000000000000001" },
+            Side.A, store, new HashSet<string>(), Settings, TimeProvider.System);
+        var blocked = new BlockedFolderInventory(inventory, fx.A);
+        fx.Provider.AddInventory(fx.Pair.A, blocked);
+        await run.IncrementalAsync("p1", new RecordingProgress(), default);
+        Require(blocked.FullScans == 1 && store.Live("ra", [child.Path]).Single().ObjectId == child.ObjectId &&
+            store.Tombstones("ra").All(t => t.Path != child.Path),
+            "full-run blocked folder preserves child identity without a tombstone");
+        var held = store.Live("ra", ["held"]).Single();
+        Require(held.Flags.HasFlag(ItemFlags.Quarantined), "full-run publication keeps held folder itself included");
+        store.ClearQuarantine("ra", held);
+        foreach (var notice in store.OpenNotices("p1").Where(n => n.Quarantine is not null))
+            store.CloseNotice(notice.NoticeId!, NoticeChoices.QuarantineRetry);
+        blocked.Blocked = false;
+        await run.IncrementalAsync("p1", new RecordingProgress(), default);
+        Require(blocked.FullScans == 2 && await fx.B.ObserveAsync(child.Path, default) is not null &&
+            store.Live("ra", [child.Path]).Single().ObjectId == child.ObjectId &&
+            store.Tombstones("ra").All(t => t.Path != child.Path) &&
+            !store.Recoveries("p1").Any(r => r.Side == Side.B),
+            "release and full rescan never delete the held folder's children on Dropbox");
+    }
+
+    private sealed class BlockedFolderInventory(LocalInventory inventory, IInventorySource source) : IInventorySource
+    {
+        internal bool Blocked = true;
+        internal int FullScans;
+        public Task<Snapshot> FullAsync(long gen, Func<string, bool> include, IProgress<string> p, CancellationToken ct)
+        {
+            FullScans++;
+            return Blocked ? Task.FromResult(inventory.BuildSnapshot(gen, "ra", "", new PilotLocalScan(
+                new Dictionary<string, PilotLocalEntry>(),
+                [new PilotDecision("held", PilotDecisionKind.Blocked, "blocked folder listing") { QuarantineCode = 225 }], 0), include))
+                : source.FullAsync(gen, include, p, ct);
+        }
+        public Task<Delta> ChangesSinceAsync(string cursor, long gen, Func<string, bool> include, CancellationToken ct) =>
+            Task.FromResult(new Delta("ra", Side.A, gen, cursor, cursor, [], true, []));
+        public Task<IReadOnlyDictionary<string, string>> HashAsync(IReadOnlyList<string> paths, CancellationToken ct) => source.HashAsync(paths, ct);
+        public Task<IReadOnlyDictionary<string, DateTimeOffset>> DeletionTimesAsync(IReadOnlyList<string> paths, CancellationToken ct) => source.DeletionTimesAsync(paths, ct);
     }
 
     private static async Task QuarantineCheckpointAsync(string root)

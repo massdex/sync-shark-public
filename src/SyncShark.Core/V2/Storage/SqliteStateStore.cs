@@ -467,6 +467,13 @@ public sealed partial class SqliteStateStore : IStateStore
 
     public void CloseNotice(string noticeId, string? choice) => InStore(() => _notices.Close(noticeId, choice));
 
+    public void RecordNoticeChoiceFailure(Notice original, string failure) => InStore(() =>
+    {
+        using var transaction = _connection.BeginTransaction();
+        _notices.RecordChoiceFailure(transaction, RequirePair(original.PairId), original, failure);
+        transaction.Commit();
+    });
+
     public void CloseNoticeFamily(string pairId, string reasonPrefix, string? exceptReason = null) => InStore(() =>
     {
         if (PairNo(pairId) is { } pairNo) _notices.CloseFamily(pairNo, reasonPrefix, exceptReason);

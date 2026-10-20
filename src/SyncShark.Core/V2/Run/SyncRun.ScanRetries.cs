@@ -60,7 +60,7 @@ public sealed partial class SyncRun
                 bool within(string path) => scopes.Any(scope => scope.Length == 0 || PairPath.IsSelfOrUnder(path, scope));
                 bool traverse(string path) => include(path) && (within(path) || scopes.Any(scope => PairPath.IsSelfOrUnder(scope, path)));
                 var reread = await ReadFullAsync(inventory, gen, traverse, root, throttle, ct);
-                _store.WriteSnapshot(reread with { IncludesPath = path => include(path) && within(path) });
+                _store.WriteSnapshot(reread with { IncludesPath = path => include(path) && within(path) && (reread.IncludesPath?.Invoke(path) ?? true) });
                 incomplete.AddRange(reread.IncompleteSubtrees);
                 touched.AddRange(reread.Items.Select(item => item.Path));
             }

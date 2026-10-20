@@ -34,21 +34,23 @@ internal sealed class FileStateTable
     /// <summary>Replaces the live set with the snapshot's items, closing anything absent outside incomplete subtrees.</summary>
     public void WriteSnapshot(Snapshot snapshot, long rootNo, IEnumerable<ItemState>? input = null)
     {
-        for (var attempt = 0; attempt < 2; attempt++)
+        SnapshotTemporary.Sweep(_connection);
+        using var verifier = snapshot.IncompleteSubtrees.Count == 0 ? null : snapshot.OpenAbsenceVerifier?.Invoke();
+        if (verifier is not null) snapshot = snapshot with { VerifyAbsence = verifier.Check };
+        for (var attempt = 0; attempt < 3; attempt++)
         {
-            try { if (TryWriteSnapshot(snapshot, rootNo, input ?? snapshot.Items)) return; }
+            try { if (TryWriteSnapshot(snapshot, rootNo, input ?? snapshot.Items, locked: attempt == 2)) return; }
             finally { _dir.ClearCache(); }
         }
-        throw new IOException("Snapshot changed concurrently twice. Retry the inventory scan.");
     }
 
-    private bool TryWriteSnapshot(Snapshot snapshot, long rootNo, IEnumerable<ItemState> input)
+    private bool TryWriteSnapshot(Snapshot snapshot, long rootNo, IEnumerable<ItemState> input, bool locked)
     {
         var profile = Environment.GetEnvironmentVariable("SYNCSHARK_SNAPSHOT_PROFILE") == "1";
         var watch = System.Diagnostics.Stopwatch.StartNew();
         void phase(string name)
         {
-            if (profile) Console.Error.WriteLine($"snapshot-phase {name} ms={watch.ElapsedMilliseconds}");
+            if (profile) System.Diagnostics.Trace.WriteLine($"snapshot-phase {name} ms={watch.ElapsedMilliseconds}");
             watch.Restart();
         }
         snapshot.PendingDeletionEvidence.Clear();
@@ -56,16 +58,19 @@ internal sealed class FileStateTable
         // A partially enumerated subtree can contain observations from before the failure. Do not
         // let even a replacement close a row there, or let an ignored observation suppress a move.
         var include = snapshot.IncludesPath;
-        // One deferred read snapshot covers directory lookup and comparison. Per-folder autocommit
-        // reads otherwise repeatedly acquire WAL read marks; this never takes the live write lock.
-        using var reading = _connection.BeginTransaction(deferred: true);
+        // Normally compare under a deferred read. After two concurrent changes, keep BEGIN IMMEDIATE
+        // through comparison and publication so a busy external writer cannot starve this scan.
+        using var lockedBatch = locked ? new StoreBatch(_connection, int.MaxValue) : null;
+        using var readingScope = locked ? null : _connection.BeginTransaction(deferred: true);
+        var reading = lockedBatch?.Transaction ?? readingScope!;
         // Already ordered, unchanged scanner arrays need neither a sort nor scratch writes. An
         // out-of-order or changed row falls back to the general disk-backed merge, without mutation.
         if (snapshot.IncompleteSubtrees.Count == 0 && input is ItemState[] or List<ItemState> &&
             UnchangedOrdered(input, include, rootNo, reading) && !HasOrphanDebt(rootNo, reading))
         {
-            reading.Commit();
+            readingScope?.Commit();
             phase("unchanged-ordered");
+            if (locked) { lockedBatch!.Flush(); return true; }
             AfterSnapshotCompared?.Invoke();
             return Equals(version, StoreSchema.Scalar(_connection, null, "PRAGMA data_version;"));
         }
@@ -122,7 +127,8 @@ internal sealed class FileStateTable
                     changes.Add(row, RowCodec.CarryHash(samePath, row.Item), wasLive: true);
                 else if ((snapshot.IncludesPath?.Invoke(row.Item.Path) ?? true) &&
                     !InsideIncomplete(row.Item.Path, snapshot.IncompleteSubtrees) &&
-                    (snapshot.IncompleteSubtrees.Count == 0 || suppressed(row.Item.ObjectId) || snapshot.CanCloseAbsent(row.Item)))
+                    (row.Item.Flags.HasFlag(ItemFlags.Quarantined) || snapshot.IncompleteSubtrees.Count == 0 ||
+                        suppressed(row.Item.ObjectId) || snapshot.CanCloseAbsent(row.Item)))
                 {
                     if (row.Item.Flags.HasFlag(ItemFlags.Quarantined))
                     {
@@ -133,7 +139,7 @@ internal sealed class FileStateTable
                 hasRight = right.MoveNext();
             }
         }
-        reading.Commit();
+        readingScope?.Commit();
         phase("compare");
         if (initialLoad)
         {
@@ -142,18 +148,18 @@ internal sealed class FileStateTable
         }
         if (changes.HasChanges) incoming.PrepareObjectLookup();
         phase("replay-index");
-        AfterSnapshotCompared?.Invoke();
+        if (!locked) AfterSnapshotCompared?.Invoke();
         // Preserve cross-row effects of the old writer without retaining the old live root in memory.
         // End the read snapshot before opening the write transaction (no deferred upgrade/BUSY_SNAPSHOT).
         const string orphan = "FROM local_rehash WHERE root_no=$r AND NOT EXISTS " +
             "(SELECT 1 FROM file_state f WHERE f.root_no=local_rehash.root_no AND f.object_id=local_rehash.object_id)";
         bool hasOrphans(SqliteTransaction? tx) => snapshot.IncompleteSubtrees.Count == 0 &&
             (long)StoreSchema.Scalar(_connection, tx, "SELECT EXISTS(SELECT 1 " + orphan + ");", ("$r", rootNo))! != 0;
-        if (initialLoad || changes.HasChanges || heldMoves.HasChanges || hasOrphans(null))
+        if (initialLoad || changes.HasChanges || heldMoves.HasChanges || hasOrphans(lockedBatch?.Transaction))
         {
             // A snapshot is one publication: callback or disk failures must roll back every row.
-            using var batch = new StoreBatch(_connection, int.MaxValue);
-            if (!Equals(version, StoreSchema.Scalar(_connection, batch.Transaction, "PRAGMA data_version;")))
+            using var batch = lockedBatch ?? new StoreBatch(_connection, int.MaxValue);
+            if (!locked && !Equals(version, StoreSchema.Scalar(_connection, batch.Transaction, "PRAGMA data_version;")))
                 return false;
             // Under this write lock an insert-only publication cannot create deletion evidence or
             // rehash debt. Probe empty tables once rather than issuing two million empty statements.
@@ -173,7 +179,7 @@ internal sealed class FileStateTable
                         InsertTombstone(rootNo, change.Entry.DirNo, change.Entry.Name, change.Entry.Item.ObjectId, now, batch);
                 }
                 else if (change.WasLive)
-                    Step(batch, Replace(change.Entry, change.Incoming, rootNo, suppressed, now, batch));
+                    Step(batch, Replace(change.Entry, change.Incoming, rootNo, suppressed, now, batch, snapshot.CanCloseAbsent));
                 else
                     Step(batch, Insert(change.Entry, rootNo, batch,
                         debtReconciled: !initialHasDebt && (change.Entry.Item.Flags & ItemFlags.NeedsRehash) == 0,
@@ -199,6 +205,7 @@ internal sealed class FileStateTable
                 StoreSchema.Execute(_connection, batch.Transaction, "DELETE " + orphan + ";", ("$r", rootNo));
             batch.Flush();
         }
+        else if (locked) lockedBatch!.Flush();
         else if (!Equals(version, StoreSchema.Scalar(_connection, null, "PRAGMA data_version;"))) return false;
         phase("publish");
         return true;
@@ -231,6 +238,10 @@ internal sealed class FileStateTable
     /// <summary>Applies a delta's deletes then upserts, each in list order, tombstoning every real deletion.</summary>
     public void WriteDelta(Delta delta, long rootNo)
     {
+        var evidence = delta.DisplacementEvidence;
+        using var verifier = evidence is { IncompleteSubtrees.Count: > 0 } ? evidence.OpenAbsenceVerifier?.Invoke() : null;
+        if (verifier is not null) evidence = evidence! with { VerifyAbsence = verifier.Check };
+        Func<ItemState, bool>? confirmDisplacement = evidence is null ? null : evidence.CanCloseAbsent;
         var suppressed = delta.Changes.Where(change => change.Kind == ChangeKind.Upsert &&
                 (delta.IncludesPath?.Invoke(change.Path) ?? true))
             .Select(change => change.ObjectId).ToHashSet(StringComparer.Ordinal);
@@ -240,7 +251,7 @@ internal sealed class FileStateTable
         var now = _clock.GetUtcNow();
         foreach (var change in delta.Changes)
             if (change.Kind == ChangeKind.Upsert && (delta.IncludesPath?.Invoke(change.Path) ?? true))
-                Step(batch, Upsert(change, rootNo, suppressed, now, batch, delta.IncludesPath));
+                Step(batch, Upsert(change, rootNo, suppressed, now, batch, delta.IncludesPath, confirmDisplacement));
         batch.Flush();
     }
 
@@ -366,7 +377,7 @@ internal sealed class FileStateTable
     // single other-spelling row of another object is a replacement that changed case (Docs/file.txt by
     // docs/File.txt) and is displaced with its evidence; a known clash (two or more spellings) is kept (RQ-039).
     private bool Upsert(Change change, long rootNo, HashSet<string> suppressed, DateTimeOffset now, StoreBatch batch,
-        Func<string, bool>? include)
+        Func<string, bool>? include, Func<ItemState, bool>? confirmDisplacement)
     {
         var state = change.State
             ?? throw new ArgumentException("An upsert change must carry its state.", nameof(change));
@@ -376,6 +387,12 @@ internal sealed class FileStateTable
         var (parent, name) = RowCodec.Split(state.Path);
         var target = _dir.Find(parent, batch.Transaction);
         var atKey = _reader.AtKey(rootNo, state.Path, batch.Transaction);
+        var exactAt = atKey.FindIndex(at => IsExact(at.DirNo, at.Name, target, name));
+        FileStateReader.Entry? live = exactAt < 0 ? null : atKey[exactAt];
+        var displaced = live ?? (atKey.Count == 1 ? atKey[0] : (FileStateReader.Entry?)null);
+        if (displaced is { } old && old.Item.ObjectId != state.ObjectId &&
+            !suppressed.Contains(old.Item.ObjectId) && !(confirmDisplacement?.Invoke(old.Item) ?? true))
+            return false; // Retain the old row and retry the replacement through pending evidence.
         var wrote = false;
         var objectRows = _reader.ReadObject(rootNo, state.ObjectId, batch.Transaction);
         // Multiple local file names may be hard-link aliases, not successive positions of a move.
@@ -388,8 +405,6 @@ internal sealed class FileStateTable
                 DeleteRow(rootNo, moved.DirNo, moved.Name, batch);
                 wrote = true;
             }
-        var exactAt = atKey.FindIndex(at => IsExact(at.DirNo, at.Name, target, name));
-        FileStateReader.Entry? live = exactAt < 0 ? null : atKey[exactAt];
         if (live is null && atKey.Count == 1 && atKey[0].Item.ObjectId != state.ObjectId)
             wrote |= RemoveAt(rootNo, atKey[0].DirNo, atKey[0].Name, now, suppressed, batch);
         if (live is null) return Insert(FileStateReader.Entry.Of(parent, name, state), rootNo, batch, debtReconciled: true);
@@ -449,8 +464,10 @@ internal sealed class FileStateTable
         DateTimeOffset deletedAt, StoreBatch batch) => Replace(live, item, rootNo, suppressed.Contains, deletedAt, batch);
 
     private bool Replace(FileStateReader.Entry live, ItemState item, long rootNo, Func<string, bool> suppressed,
-        DateTimeOffset deletedAt, StoreBatch batch)
+        DateTimeOffset deletedAt, StoreBatch batch, Func<ItemState, bool>? confirmDisplacement = null)
     {
+        if (live.Item.ObjectId != item.ObjectId && !suppressed(live.Item.ObjectId) &&
+            !(confirmDisplacement?.Invoke(live.Item) ?? true)) return false;
         item = ReconcileDebt(item, rootNo, batch.Transaction);
         DeleteRow(rootNo, live.DirNo, live.Name, batch, live.NameKey);
         var displaced = live.Item.ObjectId;

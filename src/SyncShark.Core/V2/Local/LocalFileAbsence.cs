@@ -6,32 +6,50 @@ namespace Massdex.SyncShark.V2;
 
 internal enum FileAbsence { Unknown, Present, Gone }
 
-/// <summary>Absence during a partial scan must be proved by identity, never by the old pathname.</summary>
-internal static class LocalFileAbsence
+/// <summary>One identity-verification scope; an unavailable root never proves absence.</summary>
+internal sealed class LocalFileAbsence : IDisposable
 {
-    internal static FileAbsence Check(string rootPath, PilotDirectoryIdentity rootIdentity, ItemState item)
+    private readonly PilotDirectoryLease? _root;
+    private readonly string? _rootPath;
+    private readonly char[] _pathBuffer = new char[32768];
+
+    internal LocalFileAbsence(string rootPath, PilotDirectoryIdentity rootIdentity)
     {
-        if (!OperatingSystem.IsWindows()) return FileAbsence.Unknown;
+        if (!OperatingSystem.IsWindows()) return;
+        try
+        {
+            _root = PilotDirectoryLease.Open(rootPath, rootIdentity);
+            if (FinalPath(_root.Handle) is { } finalPath) _rootPath = finalPath.TrimEnd('\\') + "\\";
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or Win32Exception or ArgumentException) { }
+    }
+
+    internal FileAbsence Check(ItemState item)
+    {
+        if (_root is null || _rootPath is null) return FileAbsence.Unknown;
         try
         {
             var (volume, id) = LocalItems.ParseObjectId(item.ObjectId);
-            if (volume != rootIdentity.VolumeSerialNumber || id == 0) return FileAbsence.Unknown;
-            using var root = PilotDirectoryLease.Open(rootPath, rootIdentity);
+            if (volume != _root.Identity.VolumeSerialNumber || id == 0) return FileAbsence.Unknown;
             var descriptor = new FileIdDescriptor { Size = 24, Type = 0, FileId = id };
-            using var file = OpenFileById(root.Handle, ref descriptor, 0x80, 7, IntPtr.Zero, 0x02200000);
-            if (!file.IsInvalid) return FileAbsence.Present;
+            using var file = OpenFileById(_root.Handle, ref descriptor, 0x80, 7, IntPtr.Zero, 0x02200000);
+            if (!file.IsInvalid)
+            {
+                var path = FinalPath(file);
+                if (path is null) return FileAbsence.Unknown;
+                return path.StartsWith(_rootPath, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(path, _rootPath.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)
+                    ? FileAbsence.Present : FileAbsence.Gone;
+            }
             var error = Marshal.GetLastWin32Error();
             if (error == 2) return FileAbsence.Gone;
-            // NTFS reports a retired file reference as INVALID_PARAMETER, not FILE_NOT_FOUND.
-            // Prove that this exact descriptor format/access/flags works on this verified volume first;
-            // otherwise error 87 could mean an unsupported API and must remain unknown.
+            // NTFS uses INVALID_PARAMETER for retired references. Prove API support first.
             if (error == 87)
             {
-                descriptor.FileId = rootIdentity.FileId;
-                using var probe = OpenFileById(root.Handle, ref descriptor, 0x80, 7, IntPtr.Zero, 0x02200000);
+                descriptor.FileId = _root.Identity.FileId;
+                using var probe = OpenFileById(_root.Handle, ref descriptor, 0x80, 7, IntPtr.Zero, 0x02200000);
                 if (!probe.IsInvalid) return FileAbsence.Gone;
             }
-            // Access denied, sharing violations and unavailable volumes are NOT absence.
             return FileAbsence.Unknown;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or Win32Exception or ArgumentException)
@@ -39,6 +57,14 @@ internal static class LocalFileAbsence
             return FileAbsence.Unknown;
         }
     }
+
+    private string? FinalPath(SafeFileHandle handle)
+    {
+        var length = GetFinalPathNameByHandle(handle, _pathBuffer, (uint)_pathBuffer.Length, 0);
+        return length == 0 || length >= _pathBuffer.Length ? null : new string(_pathBuffer, 0, (int)length);
+    }
+
+    public void Dispose() => _root?.Dispose();
 
     [StructLayout(LayoutKind.Explicit, Size = 24)]
     private struct FileIdDescriptor
@@ -51,4 +77,7 @@ internal static class LocalFileAbsence
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern SafeFileHandle OpenFileById(SafeFileHandle volume, ref FileIdDescriptor id,
         uint access, uint share, IntPtr security, uint flags);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandle(SafeFileHandle file, char[] path, uint length, uint flags);
 }

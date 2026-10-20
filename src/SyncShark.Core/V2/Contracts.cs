@@ -36,6 +36,7 @@ public sealed record Snapshot(string RootId, Side Side, long Gen, string CursorA
     IReadOnlyList<ItemState> Items, IReadOnlyList<string> IncompleteSubtrees)
 {
     public IReadOnlyDictionary<string, string> IncompleteReasons { get; init; } = new Dictionary<string, string>();
+    internal Func<LocalFileAbsence>? OpenAbsenceVerifier { get; init; }
     internal Func<ItemState, FileAbsence>? VerifyAbsence { get; init; }
     internal Dictionary<string, string> PendingDeletionEvidence { get; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -61,6 +62,9 @@ public sealed record Delta(string RootId, Side Side, long Gen, string CursorBefo
     IReadOnlyList<Change> Changes, bool CursorInvalid, IReadOnlyList<string> IncompleteSubtrees)
 {
     public IReadOnlyDictionary<string, string> IncompleteReasons { get; init; } = new Dictionary<string, string>();
+    // Local partial refreshes use the same evidence for displaced objects as for missing rows.
+    internal Snapshot? DisplacementEvidence { get; init; }
+
     /// <summary>Held paths whose retry bound expired; these no longer retain the side's cursor.</summary>
     public IReadOnlySet<string> ReleasedDeletionEvidence { get; init; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 

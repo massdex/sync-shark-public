@@ -432,7 +432,7 @@ public sealed partial class SyncRun
             Trace($"scan {side}: full snapshot read start ({watch.ElapsedMilliseconds} ms)");
             var snapshot = await ReadFullAsync(inventory, gen, include, root, throttle, ct);
             Trace($"scan {side}: full snapshot read done ({watch.ElapsedMilliseconds} ms); storing");
-            _store.WriteSnapshot(snapshot with { IncludesPath = include });
+            _store.WriteSnapshot(snapshot with { IncludesPath = path => include(path) && (snapshot.IncludesPath?.Invoke(path) ?? true) });
             if (inventory is LocalInventory && !string.IsNullOrEmpty(snapshot.CursorAfter))
                 return await CatchUpLocalWalkAsync(pair, side, inventory, snapshot, include, root, throttle, ct);
             await inventory.VerifyPendingAsync(include, _ => { }, ct);
@@ -489,7 +489,7 @@ public sealed partial class SyncRun
             Trace($"scan {side}: rescan snapshot read start ({watch.ElapsedMilliseconds} ms)");
             var rescan = await ReadFullAsync(inventory, fullGen, include, root, throttle, ct);
             Trace($"scan {side}: rescan snapshot read done ({watch.ElapsedMilliseconds} ms); storing");
-            _store.WriteSnapshot(rescan with { IncludesPath = include });
+            _store.WriteSnapshot(rescan with { IncludesPath = path => include(path) && (rescan.IncludesPath?.Invoke(path) ?? true) });
             if (inventory is LocalInventory && !string.IsNullOrEmpty(rescan.CursorAfter))
                 return await CatchUpLocalWalkAsync(pair, side, inventory, rescan, include, root, throttle, ct);
             await inventory.VerifyPendingAsync(include, _ => { }, ct);
@@ -549,7 +549,7 @@ public sealed partial class SyncRun
                 "local-walk-catch-up")]);
             var freshGen = _store.BeginGeneration(root.RootId, "full");
             var fresh = await ReadFullAsync(inventory, freshGen, include, root, throttle, ct);
-            _store.WriteSnapshot(fresh with { IncludesPath = include });
+            _store.WriteSnapshot(fresh with { IncludesPath = path => include(path) && (fresh.IncludesPath?.Invoke(path) ?? true) });
             await inventory.VerifyPendingAsync(include, _ => { }, ct);
             return new SideScan(freshGen, fresh.CursorAfter, fresh.IncompleteSubtrees.Count == 0, true, [], [],
                 NoDeletions, []) { RehashThrough = _store.RehashWatermark(root.RootId) };

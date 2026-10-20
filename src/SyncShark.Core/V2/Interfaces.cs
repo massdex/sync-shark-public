@@ -291,6 +291,9 @@ public interface IStateStore : IDisposable
 
     /// <summary>Drops an ended operation's snapshot in bounded batches; Recovery records are untouched.</summary>
     void ForgetChoiceVictims(string operationId) { }
+    /// <summary>Atomically reopens the accepted notice and appends a choice failure to its original detail.</summary>
+    void RecordNoticeChoiceFailure(Notice original, string failure);
+
     /// <summary>Closes/resets one pair's notice family, including ignored occurrences after recovery.
     /// Production performs an indexed SQL update, not a load of the pair's item notices.</summary>
     void CloseNoticeFamily(string pairId, string reasonPrefix, string? exceptReason = null)

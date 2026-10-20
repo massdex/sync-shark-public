@@ -55,6 +55,9 @@ internal static partial class RunChecks
         Require(next.Outcome == RunOutcomes.Paused, "completed apply leaves pause for next run admission");
     }
 
+    private static SyncPair PauseView(PairDef pair) => PairMapping.ToSyncPair(pair with
+        { A = pair.A with { RootObjectId = "id:local:00000001:0000000000000001" } }, true, Settings);
+
     // The temporary active-run pause: it is never written as a durable pair pause, and a resume after the run
     // exits leaves an explicit pair pause untouched. The durable global and account scopes have their own checks.
     private static async Task ScopePauseAsync(string root, string scope)
@@ -73,7 +76,7 @@ internal static partial class RunChecks
             host.SetActiveRunPausedAsync(true).GetAwaiter().GetResult();
             return null;
         };
-        var pair = PairMapping.ToSyncPair(fx.Pair, true, Settings);
+        var pair = PauseView(fx.Pair);
         string? summary = null;
         var result = await host.RunPairsAsync([pair], "pause-test", admissionProgress: text => summary = text);
         Require(summary?.Contains("(" + RunOutcomes.Paused + ")", StringComparison.Ordinal) == true &&
@@ -114,7 +117,7 @@ internal static partial class RunChecks
         var pausing = true;
         var summary = string.Empty;
         var result = await host.RunPairsAsync(
-            [PairMapping.ToSyncPair(fx.Pair, true, Settings), PairMapping.ToSyncPair(second.Def, true, Settings)],
+            [PauseView(fx.Pair), PauseView(second.Def)],
             "global-pause-batch", admissionProgress: text =>
             {
                 summary = text;
@@ -143,7 +146,7 @@ internal static partial class RunChecks
         Require(resumed is { Scope: PauseScopes.Global, Paused: false } && inputs.Ineligible(fx.Pair) is null,
             "the CLI global resume clears the scope and admits the pair");
         var resumedBatch = await host.RunPairsAsync(
-            [PairMapping.ToSyncPair(fx.Pair, true, Settings), PairMapping.ToSyncPair(second.Def, true, Settings)],
+            [PauseView(fx.Pair), PauseView(second.Def)],
             "global-resume-batch");
         Require(resumedBatch.Items.Count == 2 && second.Writer.Puts > before,
             "after the CLI resume the next batch runs the pair the pause held back");
@@ -169,7 +172,7 @@ internal static partial class RunChecks
         var before = second.Writer.Puts;
         var pausing = true;
         var result = await host.RunPairsAsync(
-            [PairMapping.ToSyncPair(fx.Pair, true, Settings), PairMapping.ToSyncPair(second.Def, true, Settings)],
+            [PauseView(fx.Pair), PauseView(second.Def)],
             "account-pause-batch", admissionProgress: _ =>
             {
                 if (!pausing) return;
@@ -194,7 +197,7 @@ internal static partial class RunChecks
             "the saved account pause blocks admission after the run exits");
         saved = saved with { AccountPauses = [] };
         var resumedBatch = await host.RunPairsAsync(
-            [PairMapping.ToSyncPair(fx.Pair, true, Settings), PairMapping.ToSyncPair(second.Def, true, Settings)],
+            [PauseView(fx.Pair), PauseView(second.Def)],
             "account-resume-batch");
         Require(resumedBatch.Items.Count == 2 && second.Writer.Puts > before,
             "clearing the account scope lets the next batch run pair 2");
@@ -262,8 +265,8 @@ internal static partial class RunChecks
                 "the callback safe point reaches the scope cache and refreshes its pause at two seconds");
             return null;
         };
-        var pairs = new[] { PairMapping.ToSyncPair(fx.Pair, true, Settings),
-            PairMapping.ToSyncPair(second.Def, true, Settings) };
+        var pairs = new[] { PauseView(fx.Pair),
+            PauseView(second.Def) };
         var summaries = new List<string>();
         var result = await host.RunPairsAsync(pairs, "scope-mid-pair", admissionProgress: summaries.Add);
         Require(saved && (account is null

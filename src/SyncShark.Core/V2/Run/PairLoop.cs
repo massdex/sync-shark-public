@@ -53,7 +53,7 @@ internal sealed class PairLoop
                     {
                         DisposeWatches();
                         Publish(blocked.Status, blocked.Reason);
-                        await WaitAsync([], null, stop).ConfigureAwait(false);
+                        await WaitAsync([], _in.SafetyInterval(), stop).ConfigureAwait(false);
                         continue;
                     }
                     if (await ReadyToRunAsync(pair, stop).ConfigureAwait(false))

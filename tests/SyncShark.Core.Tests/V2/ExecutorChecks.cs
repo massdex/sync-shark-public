@@ -1082,6 +1082,7 @@ internal static partial class ExecutorChecks
         public IReadOnlyList<Notice> OpenNotices(string? pairId) => _inner.OpenNotices(pairId);
         public IReadOnlyList<RecoveryRecord> Recoveries(string pairId) => _inner.Recoveries(pairId);
         public void CloseNotice(string noticeId, string? choice) => _inner.CloseNotice(noticeId, choice);
+        public void RecordNoticeChoiceFailure(Notice original, string failure) => _inner.RecordNoticeChoiceFailure(original, failure);
         public void Prune() => _inner.Prune();
         public void Dispose() => _inner.Dispose();
     }

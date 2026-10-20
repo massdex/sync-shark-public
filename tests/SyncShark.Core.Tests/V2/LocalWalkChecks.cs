@@ -45,7 +45,7 @@ internal static class LocalWalkChecks
     private static LocalInventory Inventory(string root, IStateStore store, NtfsUsnCheckpoint checkpoint)
     {
         var inventory = LocalChecks.Inventory(root, store, TimeProvider.System);
-        inventory.WalkCheckpointForTest = () => checkpoint;
+        inventory.WalkCheckpointForTest = () => (checkpoint, false);
         return inventory;
     }
 
@@ -296,7 +296,7 @@ internal static class LocalWalkChecks
         LocalChecks.Seed(root, "d/file.txt", "payload");
         using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System);
         var inventory = Inventory(root, sql, Start);
-        inventory.WalkCheckpointForTest = () => null;
+        inventory.WalkCheckpointForTest = () => (null, false);
         inventory.DirectoryCompletedForTest = _ =>
             LocalChecks.Require(!sql.HasLocalWalk("root-local"), "no journal means no checkpoint overhead");
         var snapshot = await inventory.FullAsync(1, _ => true, null!, CancellationToken.None);
@@ -312,7 +312,7 @@ internal static class LocalWalkChecks
         var gen = sql.BeginGeneration("root-local", "full");
         sql.CompleteGeneration(gen, Start.Cursor, true);
         var inventory = Inventory(root, sql, Start);
-        inventory.WalkCheckpointForTest = () => null; // unreadable, not a deleted journal
+        inventory.WalkCheckpointForTest = () => (null, false); // unreadable, not a deleted journal
         var snapshot = await inventory.FullAsync(sql.BeginGeneration("root-local", "full"), _ => true, null!, default);
         LocalChecks.Require(snapshot.CursorAfter == Start.Cursor && ((ILocalGapStore)sql).GapEpoch("root-local") is null,
             "transient full-walk checkpoint failure retains saved cursor without starting an untrusted gap");
