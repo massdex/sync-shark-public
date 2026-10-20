@@ -57,9 +57,12 @@ internal sealed class StoreCommitter
                 await RunOperations.WaitAsync(_storeGate, "store commit gate").ConfigureAwait(false);
                 try
                 {
-                    // Positive evidence from this apply clears a prior-run availability cause, but
-                    // never hides an unavailable pointer already encountered by this same apply.
-                    if (!_pointerPairReported) StorageNotices.CompletePair(store, pair, "pointer");
+                    // Positive evidence from this apply clears a prior-run availability cause only when every
+                    // open pair cause is connectivity (network/auth/provider), exactly as CompleteSuccess
+                    // decides for the storage lanes. A binding, host, volume, backlog or unknown cause survives
+                    // an unrelated pointer success. Never hide an unavailable pointer met by this same apply.
+                    if (!_pointerPairReported)
+                        StorageNotices.CompleteSuccess(store, pair, requested: false, pairCauseReportedThisTurn: false);
                 }
                 finally { _storeGate.Release(); }
             }

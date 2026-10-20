@@ -195,24 +195,41 @@ public sealed partial class SqliteStateStore
             """, ("$r", rootId), ("$o", objectId), ("$b", remoteBinding), ("$j", JsonSerializer.Serialize(remote)));
     });
 
+    // Keep Retry outside the normal keyset query: OR/CASE priority would scan and sort the whole queue.
+    // Literal -1 matches StorageDue.UserRequested and the partial index predicate.
+    internal const string StorageSettlementRequestedSql =
+        "SELECT w.job_id,w.root_id,w.object_id,w.remote_binding,w.remote_json FROM " + StorageRootsSql +
+        " CROSS JOIN storage_settlement w ON w.job_id IN (SELECT sw.job_id FROM storage_settlement sw INDEXED BY storage_pending_requested " +
+        "WHERE sw.root_id=roots.value AND sw.state='pending' AND sw.due=-1 ORDER BY sw.job_id LIMIT $limit) " +
+        "ORDER BY w.job_id LIMIT $limit;";
+
+    internal const string StorageSettlementRangeSql =
+        "SELECT w.job_id,w.root_id,w.object_id,w.remote_binding,w.remote_json FROM " + StorageRootsSql +
+        " CROSS JOIN storage_settlement w ON w.job_id IN (SELECT sw.job_id FROM storage_settlement sw INDEXED BY storage_pending_root " +
+        "WHERE sw.root_id=roots.value AND sw.state='pending' AND sw.due<=$now AND sw.job_id>$after ORDER BY sw.job_id LIMIT $limit) " +
+        StorageUnblockedSql + " AND w.state='pending' AND w.due<=$now AND w.job_id>$after ORDER BY w.job_id LIMIT $limit;";
+
     public IReadOnlyList<StorageSettlement> StorageSettlementPage(long afterJobId = 0, int limit = 128, IReadOnlyCollection<string>? activeRoots = null) => InStore(() =>
     {
         if (!_storageEnabled) return (IReadOnlyList<StorageSettlement>)[];
-        using var command = StoreSchema.Command(_connection, null,
-            "SELECT w.job_id,w.root_id,w.object_id,w.remote_binding,w.remote_json FROM " + StorageRootsSql +
-            " CROSS JOIN storage_settlement w ON w.job_id IN (SELECT sw.job_id FROM storage_settlement sw INDEXED BY storage_pending_root " +
-            "WHERE sw.root_id=roots.value AND sw.state='pending' AND sw.due<=$now AND (sw.job_id>$after OR sw.due=$requested) " +
-            "ORDER BY CASE WHEN sw.due=$requested THEN 0 ELSE 1 END,sw.job_id LIMIT $limit) " +
-            "WHERE (NOT EXISTS(SELECT 1 FROM storage_root_backoff b WHERE b.root_id=roots.value AND b.due>$now) OR w.due=$requested) " +
-            "AND w.state='pending' AND w.due<=$now AND (w.job_id>$after OR w.due=$requested) " +
-            "ORDER BY CASE WHEN w.due=$requested THEN 0 ELSE 1 END,w.job_id LIMIT $limit;");
+        var pageSize = Math.Clamp(limit, 1, 512);
+        using var command = StoreSchema.Command(_connection, null, StorageSettlementRequestedSql);
         StorageRootParameters(command, activeRoots);
         command.Parameters.AddWithValue("$after", afterJobId);
-        command.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 512));
+        command.Parameters.AddWithValue("$limit", Math.Min(pageSize, 8));
         var result = new List<StorageSettlement>();
-        using var reader = command.ExecuteReader();
-        while (reader.Read()) result.Add(new(reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetString(3),
-            JsonSerializer.Deserialize<PilotRemoteEntry>(reader.GetString(4))!));
+        var seen = new HashSet<long>();
+        foreach (var sql in new[] { StorageSettlementRequestedSql, StorageSettlementRangeSql })
+        {
+            command.CommandText = sql;
+            using var reader = command.ExecuteReader();
+            while (result.Count < pageSize && reader.Read())
+                if (seen.Add(reader.GetInt64(0)))
+                    result.Add(new(reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetString(3),
+                        JsonSerializer.Deserialize<PilotRemoteEntry>(reader.GetString(4))!));
+            if (result.Count == pageSize) break;
+            command.Parameters["$limit"].Value = pageSize;
+        }
         return (IReadOnlyList<StorageSettlement>)result;
     });
 
@@ -232,6 +249,12 @@ public sealed partial class SqliteStateStore
             ("$id", job.JobId), ("$j", json));
         if (current is null) return false;
         WriteStorageObservation(tx, job.RootId, job.ObjectId, job.RemoteBinding, job.Remote, observed);
+        // Native conversion has succeeded. Publish ownership on the entity in the same transaction
+        // as its receipt and queue acknowledgement, before a subsequent scan/planner can see it.
+        // Preserve independent holds; a replaced path has a different object id and is never marked.
+        StoreSchema.Execute(_connection, tx,
+            "UPDATE file_state SET flags=flags | $owned WHERE root_no=$r AND object_id=$o;",
+            ("$owned", (int)ItemFlags.OwnedPointer), ("$r", RootNo(job.RootId) ?? -1), ("$o", job.ObjectId));
         StoreSchema.Execute(_connection, tx, "DELETE FROM storage_settlement WHERE job_id=$id;", ("$id", job.JobId));
         tx.Commit();
         return true;

@@ -147,11 +147,11 @@ internal static class StorageNotices
     }
 
     private const string AuthDetail =
-        "Dropbox sign-in was refused while reading online-only files. Reconnect this Dropbox account, then Retry the read, or Ignore this cause.";
+        "Dropbox sign-in was refused during storage work. Reconnect this Dropbox account, then Retry, or Ignore this cause.";
     private const string NetworkDetail =
-        "Dropbox could not be reached while reading online-only files. Check the network connection: files stay online-only and reads retry, then Retry the read, or Ignore this cause.";
+        "Dropbox could not be reached during storage work. Check the network connection; the affected work stays deferred and retries, then Retry, or Ignore this cause.";
     private const string ProviderDetail =
-        "The Dropbox connection is unavailable while reading online-only files. Reconnect the provider, then Retry the read, or Ignore this cause.";
+        "The Dropbox connection is unavailable during storage work. Reconnect the provider, then Retry, or Ignore this cause.";
 
     private static IEnumerable<Exception> Chain(Exception error)
     {
@@ -240,7 +240,9 @@ internal static class StorageNotices
                 Complete(store, pair.PairId, item);
                 return;
             }
-            store.RetryStorageSettlement(item.RootId, item.ObjectId, item.RemoteBinding);
+            // Do not move the row due here: DrainAsync below writes the durable UserRequested sentinel under
+            // its own atomic claim. A due=0 pre-write would let a background page claim the row as Normal in
+            // between, so a later success in this turn could fail to clear the connectivity cause.
         }
         // A paused/disabled pair keeps the item request queued. Update the existing notice row (same id and
         // reason) with the explanation the service throws, without appending it again on repeated Retry.

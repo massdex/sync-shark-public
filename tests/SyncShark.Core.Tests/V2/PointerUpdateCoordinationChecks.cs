@@ -2,6 +2,23 @@ namespace Massdex.SyncShark.V2;
 
 internal static class PointerUpdateCoordinationChecks
 {
+    // Minimal neutral helpers so this check compiles in the standalone Files-on-Demand test project
+    // without pulling the larger local/executor suites.
+    private const string InstallationId = "localv2install0001";
+
+    private static RootDef RootOf(string root, string rootId) =>
+        new(rootId, SyncProviders.Local, null, root, ObjectIdOf(root));
+
+    private static string ObjectIdOf(string root)
+    {
+        using var lease = PilotDirectoryLease.Open(root);
+        return SyncLocalEndpointStore.ObjectId(lease.Identity.VolumeSerialNumber, lease.Identity.FileId);
+    }
+
+    private static SyncTransferResourceController Admission() =>
+        new(new SyncTransferSettings(ResourceMode: "Performance"), TimeProvider.System,
+            () => new SyncResourcePressure(0, 0.1, 8L << 30));
+
     internal static async Task RunAsync(string root)
     {
         using var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System);
@@ -31,7 +48,7 @@ internal static class PointerUpdateCoordinationChecks
         foreach (var cause in new[] { "host", "binding" })
         {
             writer.Cause = cause;
-            var runner = new ActionRunner(committer, V2Settings.Default, ExecutorChecks.Admission(), pair.PairId,
+            var runner = new ActionRunner(committer, V2Settings.Default, Admission(), pair.PairId,
                 writer, writer, [], new());
             var result = await runner.RunAsync(action, CancellationToken.None);
             Require(result?.Outcome == Outcome.Skipped, "pair failure is deferred, not an item failure");
@@ -52,12 +69,14 @@ internal static class PointerUpdateCoordinationChecks
         {
             var localPath = Path.Combine(root, "direct-local");
             Directory.CreateDirectory(localPath);
-            var directRoot = LocalChecks.RootOf(localPath, "direct-local");
+            var recoveryPath = Path.Combine(root, "recovery");
+            Directory.CreateDirectory(recoveryPath);
+            var directRoot = RootOf(localPath, "direct-local");
             var directPair = pair with { PairId = "direct", A = directRoot };
             store.SavePair(directPair);
             store.RecordStorageRegistration(directRoot.RootId, localPath, Guid.NewGuid().ToString("D"));
             var direct = await ProductionEndpoints.OpenLocalWriterAsync(store, directRoot, Side.A, directPair,
-                LocalChecks.InstallationId, Path.Combine(root, "recovery"), CancellationToken.None, V2Settings.Default);
+                InstallationId, recoveryPath, CancellationToken.None, V2Settings.Default);
             foreach (var cause in new[] { "host", "binding" })
             {
                 direct.PointerUpdateProvider = cause == "host" ? null :
@@ -67,6 +86,35 @@ internal static class PointerUpdateCoordinationChecks
                 catch (OwnedPointerDeferredException error) { deferred = error.Cause.Cause == cause; }
                 Require(deferred, "real local writer defers unavailable pair before source observation or native reads");
             }
+            // LOW-4 real path: the provider recheck can be wrapped by the native callback. The actual
+            // LocalWriter catch must walk that chain and defer, not surface an item failure.
+            foreach (var wrap in new Func<Exception, Exception>[]
+            {
+                inner => new IOException("native callback failed", inner),
+                inner => new AggregateException("native callback failed", new InvalidOperationException("worker"), inner)
+            })
+            {
+                direct.PointerUpdateProvider = _ => throw wrap(new StoragePairException("binding",
+                    "Foreign or overlapping registration."));
+                var deferred = false;
+                try { await ((IOwnedPointerUpdateTarget)direct).UpdateOwnedPointerAsync(action, writer, CancellationToken.None); }
+                catch (OwnedPointerDeferredException error) { deferred = error.Cause.Cause == "binding"; }
+                Require(deferred, "the real writer catch unwraps a wrapped callback pair cause into a deferral");
+            }
+            // Through ActionRunner the same wrapped cause is one pair notice and a Skipped result,
+            // never an item failure with its own notice.
+            direct.PointerUpdateProvider = _ => throw new IOException("native callback failed",
+                new StoragePairException("binding", "Foreign or overlapping registration."));
+            var directCommitter = new StoreCommitter(store, gate, directPair.PairId, 1);
+            var directRunner = new ActionRunner(directCommitter, V2Settings.Default, Admission(), directPair.PairId,
+                direct, writer, [], new());
+            var deferredRun = await directRunner.RunAsync(action, CancellationToken.None);
+            Require(deferredRun?.Outcome == Outcome.Skipped &&
+                store.OpenNotices(directPair.PairId).Count == 1 &&
+                store.OpenNotices(directPair.PairId)[0].Storage is { Operation: "availability", ObjectId: "", Scope: "binding" },
+                "a wrapped callback pair cause is a skipped pair notice, not an item failure");
+            Require(store.SyncRetryAt(directPair.PairId, action.Path)?.ReadRoots?.Count == 2,
+                "a wrapped callback pair cause keeps a durable targeted retry");
         }
 
         // Exercise success notification independently of receipt publication below: only Done
@@ -77,9 +125,50 @@ internal static class PointerUpdateCoordinationChecks
         Require(store.OpenNotices(pair.PairId).Count == 1, "same-apply success cannot hide an earlier blocked pointer");
         var nextApply = new StoreCommitter(store, gate, pair.PairId, 3);
         await nextApply.RunPointerUpdateAsync(action, SuccessfulEffect, CancellationToken.None);
-        Require(store.OpenNotices(pair.PairId).Count == 0, "next-apply pointer success closes prior availability notice");
+        Require(store.OpenNotices(pair.PairId).Count == 1 &&
+            store.OpenNotices(pair.PairId)[0].Storage?.Scope == "host",
+            "pointer success keeps a non-connectivity (host/binding) pair cause");
+        // Positive connectivity evidence closes a network/auth/provider cause and clears its root backoff.
+        StorageNotices.CompletePair(store, pair, "pointer");
+        foreach (var cause in new[] { "network", "auth", "provider" })
+        {
+            StorageNotices.Report(store, pair, string.Empty,
+                new StorageNotice(pair.A.RootId, string.Empty, pair.B.RootId, "pointer"),
+                new StoragePairException(cause, "Connectivity failure."));
+            store.SetStorageRootBackoff(pair.A.RootId, TimeSpan.FromMinutes(1));
+            await nextApply.RunPointerUpdateAsync(action, SuccessfulEffect, CancellationToken.None);
+            Require(store.OpenNotices(pair.PairId).Count == 0 && !store.StorageRootBackedOff(pair.A.RootId),
+                "pointer success closes a " + cause + " pair cause and clears its root backoff");
+        }
+        // Coexistence, volume and unknown causes are not connectivity evidence: they survive with their backoff.
+        foreach (var cause in new[] { "coexistence", "volume", "unknown" })
+        {
+            StorageNotices.Report(store, pair, string.Empty,
+                new StorageNotice(pair.A.RootId, string.Empty, pair.B.RootId, "pointer"),
+                new StoragePairException(cause, "Still blocked."));
+            store.SetStorageRootBackoff(pair.A.RootId, TimeSpan.FromMinutes(1));
+            await nextApply.RunPointerUpdateAsync(action, SuccessfulEffect, CancellationToken.None);
+            Require(store.OpenNotices(pair.PairId).Count == 1 &&
+                store.OpenNotices(pair.PairId)[0].Storage?.Scope == cause &&
+                store.StorageRootBackedOff(pair.A.RootId),
+                "pointer success preserves a " + cause + " pair cause and its backoff");
+            StorageNotices.CompletePair(store, pair, "pointer");
+            store.ClearStorageRootBackoff(pair.A.RootId);
+        }
         await nextApply.DeferPointerUpdateAsync(action, new StoragePairException("binding", "Registration changed."));
         Require(store.OpenNotices(pair.PairId).Count == 1, "later failure remains visible after an earlier success");
+
+        // LOW-4: the provider recheck throws inside the native update callback. If the provider wraps that
+        // exception (directly, in an inner chain or as an aggregate), the deferral must still find the pair cause.
+        Require(OwnedPointerUpdates.PairCause(new IOException("callback",
+                new StoragePairException("binding", "Foreign registration.")))?.Cause == "binding",
+            "a pair cause wrapped in the native callback chain is still recognised");
+        Require(OwnedPointerUpdates.PairCause(new AggregateException(
+                new InvalidOperationException("worker"),
+                new IOException("callback", new StoragePairException("host", "No provider."))))?.Cause == "host",
+            "a pair cause inside an aggregated native callback failure is still recognised");
+        Require(OwnedPointerUpdates.PairCause(new ExpectedTargetMismatchException("changed")) is null,
+            "an item target mismatch is not a pair cause");
 
         Require(!store.StoragePointerUpdateIsStale(pair, action), "original stored revision authorizes update");
         var receipt = store.StoragePointerFor(pair.A.RootId, local.ObjectId, pair.B.RootId)!;

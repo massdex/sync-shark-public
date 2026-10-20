@@ -9,9 +9,11 @@ internal static class FilesOnDemandStorageChecks
         FilesOnDemandCompatibilityChecks.Run(Path.Combine(root, "v20-fixture"));
         await FilesOnDemandServiceChecks.RunAsync(Path.Combine(root, "service"));
         await StorageExplicitRetryChecks.RunAsync(Path.Combine(root, "explicit-retry"));
+        await StorageQueuePlanChecks.RunAsync(Path.Combine(root, "queue-plans"));
         CloudFilesOwnershipChecks.Run();
         await NewPointerDownloadChecks.RunAsync();
         await PointerUpdateCoordinationChecks.RunAsync(Path.Combine(root, "pointer-coordination"));
+        await SettlementInventoryChecks.RunAsync(Path.Combine(root, "settlement-inventory"));
         await HydrationNoticeWriterChecks.RunAsync(Path.Combine(root, "hydration-notices"));
         await FilesOnDemandSettlementChecks.RunAsync(Path.Combine(root, "settlement-service"));
         await StoreWorkChecksAsync(Path.Combine(root, "store-work"));
@@ -108,7 +110,8 @@ internal static class FilesOnDemandStorageChecks
             StorageNotices.Report(store, store.Pair("pair")!, remote.RelativePath, savedNotice.Storage!, new IOException("synthetic conversion failure"));
             Require(!store.OpenNotices("pair").Any(n => n.Storage is not null), "ignored storage cause remains deduplicated");
             store.CloseNotice(savedNotice.NoticeId!, "resolved");
-            store.RetryStorageSettlement(local.RootId, "file-object", "remote");
+            store.RequestStorageSettlement(store.StorageSettlementFor(local.RootId, "file-object", "remote")
+                ?? throw new InvalidOperationException("Missing settlement retry fixture."));
             var skippedConversions = 0;
             var skipped = new FilesOnDemandSettlement(store, (_, _) =>
             {

@@ -153,13 +153,6 @@ public sealed partial class SqliteStateStore
         StoreSchema.Scalar(_connection, null, "SELECT 1 FROM notice WHERE pair_no=$p AND reason_key=$k AND choice='ignore' LIMIT 1;",
             ("$p", RequirePair(pairId)), ("$k", reasonKey)) is not null);
 
-    internal void RetryStorageSettlement(string root, string item, string binding) => InStore(() =>
-    {
-        if (!_storageEnabled) return;
-        StoreSchema.Execute(_connection, null, "UPDATE storage_settlement SET state='pending',due=0 WHERE root_id=$r AND object_id=$o AND remote_binding=$b;",
-            ("$r", root), ("$o", item), ("$b", binding));
-    });
-
     // Persist one explicit Retry without running it. Only an existing queued row is marked, so a completed
     // entity is never recreated; the negative due marker survives pause and is consumed by the claim below.
     internal void RequestStorageSettlement(StorageSettlement job) => InStore(() =>
@@ -213,6 +206,22 @@ public sealed partial class SqliteStateStore
     public static string StoragePointerCursor(StorageSettlement job) => JsonSerializer.Serialize(new[] {
         job.RefreshDue.ToString(System.Globalization.CultureInfo.InvariantCulture), job.RootId, job.ObjectId, job.RemoteBinding });
 
+    internal const string StoragePointerRequestedSql =
+        "SELECT q.job_id,s.root_id,s.object_id,s.remote_binding,s.remote_json,q.due FROM " + StorageRootsSql +
+        " CROSS JOIN storage_refresh q ON q.job_id IN (SELECT rq.job_id FROM storage_refresh rq INDEXED BY storage_refresh_requested " +
+        "WHERE rq.root_id=roots.value AND rq.due=-1 ORDER BY rq.object_id,rq.remote_binding LIMIT $limit) " +
+        "JOIN storage_item s ON s.root_id=q.root_id AND s.object_id=q.object_id AND s.remote_binding=q.remote_binding " +
+        "ORDER BY q.root_id,q.object_id,q.remote_binding LIMIT $limit;";
+
+    internal const string StoragePointerRangeSql =
+        "SELECT q.job_id,s.root_id,s.object_id,s.remote_binding,s.remote_json,q.due FROM " + StorageRootsSql +
+        " CROSS JOIN storage_refresh q ON q.job_id IN (SELECT rq.job_id FROM storage_refresh rq INDEXED BY storage_refresh_root " +
+        "WHERE rq.root_id=roots.value AND rq.due<=$now AND (rq.due,rq.root_id,rq.object_id,rq.remote_binding)>($after,$r,$o,$b) " +
+        "ORDER BY rq.due,rq.object_id,rq.remote_binding LIMIT $limit) " +
+        "JOIN storage_item s ON s.root_id=q.root_id AND s.object_id=q.object_id AND s.remote_binding=q.remote_binding " +
+        StorageUnblockedSql + " AND q.due<=$now AND (q.due,q.root_id,q.object_id,q.remote_binding)>($after,$r,$o,$b) " +
+        "ORDER BY q.due,q.root_id,q.object_id,q.remote_binding LIMIT $limit;";
+
     internal IReadOnlyList<StorageSettlement> ChangedStoragePointers(string after = "", int limit = 128, IReadOnlyCollection<string>? activeRoots = null) => InStore(() =>
     {
         if (!_storageEnabled) return (IReadOnlyList<StorageSettlement>)[];
@@ -220,20 +229,18 @@ public sealed partial class SqliteStateStore
         var cursor = after.Length == 0 ? new[] { start, "", "", "" } : JsonSerializer.Deserialize<string[]>(after)!;
         if (cursor.Length == 3) cursor = [start, .. cursor];
         if (cursor.Length != 4) throw new ArgumentException("Invalid pointer cursor.", nameof(after));
-        using var cmd = StoreSchema.Command(_connection, null,
-            "SELECT q.job_id,s.root_id,s.object_id,s.remote_binding,s.remote_json,q.due FROM " + StorageRootsSql +
-            " CROSS JOIN storage_refresh q ON q.job_id IN (SELECT rq.job_id FROM storage_refresh rq INDEXED BY storage_refresh_root " +
-            "WHERE rq.root_id=roots.value AND rq.due<=$now AND ((rq.due,rq.root_id,rq.object_id,rq.remote_binding)>($after,$r,$o,$b) OR rq.due=$requested) " +
-            "ORDER BY CASE WHEN rq.due=$requested THEN 0 ELSE 1 END,rq.due,rq.object_id,rq.remote_binding LIMIT $limit) " +
-            "JOIN storage_item s ON s.root_id=q.root_id AND s.object_id=q.object_id AND s.remote_binding=q.remote_binding " +
-            "WHERE (NOT EXISTS(SELECT 1 FROM storage_root_backoff b WHERE b.root_id=roots.value AND b.due>$now) OR q.due=$requested) " +
-            "AND q.due<=$now AND ((q.due,q.root_id,q.object_id,q.remote_binding)>($after,$r,$o,$b) OR q.due=$requested) " +
-            "ORDER BY CASE WHEN q.due=$requested THEN 0 ELSE 1 END,q.due,q.root_id,q.object_id,q.remote_binding LIMIT $limit;");
+        var pageSize = Math.Clamp(limit, 1, 128);
+        using var cmd = StoreSchema.Command(_connection, null, StoragePointerRequestedSql);
         StorageRootParameters(cmd, activeRoots);
         cmd.Parameters.AddWithValue("$after", long.Parse(cursor[0], System.Globalization.CultureInfo.InvariantCulture));
         cmd.Parameters.AddWithValue("$r", cursor[1]); cmd.Parameters.AddWithValue("$o", cursor[2]); cmd.Parameters.AddWithValue("$b", cursor[3]);
-        cmd.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 128));
-        return ReadStorageJobs(cmd);
+        cmd.Parameters.AddWithValue("$limit", Math.Min(pageSize, 8));
+        var requested = ReadStorageJobs(cmd);
+        if (requested.Count == pageSize) return requested;
+        cmd.CommandText = StoragePointerRangeSql;
+        cmd.Parameters["$limit"].Value = pageSize;
+        return (IReadOnlyList<StorageSettlement>)requested.Concat(ReadStorageJobs(cmd))
+            .DistinctBy(job => job.JobId).Take(pageSize).ToArray();
     });
 
     internal void CompleteStoragePointerUpdate(StorageSettlement prior, PilotRemoteEntry remote) => InStore(() =>

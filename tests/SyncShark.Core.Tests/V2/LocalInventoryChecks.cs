@@ -156,8 +156,8 @@ internal static class LocalInventoryChecks
     }
 
     // N10-a: before the storage feature is opted in, an ordinary pair's scan must take no extra native
-    // attribute/CfGetPlaceholderInfo open per placeholder or reparse entry. After opt-in (an owned
-    // pointer row, the same flag the writer's N10 gate uses) the probe is enabled.
+    // attribute/CfGetPlaceholderInfo open per placeholder or reparse entry. A recorded v2
+    // registration enables discovery before the first pointer has reached the index.
     private static async Task NoPreOptInOwnedPlaceholderProbeAsync()
     {
         var root = LocalChecks.FreshRoot("storage-probe-optin");
@@ -186,12 +186,14 @@ internal static class LocalInventoryChecks
                 "with no storage opt-in the scan takes no owned-placeholder native probe");
 
             known.EnableStorage();
-            var generation = known.BeginGeneration("root-local", "snapshot");
-            known.WriteSnapshot(new Snapshot("root-local", Side.A, generation, "",
-                [LocalChecks.Item("owned.txt", ItemKind.File) with { Flags = ItemFlags.OwnedPointer }], []));
-            known.CompleteGeneration(generation, "", true);
-            LocalChecks.Require(known.HasOwnedPointers("root-local"),
-                "the synthetic owned pointer row makes the root's opt-in flag true");
+            var enabledOnly = Inventory();
+            enabledOnly.OwnedPlaceholderProbeForTest = probes.Add;
+            await enabledOnly.FullAsync(2, _ => true, null!, CancellationToken.None);
+            LocalChecks.Require(probes.Count == 0, "schema opt-in alone does not probe an unregistered root");
+            // Database record only; no native root registration or connection.
+            known.RecordStorageRegistration("root-local", root, Guid.NewGuid().ToString("D"));
+            LocalChecks.Require(!known.HasOwnedPointers("root-local"),
+                "recorded registration enables first-pointer discovery without seeded owned flags");
             probes.Clear();
             var optedIn = Inventory();
             optedIn.OwnedPlaceholderProbeForTest = probes.Add;

@@ -183,7 +183,8 @@ internal static class FilesOnDemandServiceChecks
         Require(store.StorageSettlementPage().Count == 0, "the item cause schedules only the item");
         await RunTurnAsync(FailItem);
         Require(calls == 3, "item backoff prevents an immediate rehash");
-        store.RetryStorageSettlement(a.RootId, item.ObjectId, b.RootId);
+        store.RequestStorageSettlement(store.StorageSettlementFor(a.RootId, item.ObjectId, b.RootId)
+            ?? throw new InvalidOperationException("Missing deferred settlement fixture."));
         Require(store.StorageSettlementPage().Count == 1, "explicit Retry resets the item due");
         clock.Advance(TimeSpan.FromMinutes(2));
         await RunTurnAsync((_, _) => Task.FromResult(new StorageObserved("OnlineOnly", false, true)));
@@ -225,11 +226,13 @@ internal static class FilesOnDemandServiceChecks
         var diskFailure = new IOException("Disk full", unchecked((int)0x80070070));
         Require(ReferenceEquals(attempt.Correlate(diskFailure), diskFailure),
             "a captured transport error cannot replace a specific disk HRESULT");
-        Require(!store.HasOpenStoragePairCause(pair.PairId), "race begins before pair notice persistence");
+        Require(store.OpenStoragePairCauses(pair.PairId, a.RootId, b.RootId).Count == 0,
+            "race begins before pair notice persistence");
         await Fail(0, attempt.Correlate(new IOException("Windows read failed")));
         Require(store.StorageHydrationFor(a.RootId, files[0].ObjectId) is not null,
             "same-attempt transport failure retains the durable item retry");
-        Require(store.OpenNotices(pair.PairId).Count == 1 && store.HasOpenStoragePairCause(pair.PairId) &&
+        Require(store.OpenNotices(pair.PairId).Count == 1 &&
+            store.OpenStoragePairCauses(pair.PairId, a.RootId, b.RootId).Count == 1 &&
             store.StorageRootBackedOff(a.RootId) &&
             store.OpenNotices(pair.PairId).All(n => n.Storage?.ObjectId == ""),
             "typed callback source alone produces the pair notice and durable root backoff");
@@ -255,7 +258,8 @@ internal static class FilesOnDemandServiceChecks
         }
         await using (var retry = new StorageSettlementService(store, connections, target: Target(0), hydrate: Success))
             await retry.DrainAsync(CancellationToken.None);
-        Require(!store.HasOpenStoragePairCause(pair.PairId) && !store.StorageRootBackedOff(a.RootId),
+        Require(store.OpenStoragePairCauses(pair.PairId, a.RootId, b.RootId).Count == 0 &&
+            !store.StorageRootBackedOff(a.RootId),
             "successful pair recovery clears pair cause and persistent admission backoff");
         Require(store.OpenNotices(pair.PairId).Any(n => n.Storage?.ObjectId == files[2].ObjectId),
             "pair recovery does not blanket-close unrelated item failures");

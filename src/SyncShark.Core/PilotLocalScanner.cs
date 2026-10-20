@@ -37,6 +37,15 @@ public sealed class PilotLocalScanner
     // Observes an owned-placeholder probe attempt (the extra native attribute/CfGetPlaceholderInfo open).
     // The caller passes expectedPairId only when storage is opted in, so this stays silent otherwise.
     internal Action<string>? OwnedPlaceholderProbeForTest { get; init; }
+    internal Func<string, WindowsCloudPlaceholderInfo?>? ReadOwnedPlaceholderForTest { get; init; }
+
+    private bool TryReadOwnedPlaceholder(string path, out WindowsCloudPlaceholderInfo? info)
+    {
+        if (ReadOwnedPlaceholderForTest is not { } read)
+            return WindowsCloudFilesProvider.TryReadOwnedPlaceholder(path, out info);
+        info = read(path);
+        return info is not null;
+    }
     // FileStream buffering is an I/O choice, not the provider's four-MiB hash-block boundary.
     // Hashing reads larger chunks and bypasses this small buffer instead of allocating four MiB
     // for every tiny file. The held handle, exclusive sharing and fresh byte digest are unchanged.
@@ -381,7 +390,7 @@ public sealed class PilotLocalScanner
                 if (probeOwned) OwnedPlaceholderProbeForTest?.Invoke(relative);
                 // The repeated null test lets flow analysis see a non-null pair id across the chain.
                 var owned = probeOwned && expectedPairId is not null &&
-                    WindowsCloudFilesProvider.TryReadOwnedPlaceholder(exactPath, out ownedPlaceholder) &&
+                    TryReadOwnedPlaceholder(exactPath, out ownedPlaceholder) &&
                     ownedPlaceholder is not null && ownedPlaceholder.Identity.ObjectKind != "root" &&
                     ownedPlaceholder.Identity.IsBoundTo(expectedPairId, contentProvider) &&
                     ownedPlaceholder.SyncRootFileId == rootLease.Identity.FileId && ownedPlaceholder.FileId != 0;

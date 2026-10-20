@@ -9,6 +9,10 @@ public sealed partial class V2CliRuntime
         CancellationToken cancellationToken, string? backupDirectory, bool confirmWithoutBackup) =>
         SetStorageIntentCoreAsync(pairId, path, mode, cancellationToken, backupDirectory, confirmWithoutBackup);
 
+    public Task<SyncCliAvailabilityData> SetStorageIntentAsync(string pairId, string path, string mode,
+        CancellationToken cancellationToken, string? backupDirectory, bool confirmWithoutBackup, Action<string>? progress) =>
+        SetStorageIntentCoreAsync(pairId, path, mode, cancellationToken, backupDirectory, confirmWithoutBackup, progress);
+
     /// <inheritdoc />
     /// <remarks>
     /// Never-refuse the intent is persisted before any eligibility check, including for a
@@ -20,8 +24,12 @@ public sealed partial class V2CliRuntime
         CancellationToken cancellationToken) =>
         SetStorageIntentCoreAsync(pairId, path, availability, cancellationToken, null, false);
 
+    public Task<SyncCliAvailabilityData> SetAvailabilityAsync(string pairId, string path, string availability,
+        CancellationToken cancellationToken, Action<string>? progress) =>
+        SetStorageIntentCoreAsync(pairId, path, availability, cancellationToken, null, false, progress);
+
     private Task<SyncCliAvailabilityData> SetStorageIntentCoreAsync(string pairId, string path, string availability,
-        CancellationToken cancellationToken, string? backupDirectory, bool confirmWithoutBackup)
+        CancellationToken cancellationToken, string? backupDirectory, bool confirmWithoutBackup, Action<string>? progress = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var pair = RequirePair(pairId);
@@ -48,6 +56,7 @@ public sealed partial class V2CliRuntime
                     settingsWarning = "Could not read the configured Recovery location: " + error.Message + " ";
                 }
             }
+            (progress ?? Console.Error.WriteLine)("Backing up the Sync Shark database; this can take a few minutes.");
             var optIn = store.EnableStorageWithBackup(backupDirectory, confirmWithoutBackup);
             if (settingsWarning is not null) optIn = optIn with { Warning = settingsWarning + optIn.Warning };
             if (!optIn.Enabled)

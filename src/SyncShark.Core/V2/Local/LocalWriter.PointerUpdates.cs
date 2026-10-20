@@ -21,6 +21,23 @@ internal static class OwnedPointerUpdates
         Source: { Kind: ItemKind.File, Flags: ItemFlags.None, Hash: not null, VersionId: not null },
         ExpectedTarget: { Kind: ItemKind.File, Flags: ItemFlags.OwnedPointer, Hash: not null }
     };
+
+    /// <summary>Finds a pair cause anywhere in an exception chain. A native callback may wrap the
+    /// <see cref="StoragePairException"/> thrown by the provider recheck (for example in an
+    /// <see cref="AggregateException"/> or another wrapper), so the deferral must not depend on the
+    /// outermost type.</summary>
+    internal static StoragePairException? PairCause(Exception? error)
+    {
+        if (error is null) return null;
+        if (error is StoragePairException pair) return pair;
+        if (error is AggregateException aggregate)
+        {
+            foreach (var inner in aggregate.Flatten().InnerExceptions)
+                if (PairCause(inner) is { } found) return found;
+            return null;
+        }
+        return PairCause(error.InnerException);
+    }
 }
 
 public sealed partial class LocalWriter : IOwnedPointerUpdateTarget
@@ -33,7 +50,17 @@ public sealed partial class LocalWriter : IOwnedPointerUpdateTarget
         IEndpointWriter source, CancellationToken ct)
     {
         try { return await UpdatePointerCoreAsync(action, source, ct).ConfigureAwait(false); }
-        catch (StoragePairException error) { throw new OwnedPointerDeferredException(error); }
+        catch (OwnedPointerDeferredException) { throw; }
+        catch (Exception error)
+        {
+            // The provider recheck runs again inside the native callback; if the provider wraps that
+            // exception, the outer type is not StoragePairException. Walk the chain so the action is
+            // deferred with a pair notice instead of becoming an item failure. Any other exception is
+            // rethrown unchanged.
+            if (OwnedPointerUpdates.PairCause(error) is { } pairCause)
+                throw new OwnedPointerDeferredException(pairCause);
+            throw;
+        }
     }
 
     private async Task<ItemState> UpdatePointerCoreAsync(SyncAction action, IEndpointWriter source, CancellationToken ct)

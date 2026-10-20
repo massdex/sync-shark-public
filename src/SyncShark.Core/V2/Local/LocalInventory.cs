@@ -9,9 +9,9 @@ public sealed partial class LocalInventory : IInventorySource
     private readonly RootDef _root;
     private readonly IDefenderHistory? _history;
     private readonly string? _pairId;
-    // N10-a: the owned-placeholder probe is opt-in only. Until this root has an owned pointer (the
-    // same N10 flag the writer uses), scans must take no extra native attribute open per placeholder.
-    // A store without the storage feature answers from its in-memory flag and never touches the schema.
+    // N10-a: probe only after a recorded v2 registration or an indexed owned pointer exists.
+    // Registration permits discovery after conversion even before ownership reaches the index.
+    // Both store queries short-circuit before schema access when storage has never been enabled.
     private readonly string? _expectedPairId;
     private readonly Side _side;
     private readonly IStateStore _known;
@@ -36,7 +36,8 @@ public sealed partial class LocalInventory : IInventorySource
         _history = history;
         _pairId = pairId;
         _known = known ?? throw new ArgumentNullException(nameof(known));
-        _expectedPairId = pairId is not null && _known is SqliteStateStore store && store.HasOwnedPointers(root.RootId)
+        _expectedPairId = pairId is not null && _known is SqliteStateStore store &&
+            (store.HasOwnedPointers(root.RootId) || store.StorageRegistrations().Any(entry => entry.RootId == root.RootId))
             ? pairId : null;
         _productOwnedPaths = productOwnedPaths ?? throw new ArgumentNullException(nameof(productOwnedPaths));
         // The relative form the shared exclusion test needs; the scanner keeps the absolute set for enumeration.
@@ -501,7 +502,8 @@ public sealed partial class LocalInventory : IInventorySource
         HashScanOverride is { } scanOverride ? Task.FromResult(scanOverride(rows)) :
         new PilotLocalScanner { HashBufferBytes = _settings.LocalHashBufferBytes, CloudFilesAware = true,
             ReplaceOnlineOnlyStubs = _settings.ReplaceOnlineOnlyStubs,
-            OwnedPlaceholderProbeForTest = OwnedPlaceholderProbeForTest }
+            OwnedPlaceholderProbeForTest = OwnedPlaceholderProbeForTest,
+            ReadOwnedPlaceholderForTest = ReadOwnedPlaceholderForTest }
             .ScanAsync(lease, _productOwnedPaths, ct, refreshPaths: rows.Select(row => row.Path).ToArray(),
                 expectedPairId: _expectedPairId, contentProvider: OwnedContentProvider);
 
@@ -539,7 +541,8 @@ public sealed partial class LocalInventory : IInventorySource
             ReplaceOnlineOnlyStubs = _settings.ReplaceOnlineOnlyStubs, WalkCheckpoint = walk,
             BetweenDirectories = refreshPaths is null ? PairPause.Check : null,
             DirectoryCompletedForTest = DirectoryCompletedForTest,
-            OwnedPlaceholderProbeForTest = OwnedPlaceholderProbeForTest }.ScanAsync(lease, _productOwnedPaths, ct,
+            OwnedPlaceholderProbeForTest = OwnedPlaceholderProbeForTest,
+            ReadOwnedPlaceholderForTest = ReadOwnedPlaceholderForTest }.ScanAsync(lease, _productOwnedPaths, ct,
             includePath: path => include(path) && !LocalItems.IsExcluded(path, _productOwnedRelative),
             traverseDirectory: path => include(path) && !LocalItems.IsExcluded(path, _productOwnedRelative) && exactPaths?.Contains(path) != true,
             onInventory: p is null
@@ -553,6 +556,7 @@ public sealed partial class LocalInventory : IInventorySource
 
     /// <summary>Observes each owned-placeholder probe the scanner would take; null in production.</summary>
     internal Action<string>? OwnedPlaceholderProbeForTest { get; set; }
+    internal Func<string, WindowsCloudPlaceholderInfo?>? ReadOwnedPlaceholderForTest { get; set; }
 
     private static bool UnderHeldDescendant(string path, IReadOnlySet<string> heldPaths)
     {

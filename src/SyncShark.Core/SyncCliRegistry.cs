@@ -1296,7 +1296,7 @@ public static class SyncCliRegistry
             case "storage inherit":
                 return await operations.SetStorageIntentAsync(invocation.PairId!, RequirePath(invocation),
                     invocation.Command[8..], cancellationToken, invocation.Value("--backup-directory"),
-                    invocation.Flag("--confirm-without-backup"));
+                    invocation.Flag("--confirm-without-backup"), Progress);
             case "availability set":
                 if (invocation.Availability is null || invocation.Path is null)
                     throw new SyncCliUsageException(

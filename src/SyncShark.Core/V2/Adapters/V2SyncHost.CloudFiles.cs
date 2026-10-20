@@ -560,7 +560,10 @@ internal sealed class HydrationNoticeWriter : IDisposable
                         // Durable root backoff: the durable offline lane's page query skips a backed-off root, so a
                         // pair outage cannot turn every offline hydration job into its own per-item notice. The lane
                         // must NOT blanket-close offline item notices: a disk/hash/sharing cause is item-specific.
-                        _store.SetStorageRootBackoff(pair.A.RootId, PairBackoff);
+                        // Only connectivity causes pause the other lanes for this root; a local notice backlog (or
+                        // an item-specific cause) must never stall settlement, refresh or offline hydration.
+                        if (pairError.Cause is "network" or "auth" or "provider")
+                            _store.SetStorageRootBackoff(pair.A.RootId, PairBackoff);
                     }
                     catch (Exception error)
                     {

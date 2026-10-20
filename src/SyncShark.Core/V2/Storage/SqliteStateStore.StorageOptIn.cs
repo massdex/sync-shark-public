@@ -58,7 +58,8 @@ public sealed partial class SqliteStateStore
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or SqliteException or ArgumentException or NotSupportedException)
         {
             warning = "Pre-storage backup failed: " + error.Message +
-                (backupPath is null ? "" : " Incomplete backup candidate (not a rollback copy): " + backupPath + ".") +
+                (backupPath is null ? "" : " Incomplete backup candidate (not a rollback copy): " + backupPath +
+                    ". You may remove this incomplete candidate after verifying a successful replacement backup; Sync Shark does not delete it.") +
                 " Retry storage online-only with the same pair and path, choose another location with " +
                 "--backup-directory <absolute-directory>, or explicitly accept losing this rollback snapshot " +
                 "with --confirm-without-backup.";

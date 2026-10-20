@@ -101,6 +101,8 @@ internal static class StorageNoticeLaneChecks
         }
 
         // The writer's overflow/backlog pair cause is the same family and closes on the next successful read.
+        // A local notice backlog is not connectivity evidence: it must not root-backoff the other lanes.
+        store.ClearStorageRootBackoff(pair.A.RootId);
         using (var writer = new HydrationNoticeWriter(store, startWorker: false))
         {
             writer.Register(pair);
@@ -108,6 +110,8 @@ internal static class StorageNoticeLaneChecks
             writer.Report(pair, "Folder/busy.bin",
                 new StoragePairException("backlog", "queue busy"), _ => null);
             writer.Drain();
+            HydrationNoticeWriterChecks.Require(!store.StorageRootBackedOff(pair.A.RootId),
+                "a local notice backlog never root-backs-off settlement, refresh or offline");
             var backlog = SingleStorageNotice(store, pair);
             HydrationNoticeWriterChecks.Require(backlog.Storage is { Operation: StorageNotices.HydrationPairOperation, ObjectId: "" },
                 "the backlog is one pair-scoped hydration notice");

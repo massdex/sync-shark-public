@@ -2,16 +2,6 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SqliteStateStore
 {
-    /// <summary>Checks open network/auth causes in the unified hydration pair range; excludes provider, backlog and item causes.</summary>
-    internal bool HasOpenStoragePairCause(string pairId) => InStore(() =>
-        StoreSchema.Scalar(_connection, null, """
-            SELECT 1 FROM notice INDEXED BY nt_pair_reason
-              WHERE pair_no=$p AND reason_key>='storage:hydration-pair:'
-                AND reason_key<'storage:hydration-pair:￿' AND state='open'
-                AND (reason_key GLOB 'storage:hydration-pair:*:network:*'
-                  OR reason_key GLOB 'storage:hydration-pair:*:auth:*') LIMIT 1;
-            """, ("$p", RequirePair(pairId))) is not null);
-
     /// <summary>Open pair-cause rows for exactly the two storage pair families; never item notices.</summary>
     internal IReadOnlyList<StorageNotice> OpenStoragePairCauses(string pairId, string rootId, string remoteBinding) => InStore(() =>
     {

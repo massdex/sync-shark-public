@@ -57,8 +57,16 @@ internal static class FilesOnDemandCompatibilityChecks
             StoreSchema.Execute(wal, null, "PRAGMA wal_autocheckpoint=0; UPDATE root SET cursor='wal-committed' WHERE root_id='fixture-root';");
             Require(File.Exists(SqliteStateStore.DatabasePath(root) + "-wal"), "fixture has live WAL");
             var recovery = Path.Combine(root, "Recovery");
+            var progressMessages = new List<string>();
             var saved = cli.SetStorageIntentAsync("fixture-pair", "", "online-only", CancellationToken.None,
-                recovery, false).GetAwaiter().GetResult();
+                recovery, false, message =>
+                {
+                    Require(!store.IsStorageEnabled && !Directory.Exists(Path.Combine(recovery, "StateBackups")),
+                        "backup progress is delivered before the snapshot and opt-in");
+                    progressMessages.Add(message);
+                }).GetAwaiter().GetResult();
+            Require(progressMessages.Count == 1 && progressMessages[0].Contains("few minutes"),
+                "first opt-in explains the potentially slow backup before blocking");
             var backups = Directory.GetFiles(Path.Combine(recovery, "StateBackups"), "*.db");
             Require(backups.Length == 1, "first online-only command takes one snapshot");
             var savedText = System.Text.Json.JsonSerializer.Serialize(saved);

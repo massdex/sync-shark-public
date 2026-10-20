@@ -11,7 +11,8 @@ internal static class FilesOnDemandSchema
         "storage_path_intent", "storage_intent_due", "storage_policy_sweep", "storage_remote_object",
         "storage_refresh", "storage_refresh_due", "storage_cleanup", "storage_registration", "fs_owned",
         "storage_subtree_sweep", "storage_root_backoff", "storage_pending_root", "storage_refresh_root",
-        "storage_hydration", "storage_hydration_root", "storage_hydration_due", "fs_nonpointer"
+        "storage_hydration", "storage_hydration_root", "storage_hydration_due", "fs_nonpointer",
+        "storage_pending_requested", "storage_hydration_requested", "storage_refresh_requested"
     ];
 
     internal static void Ensure(Microsoft.Data.Sqlite.SqliteConnection connection)
@@ -22,6 +23,8 @@ internal static class FilesOnDemandSchema
         // Additive lazy migration: existing opted-in stores gain item-scoped retry scheduling without a schema version.
         if (StoreSchema.Scalar(connection, tx, "SELECT 1 FROM pragma_table_info('storage_settlement') WHERE name='due';") is null)
             StoreSchema.Execute(connection, tx, "ALTER TABLE storage_settlement ADD COLUMN due INTEGER NOT NULL DEFAULT 0;");
+        // Must follow the due-column migration for older opted-in stores.
+        StoreSchema.Execute(connection, tx, RequestedIndexesDdl);
         if (legacyPeriodic) StoreSchema.Execute(connection, tx, "DELETE FROM storage_refresh WHERE due>0;");
         // Preview builds changed the shared index. Restore its final26 predicate only on opted-in stores.
         if (StoreSchema.Scalar(connection, tx, "SELECT sql FROM sqlite_master WHERE name='fs_flagged';") is string sql && sql.Contains("~512", StringComparison.Ordinal))
@@ -30,6 +33,13 @@ internal static class FilesOnDemandSchema
         StoreSchema.Execute(connection, tx, "INSERT OR IGNORE INTO storage_subtree_sweep(root_id,object_id) SELECT root_id,'' FROM storage_policy_sweep; DELETE FROM storage_policy_sweep;");
         tx.Commit();
     }
+
+    // Literal predicate is required for SQLite partial-index matching; keep in sync with StorageDue.UserRequested.
+    internal const string RequestedIndexesDdl = """
+        CREATE INDEX IF NOT EXISTS storage_pending_requested ON storage_settlement(root_id,job_id) WHERE due=-1 AND state='pending';
+        CREATE INDEX IF NOT EXISTS storage_hydration_requested ON storage_hydration(root_id,job_id) WHERE due=-1;
+        CREATE INDEX IF NOT EXISTS storage_refresh_requested ON storage_refresh(root_id,object_id,remote_binding) WHERE due=-1;
+        """;
 
     internal const string Ddl = """
         CREATE INDEX IF NOT EXISTS fs_nonpointer ON file_state(root_no) WHERE (flags & ~512) != 0;

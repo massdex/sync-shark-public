@@ -57,19 +57,37 @@ public sealed partial class SqliteStateStore
         return (IReadOnlyList<StoragePathIntent>)result;
     });
 
+    internal const string StorageHydrationRequestedSql =
+        "SELECT w.job_id,w.root_id,w.object_id FROM " + StorageRootsSql +
+        " CROSS JOIN storage_hydration w ON w.job_id IN (SELECT h.job_id FROM storage_hydration h INDEXED BY storage_hydration_requested " +
+        "WHERE h.root_id=roots.value AND h.due=-1 ORDER BY h.job_id LIMIT $limit) " +
+        "ORDER BY w.job_id LIMIT $limit;";
+
+    internal const string StorageHydrationRangeSql =
+        "SELECT w.job_id,w.root_id,w.object_id FROM " + StorageRootsSql +
+        " CROSS JOIN storage_hydration w ON w.job_id IN (SELECT h.job_id FROM storage_hydration h INDEXED BY storage_hydration_root " +
+        "WHERE h.root_id=roots.value AND h.due<=$now AND h.job_id>$after ORDER BY h.job_id LIMIT $limit) " +
+        StorageUnblockedSql + " ORDER BY w.job_id LIMIT $limit;";
+
     public IReadOnlyList<StorageHydrationJob> StorageHydrationPage(long afterJobId = 0, int limit = 128, IReadOnlyCollection<string>? activeRoots = null) => InStore(() =>
     {
         if (!_storageEnabled) return (IReadOnlyList<StorageHydrationJob>)[];
-        using var cmd = StoreSchema.Command(_connection, null, "SELECT w.job_id,w.root_id,w.object_id FROM " + StorageRootsSql +
-            " CROSS JOIN storage_hydration w ON w.job_id IN (SELECT h.job_id FROM storage_hydration h INDEXED BY storage_hydration_root " +
-            "WHERE h.root_id=roots.value AND h.due<=$now AND (h.job_id>$after OR h.due=$requested) " +
-            "ORDER BY CASE WHEN h.due=$requested THEN 0 ELSE 1 END,h.job_id LIMIT $limit) " +
-            "WHERE (NOT EXISTS(SELECT 1 FROM storage_root_backoff b WHERE b.root_id=roots.value AND b.due>$now) OR w.due=$requested) " +
-            "AND w.due<=$now AND (w.job_id>$after OR w.due=$requested) " +
-            "ORDER BY CASE WHEN w.due=$requested THEN 0 ELSE 1 END,w.job_id LIMIT $limit;");
-        StorageRootParameters(cmd, activeRoots); cmd.Parameters.AddWithValue("$after", afterJobId); cmd.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 512));
-        var result = new List<StorageHydrationJob>(); using var reader = cmd.ExecuteReader();
-        while (reader.Read()) result.Add(new(reader.GetInt64(0), reader.GetString(1), reader.GetString(2)));
+        var pageSize = Math.Clamp(limit, 1, 512);
+        using var cmd = StoreSchema.Command(_connection, null, StorageHydrationRequestedSql);
+        StorageRootParameters(cmd, activeRoots);
+        cmd.Parameters.AddWithValue("$after", afterJobId); cmd.Parameters.AddWithValue("$limit", Math.Min(pageSize, 8));
+        var result = new List<StorageHydrationJob>();
+        var seen = new HashSet<long>();
+        foreach (var sql in new[] { StorageHydrationRequestedSql, StorageHydrationRangeSql })
+        {
+            cmd.CommandText = sql;
+            using var reader = cmd.ExecuteReader();
+            while (result.Count < pageSize && reader.Read())
+                if (seen.Add(reader.GetInt64(0)))
+                    result.Add(new(reader.GetInt64(0), reader.GetString(1), reader.GetString(2)));
+            if (result.Count == pageSize) break;
+            cmd.Parameters["$limit"].Value = pageSize;
+        }
         return (IReadOnlyList<StorageHydrationJob>)result;
     });
 

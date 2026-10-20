@@ -16,6 +16,7 @@ internal static class StorageExplicitRetryChecks
             await SuspendedAsync(Path.Combine(directory, "paused"), queue, disabled: false);
             await SuspendedAsync(Path.Combine(directory, "disabled"), queue, disabled: true);
             await PausedDispatcherAsync(Path.Combine(directory, "paused-dispatcher"), queue);
+            await AtomicRetryAsync(Path.Combine(directory, "atomic"), queue);
             await FailedAsync(Path.Combine(directory, "failed"), queue);
             await ConcurrentAsync(Path.Combine(directory, "concurrent"), queue);
             foreach (var cause in new[] { "network", "auth", "provider" })
@@ -115,6 +116,19 @@ internal static class StorageExplicitRetryChecks
             Require(fixture.Due(0) == StorageDue.UserRequested && fixture.Pending(0) && fixture.Calls == 0,
                 queue + ": paused dispatcher persists the request without native execution");
         }
+    }
+
+    private static async Task AtomicRetryAsync(string root, Queue queue)
+    {
+        using var fixture = new Fixture(root, queue);
+        var notice = fixture.Notice(0) ?? throw new InvalidOperationException(queue + ": missing dispatch fixture notice.");
+        // The real dispatcher path must not pre-write due=0: the targeted drain itself writes the durable
+        // UserRequested sentinel and claims atomically, so no background page can claim it as Normal.
+        await fixture.ApplyRetryAsync(notice);
+        Require(fixture.Calls == 1 && !fixture.Pending(0),
+            queue + ": real notice Retry dispatches exactly one requested target");
+        Require(fixture.Notice(0) is null,
+            queue + ": real notice Retry closes only the executed target's notice");
     }
 
     private static async Task FailedAsync(string root, Queue queue)
