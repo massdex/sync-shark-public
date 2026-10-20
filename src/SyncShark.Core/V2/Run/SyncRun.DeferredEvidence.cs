@@ -481,7 +481,9 @@ public sealed partial class SyncRun
         {
             Exception? failure = null;
             try { await Task.WhenAll(ordinary, probe, resolve); }
-            catch (Exception error) { failure = error; stop.Cancel(); }
+            // WhenAll has joined every producer. Cancelling the reader token here would mask
+            // the original pause/failure with an unrelated OperationCanceledException.
+            catch (Exception error) { failure = error; }
             finally { results.Writer.TryComplete(failure); }
         }, CancellationToken.None);
         try

@@ -38,7 +38,8 @@ public sealed partial class V2CliRuntime
             }
             return new SyncCliRunData(pairId, pair.Name, 0, 0, 0, 0, 0, false);
         }
-        if (selected is { Closed: false } && !NoticeChoices.IsPairRetryNotice(selected.Value.Notice) && string.IsNullOrEmpty(relativePath))
+        if (selected is { Closed: false } && selected.Value.Notice.Path.Length > 0 &&
+            !NoticeChoices.IsPairRetryNotice(selected.Value.Notice) && string.IsNullOrEmpty(relativePath))
             throw new SyncCliUsageException("--path is required for item notices.");
         var acceptedExclusion = selected is { Closed: false } &&
             NoticeChoices.CanQueueExclusion(selected.Value.Notice, relativePath, choice)

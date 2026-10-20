@@ -60,6 +60,12 @@ internal sealed class LinkExclusions
     /// <summary>Nothing left alone.</summary>
     internal static LinkExclusions None { get; } = new(Array.Empty<string>(), Array.Empty<string>());
 
+    // A genuine whole-root decision is durable authority, unlike an empty-path display summary.
+    // Preserve it even while its retry sleeps or is not in this run's bounded due page.
+    internal static bool HasRootDecisionHold(IStateStore store, string pairId) =>
+        store.Pair(pairId) is not null &&
+        store.SyncRetryAt(pairId, string.Empty) is { Kind: "decision" or "deletion-evidence" } or { Held: not null };
+
     /// <summary>
     /// The links (and, when <paramref name="stubsLeftAlone"/>, the stubs) both sides of the pair hold in the store.
     /// </summary>
@@ -76,7 +82,8 @@ internal sealed class LinkExclusions
                 .Concat(store.LiveFlagged(pair.B.RootId, ItemFlags.Quarantined))
                 .SelectMany(item => new[] { item.Path, DropboxNameMapping.MatchPath(item) })
                 .Concat(store.DefenderGrantHoldPaths(pair.A.RootId)).Concat(store.DefenderGrantHoldPaths(pair.B.RootId))
-                .Concat(store.OpenNotices(pair.PairId).Where(n => n.Quarantine is not null).Select(n => n.Path)),
+                .Concat(HasRootDecisionHold(store, pair.PairId) ? new[] { string.Empty } : Array.Empty<string>())
+                .Concat(store.OpenNotices(pair.PairId).Where(n => PlanNotices.HasPathScope(n) && n.Quarantine is not null).Select(n => n.Path)),
             nonLocalLinks: nonLocalLinks, rehash: new RehashProtection(store, pair));
     }
 

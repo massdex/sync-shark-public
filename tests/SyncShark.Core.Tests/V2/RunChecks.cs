@@ -9,6 +9,7 @@ internal static partial class RunChecks
 {
     public static async Task RunAsync()
     {
+        await PairSummaryDoesNotHoldSiblingsAsync();
         await ItemIgnoreWaitsForSettingsSaveAsync();
         await HistoryFailureDoesNotFailCompletedRunAsync();
         PairMissing_Refused();
@@ -94,6 +95,43 @@ internal static partial class RunChecks
         await DeferredEvidenceChecksAsync();
         await MemoryReductionChecksAsync();
         Console.WriteLine("v2 run checks passed.");
+    }
+
+    private static async Task PairSummaryDoesNotHoldSiblingsAsync()
+    {
+        using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "summary-scope-" + Guid.NewGuid().ToString("N")),
+            Settings, TimeProvider.System);
+        var fx = Build(suppliedStore: store);
+        fx.A.Seed("held.txt", "original");
+        await FirstSyncAsync(fx.Run(), fx);
+        fx.A.Seed("held.txt", "awaiting decision");
+        fx.A.Seed("sibling.txt", "independent progress");
+        store.AddNotices([
+            new("p1", 0, NoticeKind.Info, "", "pair-wide information", "fixture-info"),
+            new("p1", 0, NoticeKind.Info, "", "pair-wide evidence summary", "deletion-history-unavailable"),
+            new("p1", 0, NoticeKind.UserDecision, "", "pair-wide choices", "fixture-summary"),
+            new("p1", 10, NoticeKind.UserDecision, "held.txt", "item decision", "fixture-item")]);
+        await fx.Run().IncrementalAsync("p1", new RecordingProgress(), default);
+        Require((await fx.B.ObserveAsync("sibling.txt", default))?.Hash == (await fx.A.ObserveAsync("sibling.txt", default))?.Hash &&
+            await fx.B.ObserveAsync("sibling.txt", default) is not null,
+            "pair-wide info and decision summaries never hold an independent sibling");
+        Require((await fx.B.ObserveAsync("held.txt", default))?.Hash != (await fx.A.ObserveAsync("held.txt", default))?.Hash,
+            "real item decision remains held alongside pair summaries");
+        store.PrepareDateRepair("p1");
+        var baselines = store.Baselines("p1");
+        Require(!store.DateRepairHeld(fx.Pair, baselines.Single(b => b.A.Path == "sibling.txt")) &&
+            store.DateRepairHeld(fx.Pair, baselines.Single(b => b.A.Path == "held.txt")),
+            "date repair ignores empty-path summaries while keeping the exact item hold");
+        foreach (var kind in new[] { "decision", "deletion-evidence" })
+        {
+            store.SaveSyncRetry("p1", new SyncRetry("", kind, 0, "whole-root evidence", DateTimeOffset.MaxValue));
+            Require(LinkExclusions.Of(store, fx.Pair, false).Covers("sibling.txt"),
+                "sleeping whole-root " + kind + " remains protective without a notice");
+            store.PrepareDateRepair("p1");
+            Require(store.DateRepairHeld(fx.Pair, baselines.Single(b => b.A.Path == "sibling.txt")),
+                "date repair retains durable whole-root " + kind);
+            store.ClearSyncRetry("p1", "");
+        }
     }
 
     // One worker keeps the executor's effect order deterministic for the crash and stop checks.
@@ -1812,7 +1850,7 @@ internal static partial class RunChecks
 
     private static Executor NewExecutor(IStateStore store) => new(store, Settings, ExecutorChecks.Admission());
 
-    private static Fixture Build(bool enabled = true, bool record = false, string pairId = "p1", IStateStore? suppliedStore = null, bool localLocal = false)
+    private static Fixture Build(bool enabled = true, bool record = false, string pairId = "p1", IStateStore? suppliedStore = null, bool localLocal = false, string accountId = "acc")
     {
         var inner = suppliedStore ?? new InMemoryStateStore();
         var recorder = record ? new RecordingStore(inner) : null;
@@ -1824,7 +1862,7 @@ internal static partial class RunChecks
         var pair = new PairDef(pairId, pairId,
             new RootDef("ra", SyncProviders.Local, null, "C:\\a", "id:ra"),
             new RootDef("rb", localLocal ? SyncProviders.Local : SyncProviders.Dropbox,
-                localLocal ? null : "acc", localLocal ? @"C:\b" : "/b", "id:rb"),
+                localLocal ? null : accountId, localLocal ? @"C:\b" : "/b", "id:rb"),
             [], [], enabled);
         store.SavePair(pair);
         var provider = new FakeEndpointProvider()

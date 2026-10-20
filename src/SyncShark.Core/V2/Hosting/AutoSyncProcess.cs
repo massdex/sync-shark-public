@@ -83,7 +83,7 @@ public static class AutoSyncProcess
             if (error != 5) throw new Win32Exception(error);
             // Some launchers prohibit breakaway. Still start a console-independent host rather than refusing.
             // Windows may retain the caller's job in this fallback; explain that limitation explicitly.
-            warning?.Invoke("This launcher prohibits job breakaway. Starting without a console; its job may still stop AutoSync when the launcher closes. Per-user logon startup avoids this launcher's job.");
+            ProgressGuard.Report(warning, "This launcher prohibits job breakaway. Starting without a console; its job may still stop AutoSync when the launcher closes. Per-user logon startup avoids this launcher's job.");
             if (!CreateProcess(executable, new StringBuilder(text), IntPtr.Zero, IntPtr.Zero, false, 0x00000008,
                     IntPtr.Zero, Path.GetDirectoryName(executable), ref startup, out process))
                 throw new Win32Exception(Marshal.GetLastWin32Error());

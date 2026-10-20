@@ -36,21 +36,21 @@ internal sealed class RunOperationStream : Stream
     public override void Flush() => _inner.Flush();
     public override Task FlushAsync(CancellationToken token) => _inner.FlushAsync(token);
     public override int Read(byte[] buffer, int offset, int count)
-    { using var wait = BeginRead(); var read = _inner.Read(buffer, offset, count); _touch?.Invoke(); return read; }
+    { using var wait = BeginRead(); var read = _inner.Read(buffer, offset, count); ProgressGuard.Invoke(_touch); return read; }
     public override int Read(Span<byte> buffer)
-    { using var wait = BeginRead(); var read = _inner.Read(buffer); _touch?.Invoke(); return read; }
+    { using var wait = BeginRead(); var read = _inner.Read(buffer); ProgressGuard.Invoke(_touch); return read; }
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken token = default)
-    { using var wait = BeginRead(); var read = await _inner.ReadAsync(buffer, token).ConfigureAwait(false); _touch?.Invoke(); return read; }
+    { using var wait = BeginRead(); var read = await _inner.ReadAsync(buffer, token).ConfigureAwait(false); ProgressGuard.Invoke(_touch); return read; }
     public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken token)
-    { using var wait = BeginRead(); var read = await _inner.ReadAsync(buffer, offset, count, token).ConfigureAwait(false); _touch?.Invoke(); return read; }
+    { using var wait = BeginRead(); var read = await _inner.ReadAsync(buffer, offset, count, token).ConfigureAwait(false); ProgressGuard.Invoke(_touch); return read; }
     public override long Seek(long offset, SeekOrigin origin) => _inner.Seek(offset, origin);
     public override void SetLength(long value) => _inner.SetLength(value);
-    public override void Write(byte[] buffer, int offset, int count) { _inner.Write(buffer, offset, count); _touch?.Invoke(); }
-    public override void Write(ReadOnlySpan<byte> buffer) { _inner.Write(buffer); _touch?.Invoke(); }
+    public override void Write(byte[] buffer, int offset, int count) { _inner.Write(buffer, offset, count); ProgressGuard.Invoke(_touch); }
+    public override void Write(ReadOnlySpan<byte> buffer) { _inner.Write(buffer); ProgressGuard.Invoke(_touch); }
     public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken token = default)
-    { await _inner.WriteAsync(buffer, token).ConfigureAwait(false); _touch?.Invoke(); }
+    { await _inner.WriteAsync(buffer, token).ConfigureAwait(false); ProgressGuard.Invoke(_touch); }
     public override async Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken token)
-    { await _inner.WriteAsync(buffer, offset, count, token).ConfigureAwait(false); _touch?.Invoke(); }
+    { await _inner.WriteAsync(buffer, offset, count, token).ConfigureAwait(false); ProgressGuard.Invoke(_touch); }
 
     protected override void Dispose(bool disposing)
     {

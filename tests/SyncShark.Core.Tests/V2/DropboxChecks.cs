@@ -19,6 +19,7 @@ internal static partial class DropboxChecks
         _root = root;
         await RemovalReviewDropboxAsync();
         await FullChecksAsync();
+        await ProgressCallbackFaultsAsync();
         await ExcludedNestedListingAndReplayAsync();
         await FullRootChecksAsync();
         await DeltaChecksAsync();

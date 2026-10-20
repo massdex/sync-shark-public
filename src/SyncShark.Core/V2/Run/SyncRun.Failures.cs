@@ -22,13 +22,14 @@ public sealed partial class SyncRun
     }
 
     private async Task<RunReport> ApplyCoreAsync(string pairId, Plan approved, IProgress<RunProgress> progress,
-        IReadOnlySet<string>? reviewedDeletes, RebuildableResolution? rebuildables, CancellationToken ct)
+        IReadOnlySet<string>? reviewedDeletes, RebuildableResolution? rebuildables, CancellationToken ct,
+        EndpointContinuation? continuation)
     {
         if (approved.RunUnavailable is { } reason)
             return FailedRun(pairId, [new("", Outcome.Failed, null, null, null, reason)]);
         try
         {
-            var report = await ApplyBodyAsync(pairId, approved, progress, reviewedDeletes, rebuildables, ct);
+            var report = await ApplyBodyAsync(pairId, approved, progress, reviewedDeletes, rebuildables, ct, continuation);
             CloseUnavailable(pairId);
             return report;
         }

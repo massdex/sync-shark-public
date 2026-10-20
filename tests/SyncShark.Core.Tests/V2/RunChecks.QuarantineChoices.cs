@@ -387,14 +387,15 @@ internal static partial class RunChecks
                 "commit-only adoption cannot bypass grant binding or silently rebind it");
             await run.ResolveQuarantineAsync("p1", note.NoticeId!, NoticeChoices.QuarantineRetry, default,
                 exclusions: new FakeExclusions(new DefenderExclusionView(true, [])));
-            var retryMarker = store.OpenNotices("p1").Single(n => n.ReasonKey == "defender-grant-retired");
-            Require(retryMarker.Kind == NoticeKind.Info && NoticeChoices.Options(retryMarker).Count == 0,
-                "grant retirement replan marker is informational and has no action choices");
+            Require(store.SyncRetryAt("p1", "blocked") is { Kind: "sync", RetryAfter: var due } && due == DateTimeOffset.MinValue &&
+                store.DefenderGrantById(grant.GrantId) is null &&
+                !store.OpenNotices("p1").Any(n => n.ReasonKey == "defender-grant-retired"),
+                "grant retirement queues durable immediate entity retry, not a display-only marker");
             await run.IncrementalAsync("p1", new RecordingProgress(), default);
             Require(store.BaselinesAt("p1", Side.A, ["blocked"]).Any(b => b.A.ObjectId == local.ObjectId),
                 "verified grant retirement permits ordinary same-content adoption");
-            Require(!store.OpenNotices("p1").Any(n => n.ReasonKey == "defender-grant-retired"),
-                "grant retirement replan marker closes after next-run evaluation");
+            Require(store.SyncRetryAt("p1", "blocked") is null,
+                "grant retirement retry settles after next-run evaluation");
             var currentGrant = grant with { GrantId = "current-owner", SourceObject = cloud.ObjectId, LocalObject = local.ObjectId };
             store.StoreDefenderGrant(currentGrant);
             await fx.A.DeleteAsync(new SyncAction("external-remove", 30, ActionKind.Delete, Side.A, "blocked", null, null, local, false, null), default);

@@ -214,7 +214,7 @@ internal static class FirstSyncChoicesState
     {
         Prepared? Unreadable(string reason)
         {
-            onUnreadable?.Invoke(reason);
+            ProgressGuard.Report(onUnreadable, reason);
             return null;
         }
         var file = FileFor(productRoot, pairId);

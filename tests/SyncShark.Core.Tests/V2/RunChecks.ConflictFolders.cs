@@ -252,10 +252,9 @@ internal static partial class RunChecks
             if (obstruction == "uncertain-root")
             {
                 // A normal sync must settle a receipt-less create instead of stalling the pair.
-                // Keep the source absent so arrival cannot legitimately close this notice.
-                foreach (var path in new[] { "new/in.txt", "new" })
-                    await fx.B.DeleteAsync(new SyncAction("source-gone-" + path, 6, ActionKind.Delete, Side.B, path, null, null,
-                        await fx.B.ObserveAsync(path, CancellationToken.None), false, null), CancellationToken.None);
+                // Keep the source present but exclude this subtree to prevent legitimate arrival.
+                // Deleting the source would instead settle the notice (the no-arrival case above).
+                store.SavePair(fx.Pair with { Excluded = ["new"] });
                 fx.B.Seed("unrelated.txt", "progress");
                 store.MarkFirstSyncDone(fx.Pair.PairId);
                 await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
@@ -287,6 +286,9 @@ internal static partial class RunChecks
             var removedFirst = store.Recoveries(fx.Pair.PairId).Count;
             fx.A.Seed("new/late.txt", "added after the choice");
             if (await HashAt(fx.A, "new/b.txt") is not null) fx.A.Seed("new/b.txt", "changed after the choice");
+            // Observe the live growth before retry, without changing the frozen choice snapshot.
+            store.WriteSnapshot(await fx.A.FullAsync(store.BeginGeneration(fx.Pair.A.RootId, "refresh"),
+                _ => true, null!, CancellationToken.None));
             var retry = await Choose(fx, notice, NoticeChoices.ReplaceExisting);
             Require(retry.Outcome != Outcome.Done, "a folder with kept items is not reported replaced: " + retry.Reason);
             Require(await HashAt(fx.A, "new/late.txt") == HashOf("added after the choice"),

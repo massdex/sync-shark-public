@@ -94,17 +94,17 @@ public sealed partial class SyncRun
         var leftAlone = LeftAlone(pair);
         var includes = BuildPredicates(pair, PairInclude.ForAction);
         var ignoreRules = PairInclude.IgnoreRules(pair);
-        var decisions = _store.OpenNotices(pair.PairId).Where(notice => notice.Kind == NoticeKind.UserDecision)
+        var decisions = _store.OpenNotices(pair.PairId).Where(PlanNotices.HasPathScope).Where(notice => notice.Kind == NoticeKind.UserDecision)
             .Select(notice => notice.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var uncertain = OutstandingFootprints(pair.PairId).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var reasons = FailureReasons(plan, tally);
-        var notices = _store.OpenNotices(pair.PairId).Where(notice => notice.ReasonKey is "sync-retry" or "deletion-history-unavailable")
+        var notices = _store.OpenNotices(pair.PairId).Where(PlanNotices.HasPathScope).Where(notice => notice.ReasonKey is "sync-retry" or "deletion-history-unavailable")
             .ToLookup(notice => notice.Path, StringComparer.OrdinalIgnoreCase);
         var remaining = pending.ToHashSet(StringComparer.OrdinalIgnoreCase);
         var failed = plan.Actions.Where(action => action.Kind != ActionKind.Hold && !tally.WasSettled(action.ActionId))
             .Select(action => action.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
         remaining.UnionWith(failed);
-        remaining.UnionWith(plan.Notices.Where(notice => notice.ReasonKey == PlanNotices.ContentUnconfirmed.Key || notice.ReasonKey == "sync-retry").Select(notice => notice.Path));
+        remaining.UnionWith(plan.Notices.Where(PlanNotices.HasPathScope).Where(notice => notice.ReasonKey == PlanNotices.ContentUnconfirmed.Key || notice.ReasonKey == "sync-retry").Select(notice => notice.Path));
         var settled = plan.Actions.Where(action => tally.WasSettled(action.ActionId))
             .SelectMany(action => action.Kind == ActionKind.Move && action.FromPath is not null
                 ? new[] { action.Path, action.FromPath } : new[] { action.Path })
