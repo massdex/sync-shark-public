@@ -146,6 +146,7 @@ internal static partial class RunChecks
     {
         await DeletionIgnoreReincludeChecksAsync();
         await RestoredHoldReviewChecksAsync();
+        await RestoredEvidenceBudgetChecksAsync();
         LegacyRepairNoticeChecks();
     }
 
@@ -230,8 +231,16 @@ internal static partial class RunChecks
                     Require(decision.Detail.Contains("UNAVAILABLE", StringComparison.Ordinal) &&
                         decision.Detail.Contains("probed Dropbox deletion", StringComparison.Ordinal),
                         "released decision says deletion history was unavailable and carries the failure reason");
-                if (scenario == "folder") Require(NoticeChoices.Options(decision).Select(option => option.Choice).SequenceEqual(
-                    new[] { NoticeChoices.KeepRestore, NoticeChoices.Ignore }), "restored folder offers restore or ignore, never delete");
+                if (scenario == "folder")
+                {
+                    // F2: folders are never checked against deletion history, so the decision must not claim
+                    // the provider gave no answer.
+                    Require(decision.Detail.Contains("not checked for folders", StringComparison.Ordinal) &&
+                        !decision.Detail.Contains("did not return an answer", StringComparison.Ordinal),
+                        "restored folder decision says folder history is not checked instead of claiming no answer");
+                    Require(NoticeChoices.Options(decision).Select(option => option.Choice).SequenceEqual(
+                        new[] { NoticeChoices.KeepRestore, NoticeChoices.Ignore }), "restored folder offers restore or ignore, never delete");
+                }
             }
         }
         using var paged = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "restored-pages-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System);
@@ -261,6 +270,48 @@ internal static partial class RunChecks
         Require(restored.Recorder!.RestoredProtectionReads > 0,
             "first-sync preview with an active restored hold consults the per-item restored protection");
         Console.WriteLine("PASS RestoredHoldReviewChecks");
+    }
+
+    // Owner decision F1: the three-failed-run budget counts only runs in which Dropbox answered the
+    // deletion-history lookup. Three unreachable runs must leave the hold pending; three answered
+    // "unavailable" runs must release it.
+    private static async Task RestoredEvidenceBudgetChecksAsync()
+    {
+        foreach (var answered in new[] { false, true })
+        {
+            using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(),
+                "restored-budget-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System);
+            var fx = Build(suppliedStore: store);
+            var item = fx.A.Seed("held.txt", "content");
+            store.SaveSyncRetry(fx.Pair.PairId, new SyncRetry(item.Path, "deletion-evidence", 0, "",
+                DateTimeOffset.MinValue, Held: new HeldDeletion(item.Path, Side.A), ReprobeEvidence: true));
+            store.MarkFirstSyncDone(fx.Pair.PairId);
+            // Fail makes the provider throw without answering for any path (unreachable). LookupFailure
+            // answers per path that the deletion history is unavailable.
+            fx.Provider.AddInventory(fx.Pair.B, new DeferredInventory(fx.B) { Fail = !answered, LookupFailure = answered });
+            var run = fx.Run();
+            for (var failedRun = 1; failedRun <= 3; failedRun++)
+            {
+                await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+                var retry = store.SyncRetryAt(fx.Pair.PairId, item.Path)!;
+                Require(retry.Attempts == (answered ? failedRun : 0) &&
+                    retry.EvidenceReleased == (answered && failedRun == 3),
+                    answered
+                        ? "answered unavailable lookup spends the restored-hold budget on run " + failedRun
+                        : "unreachable provider leaves the restored-hold budget unspent after run " + failedRun);
+                Require(!store.OpenNotices(fx.Pair.PairId).Any(n => n.Path == item.Path && n.Kind == NoticeKind.UserDecision),
+                    "a restored hold raises no decision before its budget is spent");
+                store.SaveSyncRetry(fx.Pair.PairId, retry with { RetryAfter = DateTimeOffset.MinValue });
+            }
+            await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            Require(store.OpenNotices(fx.Pair.PairId).Any(n => n.Path == item.Path && n.Kind == NoticeKind.UserDecision) == answered,
+                answered
+                    ? "three answered-but-unavailable runs release the restored hold to a decision"
+                    : "three unreachable runs never release the restored hold into a decision");
+            Require(fx.WriterB.Puts == 0 && fx.WriterA.Deletes == 0,
+                "a restored hold never uploads or deletes while its evidence is unresolved");
+        }
+        Console.WriteLine("PASS RestoredEvidenceBudgetChecks");
     }
 
 }
