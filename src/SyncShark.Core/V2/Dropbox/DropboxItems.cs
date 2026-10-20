@@ -14,7 +14,8 @@ internal static class DropboxItems
             entry.ContentHash, entry.Size, entry.ClientModifiedUtc ?? entry.ModifiedUtc ?? DateTimeOffset.UnixEpoch,
             (entry.TransferBlockedReason is null && !entry.RequiresExport ? ItemFlags.None : ItemFlags.Unreadable) |
                 (entry.RequiresExport ? ItemFlags.RequiresExport : ItemFlags.None),
-            DropboxNameMapping.Fact(entry.RelativePath));
+            DropboxExportFacts.Merge(DropboxNameMapping.Fact(entry.RelativePath),
+                entry.ExportAs, entry.ExportOptions, entry.RequiresExport));
     }
 
     /// <summary>Builds the provider entry a conditional write is conditioned on.</summary>

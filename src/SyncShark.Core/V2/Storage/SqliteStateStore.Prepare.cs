@@ -129,6 +129,18 @@ public sealed partial class SqliteStateStore
 
     internal string? ReadPrepareCursor(string pairId, string rootId) => PrepareCursorForPair(pairId, rootId);
 
+    /// <summary>Rewrites the published prepare's small metadata (reviewed rule scope and digest) in place.</summary>
+    internal void UpdatePrepareMetadata(string pairId, string generation, string metadataJson, string digest) => InStore(() =>
+    {
+        StoreSchema.Execute(_connection, null,
+            "UPDATE prepare_header SET metadata_json=$m,digest=$d " +
+            "WHERE pair_id=$p AND generation=$g AND digest<>$narrowing;",
+            ("$m", metadataJson), ("$d", digest), ("$p", pairId), ("$g", generation),
+            ("$narrowing", NarrowingDigest));
+        if (StoreSchema.Changes(_connection, null) != 1)
+            throw new PreparePublicationException("The retained first-sync review changed or disappeared; run prepare again.");
+    });
+
     /// <summary>Updates the published prepare's cursor without reimporting its rows.</summary>
     internal void SetPrepareCursor(string pairId, string rootId, string? cursor, string? generation = null, string? digest = null) => InStore(() =>
     {

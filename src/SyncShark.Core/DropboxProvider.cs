@@ -2831,6 +2831,24 @@ public sealed partial class DropboxPilotClient(
             blocked ??= "Dropbox marks this cloud-native document as not directly downloadable. " +
                 "Export it to a standard file in Dropbox, then sync that exported file. " +
                 "The original cloud document and any existing local file remain unchanged.";
+        // export_info names exactly the formats this provider can produce for this item. The notice offers
+        // those formats, never a speculative list; export_as is the default when export_options is absent.
+        string? exportAs = null;
+        IReadOnlyList<string>? exportOptions = null;
+        if (item.TryGetProperty("export_info", out var exportInfo) && exportInfo.ValueKind == JsonValueKind.Object)
+        {
+            if (exportInfo.TryGetProperty("export_as", out var exportAsElement) &&
+                exportAsElement.ValueKind == JsonValueKind.String)
+                exportAs = exportAsElement.GetString();
+            if (exportInfo.TryGetProperty("export_options", out var exportOptionsElement) &&
+                exportOptionsElement.ValueKind == JsonValueKind.Array)
+                exportOptions = exportOptionsElement.EnumerateArray()
+                    .Where(option => option.ValueKind == JsonValueKind.String)
+                    .Select(option => option.GetString())
+                    .Where(format => !string.IsNullOrWhiteSpace(format))
+                    .Select(format => format!)
+                    .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        }
         // A missing identity is malformed metadata, never an invisible dictionary failure.
         var id = item.TryGetProperty("id", out var idElement) && idElement.ValueKind == JsonValueKind.String
             ? idElement.GetString() : null;
@@ -2849,6 +2867,8 @@ public sealed partial class DropboxPilotClient(
                 DropboxModifiedUtc(item), TransferBlockedReason: blocked)
             {
                 RequiresExport = requiresExport,
+                ExportAs = exportAs,
+                ExportOptions = exportOptions,
                 ClientModifiedUtc = item.TryGetProperty("client_modified", out var client) &&
                     DateTimeOffset.TryParse(client.GetString(), CultureInfo.InvariantCulture,
                         DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var clientUtc)

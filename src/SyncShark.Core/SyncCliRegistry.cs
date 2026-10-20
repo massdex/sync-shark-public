@@ -25,7 +25,7 @@ public static class SyncCliRegistry
     private static readonly string[] ValueOptions =
     [
         "--pair", "--account", "--path", "--key", "--search", "--choice", "--rules", "--settings", "--update",
-        "--limit", "--offset", "--generation", "--minutes", "--selection", "--availability", "--local",
+        "--page-token", "--limit", "--offset", "--generation", "--minutes", "--selection", "--availability", "--local",
         "--until", "--timeout-seconds",
         "--name", "--priority", "--provider"
         , "--description", "--choices", "--group", "--filter", "--seconds", "--side",
@@ -207,10 +207,10 @@ public static class SyncCliRegistry
             SyncCliRequestKind.State, "none", "one conflict's identities, sizes, hashes and retained-text flags",
             "the product state or the running application", "direct|running-application",
             "--pair,--path,--account", RequiresPair: true),
-        new("conflicts resolve", "conflicts resolve --pair <exact-id> --path <relative-path> --choice <decision> --key <conflict-id> --generation <n> --yes [--name <safe-name>] [--offset <n>] [--timeout-seconds <seconds>]",
-            SyncCliRequestKind.State, "yes", "applies one explicit conflict or blocker action (including single-file offline and document export) with the stale-plan guard",
+        new("conflicts resolve", "conflicts resolve --pair <exact-id> --path <relative-path> --choice <decision> --key <conflict-id> --generation <n> --yes [--name <safe-name|folder-path>] [--offset <n>] [--page-token <token>] [--timeout-seconds <seconds>]",
+            SyncCliRequestKind.State, "yes", "applies one explicit conflict or blocker action (including rebuildable-rule preview/choose/remove/keep, single-file offline and document export) with the stale-plan guard",
             "the product state or the running application", "direct|running-application",
-            "--pair,--path,--choice,--key,--generation,--account,--yes,--timeout-seconds,--name,--offset", Mutating: true, RequiresYes: true,
+            "--pair,--path,--choice,--key,--generation,--account,--yes,--timeout-seconds,--name,--offset,--page-token", Mutating: true, RequiresYes: true,
             RequiresPair: true),
         new("recovery list", "recovery list --pair <exact-id> [--account <exact-id>] [--search <text>] [--limit 1..200] [--offset <n>] [--deleted]", SyncCliRequestKind.State,
             "none", "retained recovery catalog and optional deleted cloud items, including Google Trash; partial-listing warnings are retained",
@@ -581,9 +581,10 @@ public static class SyncCliRegistry
         V2.NoticeChoices.UseOtherVersion, V2.NoticeChoices.SaveOtherVersionAsCopy, V2.NoticeChoices.Dismiss,
         V2.NoticeChoices.RetryNow, V2.NoticeChoices.Exclude, V2.NoticeChoices.Ignore,
         V2.NoticeChoices.DeleteReviewed, V2.NoticeChoices.KeepRestore, V2.NoticeChoices.RepairHelp, V2.NoticeChoices.Rename, V2.NoticeChoices.ShowRemaining, V2.NoticeChoices.OpenDropbox,
-        V2.NoticeChoices.MakeAvailableOffline, V2.NoticeChoices.ExportDocx, V2.NoticeChoices.ExportMarkdown, V2.NoticeChoices.ExportPdf,
+        V2.NoticeChoices.ConfirmLargeDownload, V2.NoticeChoices.MakeAvailableOffline, V2.NoticeChoices.ExportDocx, V2.NoticeChoices.ExportMarkdown, V2.NoticeChoices.ExportPdf, V2.NoticeChoices.ExportHtml,
         V2.NoticeChoices.CheckHistoryAgain, V2.NoticeChoices.ReviewDeletion, V2.NoticeChoices.OpenStorage, V2.NoticeChoices.ReviewReserve,
-        V2.NoticeChoices.OpenRecoverySettings, V2.NoticeChoices.OpenFolderSettings];
+        V2.NoticeChoices.OpenRecoverySettings, V2.NoticeChoices.OpenFolderSettings,
+        V2.NoticeChoices.PreviewMatches, V2.NoticeChoices.ChooseFolder, V2.NoticeChoices.RemoveRule, V2.NoticeChoices.KeepRule];
 
     public static SyncCliCapabilityData Capabilities() => new("Sync Shark", ProductVersion(),
         BuildIdentity.SourceRevision,
@@ -898,9 +899,10 @@ public static class SyncCliRegistry
                     V2.NoticeChoices.SaveOtherVersionAsCopy or V2.NoticeChoices.Dismiss or
                     V2.NoticeChoices.RetryNow or V2.NoticeChoices.Exclude or V2.NoticeChoices.Ignore or
                     V2.NoticeChoices.DeleteReviewed or V2.NoticeChoices.KeepRestore or V2.NoticeChoices.RepairHelp or V2.NoticeChoices.Rename or V2.NoticeChoices.ShowRemaining or V2.NoticeChoices.OpenDropbox or
-                    V2.NoticeChoices.MakeAvailableOffline or V2.NoticeChoices.ExportDocx or V2.NoticeChoices.ExportMarkdown or V2.NoticeChoices.ExportPdf or
+                    V2.NoticeChoices.ConfirmLargeDownload or V2.NoticeChoices.MakeAvailableOffline or V2.NoticeChoices.ExportDocx or V2.NoticeChoices.ExportMarkdown or V2.NoticeChoices.ExportPdf or V2.NoticeChoices.ExportHtml or
                     V2.NoticeChoices.CheckHistoryAgain or V2.NoticeChoices.ReviewDeletion or V2.NoticeChoices.OpenStorage or V2.NoticeChoices.ReviewReserve or
-                    V2.NoticeChoices.OpenRecoverySettings or V2.NoticeChoices.OpenFolderSettings;
+                    V2.NoticeChoices.OpenRecoverySettings or V2.NoticeChoices.OpenFolderSettings or
+                    V2.NoticeChoices.PreviewMatches or V2.NoticeChoices.ChooseFolder or V2.NoticeChoices.RemoveRule or V2.NoticeChoices.KeepRule;
             if (!long.TryParse(generationValue, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed) ||
                 parsed < (retainedNoticeChoice ? 0 : 1))
                 throw new SyncCliUsageException(retainedNoticeChoice
@@ -1100,13 +1102,20 @@ public static class SyncCliRegistry
                 return await operations.LoadConflictAsync(invocation.PairId!, RequirePath(invocation),
                     invocation.AccountId, cancellationToken);
             case "conflicts resolve":
-                if (invocation.Name is not null || invocation.Options?.ContainsKey("--offset") == true)
+            {
+                // Retry/retained-version choices are notice actions even without --name or --offset.
+                var noticeChoice = invocation.Choice is { } selected &&
+                    (V2.NoticeChoices.IsRetryChoice(selected.ToLowerInvariant()) ||
+                     V2.NoticeChoices.IsRetainedVersionChoice(selected.ToLowerInvariant()));
+                if (invocation.Name is not null || invocation.Options?.ContainsKey("--offset") == true ||
+                    invocation.Value("--page-token") is not null || noticeChoice)
                     return await operations.ResolveNoticeAsync(invocation.PairId!, RequirePath(invocation),
                         RequireChoice(invocation), invocation.Key, invocation.Generation, invocation.AccountId,
-                        cancellationToken, new NoticeActionInput(invocation.Name, invocation.Offset));
+                        cancellationToken, new NoticeActionInput(invocation.Name, invocation.Offset, invocation.Value("--page-token")));
                 return await operations.ResolveConflictAsync(invocation.PairId!, RequirePath(invocation),
                     RequireChoice(invocation), invocation.Key, invocation.Generation, invocation.AccountId,
                     cancellationToken, Progress);
+            }
             case "recovery list":
                 return await operations.ExecuteSurfaceAsync(invocation, cancellationToken);
             case "recovery usage":

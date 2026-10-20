@@ -10,6 +10,7 @@ public partial class MainWindow
     private async Task ShowRemainingNoticeItemsAsync(DecisionRow row)
     {
         var offset = 0;
+        string? pageToken = null;
         var text = new System.Windows.Controls.TextBox { IsReadOnly = true, TextWrapping = TextWrapping.Wrap,
             VerticalScrollBarVisibility = System.Windows.Controls.ScrollBarVisibility.Auto, Height = 380, Margin = new Thickness(12) };
         var panel = new System.Windows.Controls.StackPanel();
@@ -23,14 +24,18 @@ public partial class MainWindow
             {
                 var result = await _authorityHost.ResolveConflictSelectionCommandAsync(
                     [new(new(row.ConflictId ?? "", row.PairId, row.Path, row.ConflictGeneration ?? 0),
-                        SyncAuthorityConflictResolutionKind.PreserveBoth, V2.NoticeChoices.ShowRemaining, new(Offset: offset))],
+                        SyncAuthorityConflictResolutionKind.PreserveBoth, V2.NoticeChoices.ShowRemaining, new(Offset: offset, PageToken: pageToken))],
                     connectionId: _workspaceAccountId);
                 text.Text = result.Items.Single().Result?.Decisions.Single().Reason ?? "Listing unavailable; retry.";
-                next.IsEnabled = text.Text.Contains("More items: next offset", StringComparison.Ordinal);
+                const string marker = "Next page token: ";
+                var markerAt = text.Text.IndexOf(marker, StringComparison.Ordinal);
+                pageToken = markerAt < 0 ? null : text.Text[(markerAt + marker.Length)..].Trim();
+                if (markerAt >= 0) text.Text = text.Text[..markerAt].TrimEnd();
+                next.IsEnabled = pageToken is not null || text.Text.Contains("More items: next offset", StringComparison.Ordinal);
             }
             catch (Exception error) { text.Text = error.Message; }
         }
-        next.Click += async (_, _) => { offset += 50; await LoadPage(); };
+        next.Click += async (_, _) => { if (pageToken is null) offset += 50; await LoadPage(); };
         await LoadPage();
         new Window { Title = "Remaining items", Owner = this, Content = panel, Width = 720,
             SizeToContent = SizeToContent.Height, WindowStartupLocation = WindowStartupLocation.CenterOwner }.ShowDialog();

@@ -167,10 +167,20 @@ public enum NoticeKind { Info, KeepBoth, EditBeatsDelete, AutoConflict, UserDeci
 /// </summary>
 public sealed record Notice(string PairId, int Rule, NoticeKind Kind, string Path, string Detail, string ReasonKey,
     string? NoticeId = null, FreeSpaceNoticeMetadata? FreeSpace = null,
-    RetainedNoticeVersion? RetainedVersion = null, NoticeRepair? Repair = null, bool FolderInspection = false, bool? UploadSuspended = null, Side? UploadQuotaSide = null, long? UploadQuotaNeedBytes = null);
+    RetainedNoticeVersion? RetainedVersion = null, NoticeRepair? Repair = null, bool FolderInspection = false, bool? UploadSuspended = null, Side? UploadQuotaSide = null, long? UploadQuotaNeedBytes = null,
+    NoticeRebuildableRule? RebuildableRule = null, NoticeExportInfo? ExportInfo = null);
+
+/// <summary>The formats the cloud provider itself said it supports for one document. An empty list means the
+/// provider reported no export_info at all, so no export button is offered; null means an older notice whose
+/// formats were never captured.</summary>
+public sealed record NoticeExportInfo(string? DefaultFormat, IReadOnlyList<string> Formats);
 
 /// <summary>Identity-bound repair evidence, stored in the existing notice detail payload.</summary>
 public sealed record NoticeRepair(Side Side, ItemState Item, string? Destination = null);
+
+/// <summary>A first-sync rebuildable rule whose scoped prefix matched no folder. The category and prefix are the
+/// rule's stable identity: changing either is a different rule, so a kept notice is not raised again for it.</summary>
+public sealed record NoticeRebuildableRule(string Category, string Prefix);
 
 /// <summary>Exact per-item provenance for explicitly recovering a newest-wins loser, never a path-based guess.</summary>
 public sealed record RetainedNoticeVersion(string ActionId, Side Side, ItemState Loser, ItemState Winner);

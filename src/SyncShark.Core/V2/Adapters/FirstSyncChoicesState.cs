@@ -115,6 +115,52 @@ internal static class FirstSyncChoicesState
     }
 
     /// <summary>
+    /// Replaces or removes one scoped rebuildable rule in the retained prepare, recomputing the digest so a later
+    /// apply must present the corrected choices. Returns false when no usable prepare or no such rule exists.
+    /// This changes only review metadata; it never deletes or moves a file.
+    /// </summary>
+    public static bool UpdateRebuildableRule(string productRoot, string pairId, IStateStore? store,
+        RebuildableChoice current, RebuildableChoice? replacement)
+    {
+        var prepared = Load(productRoot, pairId, store);
+        if (prepared is null) return false;
+        var choices = (prepared.RebuildableChoices ?? []).ToList();
+        var index = choices.FindIndex(choice => SameRule(choice, current));
+        if (index < 0) return false;
+        if (replacement is null) choices.RemoveAt(index);
+        else choices[index] = new RebuildableChoice(replacement.Id, replacement.Prefix.TrimEnd('/'));
+        var frozen = prepared.Rebuildables.Select(entry => new RebuildableFolder(entry.Category, entry.Path, 0, 0))
+            .Where(folder => !current.Matches(folder) || (replacement is not null && replacement.Matches(folder)))
+            .ToArray();
+        var parsed = new FirstSyncChoices.Parsed(prepared.Paths.ToDictionary(entry => entry.Key,
+                entry => entry.Value switch { "A" => Side.A, "B" => Side.B, _ => (Side?)null }, StringComparer.Ordinal),
+            prepared.OneSided.Select(choice => new OneSidedChoice(choice.Prefix,
+                string.Equals(choice.Side, "A", StringComparison.Ordinal) ? Side.A : Side.B,
+                string.Equals(choice.Action, FirstSyncChoices.RemoveAction, StringComparison.Ordinal))).ToArray(),
+            choices);
+        var digest = prepared.NarrowedChoicesDigest is null
+            ? FirstSyncChoices.Digest(parsed, frozen, prepared.HeldDeletions)
+            : FirstSyncChoices.Digest(parsed, []);
+        var marker = "'" + current.Id + "' under '" + current.Prefix.TrimEnd('/') + "/'";
+        var warnings = (prepared.Warnings ?? []).Where(warning => !warning.Contains(marker, StringComparison.Ordinal)).ToArray();
+        var updated = prepared with
+        {
+            Digest = prepared.NarrowedChoicesDigest is null ? digest : prepared.Digest,
+            NarrowedChoicesDigest = prepared.NarrowedChoicesDigest is null ? null : digest,
+            Rebuildables = frozen.Select(folder => new StoredRebuildable(folder.Category, folder.Path)).ToArray(),
+            RebuildableChoices = choices,
+            Warnings = warnings
+        };
+        if (prepared.Database is { } database) database.UpdateSmall(updated);
+        else WritePrepared(productRoot, pairId, updated);
+        return true;
+    }
+
+    private static bool SameRule(RebuildableChoice left, RebuildableChoice right) =>
+        string.Equals(left.Id, right.Id, StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(left.Prefix.TrimEnd('/'), right.Prefix.TrimEnd('/'), StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Saves refreshed pending cursors after a successful repreview and its review guards, before apply effects.
     /// All frozen review fields remain unchanged. The caller supplies the already-loaded prepare.
     /// </summary>

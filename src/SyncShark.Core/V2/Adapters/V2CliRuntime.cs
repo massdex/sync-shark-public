@@ -281,6 +281,7 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
                 inventoryCursors: plan.InventoryCursors.Select(entry =>
                     new FirstSyncChoicesState.StoredInventoryCursor(entry.Key, entry.Value)).ToArray(),
                 inventoryScope: plan.InventoryScope);
+            RaiseRebuildableRuleNotices(pair, choices.Rebuildables, rebuildables.Detected);
             return Preparation(pair, plan, effects, FirstSyncChoices.Digest(choices, rebuildables.Selected, plan.HeldDeletions),
                 RebuildableReport(rebuildables.Detected, choices.Rebuildables, rebuildables.Selected)) with { Warnings = warnings };
         }
@@ -410,7 +411,11 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
             var report = await _run.ApplyAsync(pairId, plan, forwarder, ct, reviewed, rebuildableResolution);
             // The record only authorizes a first sync, so once that is done the record goes. The exclusions were
             // already saved by the run, inside the same completion step that marked the first sync done.
-            if (_store.FirstSyncDone(pairId)) FirstSyncChoicesState.Clear(_productRoot, pairId, _store);
+            if (_store.FirstSyncDone(pairId))
+            {
+                FirstSyncChoicesState.Clear(_productRoot, pairId, _store);
+                CloseRebuildableRuleNotices(pairId);
+            }
             return Result(pair, report, effects) with { Warnings = warnings };
         }
         catch (SyncRunRefusedException error)

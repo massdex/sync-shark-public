@@ -31,10 +31,14 @@ internal sealed partial class NoticeTable
             if (notice.ReasonKey == "content-unconfirmed" && retryOpen) return;
         }
         var noticeId = notice.RetainedVersion is { } retained ? RetainedId(notice.PairId, retained.ActionId) :
+            notice.RebuildableRule is { } rule ? ShortId.Make("n", notice.PairId,
+                notice.Rule.ToString(CultureInfo.InvariantCulture), notice.ReasonKey, rule.Category, RowCodec.Key(rule.Prefix)) :
             notice.Repair is { } repair ? ShortId.Make("n", notice.PairId, notice.Rule.ToString(CultureInfo.InvariantCulture),
                 notice.ReasonKey, repair.Side.ToString(), repair.Item.ObjectId) :
             ShortId.Make("n", notice.PairId, notice.Rule.ToString(CultureInfo.InvariantCulture),
                 RowCodec.Key(notice.Path), notice.ReasonKey);
+        // Keep dismisses one rule until that rule itself changes (its category or prefix changes the id).
+        if (notice.RebuildableRule is not null && IsKeptRule(transaction, pairNo, noticeId)) return;
         MigrateLegacyRepair(transaction, pairNo, noticeId, notice);
         StoreSchema.Execute(_connection, transaction,
             "INSERT INTO notice(notice_id, pair_no, rule, kind, path, detail, reason_key, state, choice, created) " +
@@ -114,6 +118,16 @@ internal sealed partial class NoticeTable
             "UPDATE notice SET state='closed',choice=$choice WHERE notice_id=$id AND pair_no=$p;",
             ("$id", noticeId), ("$p", pairNo), ("$choice", choice));
 
+    // A kept rebuildable rule is dismissed for that exact rule identity; changing the rule changes the id.
+    private bool IsKeptRule(SqliteTransaction transaction, long pairNo, string noticeId)
+    {
+        using var command = StoreSchema.Command(_connection, transaction,
+            "SELECT choice FROM notice WHERE pair_no=$p AND notice_id=$id AND state='closed';");
+        command.Parameters.AddWithValue("$p", pairNo);
+        command.Parameters.AddWithValue("$id", noticeId);
+        return command.ExecuteScalar() is string choice && string.Equals(choice, NoticeChoices.KeepRule, StringComparison.Ordinal);
+    }
+
     private bool IsSameProblem(SqliteTransaction transaction, string noticeId, long pairNo, Notice notice)
     {
         using var command = StoreSchema.Command(_connection, transaction,
@@ -126,7 +140,10 @@ internal sealed partial class NoticeTable
         return reader.GetInt64(0) == pairNo && reader.GetInt64(1) == notice.Rule &&
             (notice.Repair is { } repair
                 ? saved.Repair is { } prior && prior.Side == repair.Side && prior.Item.ObjectId == repair.Item.ObjectId
-                : string.Equals(RowCodec.Key(reader.GetString(2)), RowCodec.Key(notice.Path), StringComparison.Ordinal)) &&
+                : notice.RebuildableRule is { } rule
+                    ? saved.RebuildableRule is { } savedRule && string.Equals(savedRule.Category, rule.Category, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(RowCodec.Key(savedRule.Prefix), RowCodec.Key(rule.Prefix), StringComparison.Ordinal)
+                    : string.Equals(RowCodec.Key(reader.GetString(2)), RowCodec.Key(notice.Path), StringComparison.Ordinal)) &&
             string.Equals(reader.GetString(3), notice.ReasonKey, StringComparison.Ordinal) &&
             saved.RetainedVersion?.ActionId == notice.RetainedVersion?.ActionId;
     }

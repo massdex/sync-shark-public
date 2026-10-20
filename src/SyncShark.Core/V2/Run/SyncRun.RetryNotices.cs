@@ -5,7 +5,8 @@ public sealed partial class SyncRun
     // One shared authority for app and CLI. These choices change scheduling or exclusion policy,
     // never turn an uncertain effect into deletion permission or mark an effect successful.
     internal Task<string> ApplyRetryNoticeChoiceAsync(string pairId, string noticeId, string choice, CancellationToken ct,
-        Action<PairDef, PairDef>? saveNarrowerPair = null, NoticeActionInput? input = null) =>
+        Action<PairDef, PairDef>? saveNarrowerPair = null, NoticeActionInput? input = null,
+        Func<PairDef, RebuildableChoice, RebuildableChoice?, string>? updateRebuildableRule = null) =>
         RunExclusiveAsync(null, async (_, token) =>
         {
             token.ThrowIfCancellationRequested();
@@ -13,11 +14,18 @@ public sealed partial class SyncRun
             if (saved is null || saved.Value.Closed || !NoticeChoices.IsRetryNotice(saved.Value.Notice) ||
                 !NoticeChoices.Options(saved.Value.Notice).Any(option => option.Choice == choice))
                 throw new SyncRunRefusedException("That retry notice or option is no longer available. Refresh notices.");
-            if (input?.Name is not null && choice != NoticeChoices.Rename || input?.Offset is > 0 && choice != NoticeChoices.ShowRemaining)
-                throw new SyncRunRefusedException("Name is only for Rename; offset is only for Show remaining items.");
+            if (input?.Name is not null && choice is not (NoticeChoices.Rename or NoticeChoices.ChooseFolder) ||
+                input?.Offset is > 0 && choice is not (NoticeChoices.ShowRemaining or NoticeChoices.PreviewMatches))
+                throw new SyncRunRefusedException("Name is only for Rename or Choose folder; offset is only for paged previews.");
+            if (input?.PageToken is not null && choice != NoticeChoices.ShowRemaining)
+                throw new SyncRunRefusedException("Page token is only for Show remaining items.");
             var notice = saved.Value.Notice;
+            if (notice.ReasonKey == "stubs-left-alone" && input?.Offset is > 0)
+                throw new SyncRunRefusedException("Use the returned page token, not an offset, for online-only files.");
             noticeId = notice.NoticeId!; // A legacy id resolves to the canonical notice before any effect or closure.
             var pair = _store.Pair(pairId) ?? throw new SyncRunRefusedException("The pair is no longer available.");
+            if (notice.RebuildableRule is not null)
+                return HandleRebuildableRuleChoice(pair, notice, choice, input, updateRebuildableRule);
             if (notice.ReasonKey == DropboxQuota.NoticeKey)
             {
                 if (choice == NoticeChoices.RetryNow)
@@ -34,11 +42,22 @@ public sealed partial class SyncRun
                 return "Notice ignored. Uploads remain suspended until a quota check finds free space. No files were excluded or deleted.";
             }
             if (choice == NoticeChoices.Rename) return await RenameNoticeItemAsync(pair, notice, input?.Name, token);
-            if (choice is NoticeChoices.ExportDocx or NoticeChoices.ExportMarkdown or NoticeChoices.ExportPdf)
+            if (choice is NoticeChoices.ExportDocx or NoticeChoices.ExportMarkdown or NoticeChoices.ExportPdf or NoticeChoices.ExportHtml)
                 return await ExportNoticeDocumentAsync(pair, notice, choice, token);
-            if (choice == NoticeChoices.MakeAvailableOffline) return await MakeNoticeAvailableOfflineAsync(pair, notice, token);
+            if (choice is NoticeChoices.MakeAvailableOffline or NoticeChoices.ConfirmLargeDownload)
+                return await MakeNoticeAvailableOfflineAsync(pair, notice, token, choice == NoticeChoices.ConfirmLargeDownload);
             if (choice == NoticeChoices.ShowRemaining) return notice.ReasonKey == "stubs-left-alone"
-                ? ShowOnlineOnlyItems(pair, input?.Offset ?? 0) : RemainingItems(pair, notice, input?.Offset ?? 0);
+                ? ShowOnlineOnlyItems(pair, input?.PageToken) : RemainingItems(pair, notice, input?.Offset ?? 0);
+            if (notice.ReasonKey == "stubs-left-alone")
+            {
+                if (choice == NoticeChoices.Ignore)
+                {
+                    _store.CloseNotice(noticeId, choice);
+                    return "Summary ignored. Online-only files remain protected; no paths were excluded or deleted.";
+                }
+                RaiseLinksSummary(pair, LeftAlone(pair));
+                return "Availability checked. Review online-only files to download individual items; scanning never downloads them.";
+            }
             if (choice == NoticeChoices.OpenDropbox)
             {
                 var cloud = new[] { pair.A, pair.B }.FirstOrDefault(root => root.Provider == SyncProviders.Dropbox)

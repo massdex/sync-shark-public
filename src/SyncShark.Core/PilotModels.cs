@@ -61,6 +61,12 @@ public sealed record PilotRemoteEntry(
 
     /// <summary>Provider metadata explicitly says direct download is unavailable; export is required.</summary>
     public bool RequiresExport { get; init; }
+
+    /// <summary>Dropbox export_info.export_as: the provider's default export format, when listed.</summary>
+    public string? ExportAs { get; init; }
+
+    /// <summary>Dropbox export_info.export_options: exactly the formats the provider supports for this item.</summary>
+    public IReadOnlyList<string>? ExportOptions { get; init; }
 }
 
 /// <summary>

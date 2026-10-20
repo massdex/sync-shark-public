@@ -6,7 +6,7 @@ public sealed record SyncConflictResolutionRequest(SyncConflictSelection Conflic
     SyncAuthorityConflictResolutionKind Resolution, string? NoticeChoice = null, NoticeActionInput? NoticeInput = null);
 
 /// <summary>Optional bounded input for a notice action, shared by app and CLI.</summary>
-public sealed record NoticeActionInput(string? Name = null, int Offset = 0);
+public sealed record NoticeActionInput(string? Name = null, int Offset = 0, string? PageToken = null);
 
 public sealed partial class SyncAuthorityRuntimeHost
 {

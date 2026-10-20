@@ -28,7 +28,8 @@ public sealed partial class V2CliRuntime
             if (notice is not null && NoticeChoices.IsRetryNotice(notice) && NoticeChoices.IsRetryChoice(choice))
             {
                 var message = await _run.ApplyRetryNoticeChoiceAsync(pairId, conflictId, choice, cancellationToken,
-                    (previous, updated) => SaveNarrowerPair(previous, updated), input);
+                    (previous, updated) => SaveNarrowerPair(previous, updated), input,
+                    (currentPair, current, replacement) => UpdateRebuildableRule(currentPair, current, replacement));
                 Console.Error.WriteLine(message);
                 if (choice is not (NoticeChoices.Rename or NoticeChoices.RetryNow or NoticeChoices.DeleteReviewed or NoticeChoices.KeepRestore) || !_store.FirstSyncDone(pairId))
                     return new SyncCliRunData(pairId, pair.Name, 0, 0, 0, 0, 0, false);

@@ -1241,7 +1241,7 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
             throw new IOException("Windows did not confirm the complete offline copy.");
     }
 
-    private static AttributeCloudFileHandle OpenAttributes(string path, bool writeDac, bool exclusive)
+    internal static AttributeCloudFileHandle OpenAttributes(string path, bool writeDac, bool exclusive)
     {
         const uint fileReadAttributes = 0x00000080;
         const uint writeDacAccess = 0x00040000;
@@ -1291,7 +1291,7 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
         Disconnect();
     }
 
-    private sealed class AttributeCloudFileHandle(SafeFileHandle handle) : IDisposable
+    internal sealed class AttributeCloudFileHandle(SafeFileHandle handle) : IDisposable
     {
         public SafeFileHandle Handle { get; } = handle;
         public void Dispose() => Handle.Dispose();

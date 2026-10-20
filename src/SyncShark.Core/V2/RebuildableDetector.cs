@@ -39,6 +39,20 @@ internal static class RebuildableDetector
     internal static bool IsKnown(string? id) =>
         id is not null && Categories.Any(category => string.Equals(category.Id, id, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>The folder names a category can qualify by; empty means any folder name (CACHEDIR.TAG-marked caches).
+    /// This is the bounded preview vocabulary, not a substitute for the marker check at prepare.</summary>
+    internal static IReadOnlyList<string> FolderNames(string category) =>
+        category.ToLowerInvariant() switch
+        {
+            "js-packages" => ["node_modules"],
+            "python-cache" => ["__pycache__"],
+            "python-venv" => [".venv", "venv"],
+            "dotnet-build" => ["bin", "obj"],
+            "js-build" => [".next"],
+            "cache-tagged" => [],
+            _ => throw new ArgumentException("Unknown rebuildable category: " + category, nameof(category))
+        };
+
     /// <summary>
     /// Every rebuildable folder in the inventory, ordered by category then path. A nested <c>node_modules</c> inside
     /// an already-detected one is not listed separately (the outer one covers it).

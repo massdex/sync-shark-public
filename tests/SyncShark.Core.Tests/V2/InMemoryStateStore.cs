@@ -524,9 +524,14 @@ internal sealed class InMemoryStateStore : IStateStore
                     known.RetainedVersion?.ActionId == notice.RetainedVersion?.ActionId);
                 if (same is not null)
                 {
-                    if (notice.RetainedVersion is null) _closedNotices.Remove(same.NoticeId!);
-                    // These standing notices refresh their current details without changing problem identity.
-                    if ((notice.Kind == NoticeKind.UserDecision && notice.Detail.Contains(ProviderNameRefusedException.Detail, StringComparison.Ordinal)) || notice.FreeSpace is not null ||
+                    // Mirror NoticeTable.Add: an ignored retry notice stays closed; every other repeated notice
+                    // reopens, and a retry notice refreshes its display text without changing problem identity.
+                    var priorChoice = _closedNotices.GetValueOrDefault(same.NoticeId!);
+                    if (notice.RetainedVersion is null &&
+                        !(NoticeChoices.IsRetryNotice(notice) && priorChoice == NoticeChoices.Ignore))
+                        _closedNotices.Remove(same.NoticeId!);
+                    if (NoticeChoices.IsRetryNotice(notice) || notice.FreeSpace is not null ||
+                        (notice.Kind == NoticeKind.UserDecision && notice.Detail.Contains(ProviderNameRefusedException.Detail, StringComparison.Ordinal)) ||
                         notice.ReasonKey == ProviderNameRefusedException.NoticeKey)
                         _notices[_notices.IndexOf(same)] = notice with { NoticeId = same.NoticeId };
 
