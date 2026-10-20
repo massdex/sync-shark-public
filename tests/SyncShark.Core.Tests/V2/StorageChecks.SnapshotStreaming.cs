@@ -12,6 +12,7 @@ internal static partial class StorageChecks
         SnapshotFailureAndPartialAbsence(root);
         SnapshotNativeAbsence(root);
         SnapshotStoredKeyDrift(root);
+        SnapshotInputMutationIsAtomic(root);
         SnapshotConcurrentRetry(root);
         SnapshotScratchLifecycle(root);
         for (var seed = 0; seed < 12; seed++) SnapshotDifferential(root, seed);
@@ -19,20 +20,19 @@ internal static partial class StorageChecks
         var items = Enumerable.Range(0, 1100).Select(i => F($"d{i % 7}/f{i:D5}", "id:" + i, "aabb")).ToArray();
         using var staged = SnapshotInput.Create(fixture.Connection, fixture.Dirs, items);
         fixture.Write(items);
-        var plans = staged.Plans().Concat(StoreSchema.QueryPlan(fixture.Connection, "LiveDirectory",
-            FileStateReader.SnapshotDirectorySql, "$r", "$d")).Concat(StoreSchema.QueryPlan(fixture.Connection,
-            "LivePage", FileStateReader.SnapshotPageSql, "$r", "$d", "$k", "$n")).ToArray();
+        var plans = staged.Plans().Concat(StoreSchema.QueryPlan(fixture.Connection, "LiveStream",
+            FileStateReader.SnapshotStreamSql, "$r")).ToArray();
         foreach (var plan in plans) Console.WriteLine(plan);
-        Require(!plans.Any(p => p.Contains("TEMP B-TREE") || (p.Contains(": SCAN ") && !p.EndsWith("SCAN CONSTANT ROW", StringComparison.Ordinal))),
-            "snapshot pages and object suppression have no root sort or scan");
-        Require(plans.Any(p => p.StartsWith("LivePage:") && p.Contains("USING PRIMARY KEY (root_no=? AND dir_no=?")),
-            "live page uses the root/directory primary key range");
+        Require(!plans.Any(p => p.Contains("TEMP B-TREE")), "snapshot streams need no root sort");
+        Require(plans.Any(p => p.StartsWith("LiveStream:") && p.Contains("USING PRIMARY KEY (root_no=?")),
+            "live stream seeks only the requested root's primary-key range");
         Require(plans.Any(p => p.StartsWith("IncomingObject:") && p.Contains("incoming_object")),
             "suppression probes the non-unique object index");
         // SQLite itself rejects even zero-row DML under query_only: stronger than total_changes.
         StoreSchema.Execute(fixture.Connection, null, "PRAGMA query_only=ON;");
         fixture.Write(items);
-        Require(fixture.Reader.Live(1, null).Count == items.Length, "durable unchanged input is entirely read-only");
+        fixture.Write(items.Reverse().ToArray());
+        Require(fixture.Reader.Live(1, null).Count == items.Length, "ordered and fallback unchanged input are entirely read-only");
         StoreSchema.Execute(fixture.Connection, null, "PRAGMA query_only=OFF;");
     }
 
@@ -67,8 +67,10 @@ internal static partial class StorageChecks
             F("z/deleted-alias", "id:local:deleted", "aa"), F("b/deleted-alias", "id:local:deleted", "aa")]);
         foreach (var name in new[] { "a[", "ab", "_x", "X", "ß", "ſ", "😀", "！" })
             initial.Add(F("edge/" + name, "edge:" + name, "aa"));
-        current.Write(initial);
+        current.WriteStream(initial.Select(item => item));
         legacy.Write(initial);
+        Require(current.Dump().SequenceEqual(legacy.Dump()), "typed streamed initial publication matches the frozen writer");
+        current.Write(initial);
         foreach (var fixture in new[] { current, legacy })
         {
             foreach (var item in initial)
@@ -175,6 +177,18 @@ internal static partial class StorageChecks
         fixture.Write(items);
         Require(calls == 2 && fixture.Reader.Live(1, null).Single().Size == items[0].Size,
             "concurrent writer forces one fresh comparison before publication");
+    }
+
+    private static void SnapshotInputMutationIsAtomic(string root)
+    {
+        using var fixture = new SnapshotFixture(Fresh(root, "snapshot-input-mutation"));
+        ItemState[] items = [F("first", "one", "aa"), F("last", "two", "bb")];
+        fixture._writer.AfterSnapshotCompared = () => items[1] = F("different", "three", "cc");
+        var refused = false;
+        try { fixture.Write(items); }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("input changed", StringComparison.Ordinal)) { refused = true; }
+        Require(refused && fixture.Reader.Live(1, null).Count == 0,
+            "changing a referenced input path cannot publish even an earlier row");
     }
 
     private static void SnapshotStoredKeyDrift(string root)

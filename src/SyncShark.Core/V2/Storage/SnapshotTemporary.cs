@@ -20,7 +20,7 @@ internal sealed class SnapshotTemporary : IDisposable
         try
         {
             Connection.Open();
-            StoreSchema.Execute(Connection, null, "PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-2048;");
+            StoreSchema.Execute(Connection, null, "PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-32768; PRAGMA locking_mode=EXCLUSIVE;");
         }
         catch { Dispose(); throw; }
     }

@@ -44,21 +44,44 @@ internal sealed class FileStateTable
 
     private bool TryWriteSnapshot(Snapshot snapshot, long rootNo, IEnumerable<ItemState> input)
     {
+        var profile = Environment.GetEnvironmentVariable("SYNCSHARK_SNAPSHOT_PROFILE") == "1";
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        void phase(string name)
+        {
+            if (profile) Console.Error.WriteLine($"snapshot-phase {name} ms={watch.ElapsedMilliseconds}");
+            watch.Restart();
+        }
         snapshot.PendingDeletionEvidence.Clear();
         var version = StoreSchema.Scalar(_connection, null, "PRAGMA data_version;");
         // A partially enumerated subtree can contain observations from before the failure. Do not
         // let even a replacement close a row there, or let an ignored observation suppress a move.
         Func<string, bool>? include = snapshot.IncompleteSubtrees.Count == 0 ? snapshot.IncludesPath
             : path => (snapshot.IncludesPath?.Invoke(path) ?? true) && !InsideIncomplete(path, snapshot.IncompleteSubtrees);
-        using var incoming = SnapshotInput.Create(_connection, _dir, input, include);
-        var now = _clock.GetUtcNow();
+        // One deferred read snapshot covers directory lookup and comparison. Per-folder autocommit
+        // reads otherwise repeatedly acquire WAL read marks; this never takes the live write lock.
         using var reading = _connection.BeginTransaction(deferred: true);
+        // Already ordered, unchanged scanner arrays need neither a sort nor scratch writes. An
+        // out-of-order or changed row falls back to the general disk-backed merge, without mutation.
+        if (snapshot.IncompleteSubtrees.Count == 0 && input is ItemState[] or List<ItemState> &&
+            UnchangedOrdered(input, include, rootNo, reading) && !HasOrphanDebt(rootNo, reading))
+        {
+            reading.Commit();
+            phase("unchanged-ordered");
+            AfterSnapshotCompared?.Invoke();
+            return Equals(version, StoreSchema.Scalar(_connection, null, "PRAGMA data_version;"));
+        }
+        using var incoming = SnapshotInput.Create(_connection, _dir, input, include, reading);
+        if (snapshot.IncompleteSubtrees.Count > 0) incoming.PrepareObjectLookup();
+        phase("stage");
+        var now = _clock.GetUtcNow();
         Func<string, bool> suppressed = incoming.ContainsObject;
         using var changes = new SnapshotChanges(_connection);
         using var left = incoming.Entries().GetEnumerator();
         using var right = _reader.SnapshotEntries(rootNo, () => reading).GetEnumerator();
         var hasLeft = left.MoveNext();
         var hasRight = right.MoveNext();
+        var initialLoad = !hasRight && hasLeft;
+        if (initialLoad) hasLeft = false;
         while (hasLeft || hasRight)
         {
             var order = !hasLeft ? 1 : !hasRight ? -1 : SnapshotInput.Compare(left.Current, right.Current);
@@ -82,12 +105,20 @@ internal sealed class FileStateTable
                     changes.Add(row, RowCodec.CarryHash(samePath, row.Item), wasLive: true);
                 else if ((snapshot.IncludesPath?.Invoke(row.Item.Path) ?? true) &&
                     !InsideIncomplete(row.Item.Path, snapshot.IncompleteSubtrees) &&
-                    (suppressed(row.Item.ObjectId) || snapshot.CanCloseAbsent(row.Item)))
+                    (snapshot.IncompleteSubtrees.Count == 0 || suppressed(row.Item.ObjectId) || snapshot.CanCloseAbsent(row.Item)))
                     changes.Add(row, null, wasLive: true);
                 hasRight = right.MoveNext();
             }
         }
         reading.Commit();
+        phase("compare");
+        if (initialLoad)
+        {
+            left.Dispose();
+            incoming.PreparePathOrder();
+        }
+        if (changes.HasChanges) incoming.PrepareObjectLookup();
+        phase("replay-index");
         AfterSnapshotCompared?.Invoke();
         // Preserve cross-row effects of the old writer without retaining the old live root in memory.
         // End the read snapshot before opening the write transaction (no deferred upgrade/BUSY_SNAPSHOT).
@@ -95,13 +126,22 @@ internal sealed class FileStateTable
             "(SELECT 1 FROM file_state f WHERE f.root_no=local_rehash.root_no AND f.object_id=local_rehash.object_id)";
         bool hasOrphans(SqliteTransaction? tx) => snapshot.IncompleteSubtrees.Count == 0 &&
             (long)StoreSchema.Scalar(_connection, tx, "SELECT EXISTS(SELECT 1 " + orphan + ");", ("$r", rootNo))! != 0;
-        if (changes.HasChanges || hasOrphans(null))
+        if (initialLoad || changes.HasChanges || hasOrphans(null))
         {
             // A snapshot is one publication: callback or disk failures must roll back every row.
             using var batch = new StoreBatch(_connection, int.MaxValue);
             if (!Equals(version, StoreSchema.Scalar(_connection, batch.Transaction, "PRAGMA data_version;")))
                 return false;
-            foreach (var change in changes.Read())
+            // Under this write lock an insert-only publication cannot create deletion evidence or
+            // rehash debt. Probe empty tables once rather than issuing two million empty statements.
+            var initialHasDebt = !initialLoad || StoreSchema.Scalar(_connection, batch.Transaction,
+                "SELECT 1 FROM local_rehash WHERE root_no=$r LIMIT 1;", ("$r", rootNo)) is not null;
+            var initialHasTombstones = !initialLoad || StoreSchema.Scalar(_connection, batch.Transaction,
+                "SELECT 1 FROM tombstone WHERE root_no=$r LIMIT 1;", ("$r", rootNo)) is not null;
+            var replay = initialLoad
+                ? incoming.PathEntries().Select(entry => new SnapshotChanges.Change(entry, entry.Item, false))
+                : changes.Read();
+            foreach (var change in replay)
             {
                 if (change.Incoming is null)
                 {
@@ -112,15 +152,42 @@ internal sealed class FileStateTable
                 else if (change.WasLive)
                     Step(batch, Replace(change.Entry, change.Incoming, rootNo, suppressed, now, batch));
                 else
-                    Step(batch, Insert(change.Entry, rootNo, batch));
+                    Step(batch, Insert(change.Entry, rootNo, batch,
+                        debtReconciled: !initialHasDebt && (change.Entry.Item.Flags & ItemFlags.NeedsRehash) == 0,
+                        clearTombstone: initialHasTombstones));
             }
             if (hasOrphans(batch.Transaction))
                 StoreSchema.Execute(_connection, batch.Transaction, "DELETE " + orphan + ";", ("$r", rootNo));
             batch.Flush();
         }
         else if (!Equals(version, StoreSchema.Scalar(_connection, null, "PRAGMA data_version;"))) return false;
+        phase("publish");
         return true;
     }
+
+    private bool UnchangedOrdered(IEnumerable<ItemState> items, Func<string, bool>? include,
+        long rootNo, SqliteTransaction reading)
+    {
+        using var live = _reader.SnapshotEntries(rootNo, () => reading)
+            .Where(row => include?.Invoke(row.Item.Path) ?? true).GetEnumerator();
+        foreach (var item in items)
+        {
+            if (!(include?.Invoke(item.Path) ?? true)) continue;
+            if (!live.MoveNext()) return false;
+            // Matching each exact pathname against the PK-ordered live stream proves the same set
+            // without assuming any particular scanner sort order or constructing a second collection.
+            var row = live.Current;
+            if (item.Path != row.Item.Path || row.NameKey != RowCodec.Key(row.Name) ||
+                !RowCodec.Same(RowCodec.CarryHash(item, row.Item), row.Item)) return false;
+        }
+        return !live.MoveNext();
+    }
+
+    private bool HasOrphanDebt(long rootNo, SqliteTransaction reading) =>
+        StoreSchema.Scalar(_connection, reading,
+            "SELECT 1 FROM local_rehash WHERE root_no=$r AND NOT EXISTS " +
+            "(SELECT 1 FROM file_state f WHERE f.root_no=local_rehash.root_no AND f.object_id=local_rehash.object_id) LIMIT 1;",
+            ("$r", rootNo)) is not null;
 
     /// <summary>Applies a delta's deletes then upserts, each in list order, tombstoning every real deletion.</summary>
     public void WriteDelta(Delta delta, long rootNo)
@@ -349,12 +416,13 @@ internal sealed class FileStateTable
             item with { Hash = null, Flags = item.Flags & ~ItemFlags.NeedsRehash };
     }
 
-    private bool Insert(FileStateReader.Entry entry, long rootNo, StoreBatch batch, bool debtReconciled = false)
+    private bool Insert(FileStateReader.Entry entry, long rootNo, StoreBatch batch, bool debtReconciled = false,
+        bool clearTombstone = true)
     {
         var dirNo = _dir.Intern(entry.Parent, batch.Transaction);
         if (!debtReconciled)
             entry = FileStateReader.Entry.Of(entry.Parent, entry.Name, ReconcileDebt(entry.Item, rootNo, batch.Transaction));
-        StoreSchema.Execute(_connection, batch.Transaction,
+        batch.Execute(
             "INSERT INTO file_state(root_no, dir_no, name_key, name, kind, object_id, version_id, hash, size, mtime, flags, " +
             "identity_json) VALUES($r, $d, $nk, $n, $k, $o, $v, $h, $s, $m, $f, $i);",
             ("$r", rootNo), ("$d", dirNo), ("$nk", RowCodec.Key(entry.Name)), ("$n", entry.Name),
@@ -363,7 +431,7 @@ internal sealed class FileStateTable
             ("$h", RowCodec.HashBlob(entry.Item.Hash)), ("$s", entry.Item.Size),
             ("$m", RowCodec.MtimeTicks(entry.Item.Mtime)), ("$f", (long)entry.Item.Flags),
             ("$i", entry.Item.IdentityJson));
-        ClearTombstone(rootNo, entry.Item.ObjectId, batch);
+        if (clearTombstone) ClearTombstone(rootNo, entry.Item.ObjectId, batch);
         if ((entry.Item.Flags & ItemFlags.Link) != 0)
             OnLinkWritten?.Invoke(batch.Transaction, rootNo, RowCodec.Join(entry.Parent, entry.Name));
         return true;
@@ -391,7 +459,7 @@ internal sealed class FileStateTable
     }
 
     private void ClearTombstone(long rootNo, string objectId, StoreBatch batch) =>
-        StoreSchema.Execute(_connection, batch.Transaction,
+        batch.Execute(
             "DELETE FROM tombstone WHERE root_no=$r AND object_id=$o;", ("$r", rootNo), ("$o", objectId));
 
     // "" is the whole root; otherwise the shared self-or-under rule (standards audit B2: no local copy of it).

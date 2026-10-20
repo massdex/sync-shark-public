@@ -12,6 +12,7 @@ internal sealed class SnapshotChanges(SqliteConnection owner) : IDisposable
     private SqliteConnection? _connection;
     private StoreBatch? _batch;
     private SnapshotTemporary? _temporary;
+    private SqliteCommand? _insert;
 
     internal bool HasChanges => _connection is not null;
 
@@ -21,28 +22,31 @@ internal sealed class SnapshotChanges(SqliteConnection owner) : IDisposable
         {
             _temporary = new SnapshotTemporary(owner);
             _connection = _temporary.Connection;
-            StoreSchema.Execute(_connection, null, "PRAGMA cache_size=-2048;" +
+            StoreSchema.Execute(_connection, null,
                 "CREATE TABLE changes(parent TEXT NOT NULL,name TEXT NOT NULL,json TEXT NOT NULL," +
                 "PRIMARY KEY(parent,name)) WITHOUT ROWID;");
-            _batch = new StoreBatch(_connection, 1024);
+            _batch = new StoreBatch(_connection, int.MaxValue);
+            _insert = StoreSchema.Command(_connection, _batch!.Transaction, "INSERT OR IGNORE INTO changes VALUES($p,$n,$j);");
+            foreach (var parameter in new[] { "$p", "$n", "$j" }) _insert.Parameters.AddWithValue(parameter, DBNull.Value);
+            _insert.Prepare();
         }
-        StoreSchema.Execute(_connection, _batch!.Transaction, "INSERT OR IGNORE INTO changes VALUES($p,$n,$j);",
-            ("$p", entry.Parent), ("$n", entry.Name),
-            ("$j", JsonSerializer.Serialize(new Change(entry, wasLive ? incoming : null, wasLive), RowCodec.Json)));
-        if (StoreSchema.Changes(_connection, _batch.Transaction) == 0)
+        _insert!.Parameters[0].Value = entry.Parent;
+        _insert.Parameters[1].Value = entry.Name;
+        _insert.Parameters[2].Value = JsonSerializer.Serialize(new Change(entry, wasLive ? incoming : null, wasLive), RowCodec.Json);
+        if (_insert.ExecuteNonQuery() == 0)
         {
-            var previous = JsonSerializer.Deserialize<Change>((string)StoreSchema.Scalar(_connection, _batch.Transaction,
+            var previous = JsonSerializer.Deserialize<Change>((string)StoreSchema.Scalar(_connection, _batch!.Transaction,
                 "SELECT json FROM changes WHERE parent=$p AND name=$n;", ("$p", entry.Parent), ("$n", entry.Name))!, RowCodec.Json)!;
             // Runtime case-table changes may order one exact path as an insert plus a removal.
             // Collapse them to a replacement, retaining the old stored key for the delete.
             var live = wasLive ? entry : previous.Entry;
             var replacement = incoming ?? (previous.WasLive ? previous.Incoming : previous.Entry.Item);
             var combined = new Change(live, replacement is null ? null : RowCodec.CarryHash(replacement, live.Item), true);
-            StoreSchema.Execute(_connection, _batch.Transaction,
+            StoreSchema.Execute(_connection, _batch!.Transaction,
                 "UPDATE changes SET json=$j WHERE parent=$p AND name=$n;", ("$p", entry.Parent), ("$n", entry.Name),
                 ("$j", JsonSerializer.Serialize(combined, RowCodec.Json)));
         }
-        _batch.Step();
+
     }
 
     internal IEnumerable<Change> Read()
@@ -51,28 +55,18 @@ internal sealed class SnapshotChanges(SqliteConnection owner) : IDisposable
         _batch!.Flush();
         _batch.Dispose();
         _batch = null;
-        var parent = "";
-        var name = "";
-        while (true)
+        using var command = StoreSchema.Command(_connection, null, "SELECT json FROM changes ORDER BY parent,name;");
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
         {
-            var page = new List<Change>(256);
-            using (var command = StoreSchema.Command(_connection, null,
-                "SELECT json FROM changes WHERE (parent,name)>($p,$n) ORDER BY parent,name LIMIT 256;"))
-            {
-                command.Parameters.AddWithValue("$p", parent);
-                command.Parameters.AddWithValue("$n", name);
-                using var reader = command.ExecuteReader();
-                while (reader.Read()) page.Add(JsonSerializer.Deserialize<Change>(reader.GetString(0), RowCodec.Json)!);
-            }
-            if (page.Count == 0) yield break;
-            parent = page[^1].Entry.Parent;
-            name = page[^1].Entry.Name;
-            foreach (var change in page) yield return change.WasLive ? change : change with { Incoming = change.Entry.Item };
+            var change = JsonSerializer.Deserialize<Change>(reader.GetString(0), RowCodec.Json)!;
+            yield return change.WasLive ? change : change with { Incoming = change.Entry.Item };
         }
     }
 
     public void Dispose()
     {
+        _insert?.Dispose();
         _batch?.Dispose();
         _temporary?.Dispose();
     }

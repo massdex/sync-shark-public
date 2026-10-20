@@ -191,15 +191,12 @@ internal sealed class FileStateReader
         Query($"SELECT {Columns} FROM file_state f JOIN dir d ON d.dir_no = f.dir_no " +
             "WHERE f.root_no=$r ORDER BY d.path, f.name;", [("$r", rootNo)]);
 
-    internal const string SnapshotDirectorySql =
-        "SELECT dir_no FROM file_state WHERE root_no=$r AND dir_no>$d ORDER BY dir_no LIMIT 1;";
-    internal const string SnapshotPageSql =
+    internal const string SnapshotStreamSql =
         $"SELECT {Columns} FROM file_state f JOIN dir d ON d.dir_no=f.dir_no " +
-        "WHERE f.root_no=$r AND f.dir_no=$d AND (f.name_key,f.name)>($k,$n) " +
-        "ORDER BY f.name_key,f.name LIMIT 256;";
+        "WHERE f.root_no=$r ORDER BY f.dir_no,f.name_key,f.name;";
 
     internal IEnumerable<Entry> SnapshotEntries(long rootNo, Func<SqliteTransaction> transaction) =>
-        SnapshotPager.Read(_connection, () => transaction(), SnapshotDirectorySql, SnapshotPageSql, Decode, rootNo);
+        SnapshotRows.Read(_connection, transaction(), SnapshotStreamSql, Decode, rootNo);
 
     /// <summary>The keys of live rows carrying one object id (its old path after a move).</summary>
     public List<(long DirNo, string Name, string Path)> ReadObject(long rootNo, string objectId, SqliteTransaction? transaction)
