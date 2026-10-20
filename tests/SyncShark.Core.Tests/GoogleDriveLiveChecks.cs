@@ -11,8 +11,8 @@ internal static class GoogleDriveLiveChecks
     // The exact-fixture sharing inspect is an opt-in test harness read only. These are the approved
     // acceptance identities, and the mode refuses anything else before it opens product state.
     internal const string ApprovedSharingConnectionId = "gdrive-connection-a00000000000000000000000";
-    internal const string ApprovedSharingFolderId = "1AHj7vZxy2f9f2TrJaPA-bsMTgdjZB0Lp";
-    internal const string ApprovedSharingFileId = "1BaiZWwgU5gRPofYRkTkfNfSigXc9_LfG";
+    internal const string ApprovedSharingFolderId = "drive-fixture-folder";
+    internal const string ApprovedSharingFileId = "drive-fixture-file";
 
     // The expected live acceptance account is never committed. Each live mode skips visibly
     // (and stays on exit code 0) when the operator has not supplied it.
@@ -415,7 +415,7 @@ internal static class GoogleDriveLiveChecks
         string createdFileId;
         if (resumeKnownFixture)
         {
-            Require(folderId == "1AHj7vZxy2f9f2TrJaPA-bsMTgdjZB0Lp" && entries.Count == 1 &&
+            Require(folderId == "drive-fixture-folder" && entries.Count == 1 &&
                 entries[0].RelativePath == path && entries[0].Size <= 1024,
                 "exact retained owner fixture only");
             using var priorContent = new MemoryStream();
@@ -470,9 +470,9 @@ internal static class GoogleDriveLiveChecks
     private static async Task MetadataAsync(GoogleDrivePilotClient ordinary, GoogleDrivePilotClient racing,
         LiveRaceHandler handler, string folderId, IReadOnlyList<PilotRemoteEntry> entries, CancellationToken ct)
     {
-        const string id = "1BaiZWwgU5gRPofYRkTkfNfSigXc9_LfG";
+        const string id = "drive-fixture-file";
         const string original = "sync-check.txt";
-        Require(folderId == "1AHj7vZxy2f9f2TrJaPA-bsMTgdjZB0Lp" && entries.Count == 1 &&
+        Require(folderId == "drive-fixture-folder" && entries.Count == 1 &&
             entries[0].Id == id && entries[0].RelativePath == original,
             "exact retained fixture before one metadata acceptance, no automatic replay");
         var expectedBytes = Encoding.UTF8.GetBytes("Concurrent live edit must survive the stale request.\n");
