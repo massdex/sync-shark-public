@@ -562,7 +562,7 @@ internal sealed class HydrationNoticeWriter : IDisposable
                         // must NOT blanket-close offline item notices: a disk/hash/sharing cause is item-specific.
                         // Only connectivity causes pause the other lanes for this root; a local notice backlog (or
                         // an item-specific cause) must never stall settlement, refresh or offline hydration.
-                        if (pairError.Cause is "network" or "auth" or "provider")
+                        if (pairError is StoragePairException { Cause: "network" or "auth" or "provider" })
                             _store.SetStorageRootBackoff(pair.A.RootId, PairBackoff);
                     }
                     catch (Exception error)
