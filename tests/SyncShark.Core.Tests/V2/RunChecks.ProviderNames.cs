@@ -1,0 +1,38 @@
+namespace Massdex.SyncShark.V2;
+
+internal static partial class RunChecks
+{
+    public static async Task ProviderNamesTransientAsync(string root)
+    {
+        var settings = StorageChecks.Fast with { MaxWorkers = 8, ProgressInterval = TimeSpan.Zero };
+        using var store = SqliteStateStore.Open(root, settings, TimeProvider.System);
+        var fx = Build(suppliedStore: store);
+        for (var i = 0; i < 30; i++) fx.A.Seed($"refused-{i}", "unchanged");
+        fx.A.Seed("ordinary", "normal retry");
+        var ordinaryAttempts = 0;
+        var refusedAttempts = 0;
+        fx.WriterB.PutFailure = action =>
+        {
+            if (action.Path == "ordinary")
+                return Interlocked.Increment(ref ordinaryAttempts) == 1 ? new IOException("temporary connection failure") : null;
+            Interlocked.Increment(ref refusedAttempts);
+            return new ProviderNameRefusedException(new IOException("structured test refusal"));
+        };
+        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission()), fx.Provider,
+            settings, TimeProvider.System);
+        var first = await FirstSyncAsync(run, fx);
+        Require(first.Failed == 1 && first.Uploaded == 0 && first.Skipped == 30 && first.Done == 0 &&
+            !store.FirstSyncDone("p1"),
+            "ordinary transient failure alone remains failed and blocks completion");
+        Require(store.UnresolvedIntents("p1").Count == 1 &&
+            store.Live("ra").Count(item => item.Flags.HasFlag(ItemFlags.ProviderNameRefused)) == 30,
+            "parallel refusal commits mark every item and atomically settle their intents");
+        var second = await FirstSyncAsync(run, fx);
+        Require(second.Failed == 0 && second.Uploaded == 1 && store.FirstSyncDone("p1") &&
+            ordinaryAttempts == 2 && refusedAttempts == 30,
+            "transient failure retries, refused items never retry, and first sync finishes");
+        Require(fx.WriterA.Calls == 0, "parallel refusal handling performs no local effects");
+        Require(store.OpenNotices("p1").Count(n => n.ReasonKey == ProviderNameRefusedException.NoticeKey) == 1,
+            "parallel refusals have one bounded summary");
+    }
+}
