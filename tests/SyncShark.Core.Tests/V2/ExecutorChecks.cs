@@ -45,6 +45,7 @@ internal static partial class ExecutorChecks
         await Cancel_StopsLaunching_KeepsIntents();
         await Apply_EarlyBreak_StopsEffects();
         await Reconcile_ThreeOutcomes();
+        await Reconcile_PairLookupIsIndexedAsync();
         await Reconcile_RecoveryFirstDone_SameRef();
         await Reconcile_Move_Done_WhenSameObject();
         await Reconcile_Move_Done_WhenSourceContentDiffers();
@@ -677,6 +678,29 @@ internal static partial class ExecutorChecks
         Require(store.UnresolvedIntents("p1").Count == 0, "every reconciled intent is closed");
     }
 
+    // P1: reconcile must find each intent's owning pair by an indexed point lookup, never by materializing every
+    // unresolved intent of every pair once per intent (the 1M-row deploy-time memory/time risk).
+    private static async Task Reconcile_PairLookupIsIndexedAsync()
+    {
+        var inner = new InMemoryStateStore();
+        inner.SavePair(Pair());
+        var store = new JournalStore(inner, new List<string>());
+        var a = new FakeEndpoint(Side.A, "ra");
+        var b = new FakeEndpoint(Side.B, "rb");
+        var source = a.Seed("present", "present-content", versionId: "v1");
+        b.Seed("present", "present-content", versionId: "v1");
+        var action = Act(ActionKind.CopyNew, Side.B, "present", source: source, key: "k1");
+        store.RecordIntent("p1", action);
+        var executor = new Executor(store, Settings(1), Admission());
+
+        var results = await executor.ReconcileAsync([action], 1, new RecordingWriter(a), new RecordingWriter(b),
+            CancellationToken.None);
+        Require(results.Single().Outcome == Outcome.Done, "the indexed lookup still commits the reconcile result");
+        Require(store.UnresolvedIntentLoads == 0,
+            "reconcile resolves the pair by point lookup, never by loading every unresolved intent");
+        Console.WriteLine("PASS Reconcile_PairLookupIsIndexed");
+    }
+
     private static async Task Reconcile_RecoveryFirstDone_SameRef()
     {
         var inner = new InMemoryStateStore();
@@ -1012,6 +1036,9 @@ internal static partial class ExecutorChecks
         /// <summary>A simulated cost per store transaction, so concurrent writes queue behind a running one.</summary>
         internal TimeSpan WriteCost { get; set; }
 
+        /// <summary>How many times a caller materialized the full unresolved-intent list (must stay 0 on reconcile).</summary>
+        internal int UnresolvedIntentLoads { get; private set; }
+
         /// <summary>The size of each intent and result batch the executor wrote (one store transaction each).</summary>
         internal List<int> IntentBatches { get; } = new();
         internal List<int> ResultBatches { get; } = new();
@@ -1079,7 +1106,22 @@ internal static partial class ExecutorChecks
 
         public IReadOnlyList<Baseline> BaselinesTouching(string pairId, Side side, IEnumerable<string> objectIds,
             IEnumerable<string> pathPrefixes) => _inner.BaselinesTouching(pairId, side, objectIds, pathPrefixes);
-        public IReadOnlyList<SyncAction> UnresolvedIntents(string pairId) => _inner.UnresolvedIntents(pairId);
+        public IReadOnlyList<SyncAction> UnresolvedIntents(string pairId)
+        {
+            UnresolvedIntentLoads++;
+            return _inner.UnresolvedIntents(pairId);
+        }
+        public int CountUnresolvedIntents(string pairId) => _inner.CountUnresolvedIntents(pairId);
+        public void SetIntentHeld(string pairId, string actionId, bool held) => _inner.SetIntentHeld(pairId, actionId, held);
+        public void SetIntentsHeld(string pairId, IReadOnlyList<string> actionIds, bool held) =>
+            _inner.SetIntentsHeld(pairId, actionIds, held);
+        public int CountHeldIntents(string pairId) => _inner.CountHeldIntents(pairId);
+        public bool IsIntentHeld(string pairId, string actionId) => _inner.IsIntentHeld(pairId, actionId);
+        public IntentPage HeldIntentsPage(string pairId, string? cursor, int limit) =>
+            _inner.HeldIntentsPage(pairId, cursor, limit);
+        public IEnumerable<SyncAction> StreamUnresolvedIntents(string pairId) => _inner.StreamUnresolvedIntents(pairId);
+        public IEnumerable<IntentRow> StreamUnresolvedIntentRows(string pairId) => _inner.StreamUnresolvedIntentRows(pairId);
+        public string? PairForIntent(string actionId) => _inner.PairForIntent(actionId);
         public void AddNotices(IEnumerable<Notice> n) => _inner.AddNotices(n);
         public IReadOnlyList<Notice> OpenNotices(string? pairId) => _inner.OpenNotices(pairId);
         public IReadOnlyList<RecoveryRecord> Recoveries(string pairId) => _inner.Recoveries(pairId);

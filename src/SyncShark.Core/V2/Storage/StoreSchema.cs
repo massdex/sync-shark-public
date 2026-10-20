@@ -65,6 +65,12 @@ internal static class StoreSchema
           PRIMARY KEY(pair_no, root_no, path_key)) WITHOUT ROWID;
         """;
 
+    // Performance-only, additive index for the intent stream and the rowid horizon. It is replayed on every
+    // compatible open: (pair_no) carries rowid as the implicit final key, so MAX(rowid) and the ordered rowid
+    // keyset never degrade to a primary-key scan after concurrent state changes.
+    private const string IntentOrderIndexDdl =
+        "CREATE INDEX IF NOT EXISTS pe_intent_order ON pending_effect(pair_no);";
+
     // Performance-only, additive index; no persisted row format changes or version bump.
     private const string FlaggedIndexDdl =
         "CREATE INDEX IF NOT EXISTS fs_flagged ON file_state(root_no) WHERE flags != 0;" +
@@ -195,7 +201,8 @@ internal static class StoreSchema
             ("local_gap_item", "failure_reason", "TEXT"),
             ("local_gap_item", "retry_allowed", "INTEGER NOT NULL DEFAULT 1"),
             ("local_gap_item", "defer_count", "INTEGER NOT NULL DEFAULT 0"),
-            ("local_gap_item", "defer_reason", "TEXT")
+            ("local_gap_item", "defer_reason", "TEXT"),
+            ("local_gap_item", "discovery_reason", "TEXT")
         })
             if (Convert.ToInt64(Scalar(connection, transaction,
                 $"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name=$name;", ("$name", column))) == 0)
@@ -304,6 +311,7 @@ internal static class StoreSchema
         Execute(connection, null, QuarantineDdl);
         EnsureDefenderColumns(connection, null);
         Execute(connection, null, FlaggedIndexDdl);
+        Execute(connection, null, IntentOrderIndexDdl);
         BackfillDefenderGrants(connection);
         Step(13, null);
         Step(14, tx => EnsureGapSchema(connection, tx));
@@ -362,7 +370,7 @@ internal static class StoreSchema
         "journal_volume", "dir", "root", "pair", "generation", "file_state", "tombstone", "sync_point", "pending_effect", "sync_retry", "sync_retry_due", "recovery",
         "notice", "notice_legacy_fold", "local_gap", "local_gap_item", "gap_ready", "gap_failed", "gap_waiting", "gap_results", "local_rehash", "rehash_retry", "deletion_evidence", "dir_key", "dir_mapped_key", "fs_obj", "fs_flagged", "fs_refused", "sp_a_obj", "sp_b_obj", "sp_a_dir", "sp_b_dir",
 
-        "removal_review", "pe_unresolved", "rc_pair", "nt_open", "prepare_header", "prepare_row", "prepare_lookup", "prepare_cursor",
+        "removal_review", "pe_unresolved", "pe_intent_order", "rc_pair", "nt_open", "prepare_header", "prepare_row", "prepare_lookup", "prepare_cursor",
         "quarantine_upgrade", "defender_deferral_batch", "fs_quarantine", "defender_deferral", "defender_deferral_updated", "defender_grant", "defender_grant_path",
         "choice_victim", "cv_op", "cv_item", "cv_scan", "choice_restore_receipt", "choice_merge",
         "run_summary", "run_summary_pair", "nt_pair_reason",
@@ -447,6 +455,7 @@ internal static class StoreSchema
         MigrateRunSummary(connection, transaction);
         Execute(connection, transaction, LegacyFoldDdl);
         Execute(connection, transaction, FlaggedIndexDdl);
+        Execute(connection, transaction, IntentOrderIndexDdl);
         Execute(connection, transaction, QuarantineDdl);
         Execute(connection, transaction, "INSERT INTO quarantine_upgrade VALUES('grant-backfill');");
         EnsureDefenderColumns(connection, transaction);

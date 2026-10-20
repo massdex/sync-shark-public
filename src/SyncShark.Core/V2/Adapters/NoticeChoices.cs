@@ -128,7 +128,12 @@ public static class NoticeChoices
 
     public static bool IsAutoSyncFailure(Notice notice) => notice.ReasonKey?.StartsWith("autosync-failed", StringComparison.Ordinal) == true;
 
-    public static bool IsRetryNotice(Notice notice) => notice.RetainedVersion is null && (notice.FreeSpace is not null || notice.Repair is not null || notice.RebuildableRule is not null || notice.ReasonKey is "deletion-evidence-pending" or "links-excluded" or "link-item" or "stubs-left-alone" or "online-only-item" or "unreadable" or ItemBlocked or "dropbox-storage-full" or "export-required" || IsPairRetryNotice(notice) || notice.ReasonKey is "sync-retry" or "deletion-review" or "planning-degraded" or "recovery-unavailable" || IsRemovalAttention(notice) || IsRemovalReview(notice));
+    public static bool IsRetryNotice(Notice notice) => notice.RetainedVersion is null && (notice.FreeSpace is not null || notice.Repair is not null || notice.RebuildableRule is not null || notice.ReasonKey is "held-intents" or "permanent-boundary" or "deletion-evidence-pending" or "links-excluded" or "link-item" or "stubs-left-alone" or "online-only-item" or "unreadable" or ItemBlocked or "dropbox-storage-full" or "export-required" or RehashProtection.Reason || IsPairRetryNotice(notice) || notice.ReasonKey is "sync-retry" or "deletion-review" or "planning-degraded" or "recovery-unavailable" || IsRemovalAttention(notice) || IsRemovalReview(notice));
+
+    /// <summary>The combined background-verification summary (M3), including the legacy held-intents summary.</summary>
+    internal static bool IsVerificationSummary(Notice notice) =>
+        notice.ReasonKey == RehashProtection.Reason && notice.Rule == RehashProtection.Rule ||
+        notice.ReasonKey == "held-intents";
 
     public static bool IsRetryChoice(string choice) => choice is ShowTarget or SyncTargetSeparately or CopyLink or CopyLinkOutsideRoot or CopyLinkAgain or RemoveLinkStaging or ConfirmLargeDownload or PreviewMatches or ChooseFolder or RemoveRule or KeepRule or ExportHtml or CheckHistoryAgain or ReviewDeletion or OpenStorage or ReviewReserve or ExportDocx or ExportMarkdown or ExportPdf or MakeAvailableOffline or Rename or ShowRemaining or OpenDropbox or RepairHelp or RetryNow or Exclude or Ignore or DeleteReviewed or KeepRestore or OpenFolderSettings or OpenRecoverySettings or Dismiss or ReviewRemoval or ReviewRemovalA or ReviewRemovalB or ConfirmRemoval or RemovalNextPage or RemovalPreviousPage;
     public const string QuarantineRetry = "quarantine-retry";
@@ -157,7 +162,7 @@ public static class NoticeChoices
     /// <summary>Only ordinary item exclusions may outlive the requesting client while waiting for a run.</summary>
     public static bool CanQueueExclusion(Notice notice, string? path, string? choice) =>
         notice.RetainedVersion is null && choice is Ignore or Exclude &&
-        !IsPairRetryNotice(notice) && IsRetryNotice(notice) &&
+        !IsPairRetryNotice(notice) && notice.ReasonKey != "permanent-boundary" && IsRetryNotice(notice) &&
         !string.IsNullOrEmpty(path) && PairPath.Same(notice.Path, path) &&
         Options(notice).Any(option => option.Choice == choice);
 
@@ -179,7 +184,13 @@ public static class NoticeChoices
     public const string RebindPending = "pending: rebind arrives with the central registry (B-191)";
 
     public static IReadOnlyList<SyncNoticeOption> Options(Notice notice) =>
-        JournalSizing.IsNotice(notice)
+        notice.ReasonKey == "held-intents"
+            ? [new(ShowRemaining, "Show remaining changes (50 per page)")]
+            : notice.ReasonKey == RehashProtection.Reason
+            ? [new(ShowRemaining, "Show remaining changes (50 per page)")]
+            : notice.ReasonKey == "permanent-boundary"
+            ? [new(Ignore, "Ignore this information (keep boundary protected)")]
+            : JournalSizing.IsNotice(notice)
             ? [new(JournalSizing.Enlarge, "Enlarge (UAC)"), new(JournalSizing.NotNow, "Not now"), new(JournalSizing.Never, "Never")]
             : notice.DefenderHistory is { Cause: DefenderReview.SharedReleaseCause, SharedRelease: { } shared }
             ? [new(DefenderReleaseAllPairs, "Release in all pairs (also held by: " + (shared.OtherPairNames.Length == 0 ? "no other pairs" : shared.OtherPairNames) + ")"),

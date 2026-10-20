@@ -35,7 +35,7 @@ public sealed partial class SqliteStateStore
             var pairNo = (long)StoreSchema.Scalar(_connection, transaction,
                 "SELECT pair_no FROM pair WHERE pair_id=$id;", ("$id", pairId))!;
             var unfinished = (long)StoreSchema.Scalar(_connection, transaction,
-                "SELECT COUNT(*) FROM pending_effect WHERE pair_no=$p AND state IN ('started','uncertain','failed');",
+                "SELECT COUNT(*) FROM pending_effect WHERE pair_no=$p AND state IN ('started','uncertain','failed','held');",
                 ("$p", pairNo))!;
             if (unfinished > 0 && !dropUnfinished)
                 throw new InvalidOperationException($"Pair '{pairId}' has {unfinished} unfinished effects (including any folder-delete groups). " +

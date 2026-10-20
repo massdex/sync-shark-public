@@ -26,6 +26,11 @@ internal sealed class LinkExclusions
         "online-only placeholders left alone; they and the same paths on the other side are not synced");
 
     private const int TopFolders = 5;
+    // Which kind of protected path sits strictly under a container path, so a held intent can be retired under the
+    // notice that already explains it instead of being counted as background verification.
+    private const byte LinkKind = 1;
+    private const byte StubKind = 2;
+    private const byte PendingKind = 4;
     private readonly HashSet<string> _links;
     private readonly HashSet<string> _nonLocalLinks;
     private readonly HashSet<string> _stubs;
@@ -33,11 +38,11 @@ internal sealed class LinkExclusions
     private readonly RehashProtection? _rehash;
     private readonly Func<string, bool, bool>? _retryProtection;
     private readonly HashSet<string> _all;
-    private readonly HashSet<string> _containers;
+    private readonly Dictionary<string, byte> _containers;
 
     private LinkExclusions(IEnumerable<string> links, IEnumerable<string> stubs, IEnumerable<string>? pending = null,
         IEnumerable<string>? nonLocalLinks = null, RehashProtection? rehash = null,
-        Func<string, bool, bool>? retryProtection = null)
+        Func<string, bool, bool>? retryProtection = null, int heldCount = 0)
     {
         _links = new HashSet<string>(links, StringComparer.OrdinalIgnoreCase);
         _nonLocalLinks = new HashSet<string>(nonLocalLinks ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase);
@@ -45,11 +50,22 @@ internal sealed class LinkExclusions
         _pending = new HashSet<string>(pending ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase);
         _rehash = rehash;
         _retryProtection = retryProtection;
+        HeldCount = heldCount;
         _all = new HashSet<string>(_links.Concat(_stubs).Concat(_pending), StringComparer.OrdinalIgnoreCase);
-        _containers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var path in _all)
+        _containers = new Dictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
+        AddContainers(_links, LinkKind);
+        AddContainers(_stubs, StubKind);
+        AddContainers(_pending, PendingKind);
+    }
+
+    /// <summary>Verification holds counted after the run's intent classification; the combined summary shows both.</summary>
+    internal int HeldCount { get; }
+
+    private void AddContainers(IEnumerable<string> paths, byte kind)
+    {
+        foreach (var path in paths)
             for (var cut = path.LastIndexOf('/'); cut > 0; cut = path.LastIndexOf('/', cut - 1))
-                _containers.Add(path[..cut]);
+                _containers[path[..cut]] = (byte)(_containers.GetValueOrDefault(path[..cut]) | kind);
     }
 
     /// <summary>A bounded consumer's immutable overflow answers; ordinary snapshots are shared.</summary>
@@ -79,7 +95,8 @@ internal sealed class LinkExclusions
             .SelectMany(root => store.LiveFlagged(root.RootId, ItemFlags.Link)).Select(item => item.Path);
         return new(Flagged(ItemFlags.Link), stubsLeftAlone ? Flagged(ItemFlags.Placeholder) : Array.Empty<string>(),
             pending: HoldPaths(store, pair),
-            nonLocalLinks: nonLocalLinks, rehash: new RehashProtection(store, pair));
+            nonLocalLinks: nonLocalLinks, rehash: new RehashProtection(store, pair),
+            heldCount: store.CountHeldIntents(pair.PairId));
     }
 
     // Evidence observations may inspect links/stubs, but must not retire debt under a real hold.
@@ -101,7 +118,7 @@ internal sealed class LinkExclusions
     internal LinkExclusions With(LinkExclusions after) =>
         new(_links.Concat(after._links), _stubs.Concat(after._stubs), _pending.Concat(after._pending),
             _nonLocalLinks.Concat(after._nonLocalLinks), after._rehash ?? _rehash,
-            after._retryProtection ?? _retryProtection);
+            after._retryProtection ?? _retryProtection, after.HeldCount);
 
     /// <summary>
     /// Decision 64: also leaves alone, on both sides, every path whose user-decision notice is open (a first-sync tie
@@ -109,10 +126,10 @@ internal sealed class LinkExclusions
     /// decision notices themselves are listed.
     /// </summary>
     internal LinkExclusions WithPending(IEnumerable<string> pending) =>
-        new(_links, _stubs, _pending.Concat(pending), _nonLocalLinks, _rehash, _retryProtection);
+        new(_links, _stubs, _pending.Concat(pending), _nonLocalLinks, _rehash, _retryProtection, HeldCount);
 
     internal LinkExclusions WithRetryProtection(Func<string, bool, bool> protection) =>
-        new(_links, _stubs, _pending, _nonLocalLinks, _rehash, protection);
+        new(_links, _stubs, _pending, _nonLocalLinks, _rehash, protection, HeldCount);
 
     internal int Count => (int)Math.Min(int.MaxValue, _all.Count + (_rehash?.Count ?? 0) + (_retryProtection is null ? 0 : 1));
 
@@ -134,7 +151,41 @@ internal sealed class LinkExclusions
     /// <summary>True when a protected path lies strictly under the path (or the path is the whole pair).</summary>
     internal bool Contains(string path) => _retryProtection?.Invoke(path, true) == true ||
         _rehash?.Touches(path, descendants: true) == true ||
-        _all.Count > 0 && (path.Length == 0 || _containers.Contains(path));
+        _all.Count > 0 && (path.Length == 0 || _containers.ContainsKey(path));
+
+    /// <summary>Whether this exact path (or an ancestor) is a recorded link, with no other protection kind.</summary>
+    internal bool CoversLink(string path) => Covers(_links, path);
+
+    /// <summary>Whether a link lies strictly under this path (for a move or delete that would carry it).</summary>
+    internal bool ContainsLink(string path) =>
+        path.Length == 0 ? _links.Count > 0 : (_containers.GetValueOrDefault(path) & LinkKind) != 0;
+
+    /// <summary>Whether this exact path (or an ancestor) is a left-alone online-only placeholder.</summary>
+    internal bool CoversStub(string path) => Covers(_stubs, path);
+
+    /// <summary>Whether a left-alone placeholder lies strictly under this path.</summary>
+    internal bool ContainsStub(string path) =>
+        path.Length == 0 ? _stubs.Count > 0 : (_containers.GetValueOrDefault(path) & StubKind) != 0;
+
+    /// <summary>Whether this exact path (or an ancestor) waits on quarantine, Defender or a pair-wide decision.</summary>
+    internal bool CoversPending(string path) => Covers(_pending, path);
+
+    /// <summary>Whether a pending-evidence path lies strictly under this path.</summary>
+    internal bool ContainsPending(string path) =>
+        path.Length == 0 ? _pending.Count > 0 : (_containers.GetValueOrDefault(path) & PendingKind) != 0;
+
+    private static bool Covers(HashSet<string> paths, string path)
+    {
+        if (paths.Count == 0) return false;
+        if (paths.Contains(string.Empty)) return true;
+        for (var current = path; current.Length > 0;)
+        {
+            if (paths.Contains(current)) return true;
+            var cut = current.LastIndexOf('/');
+            current = cut < 0 ? string.Empty : current[..cut];
+        }
+        return false;
+    }
 
     /// <summary>Ordinary copy/source predicates protect every held path, including hash debt.</summary>
     internal Func<string, bool> Narrow(Func<string, bool> include) =>
@@ -159,7 +210,8 @@ internal sealed class LinkExclusions
 
     // The same protection without the LOCAL links (cloud links, stubs and pending decisions only).
     private LinkExclusions? _withoutLocalLinks;
-    private LinkExclusions WithoutLocalLinks => _withoutLocalLinks ??= new(_nonLocalLinks, _stubs, _pending, rehash: _rehash, retryProtection: _retryProtection);
+    private LinkExclusions WithoutLocalLinks => _withoutLocalLinks ??= new(_nonLocalLinks, _stubs, _pending,
+        rehash: _rehash, retryProtection: _retryProtection, heldCount: HeldCount);
 
     /// <summary>
     /// True when the path is protected by anything other than a local link: a cloud link, a left-alone stub or an
@@ -190,7 +242,10 @@ internal sealed class LinkExclusions
         if (_stubs.Count > 0)
             notices.Add(Summary(pairId, StubRule, StubReason, _stubs,
                 $"online-only placeholders left alone ({_stubs.Count}); not read, replaced or synced on either side"));
-        if (_rehash is { Count: > 0 }) notices.Add(_rehash.Summary(pairId));
+        // One combined summary for background verification debt: content verification (rehash or gap) and the
+        // intents currently parked for it. It stays open while either count is above zero (M3).
+        if (_rehash is { } rehash && (rehash.Count > 0 || HeldCount > 0))
+            notices.Add(rehash.Summary(pairId, HeldCount));
         return notices;
     }
 

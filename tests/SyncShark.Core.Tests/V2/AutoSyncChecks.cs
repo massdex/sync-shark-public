@@ -27,6 +27,8 @@ internal static partial class AutoSyncChecks
         await TwoPairs_IndependentAsync();
         await PauseWhileQueued_NeverStartsAsync();
         await Partial_RetriesOnlyWithFailuresAsync();
+        await HeldOnlyComplete_WaitsNormalIntervalAsync();
+        await HeldWithRealWork_StillRetriesAsync();
         await RetryAt_NotBypassedBySignalsAsync();
         await WatchFault_RebuildsAndHoldsAsync();
         await FailureChecksAsync();
@@ -294,6 +296,64 @@ internal static partial class AutoSyncChecks
                 "deferred item schedules a later run despite a throwing status subscriber; other subscribers still run");
         }
         Pass("Partial_RetriesOnlyWithFailures");
+    }
+
+    // continuous-sync.md section 2 (Retry) and section 7 case 12: temporary held intents are a completed run with
+    // held rows, not a failure, deferred work or pending deletion evidence. Such a report waits for signals or the
+    // safety poll instead of scheduling a retry.
+    private static async Task HeldOnlyComplete_WaitsNormalIntervalAsync()
+    {
+        await using var rig = new Rig(["p1"]);
+        rig.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Complete, held: 3) with { PendingVerification = 3 });
+        await rig.StartAsync();
+        await rig.ParkedAsync(AutoStatus.Idle);
+        var state = rig.State("p1");
+        var report = state.LastReport!;
+        Require(state.RetryAt is null, "a hold-only complete report schedules no retry");
+        Require(state.NextRunUtc - rig.Clock.GetUtcNow() == SafetyPoll,
+            "the held-only pair is parked on the normal safety interval");
+        Require(report.Outcome == RunOutcomes.Complete && report.Held == 3 && report.PendingVerification == 3 &&
+                report.FailureCount == 0 && report.Failures.Count == 0 && report.Deferred == 0 &&
+                report.DeletionEvidencePending.Count == 0,
+            "the held-only report is complete with held/pending counts and no failure, deferred or evidence counts");
+        rig.Clock.Advance(Settings.ChangeQuietWindow);
+        await rig.SettledAsync();
+        Require(rig.Run.Runs("p1") == 1, "a hold-only complete report does not run again inside the quiet window");
+        rig.Clock.Advance(SafetyPoll - Settings.ChangeQuietWindow);
+        await rig.ParkedAsync(AutoStatus.Waiting);
+        rig.Clock.Advance(Settings.ChangeQuietWindow);
+        await rig.ParkedAsync(AutoStatus.Idle);
+        Require(rig.Run.Runs("p1") == 2, "the held-only pair next runs at the normal safety poll, not on a retry");
+        Pass("HeldOnlyComplete_WaitsNormalInterval");
+    }
+
+    // A held/pending count must never mask outstanding work: a real failed result or pending deletion evidence still
+    // schedules the ordinary retry, so separating temporary holds cannot swallow failures.
+    private static async Task HeldWithRealWork_StillRetriesAsync()
+    {
+        await using (var failed = new Rig(["p1"]))
+        {
+            failed.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Complete, 3, Failure(Outcome.Failed))
+                with { PendingVerification = 3 });
+            await failed.StartAsync();
+            await failed.ParkedAsync(AutoStatus.Waiting);
+            Require(failed.State("p1").RetryAt - failed.Clock.GetUtcNow() == Settings.AutoRetryDelay,
+                "a failed result still retries even when the report also carries held/pending rows");
+            failed.Clock.Advance(Settings.AutoRetryDelay);
+            await failed.ParkedAsync(AutoStatus.Idle);
+            Require(failed.Run.Runs("p1") == 2, "the held report with a real failure retries at AutoRetryDelay");
+        }
+        await using (var evidence = new Rig(["p1"]))
+        {
+            evidence.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Complete) with
+            {
+                DeletionEvidencePending = ["pending.txt"]
+            });
+            await evidence.StartAsync();
+            await evidence.ParkedAsync(AutoStatus.Waiting);
+            Require(evidence.State("p1").RetryAt is not null, "pending deletion evidence still schedules its retry");
+        }
+        Pass("HeldWithRealWork_StillRetries");
     }
 
     private static async Task RetryAt_NotBypassedBySignalsAsync()

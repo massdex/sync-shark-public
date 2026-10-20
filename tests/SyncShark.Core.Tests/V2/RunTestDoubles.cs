@@ -453,6 +453,18 @@ internal sealed class RecordingStore : IStateStore
     }
 
     public IReadOnlyList<SyncAction> UnresolvedIntents(string pairId) => _inner.UnresolvedIntents(pairId);
+    public int CountUnresolvedIntents(string pairId) => _inner.CountUnresolvedIntents(pairId);
+    public void SetIntentHeld(string pairId, string actionId, bool held) => _inner.SetIntentHeld(pairId, actionId, held);
+    public void SetIntentsHeld(string pairId, IReadOnlyList<string> actionIds, bool held) =>
+        _inner.SetIntentsHeld(pairId, actionIds, held);
+    public int CountHeldIntents(string pairId) => _inner.CountHeldIntents(pairId);
+    public bool IsIntentHeld(string pairId, string actionId) => _inner.IsIntentHeld(pairId, actionId);
+    public IntentPage HeldIntentsPage(string pairId, string? cursor, int limit) =>
+        _inner.HeldIntentsPage(pairId, cursor, limit);
+    public IEnumerable<SyncAction> StreamUnresolvedIntents(string pairId) => _inner.StreamUnresolvedIntents(pairId);
+    public IEnumerable<IntentRow> StreamUnresolvedIntentRows(string pairId) =>
+        _inner.StreamUnresolvedIntentRows(pairId);
+    public string? PairForIntent(string actionId) => _inner.PairForIntent(actionId);
 
     public Exception? RefusalRefreshError { get; set; }
     public void RefreshProviderNameNotices(PairDef pair)

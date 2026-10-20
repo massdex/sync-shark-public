@@ -5,8 +5,8 @@ public sealed partial class SyncRun
     internal const string ExcludedIntentReason = "excluded after planning; not applied";
     internal const string ExcludedIntentNoticeKey = "excluded-outstanding-intents";
 
-    // Only explicit user exclusions/ignores can retire an unperformed intent. Ownership
-    // boundaries, links, quarantine and other temporary protection merely defer it.
+    // User exclusions/ignores have their own verify-only lane. Permanent ownership boundaries
+    // retire separately with an informational notice; links/quarantine/verification holds retain authority.
     private static ActionGuard ExclusionPredicates(PairDef pair)
     {
         bool Include(string path) => !pair.Excluded.Any(excluded => PairPath.IsSelfOrUnder(path, excluded));

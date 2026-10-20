@@ -14,6 +14,8 @@ internal interface ILocalGapStore
     IReadOnlyList<ItemState> GapDiscoveryPage(string rootId, LocalGapEpoch epoch, int limit);
     void GapDiscovered(string rootId, LocalGapEpoch epoch, ItemState item, bool requiresHash);
     void GapDiscoveredBatch(string rootId, LocalGapEpoch epoch, IReadOnlyList<(ItemState Item, bool RequiresHash)> items);
+    /// <summary>Records the discovery outcome on remaining entity work; queues and holds are unchanged.</summary>
+    void SetGapDiscoveryReasons(string rootId, LocalGapEpoch epoch, IReadOnlyList<(string ObjectId, string Reason)> reasons) { }
     void GapDiscoveryDone(string rootId, LocalGapEpoch epoch);
     IReadOnlyList<ItemState> GapHashPage(string rootId, LocalGapEpoch epoch, int limit);
     void StageGapHash(string rootId, LocalGapEpoch epoch, ItemState item, string hash, LocalGapProof proof);

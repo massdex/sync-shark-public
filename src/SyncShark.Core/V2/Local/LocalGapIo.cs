@@ -63,13 +63,29 @@ internal sealed class LocalGapIo(IStateStore known, V2Settings settings, IReadOn
             ? "journal unavailable or unsupported: verification needs a readable NTFS journal; ask the Windows administrator to check/enable it, then Sync Now"
             : _volume.IsInvalid ? "volume identity handle unavailable; retry when the volume is accessible" : null;
 
+        public string? LastFailureReason { get; private set; }
+
         public LocalGapProof? Probe(ItemState item)
         {
-            if (UnavailableReason is not null) return null;
+            LastFailureReason = null;
+            if (UnavailableReason is not null) { LastFailureReason = "journal-unavailable"; return null; }
             var identity = LocalItems.ParseObjectId(item.ObjectId);
             using var file = NtfsUsnJournal.OpenGapMetadata(_volume, identity.FileId);
-            if (file.IsInvalid || !NtfsUsnJournal.TryReadFileUsn(file, out var proof) || proof is null ||
-                proof.Volume != identity.Volume || proof.FileId != identity.FileId) return null;
+            if (file.IsInvalid)
+            {
+                LastFailureReason = "open-failed(" + Marshal.GetLastWin32Error() + ")";
+                return null;
+            }
+            if (!NtfsUsnJournal.TryReadFileUsn(file, out var proof, out var failure) || proof is null)
+            {
+                LastFailureReason = failure ?? "proof-unavailable";
+                return null;
+            }
+            if (proof.Volume != identity.Volume || proof.FileId != identity.FileId)
+            {
+                LastFailureReason = "metadata-mismatch";
+                return null;
+            }
             return new(_checkpoint!.Cursor, proof);
         }
 

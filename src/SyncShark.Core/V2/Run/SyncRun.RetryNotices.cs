@@ -54,6 +54,16 @@ public sealed partial class SyncRun
         Action<PairDef, PairDef>? saveNarrowerPair = null, Action<SyncAction, ActionResult>? removalResult = null, IProgress<RunProgress>? progress = null, Notice? acceptedExclusion = null, NoticeActionInput? input = null,
         Func<PairDef, RebuildableChoice, RebuildableChoice?, string>? updateRebuildableRule = null)
     {
+        // A bounded remaining-items read must not wait behind a long verification/sync run.
+        // The page is a current snapshot only; it neither changes intent authority nor claims fresh proof.
+        if (choice == NoticeChoices.ShowRemaining &&
+            _store.NoticeById(pairId, noticeId) is { Closed: false } savedHeld &&
+            NoticeChoices.IsVerificationSummary(savedHeld.Notice))
+        {
+            ct.ThrowIfCancellationRequested();
+            var pair = _store.Pair(pairId) ?? throw new SyncRunRefusedException("The pair is no longer available.");
+            return ShowHeldIntentItems(pair, input);
+        }
         string? observationSession = null;
         PairDef? observedPair = null;
         try
@@ -160,6 +170,13 @@ public sealed partial class SyncRun
                 _store.CloseNotice(noticeId, choice);
                 return "Notice ignored. Uploads remain suspended until a quota check finds free space. No files were excluded or deleted.";
             }
+            if (notice.ReasonKey == "permanent-boundary" && choice == NoticeChoices.Ignore)
+            {
+                _store.CloseNotice(noticeId, choice);
+                return "Information dismissed. The ownership boundary remains protected; no files were excluded, changed or marked synced.";
+            }
+            if (NoticeChoices.IsVerificationSummary(notice) && choice == NoticeChoices.ShowRemaining)
+                return ShowHeldIntentItems(pair, input);
             if (choice == NoticeChoices.Rename) return await RenameNoticeItemAsync(pair, notice, input?.Name, token);
             if (choice is NoticeChoices.ExportDocx or NoticeChoices.ExportMarkdown or NoticeChoices.ExportPdf or NoticeChoices.ExportHtml)
                 return await ExportNoticeDocumentAsync(pair, notice, choice, token);

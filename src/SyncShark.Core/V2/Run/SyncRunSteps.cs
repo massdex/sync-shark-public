@@ -86,6 +86,7 @@ public sealed partial class SyncRun
     {
         public static ReconcileResult None { get; } = new([], []);
         public IReadOnlyList<string> Protected { get; init; } = [];
+        public int PendingVerification { get; init; }
     }
 
     internal sealed class Tally(V2Settings? settings = null)
@@ -250,51 +251,131 @@ public sealed partial class SyncRun
     private async Task<ReconcileResult> ReconcileAsync(PairDef pair, ProgressThrottle throttle, CancellationToken ct,
         IReadOnlyList<string>? narrowedIgnoreRules = null)
     {
-        var guard = ActionPredicates(pair, LeftAlone(pair));
+        // The same protection snapshot answers the guard and the hold-cause classification below, so a rehash/held
+        // count is read once per run and the classification cannot disagree with the guard.
+        var protections = LeftAlone(pair);
+        var guard = ActionPredicates(pair, protections);
         var rules = SyncIgnorePolicy.Normalize((narrowedIgnoreRules ?? []).SelectMany(SyncIgnorePolicy.Parse).ToArray());
         var recoveryUnavailable = RecoverySafety.Unavailable(_endpoints.Writer(pair.A), _endpoints.Writer(pair.B)) is not null;
         bool CanReconcile(SyncAction action, ActionGuard prepared) =>
             !(recoveryUnavailable && RecoverySafety.RequiresRecovery(action)) &&
             (action.ProviderEffect?.Kind is "whole-folder-group" or "whole-folder-member" ||
             ReconcileAllowed(prepared, action) && !CarriesNewlyIgnored(pair, action, rules));
-        var outstanding = _store.UnresolvedIntents(pair.PairId);
+        var outstanding = _store.StreamUnresolvedIntentRows(pair.PairId);
         var exclusions = ExclusionPredicates(pair);
+        var pairs = _store.Pairs();
+        var owned = _productOwned(pair);
+        long? retirementGeneration = null;
         var sleeping = new List<ActionResult>();
         var intents = new List<SyncAction>();
+        // A resolved commit now clears a parked retry atomically, so keep this run's reconcile intents' retry rows
+        // (at most 256) to preserve the existing "Skipped is retried immediately" scheduling afterwards.
+        var reconcileRetries = new Dictionary<string, SyncRetry?>(StringComparer.Ordinal);
         var excludedIntents = new List<SyncAction>();
-        foreach (var entry in GuardedActions(outstanding, guard))
+        foreach (var batch in outstanding.Chunk(256))
         {
-            ct.ThrowIfCancellationRequested();
-            var action = entry.Action;
-            var retry = _store.SyncRetryAt(pair.PairId, action.Path);
-            if (retry?.RetryAfter > _time.GetUtcNow())
+            var heldIds = new List<string>(batch.Length);
+            var releasedIds = new List<string>(batch.Length);
+            var parkedRetries = new List<SyncRetry>();
+            // The page carries each row's stored state, so classification never point-queries it per intent.
+            var rowStates = batch.ToDictionary(row => row.Action.ActionId, row => row.State, StringComparer.Ordinal);
+            foreach (var entry in GuardedActions(batch.Select(row => row.Action), guard))
             {
-                sleeping.Add(new(action.ActionId, Outcome.Uncertain, null, null, null, retry?.LastError));
-                continue;
+                ct.ThrowIfCancellationRequested();
+                var action = entry.Action;
+                if (PermanentIntentBoundary(pair, action, pairs, owned) is { } boundary)
+                {
+                    retirementGeneration ??= _store.BeginGeneration(pair.A.RootId, RunKind);
+                    RetireBoundaryIntent(pair, action, boundary, retirementGeneration.Value);
+                    continue;
+                }
+                var retry = _store.SyncRetryAt(pair.PairId, action.Path);
+                // Classify protection before retry backoff: a previous failure must not put a now-held
+                // item on the fast retry loop. The original intent and its evidence stay intact.
+                var quarantined = IsQuarantinedIntent(pair, action);
+                if (quarantined ||
+                    !ReconcileAllowed(entry.Guard, action) && ReconcileAllowed(exclusions, action) &&
+                    !CarriesNewlyIgnored(pair, action, rules))
+                {
+                    switch (quarantined ? HoldCause.Pending : HoldCauseOf(protections, action))
+                    {
+                        // Quarantine, Defender grants and pair-wide decisions stay pending and unsynced on their own
+                        // notice. An unverified destructive effect under a link or stub (a delete, an overwrite or a
+                        // move) stays pending too: retirement drops the intent without observing what it did, so a
+                        // crash-interrupted apply must keep waiting for reconciliation. None of these are background
+                        // verification or retry debt; release any older hold so the combined count never includes them.
+                        case HoldCause.Link or HoldCause.Stub when RecoverySafety.RequiresRecovery(action):
+                        case HoldCause.Pending:
+                            if (rowStates[action.ActionId] == "held") releasedIds.Add(action.ActionId);
+                            ParkRetry(parkedRetries, retry);
+                            break;
+                        // Links and left-alone stubs never clear by themselves. A non-destructive intent has no effect
+                        // to observe, so retire it under the existing standing summary; a new notice would duplicate
+                        // that cause (M2).
+                        case HoldCause.Link:
+                            retirementGeneration ??= _store.BeginGeneration(pair.A.RootId, RunKind);
+                            RetireProtectedIntent(pair, action, retirementGeneration.Value, LinkRetiredReason);
+                            break;
+                        case HoldCause.Stub:
+                            retirementGeneration ??= _store.BeginGeneration(pair.A.RootId, RunKind);
+                            RetireProtectedIntent(pair, action, retirementGeneration.Value, StubRetiredReason);
+                            break;
+                        // Rehash/gap debt is the only cause the combined verification summary counts.
+                        default:
+                            if (rowStates[action.ActionId] != "held") heldIds.Add(action.ActionId);
+                            ParkRetry(parkedRetries, retry);
+                            break;
+                    }
+                    continue;
+                }
+                var wasHeld = rowStates[action.ActionId] == "held";
+                // M1: unpark on the retry row alone. Two writers overwrite state='held' outside this path
+                // (IntentTable.Commit and Record), so keying the unpark on the intent state stranded a parked row.
+                // Only parking writes the shape Kind sync + Held null + MaxValue; decision and restored-held rows
+                // always carry a kind or held evidence of their own.
+                if (retry is { Kind: "sync", Held: null, RetryAfter: var due } && due == DateTimeOffset.MaxValue)
+                {
+                    retry = retry with { RetryAfter = DateTimeOffset.MinValue };
+                    _store.SaveSyncRetry(pair.PairId, retry);
+                }
+                // Unpark before changing the classification: a crash can repeat release, never strand
+                // an uncertain intent behind the old held deadline.
+                if (wasHeld) releasedIds.Add(action.ActionId);
+                if (retry?.RetryAfter > _time.GetUtcNow())
+                {
+                    sleeping.Add(new(action.ActionId, Outcome.Uncertain, null, null, null, retry.LastError));
+                    continue;
+                }
+                if (CanReconcile(action, entry.Guard))
+                {
+                    if (intents.Count < 256)
+                    {
+                        intents.Add(action);
+                        reconcileRetries[action.ActionId] = retry;
+                    }
+                    else sleeping.Add(new(action.ActionId, Outcome.Uncertain, null, null, null, retry?.LastError));
+                }
+                else if (!ReconcileAllowed(exclusions, action) || CarriesNewlyIgnored(pair, action, rules))
+                {
+                    if (excludedIntents.Count < 256) excludedIntents.Add(action);
+                    else sleeping.Add(new(action.ActionId, Outcome.Uncertain, null, null, null, retry?.LastError));
+                }
+                // Recovery unavailability is a real failure, not background verification debt.
+                else sleeping.Add(new(action.ActionId, Outcome.Uncertain, null, null, null,
+                    "Recovery is unavailable; restore access to Recovery and retry."));
             }
-            // Holds retain authority and are not exclusions. Neither they nor the independent
-            // verify-only exclusion lane consume the bounded executor dispatch allowance.
-            if (IsQuarantinedIntent(pair, action)) continue;
-            if (CanReconcile(action, entry.Guard))
-            {
-                if (intents.Count < 256) intents.Add(action);
-                else sleeping.Add(new(action.ActionId, Outcome.Uncertain, null, null, null, retry?.LastError));
-            }
-            else if (!ReconcileAllowed(exclusions, action) || CarriesNewlyIgnored(pair, action, rules))
-            {
-                if (excludedIntents.Count < 256) excludedIntents.Add(action);
-                else sleeping.Add(new(action.ActionId, Outcome.Uncertain, null, null, null, retry?.LastError));
-            }
-            // Permanent boundaries (including nested pairs and product-owned paths) retain the
-            // intent and its footprint indefinitely; only explicit exclusion or positive proof retires it.
-            else sleeping.Add(new(action.ActionId, Outcome.Uncertain, null, null, null,
-                "Held by a protected path (link, placeholder, quarantine or ownership boundary); retained and re-checked when the hold clears."));
+            _store.SetIntentsHeld(pair.PairId, heldIds, true);
+            // Classification must be durable before parking retries. A crash before this loop leaves
+            // retry deadlines active, not lost; the next run safely repeats the classification.
+            foreach (var retry in parkedRetries) _store.SaveSyncRetry(pair.PairId, retry);
+            _store.SetIntentsHeld(pair.PairId, releasedIds, false);
         }
+        var pendingVerification = RefreshHeldIntentSummary(pair);
         var excludedUncertain = (await SettleExcludedIntentsAsync(pair, excludedIntents, ct)).Concat(sleeping).ToArray();
         // The phase's real total from its first line, so progress reads n/of-the-actual-count instead of 0/0.
         throttle.Report(RunPhases.Reconcile, null, 0, intents.Count);
         if (intents.Count == 0) return new ReconcileResult(excludedUncertain, [])
-        { Protected = OutstandingFootprints(pair.PairId) };
+        { Protected = OutstandingFootprints(pair.PairId), PendingVerification = pendingVerification };
         // An announced wait: the effects an earlier run left unconfirmed are re-checked now.
         await SyncByteProgressStream.ReportCurrentProcessAsync("Unconfirmed effects",
             $"{intents.Count} effect(s) unconfirmed; re-checking at {_time.GetUtcNow():HH:mm:ss}.", ProcessMessageKind.Notice);
@@ -306,7 +387,8 @@ public sealed partial class SyncRun
         foreach (var result in results)
         {
             if (!byId.TryGetValue(result.ActionId, out var action)) continue;
-            var retry = _store.SyncRetryAt(pair.PairId, action.Path);
+            var retry = reconcileRetries.TryGetValue(result.ActionId, out var known)
+                ? known : _store.SyncRetryAt(pair.PairId, action.Path);
             if (result.Outcome is Outcome.Uncertain or Outcome.Failed)
                 SaveFailedRetry(pair, action.Path, result.Reason, retry);
             else if (result.Outcome == Outcome.Done)
@@ -319,20 +401,57 @@ public sealed partial class SyncRun
             }
         }
         return new ReconcileResult(excludedUncertain.Concat(results.Where(result => result.Outcome == Outcome.Uncertain))
-            .ToArray(), touched) { Protected = OutstandingFootprints(pair.PairId) };
+            .ToArray(), touched) { Protected = OutstandingFootprints(pair.PairId), PendingVerification = pendingVerification };
+    }
+
+    // Why a guard-rejected intent is held. Only Verification is background verification debt that the combined
+    // summary counts; Link/Stub retire under their standing notice; Pending keeps its own notice and stays unsynced.
+    private enum HoldCause { Verification, Link, Stub, Pending }
+
+    // Mirrors ActionGuard exactly: a move or delete also rejects a path that CONTAINS a protected path, while a
+    // copy rejects only a path at or under one. Source paths are always checked as plain includes.
+    private static HoldCause HoldCauseOf(LinkExclusions protections, SyncAction action)
+    {
+        var strict = action.Kind is ActionKind.Move or ActionKind.Delete;
+        bool Touches(string? path, Func<string, bool> covers, Func<string, bool> contains) =>
+            path is not null && (covers(path) || strict && contains(path));
+        if (Touches(action.Path, protections.CoversLink, protections.ContainsLink) ||
+            Touches(action.FromPath, protections.CoversLink, protections.ContainsLink) ||
+            action.Source is { } linkSource && protections.CoversLink(linkSource.Path))
+            return HoldCause.Link;
+        if (Touches(action.Path, protections.CoversStub, protections.ContainsStub) ||
+            Touches(action.FromPath, protections.CoversStub, protections.ContainsStub) ||
+            action.Source is { } stubSource && protections.CoversStub(stubSource.Path))
+            return HoldCause.Stub;
+        if (Touches(action.Path, protections.CoversPending, protections.ContainsPending) ||
+            Touches(action.FromPath, protections.CoversPending, protections.ContainsPending) ||
+            action.Source is { } pendingSource && protections.CoversPending(pendingSource.Path))
+            return HoldCause.Pending;
+        return HoldCause.Verification;
+    }
+
+    // A retry for the same pending effect is not an independent failure while protected. Preserve its
+    // evidence/attempts, but park its deadline until protection clears.
+    private static void ParkRetry(List<SyncRetry> parked, SyncRetry? retry)
+    {
+        if (retry is { Held: null, Kind: "sync" } && retry.RetryAfter != DateTimeOffset.MaxValue)
+            parked.Add(retry with { RetryAfter = DateTimeOffset.MaxValue });
     }
 
     private RunReport WithReconciliation(RunReport report, ReconcileResult reconciliation) =>
-        reconciliation.Uncertain.Count == 0 ? report : report with
+        report with
         {
-            Outcome = report.Outcome == RunOutcomes.Stopped ? report.Outcome : RunOutcomes.Partial,
+            Outcome = reconciliation.Uncertain.Count == 0 || report.Outcome == RunOutcomes.Stopped
+                ? report.Outcome : RunOutcomes.Partial,
+            PendingVerification = report.PendingVerification + reconciliation.PendingVerification,
+            Held = report.Held + reconciliation.PendingVerification,
             Uncertain = report.Uncertain + reconciliation.Uncertain.Count,
             Failures = report.Failures.Concat(reconciliation.Uncertain).Take(_settings.FailureSampleLimit).ToArray()
         };
 
     // An unresolved effect owns its entire footprint until reconciliation proves its outcome.
     // Do not replay, overwrite, or expand an ancestor deletion across it; siblings remain runnable.
-    private IReadOnlyList<string> OutstandingFootprints(string pairId) => _store.UnresolvedIntents(pairId)
+    private IReadOnlyList<string> OutstandingFootprints(string pairId) => _store.StreamUnresolvedIntents(pairId)
         .SelectMany(action => new[] { action.Path, action.FromPath, action.Source?.Path, action.ExpectedTarget?.Path })
         .Where(path => path is not null).Select(path => path!)
         .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
@@ -669,12 +788,16 @@ public sealed partial class SyncRun
         BothScan scan, bool firstSync, ProgressThrottle throttle, CancellationToken ct, Action<HashRequest>? refresh = null)
     {
         throttle.Report(RunPhases.Comparing, null, 0, 0);
+        var comparison = System.Diagnostics.Stopwatch.StartNew();
         var rows = JoinRows(loadScope(), scan, firstSync);
         var requests = Planner.HashRequests(rows);
+        RunLog.Trace($"comparison scope/join: elapsed-ms={comparison.ElapsedMilliseconds}; rows={rows.Count}; hash-a={requests.PathsA.Count}; hash-b={requests.PathsB.Count}");
         if (requests.PathsA.Count == 0 && requests.PathsB.Count == 0) return rows;
         // Requests retain only paths; release the old joined inventory before hashing and reloading.
         rows = [];
+        comparison.Restart();
         await PatchHashesAsync(pair, scan, requests, ct);
+        RunLog.Trace($"comparison content requests completed: elapsed-ms={comparison.ElapsedMilliseconds}; hash-a={requests.PathsA.Count}; hash-b={requests.PathsB.Count}");
         refresh?.Invoke(requests);
         return JoinRows(loadScope(), scan, firstSync);
     }
@@ -1002,6 +1125,7 @@ public sealed partial class SyncRun
             }
             if (notice.NoticeId is not null &&
                 (notice.ReasonKey == "name-mapping-collision" || !PlanNotices.AwaitsAcknowledgement(notice)) &&
+                notice.ReasonKey is not (HeldIntentsKey or "permanent-boundary" or RehashProtection.Reason) &&
                 notice.ReasonKey != DropboxQuota.NoticeKey && notice.ReasonKey != QuarantineFailure.NoticeKey && notice.ReasonKey != ExcludedIntentNoticeKey && notice.ReasonKey != ProviderNameRefusedException.NoticeKey &&
                 !JournalSizing.IsNotice(notice) && notice.ReasonKey != HydrationFallbackNoticeKey && !NoticeChoices.IsRemovalAttention(notice) &&
                 !(notice.ReasonKey is "sync-retry" or "deletion-history-unavailable" &&

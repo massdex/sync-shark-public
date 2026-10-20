@@ -12,6 +12,15 @@ public sealed record DeletionEvidenceRecord(string Path, DateTimeOffset? Deleted
 /// <summary>Failed delta history reads are not negative evidence; retained independently of cache validation.</summary>
 public sealed record DeletionEvidenceFailure(int Attempts, DateTimeOffset FirstUtc, long Generation, bool Released);
 
+/// <summary>One bounded page of intents plus the exclusive keyset cursor for the next page.</summary>
+public sealed record IntentPage(IReadOnlyList<SyncAction> Items, string? NextCursor);
+
+/// <summary>One unresolved intent with the state it was streamed with, so a scan need not re-read it per row.</summary>
+public sealed record IntentRow(SyncAction Action, string State);
+
+/// <summary>One bounded page of unresolved intent rows in rowid order, plus the next exclusive cursor.</summary>
+public sealed record IntentRowsPage(IReadOnlyList<IntentRow> Items, string? NextCursor);
+
 /// <summary>The only place that reads and writes the sync database.</summary>
 public interface IStateStore : IDisposable
 {
@@ -251,8 +260,50 @@ public interface IStateStore : IDisposable
         foreach (var action in actions) RecordIntent(pairId, action);
     }
 
-    /// <summary>Intents still in play: those whose last outcome was started, uncertain or failed.</summary>
+    /// <summary>Intents still in play: those whose last outcome was started, uncertain, failed or temporarily held.</summary>
     IReadOnlyList<SyncAction> UnresolvedIntents(string pairId);
+
+    /// <summary>How many intents are unresolved (started, uncertain, failed or held); indexed and never materialized.</summary>
+    int CountUnresolvedIntents(string pairId) => UnresolvedIntents(pairId).Count;
+
+    /// <summary>
+    /// Classifies one intent as temporarily held for verification, or returns a held one to uncertain. Holding never
+    /// touches attempts or the update time, and an unknown/removed id is ignored rather than reinserted.
+    /// </summary>
+    void SetIntentHeld(string pairId, string actionId, bool held) { }
+
+    /// <summary>Classifies several intents in one call; stores may reuse one transaction per bounded batch.</summary>
+    void SetIntentsHeld(string pairId, IReadOnlyList<string> actionIds, bool held)
+    {
+        foreach (var actionId in actionIds) SetIntentHeld(pairId, actionId, held);
+    }
+
+    /// <summary>How many of the pair's intents are held for background verification; indexed, never materialized.</summary>
+    int CountHeldIntents(string pairId) => 0;
+
+    /// <summary>Whether this exact intent is currently held; a point lookup, false for an unknown or other pair's id.</summary>
+    bool IsIntentHeld(string pairId, string actionId) => false;
+
+    /// <summary>One bounded held-intent page, ordered by (updated, rowid); a null cursor starts at the first page.</summary>
+    IntentPage HeldIntentsPage(string pairId, string? cursor, int limit) => new([], null);
+
+    /// <summary>All unresolved intents, lazily paged in (updated, rowid) order so mutations cannot reorder the scan.</summary>
+    IEnumerable<SyncAction> StreamUnresolvedIntents(string pairId) => UnresolvedIntents(pairId);
+
+    /// <summary>
+    /// All unresolved intents with their stored state, lazily paged so a run streams a million intents in bounded
+    /// pages and does not point-query each row's state. A store without state pages reports the empty state.
+    /// </summary>
+    IEnumerable<IntentRow> StreamUnresolvedIntentRows(string pairId) =>
+        StreamUnresolvedIntents(pairId).Select(action => new IntentRow(action, string.Empty));
+
+    /// <summary>
+    /// The pair that owns this exact intent, by an indexed primary-key lookup where the store can provide one.
+    /// Reconciliation calls this per intent; the fallback scans pairs only for small custom stores.
+    /// </summary>
+    string? PairForIntent(string actionId) =>
+        Pairs().FirstOrDefault(pair => UnresolvedIntents(pair.PairId)
+            .Any(action => string.Equals(action.ActionId, actionId, StringComparison.Ordinal)))?.PairId;
 
     void AddNotices(IEnumerable<Notice> n);
     // Persistent stores override this to page reads and notice writes under one transaction.
@@ -519,6 +570,9 @@ public sealed record RunReport(string PairId, string Outcome, int Done, int Fail
 
     /// <summary>Effects whose commit could not be confirmed, including those outside the failure sample.</summary>
     public int Uncertain { get; init; }
+
+    /// <summary>Pending intents protected by temporary verification/evidence holds, not failed effects.</summary>
+    public int PendingVerification { get; init; }
 
     /// <summary>Total failed or unconfirmed effects, independent of the retained examples.</summary>
     public int FailureCount => Failed + Uncertain;

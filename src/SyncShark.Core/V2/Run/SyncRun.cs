@@ -572,6 +572,16 @@ public sealed partial class SyncRun : ISyncRun
         var reconcile = await ReconcileAsync(pair, throttle, ct, approved.NarrowedIgnoreRules);
         approved = ApplySafetyFilter(pair,
             ActionPredicates(pair, LeftAlone(pair).WithPending(reconcile.Protected), reviewedSelection), approved);
+        // Classification can change the held count or retire link/stub intents. Replace every summary the reviewed
+        // plan carries with the post-classification snapshot: the plan's copy was computed before this apply's
+        // reconciliation, and re-raising it later would refresh the stored counts back to the stale preview values.
+        var summaryLinks = LeftAlone(pair);
+        approved = approved with
+        {
+            Notices = approved.Notices.Where(notice => !LinkExclusions.IsSummary(notice))
+                .Concat(summaryLinks.Summaries(pair.PairId)).ToArray()
+        };
+        RaiseLinksSummary(pair, summaryLinks);
         // Decision 54 addendum, execution-time half: re-check the plan's delete victims here, under this run's gate,
         // right before executing. A scan that interleaved after apply's own preview (e.g. a concurrent plan command)
         // may have added a child to the store; the Executor's folder expansion reads it live, so a child the reviewed

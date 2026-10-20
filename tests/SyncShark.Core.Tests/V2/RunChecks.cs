@@ -13,6 +13,16 @@ internal static partial class RunChecks
         await HeldRetriesSurviveAsync();
         await ReleasedSurvivor_FlaggedAsync();
         await HeldIntentsDoNotStarveAsync();
+        await HeldIntentBoundariesAsync();
+        await HeldIntentSummaryAsync();
+        await HeldIntentRetryParksAsync();
+        await HeldIntentUnparkAfterOutsideCommitAsync();
+        await HeldIntentLinkAndStubRetireAsync();
+        await HeldIntentDestructiveLinkAndStubStayPendingAsync();
+        await HeldIntentPendingStaysUnsyncedAsync();
+        await HeldIntentPendingNoticeCountsAsync();
+        await HeldIntentQuarantineChoiceReconcilesAsync();
+        await HeldIntentApplySummaryUsesPostClassificationAsync();
         await HeldRetryRotationAndReleaseAsync();
         await HeldRetryExclusionAndContainersAsync();
         await ItemIgnoreWaitsForSettingsSaveAsync();

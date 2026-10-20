@@ -63,20 +63,31 @@ internal sealed class RehashProtection
         return ForPaths([path]).Touches(path, descendants);
     }
 
-    internal Notice Summary(string pairId)
+    /// <summary>
+    /// The one background-verification summary. It carries both counts: files awaiting content verification (rehash
+    /// or gap debt) and changes parked waiting for that verification. It is display-only (empty path, never a hold)
+    /// and the run closes it only when both counts are zero.
+    /// </summary>
+    internal Notice Summary(string pairId, int heldCount = 0)
     {
+        var waiting = heldCount > 0
+            ? $"{heldCount} {(heldCount == 1 ? "change is" : "changes are")} waiting for background verification; "
+            : string.Empty;
         if (_gap) return new Notice(pairId, Rule, NoticeKind.Info, "",
             "Local journal verification is pending; unvisited and unverified files stay protected while other files continue. " +
+            waiting +
             string.Join("; ", new[] { _pair.A.RootId, _pair.B.RootId }.Distinct()
                 .Where(id => ((ILocalGapStore)_store).HasGapProtection(id))
                 .Select(id => ((ILocalGapStore)_store).GapProgress(id))) +
             ". Options: when the journal is readable, leave the computer idle on AC power to verify automatically; " +
             "use Sync Now to admit verified results or retry failed items after correcting the reported cause. " +
-            "If the journal is unavailable, restore/enable it with a Windows administrator before retrying.", Reason);
+            "If the journal is unavailable, restore/enable it with a Windows administrator before retrying. " +
+            "Show remaining lists the changes parked for this verification; they are not marked synced.", Reason);
         var examples = _store.RehashReasons(_pair.A.RootId, 5).ToList();
         examples.AddRange(_store.RehashReasons(_pair.B.RootId, 5 - examples.Count));
         return new Notice(pairId, Rule, NoticeKind.Info, "",
-            $"{Count} files awaiting content verification; kept safe on both sides while other files continue; " +
-            "automatically retried next sync. " + string.Join("; ", examples), Reason);
+            $"{Count} files awaiting content verification; {waiting}kept safe on both sides while other files continue; " +
+            "automatically retried next sync. Show remaining lists the changes parked for this verification; they are not " +
+            "marked synced. " + string.Join("; ", examples), Reason);
     }
 }

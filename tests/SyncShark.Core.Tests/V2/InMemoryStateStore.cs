@@ -15,7 +15,11 @@ internal sealed class InMemoryStateStore : IStateStore
     { lock (_gate) return _retries.GetValueOrDefault((pairId, path.ToUpperInvariant())); }
     public IReadOnlyList<SyncRetry> DueSyncRetries(string pairId, DateTimeOffset now, int limit) =>
         ReadSyncRetries(pairId).Where(item => item.RetryAfter <= now).OrderBy(item => item.RetryAfter).Take(Math.Clamp(limit, 1, 256)).ToArray();
-    public int CountSyncRetries(string pairId) => ReadSyncRetries(pairId).Count(item => item.RetryAfter < DateTimeOffset.MaxValue);
+    // An indefinite pair-wide decision hold (Kind decision at the root path) is not scheduling debt, but one still
+    // waiting on a failed notice write (PendingNotice set) is.
+    public int CountSyncRetries(string pairId) => ReadSyncRetries(pairId).Count(item =>
+        item.RetryAfter < DateTimeOffset.MaxValue &&
+        !(item.Path.Length == 0 && item.Kind == "decision" && item.PendingNotice is null));
     public bool HasActiveRestoredRetries(string pairId) =>
         ReadSyncRetries(pairId).Any(item => item.ReprobeEvidence && item.RetryAfter < DateTimeOffset.MaxValue);
     public bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants, bool restoredOnly = false) =>
@@ -43,7 +47,7 @@ internal sealed class InMemoryStateStore : IStateStore
 
     private sealed record Generation(string RootId, string Kind);
     private sealed record Row(ItemState State, long ToGen, long FromGen);
-    private sealed record IntentRecord(SyncAction Action, string State);
+    private sealed record IntentRecord(SyncAction Action, string State, long Updated, long RowId);
 
     private readonly object _gate = new();
     private readonly Dictionary<long, Generation> _generations = new();
@@ -147,6 +151,9 @@ internal sealed class InMemoryStateStore : IStateStore
 
     private long _nextGeneration = 1;
     private long _noticeSeq;
+    // Mirrors SQLite's (updated, rowid) intent order: a monotonic update stamp and a stable row identity.
+    private long _intentUpdated;
+    private long _nextIntentRowId;
 
     public long BeginGeneration(string rootId, string kind)
     {
@@ -450,8 +457,18 @@ internal sealed class InMemoryStateStore : IStateStore
             if (IntentsFor(pairId).GetValueOrDefault(a.ActionId)?.Action.SuppressReconciledBaseline == true)
                 a = a with { SuppressReconciledBaseline = true };
             // a resolved intent (Done, Skipped) is deleted with its result, like the real store.
-            if (r.Outcome is Outcome.Done or Outcome.Skipped) IntentsFor(pairId).Remove(a.ActionId);
-            else IntentsFor(pairId)[a.ActionId] = new IntentRecord(a, r.Outcome.ToString().ToLowerInvariant());
+            // Any other outcome overwrites held, so a committer never leaves a stale hold behind.
+            var intents = IntentsFor(pairId);
+            var intentRow = intents.TryGetValue(a.ActionId, out var knownIntent) ? knownIntent.RowId : ++_nextIntentRowId;
+            if (r.Outcome is Outcome.Done or Outcome.Skipped)
+            {
+                intents.Remove(a.ActionId);
+                // M1: a resolved or retired intent never leaves a parked verification retry behind.
+                var parkedKey = (pairId, a.Path.ToUpperInvariant());
+                if (_retries.GetValueOrDefault(parkedKey) is { Kind: "sync", Held: null } parked &&
+                    parked.RetryAfter == DateTimeOffset.MaxValue) _retries.Remove(parkedKey);
+            }
+            else intents[a.ActionId] = new IntentRecord(a, r.Outcome.ToString().ToLowerInvariant(), ++_intentUpdated, intentRow);
 
             if (r.Recovery is { } recovery)
             {
@@ -533,17 +550,146 @@ internal sealed class InMemoryStateStore : IStateStore
 
     public void RecordIntent(string pairId, SyncAction a)
     {
-        lock (_gate) IntentsFor(pairId)[a.ActionId] = new IntentRecord(a, "started");
+        lock (_gate)
+        {
+            // Upsert semantics: a repeated action id replaces the row, keeps its stable row identity and clears a hold.
+            var intents = IntentsFor(pairId);
+            var rowId = intents.TryGetValue(a.ActionId, out var existing) ? existing.RowId : ++_nextIntentRowId;
+            intents[a.ActionId] = new IntentRecord(a, "started", ++_intentUpdated, rowId);
+        }
     }
 
     public IReadOnlyList<SyncAction> UnresolvedIntents(string pairId)
     {
         lock (_gate)
             return _intents.TryGetValue(pairId, out var map)
-                ? map.Values.Where(intent => intent.State is "started" or "uncertain" or "failed")
+                ? map.Values.Where(IsUnresolved).OrderBy(intent => intent.Updated)
+                    .ThenBy(intent => intent.Action.ActionId, StringComparer.Ordinal)
                     .Select(intent => intent.Action).ToArray()
                 : Array.Empty<SyncAction>();
     }
+
+    public int CountUnresolvedIntents(string pairId)
+    {
+        lock (_gate) return _intents.TryGetValue(pairId, out var map) ? map.Values.Count(IsUnresolved) : 0;
+    }
+
+    public void SetIntentHeld(string pairId, string actionId, bool held)
+    {
+        lock (_gate)
+        {
+            RequireIntentOwner(pairId, actionId);
+            ApplyHeld(pairId, actionId, held);
+        }
+    }
+
+    // Ownership matches SQLite's primary-key rule: an id already owned by another pair is rejected.
+    private void RequireIntentOwner(string pairId, string actionId)
+    {
+        if (_intents.Any(entry => !string.Equals(entry.Key, pairId, StringComparison.Ordinal) &&
+                entry.Value.ContainsKey(actionId)))
+            throw new InvalidOperationException($"Intent {actionId} belongs to another pair.");
+    }
+
+    // A missing id is a no-op, never a reinsert; an unchanged state is not rewritten.
+    private void ApplyHeld(string pairId, string actionId, bool held)
+    {
+        if (!_intents.TryGetValue(pairId, out var map) || !map.TryGetValue(actionId, out var record)) return;
+        if (held)
+        {
+            if (record.State != "held") map[actionId] = record with { State = "held" };
+        }
+        else if (record.State == "held")
+        {
+            // Rollback returns a hold to uncertain; attempts and the update stamp stay untouched.
+            map[actionId] = record with { State = "uncertain" };
+        }
+    }
+
+    public int CountHeldIntents(string pairId)
+    {
+        lock (_gate) return _intents.TryGetValue(pairId, out var map)
+            ? map.Values.Count(intent => intent.State == "held") : 0;
+    }
+
+    public bool IsIntentHeld(string pairId, string actionId)
+    {
+        lock (_gate) return _intents.TryGetValue(pairId, out var map) &&
+            map.TryGetValue(actionId, out var record) && record.State == "held";
+    }
+
+    public void SetIntentsHeld(string pairId, IReadOnlyList<string> actionIds, bool held)
+    {
+        ArgumentNullException.ThrowIfNull(actionIds);
+        // Mirror SQLite exactly: one 256-id transaction per chunk. Validate every ownership first so a later
+        // foreign id rolls the whole chunk back, while earlier committed chunks stay committed.
+        for (var offset = 0; offset < actionIds.Count; offset += 256)
+        {
+            var end = Math.Min(offset + 256, actionIds.Count);
+            lock (_gate)
+            {
+                for (var index = offset; index < end; index++) RequireIntentOwner(pairId, actionIds[index]);
+                for (var index = offset; index < end; index++) ApplyHeld(pairId, actionIds[index], held);
+            }
+        }
+    }
+
+    // Mirrors SQLite: a fixed rowid horizon captured once, then bounded pages in rowid order. Rows whose state
+    // becomes resolved after the horizon was captured simply drop out of the matching set; rowids never move.
+    public IEnumerable<IntentRow> StreamUnresolvedIntentRows(string pairId)
+    {
+        long through;
+        lock (_gate)
+            through = _intents.TryGetValue(pairId, out var map) && map.Count > 0
+                ? map.Values.Max(intent => intent.RowId) : 0;
+        long after = 0;
+        while (after < through)
+        {
+            List<(IntentRow Row, long RowId)> page;
+            lock (_gate)
+                page = _intents.TryGetValue(pairId, out var map)
+                    ? map.Values.Where(intent => IsUnresolved(intent) && intent.RowId > after && intent.RowId <= through)
+                        .OrderBy(intent => intent.RowId).Take(201)
+                        .Select(intent => (new IntentRow(intent.Action, intent.State), intent.RowId)).ToList()
+                    : new List<(IntentRow Row, long RowId)>();
+            if (page.Count == 0) yield break;
+            foreach (var row in page.Take(200)) yield return row.Row;
+            if (page.Count <= 200) yield break;
+            after = page[199].RowId;
+        }
+    }
+
+    public IEnumerable<SyncAction> StreamUnresolvedIntents(string pairId) =>
+        StreamUnresolvedIntentRows(pairId).Select(row => row.Action);
+
+    public string? PairForIntent(string actionId)
+    {
+        lock (_gate)
+            return _intents.FirstOrDefault(entry => entry.Value.ContainsKey(actionId)).Key;
+    }
+
+    public IntentPage HeldIntentsPage(string pairId, string? cursor, int limit)
+    {
+        if (limit is < 1 or > 200)
+            throw new ArgumentOutOfRangeException(nameof(limit), limit, "Intent pages are limited to 1..200.");
+        var after = cursor is null ? ((long Updated, long RowId)?)null : IntentPageCursor.Parse(cursor);
+        lock (_gate)
+        {
+            if (!_intents.TryGetValue(pairId, out var map)) return new IntentPage([], null);
+            IEnumerable<IntentRecord> rows = map.Values.Where(intent => intent.State == "held")
+                .OrderBy(intent => intent.Updated).ThenBy(intent => intent.RowId);
+            if (after is { } from)
+                rows = rows.Where(intent => intent.Updated > from.Updated ||
+                    (intent.Updated == from.Updated && intent.RowId > from.RowId));
+            var page = rows.Take(limit + 1).ToArray();
+            var items = page.Take(limit).Select(intent => intent.Action).ToArray();
+            var next = page.Length > limit ? IntentPageCursor.Encode(page[limit - 1].Updated, page[limit - 1].RowId) : null;
+            return new IntentPage(items, next);
+        }
+    }
+
+    private static bool IsUnresolved(IntentRecord intent) =>
+        intent.State is "started" or "uncertain" or "failed" or "held";
 
     public void AddNotices(IEnumerable<Notice> n)
     {

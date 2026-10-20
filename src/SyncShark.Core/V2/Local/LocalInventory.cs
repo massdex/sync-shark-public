@@ -206,9 +206,7 @@ public sealed partial class LocalInventory : IInventorySource
         var from = new NtfsUsnCheckpoint(journalId, through.FirstUsn, next, through.LowestValidUsn);
         if (through.RequiresFullReconciliation(cursor))
         {
-            (_known as ILocalGapStore)?.BeginGap(rootId, through.Cursor, next,
-                journalId == through.JournalId && next <= through.NextUsn,
-                journalId != through.JournalId ? "journal replaced" : next > through.NextUsn ? "cursor ahead of journal" : "journal wrapped past saved cursor");
+            BeginJournalGap(rootId, journalId, next, through);
             return Invalid(gen, rootId, cursor,
                 journalId != through.JournalId ? "journal replaced" : next > through.NextUsn ? "cursor ahead of journal" : "journal gap: cursor precedes retained range");
         }
@@ -636,6 +634,13 @@ public sealed partial class LocalInventory : IInventorySource
         new(rootId, _side, gen, string.Empty, Array.Empty<ItemState>(), new[] { string.Empty });
 
     internal string? LastFallbackReason { get; private set; }
+
+    // Shared by the journal branch and its synthetic wrap regression. The cursor is the
+    // next UNPROCESSED USN: equality is a candidate, and journal sizing is not identity.
+    internal void BeginJournalGap(string rootId, ulong journalId, long next, NtfsUsnCheckpoint through) =>
+        (_known as ILocalGapStore)?.BeginGap(rootId, through.Cursor, next,
+            journalId == through.JournalId && next <= through.NextUsn,
+            journalId != through.JournalId ? "journal replaced" : next > through.NextUsn ? "cursor ahead of journal" : "journal wrapped past saved cursor");
 
     internal void BeginFullGap(string rootId, string cursor, bool journalDeleted)
     {

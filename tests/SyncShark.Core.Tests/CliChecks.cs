@@ -1194,6 +1194,10 @@ internal static partial class CliChecks
             "--path", "Folder", "--choice", Massdex.SyncShark.V2.NoticeChoices.ShowRemaining,
             "--offset", "50", "--key", "notice-a", "--generation", "0", "--yes"]);
         Require(children.Offset == 50, "child inspection carries its bounded page offset");
+        var heldPage = SyncCliRegistry.Parse(["--cli", "conflicts", "resolve", "--pair", "pair-a",
+            "--choice", Massdex.SyncShark.V2.NoticeChoices.ShowRemaining, "--name", "123:50",
+            "--key", "held-summary", "--generation", "0", "--yes"]);
+        Require(heldPage.Name == "123:50", "pair summary remaining-items inspection carries its keyset cursor without an item path");
         foreach (var choice in new[] { Massdex.SyncShark.V2.NoticeChoices.ShowTarget,
             Massdex.SyncShark.V2.NoticeChoices.SyncTargetSeparately, Massdex.SyncShark.V2.NoticeChoices.CopyLink,
             Massdex.SyncShark.V2.NoticeChoices.CopyLinkAgain, Massdex.SyncShark.V2.NoticeChoices.RemoveLinkStaging,

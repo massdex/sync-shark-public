@@ -213,7 +213,7 @@ public sealed partial class SqliteStateStore : ILocalGapStore
                 StoreSchema.Execute(_connection, tx,
                     "INSERT INTO local_gap_item(root_no,object_id,epoch,expected_json) VALUES($r,$o,$e,$j) " +
                     "ON CONFLICT(root_no,object_id) DO UPDATE SET epoch=excluded.epoch,expected_json=excluded.expected_json," +
-                    "hash=NULL,proof_json=NULL,result_seq=0,failure_count=0,failure_reason=NULL,retry_allowed=1,defer_count=0,defer_reason=NULL;",
+                    "hash=NULL,proof_json=NULL,result_seq=0,failure_count=0,failure_reason=NULL,retry_allowed=1,defer_count=0,defer_reason=NULL,discovery_reason=NULL;",
                     ("$r", root.Value), ("$o", item.ObjectId), ("$e", epoch.Epoch), ("$j", JsonSerializer.Serialize(current)));
             else
                 StoreSchema.Execute(_connection, tx, "DELETE FROM local_gap_item WHERE root_no=$r AND object_id=$o;",
@@ -223,6 +223,22 @@ public sealed partial class SqliteStateStore : ILocalGapStore
                 "UPDATE local_gap SET after_object=$o WHERE root_no=$r AND epoch=$e AND after_object<$o;",
                 ("$r", root.Value), ("$e", epoch.Epoch), ("$o", item.ObjectId));
         }
+        tx.Commit();
+    });
+
+    void ILocalGapStore.SetGapDiscoveryReasons(string rootId, LocalGapEpoch epoch,
+        IReadOnlyList<(string ObjectId, string Reason)> reasons) => InStore(() =>
+    {
+        if (reasons.Count > 128) throw new ArgumentOutOfRangeException(nameof(reasons));
+        var root = RootNo(rootId);
+        if (root is null || ReadGap(root)?.Epoch != epoch.Epoch) return;
+        using var tx = _connection.BeginTransaction();
+        foreach (var (objectId, reason) in reasons)
+            StoreSchema.Execute(_connection, tx,
+                // Hashing may already have staged this row in the independent lane. Keep its
+                // discovery cause too; this update changes neither work eligibility nor proof.
+                "UPDATE local_gap_item SET discovery_reason=$why WHERE root_no=$r AND object_id=$o AND epoch=$e;",
+                ("$r", root.Value), ("$o", objectId), ("$e", epoch.Epoch), ("$why", reason));
         tx.Commit();
     });
 

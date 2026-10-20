@@ -142,7 +142,7 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
     {
         var pairs = _store.Pairs();
         var accounts = Accounts();
-        var pending = pairs.Sum(pair => _store.UnresolvedIntents(pair.PairId).Count);
+        var pending = pairs.Sum(pair => _store.CountUnresolvedIntents(pair.PairId));
         var attention = _store.OpenNotices(null).Count;
         return Task.FromResult(new SyncCliStatusData("Sync Shark", ProductVersion(), BuildIdentity.SourceRevision,
             SyncCli.StateAccessNote, _productRoot, AuthorityStateExists, accounts.Count, accounts,
