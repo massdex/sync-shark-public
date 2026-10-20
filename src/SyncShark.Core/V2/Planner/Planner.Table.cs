@@ -148,11 +148,12 @@ public static partial class Planner
         switch (present == Side.A ? sA : sB)
         {
             case RowState.Same:
-                // Decision 69: the Dropbox revision that was deleted is a copy of this file when the current
-                // hash exactly equals the deleted (baseline) Dropbox side's hash; history then needs no Recovery
-                // copy. A missing or unknown hash keeps the recovery-first delete.
+                // Decision 69: history replaces the Recovery copy only for a delete on a local target whose
+                // opposite side is Dropbox, and only when the current hash exactly equals the deleted
+                // (baseline) Dropbox side's hash. Every other target (Dropbox, google-drive, local/local)
+                // keeps the recovery-first delete, as does a missing or unknown hash.
                 Emit(ctx, row, 6, ActionKind.Delete, present, cur.Path, null, null, cur,
-                    !MatchesDeletedRevision(cur, DeletedSideHash(row, present)), key); // rule 6
+                    !CanUseDropboxHistory(ctx, present, cur, DeletedSideHash(row, present)), key); // rule 6
                 return;
             case RowState.Edited:
             case RowState.MovedEdited:
@@ -180,7 +181,16 @@ public static partial class Planner
         cur.Kind == ItemKind.File && cur.Hash is not null && revisionHash is not null &&
         string.Equals(cur.Hash, revisionHash, StringComparison.Ordinal);
 
-    /// <summary>The content hash of the baseline side that disappeared (the deleted Dropbox revision).</summary>
+    // Only a local target can rely on the other side's Dropbox history. Cloud targets retain app Recovery
+    // provenance (PreserveAsync is metadata-only); local/local and unknown providers must preserve the bytes.
+    private static bool CanUseDropboxHistory(Context ctx, Side target, ItemState cur, string? revisionHash) =>
+        string.Equals(target == Side.A ? ctx.Options.ProviderA : ctx.Options.ProviderB,
+            SyncProviders.Local, StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(target == Side.A ? ctx.Options.ProviderB : ctx.Options.ProviderA,
+            SyncProviders.Dropbox, StringComparison.OrdinalIgnoreCase) &&
+        MatchesDeletedRevision(cur, revisionHash);
+
+    /// <summary>The content hash of the baseline side that disappeared.</summary>
     private static string? DeletedSideHash(PlanRow row, Side present) =>
         present == Side.A ? row.Base?.B.Hash : row.Base?.A.Hash;
 
@@ -224,7 +234,7 @@ public static partial class Planner
     /// </summary>
     private static bool TryPreparedMatch(Context ctx, PlanRow row)
     {
-        if (!ctx.Options.FirstSync || row.Base is not null ||
+        if (row.Base is not null ||
             ctx.Options.MatchedAtPrepare is not { } matched ||
             (row.A is null) == (row.B is null))
             return false;
@@ -267,7 +277,7 @@ public static partial class Planner
             if (cur.Kind != ItemKind.File || MatchesDeletedRevision(cur, revisionHash))
             {
                 Emit(ctx, row, 19, ActionKind.Delete, present, cur.Path, null, null, cur,
-                    cur.Kind != ItemKind.File, null, needsReview: true);
+                    !CanUseDropboxHistory(ctx, present, cur, revisionHash), null, needsReview: true);
                 return;
             }
         }

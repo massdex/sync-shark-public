@@ -8,6 +8,22 @@ namespace Massdex.SyncShark.V2;
 /// </remarks>
 internal sealed class InMemoryStateStore : IStateStore
 {
+    private readonly Dictionary<(string Pair, string Path), SyncRetry> _retries = new();
+    public IEnumerable<SyncRetry> ReadSyncRetries(string pairId)
+    { lock (_gate) return _retries.Where(row => row.Key.Pair == pairId).Select(row => row.Value).ToArray(); }
+    public SyncRetry? SyncRetryAt(string pairId, string path)
+    { lock (_gate) return _retries.GetValueOrDefault((pairId, path.ToUpperInvariant())); }
+    public IReadOnlyList<SyncRetry> DueSyncRetries(string pairId, DateTimeOffset now, int limit) =>
+        ReadSyncRetries(pairId).Where(item => item.RetryAfter <= now).OrderBy(item => item.RetryAfter).Take(Math.Clamp(limit, 1, 256)).ToArray();
+    public int CountSyncRetries(string pairId) => ReadSyncRetries(pairId).Count(item => item.RetryAfter < DateTimeOffset.MaxValue);
+    public bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants) =>
+        ReadSyncRetries(pairId).Any(item => !active.Contains(item.Path) && (descendants
+            ? PairPath.IsSelfOrUnder(item.Path, path) : PairPath.IsSelfOrUnder(path, item.Path)));
+    public void SaveSyncRetry(string pairId, SyncRetry retry)
+    { lock (_gate) _retries[(pairId, retry.Path.ToUpperInvariant())] = retry; }
+    public void ClearSyncRetry(string pairId, string path)
+    { lock (_gate) _retries.Remove((pairId, path.ToUpperInvariant())); }
+
     private const long LiveToGen = long.MaxValue;
 
     private sealed record Generation(string RootId, string Kind);
@@ -685,7 +701,9 @@ internal sealed class InMemoryStateStore : IStateStore
             (prior.State.Size != item.Size || prior.State.Mtime != item.Mtime))
             foreach (var alias in live.Where(p => p.Value.State.ObjectId == item.ObjectId).ToArray())
                 live[alias.Key] = alias.Value with { State = alias.Value.State with { Hash = null, Flags = alias.Value.State.Flags & ~ItemFlags.NeedsRehash } };
-        var aliases = live.Values.Where(r => r.State.ObjectId == item.ObjectId).ToArray();
+        // Alias evidence is relevant only to rehash debt. Avoid a whole-store scan on every
+        // ordinary snapshot insertion (the million-item prepare fixture otherwise becomes quadratic).
+        var aliases = debt ? live.Values.Where(r => r.State.ObjectId == item.ObjectId).ToArray() : Array.Empty<Row>();
         var needs = debt && (aliases.Length == 0 || aliases.Any(r => (r.State.Flags & ItemFlags.NeedsRehash) != 0));
         if (needs) item = item with { Hash = null, Flags = item.Flags | ItemFlags.NeedsRehash };
         else if ((item.Flags & ItemFlags.NeedsRehash) != 0) item = item with { Hash = null, Flags = item.Flags & ~ItemFlags.NeedsRehash };

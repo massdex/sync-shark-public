@@ -8,7 +8,7 @@ public sealed partial class V2CliRuntime
     {
         var pair = RequirePair(pairId);
         choice = choice.ToLowerInvariant();
-        if (!NoticeChoices.IsRetainedVersionChoice(choice))
+        if (!NoticeChoices.IsRetainedVersionChoice(choice) && !NoticeChoices.IsRetryChoice(choice))
             throw new SyncCliUsageException("Use decisions resolve for a held winner choice, or choose a retained-version notice action.");
         if (conflictId is null || generation != 0)
             throw new SyncCliUsageException("Use the exact --key and --generation 0 from conflicts list.");
@@ -19,7 +19,21 @@ public sealed partial class V2CliRuntime
         {
             var notice = _store.OpenNotices(pairId).FirstOrDefault(item => item.NoticeId == conflictId &&
                 PairPath.Same(item.Path, relativePath));
-            if (notice?.RetainedVersion is null)
+            if (notice is not null && NoticeChoices.IsRetryNotice(notice) && NoticeChoices.IsRetryChoice(choice))
+            {
+                await _run.ApplyRetryNoticeChoiceAsync(pairId, conflictId, choice, cancellationToken,
+                    (previous, updated) => SaveNarrowerPair(previous, updated));
+                if (choice is not (NoticeChoices.RetryNow or NoticeChoices.DeleteReviewed or NoticeChoices.KeepRestore) || !_store.FirstSyncDone(pairId))
+                    return new SyncCliRunData(pairId, pair.Name, 0, 0, 0, 0, 0, false);
+                var retryReport = await _run.IncrementalAsync(pairId, new RunProgressForwarder(Console.Error.WriteLine), cancellationToken);
+                return new SyncCliRunData(pairId, pair.Name, retryReport.Uploaded, retryReport.Downloaded, 0,
+                    retryReport.KeptBoth, retryReport.Held, retryReport.Outcome == RunOutcomes.Stopped)
+                {
+                    Failed = retryReport.Failed, Deleted = retryReport.Deleted, Moved = retryReport.Moved,
+                    NeedsVerification = retryReport.Uncertain, Diagnostics = retryReport.Diagnostics
+                };
+            }
+            if (notice?.RetainedVersion is null || !NoticeChoices.IsRetainedVersionChoice(choice))
                 throw new SyncCliReviewException("That retained-version notice is no longer open. Refresh conflicts list; nothing was changed.");
             if (choice == NoticeChoices.Dismiss)
             {

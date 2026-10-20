@@ -356,7 +356,7 @@ internal static class CorrespondingIncludedOverlapChecks
         await fixture.RegisterRootsAsync();
         // An ISSUED (leased, nonterminal) aliased reservation must fence the translated child path.
         await fixture.CreatePathOperationAsync("op-issued-parent", ParentPair, ParentLeftRoot, NestedChildName + "/a");
-        await fixture.Db.AcquireOperationLeaseAsync("op-issued-parent", "worker-ov637-issued",
+        await fixture.Db.AcquireOperationLeaseAsync((await fixture.Db.FindRetainedActionIdAsync("idempotency-op-issued-parent"))!, "worker-ov637-issued",
             TimeSpan.FromMinutes(5));
         await RefuseAsync(() => fixture.CreatePathOperationAsync("op-issued-child", ChildPair, ChildLeftRoot,
             "a"), OverlapMessage);
@@ -427,6 +427,10 @@ internal static class CorrespondingIncludedOverlapChecks
         // nesting, so the opaque alias fence is exercised here through the SAME two production decision
         // entries the projection uses, with the same independently bound proofs (see OPAQUE-FENCE-OPEN in the
         // result ledger). Real reservations on both retained cloud roots stay available for the fence itself.
+        await RefuseAsync(() => fixture.RegisterLocalPlanningRootAsync());
+        await fixture.RetainRootObservationsAsync();
+        Require(await fixture.ActiveRootCountAsync() == 4,
+            "OV637-4 local planning root requires current bound opaque hierarchy, not display ancestry");
         await fixture.CreateParentGoogleOperationAsync("op-opaque-parent", NestedChildName + "/a");
         await fixture.CreateChildGoogleOperationAsync("op-opaque-child-z", "z", fixture.Evidence());
 
@@ -493,10 +497,12 @@ internal static class CorrespondingIncludedOverlapChecks
         await fixture.RetainRootObservationsAsync();
         await fixture.Db.RetainPairDefinitionAsync(fixture.Child, select: false);
         await fixture.ExpireRootObservationsAsync();
+        await RefuseAsync(() => fixture.RegisterLocalPlanningRootAsync());
+        Require(true, "OV637-6 stale hierarchy cannot admit even the same local planning root again");
         await fixture.CreateChildGoogleOperationAsync("op-sentinel-child", "z", null);
         await RefuseAsync(() => fixture.CreateParentGoogleOperationAsync("op-sentinel-parent", NestedChildName + "/z"),
             "no bound provider hierarchy context is available");
-        Require(await fixture.ActiveRootCountAsync() == 3,
+        Require(await fixture.ActiveRootCountAsync() == 4,
             "OV637-6 sentinel: the refused bypass wrote no authority row");
         // 3. NOT OVER-BLOCKING: once the bound context is current again, a path with no aliased competitor is
         // admitted exactly as before.
@@ -537,7 +543,7 @@ internal static class CorrespondingIncludedOverlapChecks
             "op-collide-parent-reopened", NestedChildName + "/z"), OverlapMessage);
         // OV637-6 ISSUED: a leased, nonterminal aliased reservation is fenced across the aliased translation.
         await fixture.CreateChildGoogleOperationAsync("op-collide-issued", "z4", null);
-        await fixture.Db.AcquireOperationLeaseAsync("op-collide-issued", "worker-ov637-issued",
+        await fixture.Db.AcquireOperationLeaseAsync((await fixture.Db.FindRetainedActionIdAsync("idempotency-op-collide-issued"))!, "worker-ov637-issued",
             TimeSpan.FromMinutes(5));
         await RefuseAsync(() => fixture.CreateParentGoogleOperationAsync("op-collide-parent-issued",
             NestedChildName + "/z4"), OverlapMessage);
@@ -563,7 +569,7 @@ internal static class CorrespondingIncludedOverlapChecks
             // The identical reservation is admitted again once the bound context is current.
             await noContext.RestoreRootObservationsAsync();
             await noContext.CreateParentGoogleOperationAsync("op-nocx-parent-ctx", NestedChildName + "/a");
-            Require(await noContext.ActiveRootCountAsync() == 3,
+            Require(await noContext.ActiveRootCountAsync() == 4,
                 "OV637-5 the refused no-context reservation wrote no authority row");
         }
     }
@@ -579,6 +585,8 @@ internal static class CorrespondingIncludedOverlapChecks
         Directory.CreateDirectory(rigRoot);
         using var instance = PilotInstanceLock.Acquire(Path.Combine(rigRoot, "state", "instance.lock"));
         using var http = new HttpClient(new NoProviderRequests());
+        var product = new SyncProductStateStore(instance.StateAuthority);
+        await product.UpdateAsync(current => current with { InstallationId = "installation-ov637-host" });
         using var host = new SyncAuthorityRuntimeHost(instance.StateAuthority, http);
         await host.Authority.InitializeAsync("installation-ov637-host", Profile, "ov637-host", "{}");
         var parentLocal = Directory.CreateDirectory(Path.Combine(rigRoot, "local")).FullName;
@@ -772,7 +780,7 @@ internal static class CorrespondingIncludedOverlapChecks
         {
             var objectId = "object-" + operationId;
             await Db.RegisterObjectAsync(objectId, "file");
-            await Db.CreateOperationAsync(new SyncAuthorityOperationPlan(operationId, "idempotency-" + operationId,
+            await CreateFixtureOperationAsync(Db, new SyncAuthorityOperationPlan(operationId, "idempotency-" + operationId,
                 SyncAuthorityOperationKind.UpdateRemote, pairId, objectId, 1, Profile, "{}", 1,
                 [new SyncAuthorityMember("member-" + operationId, pairId, objectId, "lock", rootBindingId,
                     null, null, null, path, "{}")], [], []), admission: Admission);
@@ -893,10 +901,10 @@ internal static class CorrespondingIncludedOverlapChecks
         {
             var objectId = "object-" + operationId;
             await db.RegisterObjectAsync(objectId, "file");
-            await db.CreateOperationAsync(new SyncAuthorityOperationPlan(operationId, "idempotency-" + operationId,
+            await CreateFixtureOperationAsync(db, new SyncAuthorityOperationPlan(operationId, "idempotency-" + operationId,
                 SyncAuthorityOperationKind.UpdateRemote, Parent.Id, objectId, Parent.PolicyRevision, Profile, "{}",
                 1, [new SyncAuthorityMember("member-" + operationId, Parent.Id, objectId, "lock",
-                    ParentCloudRootId, null, null, null, path, "{}")], [], []), Admission, default, evidence);
+                    ParentCloudRootId, null, null, null, path, "{}")], [], []), Admission, evidence);
         }
 
         internal async Task CreateChildGoogleOperationAsync(string operationId, string path,
@@ -904,10 +912,10 @@ internal static class CorrespondingIncludedOverlapChecks
         {
             var objectId = "object-" + operationId;
             await Db.RegisterObjectAsync(objectId, "file");
-            await Db.CreateOperationAsync(new SyncAuthorityOperationPlan(operationId, "idempotency-" + operationId,
+            await CreateFixtureOperationAsync(Db, new SyncAuthorityOperationPlan(operationId, "idempotency-" + operationId,
                 SyncAuthorityOperationKind.UpdateRemote, Child.Id, objectId, Child.PolicyRevision, Profile, "{}",
                 1, [new SyncAuthorityMember("member-" + operationId, Child.Id, objectId, "lock",
-                    ChildCloudRootId, null, null, null, path, "{}")], [], []), Admission, default, evidence);
+                    ChildCloudRootId, null, null, null, path, "{}")], [], []), Admission, evidence);
         }
 
         /// <summary>D3/OV637-5: make both published cloud observations stale by advancing their root generation.</summary>
@@ -935,7 +943,7 @@ internal static class CorrespondingIncludedOverlapChecks
         {
             var objectId = "object-" + operationId;
             await Db.RegisterObjectAsync(objectId, "directory");
-            await Db.CreateOperationAsync(new SyncAuthorityOperationPlan(operationId, "idempotency-" + operationId,
+            await CreateFixtureOperationAsync(Db, new SyncAuthorityOperationPlan(operationId, "idempotency-" + operationId,
                 SyncAuthorityOperationKind.CrossPairMove, Child.Id, objectId, Child.PolicyRevision, Profile,
                 System.Text.Json.JsonSerializer.Serialize(new { entryKind = "Directory", sourcePairId = Child.Id, destinationPairId = Parent.Id }), 1,
                 [new SyncAuthorityMember("member-" + operationId, Child.Id, objectId, "lock", ChildCloudRootId,
@@ -956,7 +964,14 @@ internal static class CorrespondingIncludedOverlapChecks
         {
             await Db.RetainOpaqueHierarchyObservationAsync(ParentSnapshot, Parent.Id, "dropbox", 1);
             await Db.RetainOpaqueHierarchyObservationAsync(ChildSnapshot, Child.Id, "dropbox", 1);
+            // Planning requires both endpoints. Admit the local endpoint only after the
+            // independently bound cloud observations can prove the complete correspondence.
+            await RegisterLocalPlanningRootAsync();
         }
+
+        internal Task RegisterLocalPlanningRootAsync() =>
+            Db.RegisterRootBindingAsync(ChildLocalRootId, Child.Id, "local", 1, "{}",
+                Child.LocalRoot, partitionCandidate: Child);
 
         /// <summary>A NEW authority database instance over the SAME file, for the restart leg.</summary>
         internal SyncAuthorityDatabase Reopen() => new SyncAuthorityDatabase(Db.DatabasePath);
@@ -1094,7 +1109,7 @@ internal static class CorrespondingIncludedOverlapChecks
             var db = database ?? Db;
             var objectId = "object-" + operationId;
             await db.RegisterObjectAsync(objectId, "file");
-            await db.CreateOperationAsync(new SyncAuthorityOperationPlan(operationId,
+            await CreateFixtureOperationAsync(db, new SyncAuthorityOperationPlan(operationId,
                 "idempotency-" + operationId, SyncAuthorityOperationKind.UpdateRemote, pairId, objectId, 1,
                 Profile, "{}", 1,
                 [new SyncAuthorityMember("member-" + operationId, pairId, objectId, "lock", rootBindingId,
@@ -1109,7 +1124,7 @@ internal static class CorrespondingIncludedOverlapChecks
             var db = database ?? Db;
             var objectId = "object-" + operationId;
             await db.RegisterObjectAsync(objectId, "directory");
-            await db.CreateOperationAsync(new SyncAuthorityOperationPlan(operationId,
+            await CreateFixtureOperationAsync(db, new SyncAuthorityOperationPlan(operationId,
                 "idempotency-" + operationId, SyncAuthorityOperationKind.CrossPairMove, pairId, objectId, 1,
                 Profile, System.Text.Json.JsonSerializer.Serialize(new { entryKind = "Directory", sourcePairId = pairId, destinationPairId = ChildPair }), 1,
                 [new SyncAuthorityMember("member-" + operationId, pairId, objectId, "lock", rootBindingId,
@@ -1147,6 +1162,49 @@ internal static class CorrespondingIncludedOverlapChecks
         }
 
         public void Dispose() { }
+    }
+
+    // Reservation checks deliberately use synthetic lock-only objects, not transfer effects.
+    // They still need genuine completed observation cuts and a freshly minted action ticket;
+    // otherwise action admission rejects them before the alias fence under test is reached.
+    private static readonly Dictionary<(string Database, string Pair), (string Local, string Cloud)> PlanningCuts = new();
+
+    private static async Task CreateFixtureOperationAsync(SyncAuthorityDatabase db,
+        SyncAuthorityOperationPlan plan, SyncAuthorityCommandAdmission admission,
+        IReadOnlyList<SyncAuthorityCloudHierarchySnapshot>? evidence = null)
+    {
+        var pairId = plan.PairId ?? throw new InvalidOperationException("A reservation fixture requires a pair.");
+        var roots = new Dictionary<string, string>();
+        await using (var connection = new Microsoft.Data.Sqlite.SqliteConnection(
+                         new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = db.DatabasePath }.ToString()))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT side,root_binding_id FROM root_binding WHERE pair_id=$pair AND side IN ('local','dropbox') AND state='active';";
+            command.Parameters.AddWithValue("$pair", pairId);
+            await using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync()) roots.Add(reader.GetString(0), reader.GetString(1));
+        }
+        var key = (db.DatabasePath, pairId);
+        if (!PlanningCuts.TryGetValue(key, out var cuts))
+        {
+            var local = await db.BeginScanGenerationAsync(pairId, roots["local"], "local", "manual", "{}");
+            await db.CompleteScanGenerationAsync(local);
+            var cloud = await db.BeginScanGenerationAsync(pairId, roots["dropbox"], "dropbox", "manual", "{}");
+            await db.CompleteScanGenerationAsync(cloud);
+            cuts = (local.ScanGenerationId, cloud.ScanGenerationId);
+            PlanningCuts.Add(key, cuts);
+        }
+        var set = await db.LoadPlanningObservationSetAsync(pairId, plan.ConfigurationRevision,
+            roots["local"], roots["dropbox"], cuts.Local, cuts.Cloud);
+        var registration = await db.ReserveActionAsync(plan.IdempotencyKey, admission);
+        plan = plan with
+        {
+            OperationId = registration.OperationId,
+            PlanningAuthorities = [set.Bind(SyncAuthorityReconciliationPlanner.ObservationSetIdentity(set), plan.ObjectId)]
+        };
+        await db.CreateOperationAsync(plan, admission, cloudHierarchyEvidence: evidence,
+            reservation: registration.Reservation);
     }
 
     private static SyncControlNamespaceBinding Control(string root, string pairId) => new(Installation, pairId,

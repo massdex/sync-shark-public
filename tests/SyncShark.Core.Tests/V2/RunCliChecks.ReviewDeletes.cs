@@ -18,7 +18,8 @@ internal static partial class RunCliChecks
         await Cli_ReviewDeletes_PrepareMatchedHeldLaneMissChangedSurvivorAsync();
         await Cli_ReviewDeletes_PrepareMatchedHashPassNoCopyBackAsync();
         await Cli_ReviewDeletes_PrepareMatchedMetadataStampNoCopyBackAsync();
-        await Cli_ReviewDeletes_HeldChildBlocksFolderDeleteAsync();
+        await Cli_ReviewDeletes_HeldChildBlocksFolderDeleteAsync(false);
+        await Cli_ReviewDeletes_HeldChildBlocksFolderDeleteAsync(true);
         await Cli_ReviewDeletes_ResolvedHeldChildKeepsFolderPendingAsync();
         await Cli_ReviewDeletes_NewChoiceVictimIsRefusedAsync();
         await Cli_ReviewDeletes_NewDeletionEvidenceVictimIsRefusedAsync();
@@ -62,7 +63,8 @@ internal static partial class RunCliChecks
             {
                 refused = true;
             }
-            Require(refused, "the run refuses a choice child expanded at execution time that the prepare never showed");
+            Require(!refused && fx.Store.FirstSyncDone(fx.Pair.PairId),
+                "the unreviewed child blocks the folder effect without refusing first-sync completion");
             Require(fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0, "the refused execution makes no writer call");
         }
         finally
@@ -96,8 +98,11 @@ internal static partial class RunCliChecks
                 CancellationToken.None);
             Require(result.Failed == 0 && result.FirstSyncComplete,
                 "a post-prepare deletion applies as ordinary sync without a new prepare");
+            Require(await fx.B.ObserveAsync("d/x.txt", default) is not null && fx.WriterB.Deletes == 0,
+                "post-preview deletion is not executed by first-sync apply");
+            await fx.Run().IncrementalAsync(fx.Pair.PairId, new Progress<RunProgress>(), default);
             Require(await fx.B.ObserveAsync("d/x.txt", CancellationToken.None) is null,
-                "the deletion propagated to the Dropbox side");
+                "the deletion propagated to the Dropbox side in ordinary sync");
         }
         finally
         {
@@ -127,8 +132,11 @@ internal static partial class RunCliChecks
                 CancellationToken.None);
             Require(result.Failed == 0 && result.FirstSyncComplete,
                 "a deletion after prepare propagates from the prepare's matched set without a baseline row");
+            Require(await fx.B.ObserveAsync("d/x.txt", default) is not null && fx.WriterB.Deletes == 0,
+                "post-preview deletion is not executed by first-sync apply");
+            await fx.Run().IncrementalAsync(fx.Pair.PairId, new Progress<RunProgress>(), default);
             Require(await fx.B.ObserveAsync("d/x.txt", CancellationToken.None) is null,
-                "the deletion propagated to the Dropbox side");
+                "the deletion propagated to the Dropbox side in ordinary sync");
         }
         finally
         {
@@ -156,6 +164,8 @@ internal static partial class RunCliChecks
                 CancellationToken.None);
             Require(result.Failed == 0 && result.FirstSyncComplete,
                 "a changed survivor applies as an ordinary copy-back");
+            Require(fx.WriterA.Deletes == 0 && fx.WriterB.Deletes == 0, "changed survivor is never deleted during apply");
+            await fx.Run().IncrementalAsync(fx.Pair.PairId, new Progress<RunProgress>(), default);
             var restored = await fx.A.ObserveAsync("d/x.txt", CancellationToken.None);
             Require(restored is not null && await fx.B.ObserveAsync("d/x.txt", CancellationToken.None) is not null,
                 "the changed side wins, so both sides hold it instead of the delete propagating");
@@ -187,6 +197,9 @@ internal static partial class RunCliChecks
                 CancellationToken.None);
             Require(result.Failed == 0 && result.FirstSyncComplete,
                 "a prepare-matched path is planned instead of held on an evidence cache miss");
+            Require(await fx.A.ObserveAsync("d/x.txt", default) is not null && fx.WriterA.Deletes == 0,
+                "post-preview local survivor waits for ordinary sync");
+            await fx.Run().IncrementalAsync(fx.Pair.PairId, new Progress<RunProgress>(), default);
             Require(await fx.A.ObserveAsync("d/x.txt", CancellationToken.None) is null,
                 "the unchanged local survivor is deleted as ordinary propagation");
             Require(fx.Store.Recoveries(fx.Pair.PairId).Count == 1, "the local delete is Recovery-first");
@@ -217,6 +230,8 @@ internal static partial class RunCliChecks
                 CancellationToken.None);
             Require(result.Failed == 0 && result.FirstSyncComplete,
                 "a changed prepare-matched survivor is not held and applies as a copy-back");
+            Require(fx.WriterA.Deletes == 0 && fx.WriterB.Deletes == 0, "changed survivor is never deleted");
+            await fx.Run().IncrementalAsync(fx.Pair.PairId, new Progress<RunProgress>(), default);
             Require(await fx.A.ObserveAsync("d/x.txt", CancellationToken.None) is not null &&
                 await fx.B.ObserveAsync("d/x.txt", CancellationToken.None) is not null,
                 "the changed side wins and both sides hold it");
@@ -253,6 +268,9 @@ internal static partial class RunCliChecks
                 CancellationToken.None);
             Require(result.Failed == 0 && result.FirstSyncComplete,
                 "the hashed-at-prepare survivor matches its final-row stamp and applies");
+            Require(await fx.A.ObserveAsync("d/x.txt", default) is not null && fx.WriterA.Deletes == 0,
+                "post-preview survivor remains until ordinary sync");
+            await fx.Run().IncrementalAsync(fx.Pair.PairId, new Progress<RunProgress>(), default);
             Require(await fx.A.ObserveAsync("d/x.txt", CancellationToken.None) is null,
                 "the deletion propagates; the survivor is not falsely copied back");
         }
@@ -297,6 +315,9 @@ internal static partial class RunCliChecks
             Require(fx.A.DeltaCalls > deltaCalls, "metadata-stamped apply resumed A from the prepare checkpoint");
             Require(result.Failed == 0 && result.FirstSyncComplete,
                 "a metadata-stamped survivor matches after the apply gains a hash");
+            Require(await fx.A.ObserveAsync("d/x.txt", default) is not null && fx.WriterA.Deletes == 0,
+                "post-preview survivor remains until ordinary sync");
+            await fx.Run().IncrementalAsync(fx.Pair.PairId, new Progress<RunProgress>(), default);
             Require(await fx.A.ObserveAsync("d/x.txt", CancellationToken.None) is null,
                 "the deletion propagates; the survivor is not falsely copied back");
         }
@@ -310,7 +331,7 @@ internal static partial class RunCliChecks
     // third-review finding 1: a held child is hidden from planner rows, so an ordinary folder
     // delete must not be emitted over it. The folder is held with a pending-evidence notice, the child survives, and
     // a later run (after the evidence resolves) handles the folder.
-    private static async Task Cli_ReviewDeletes_HeldChildBlocksFolderDeleteAsync()
+    private static async Task Cli_ReviewDeletes_HeldChildBlocksFolderDeleteAsync(bool sleeping)
     {
         var fx = Build();
         var folder = fx.A.Seed("d", "", ItemKind.Folder);
@@ -336,18 +357,30 @@ internal static partial class RunCliChecks
                 "a held child under the folder is never deleted by an ordinary folder-delete expansion");
             Require(await fx.A.ObserveAsync("d", CancellationToken.None) is not null,
                 "the folder stays while its held child is pending");
-            Require(await fx.A.ObserveAsync("d/keep.txt", CancellationToken.None) is null,
-                "the matched child's ordinary delete still runs; the held child never collapses it into the folder");
+            Require(await fx.A.ObserveAsync("d/keep.txt", CancellationToken.None) is not null,
+                "the matched post-preview delete waits for ordinary sync");
+            Require(result.FirstSyncComplete, "the pending held child does not prevent completion");
+            if (sleeping)
+            {
+                var retry = fx.Store.SyncRetryAt(fx.Pair.PairId, "d/new.txt")!;
+                fx.Store.SaveSyncRetry(fx.Pair.PairId, retry with { RetryAfter = DateTimeOffset.UtcNow.AddHours(1) });
+            }
+            var handoff = System.Text.Json.JsonSerializer.Serialize(fx.Store.ReadSyncRetries(fx.Pair.PairId));
+            var following = await fx.Run().IncrementalAsync(fx.Pair.PairId, new Progress<RunProgress>(), default);
+            Require(await fx.A.ObserveAsync("d/keep.txt", default) is null,
+                "the next ordinary run propagates the matched child's delete; before=" + handoff +
+                "; after=" + System.Text.Json.JsonSerializer.Serialize(new { Retry = fx.Store.ReadSyncRetries(fx.Pair.PairId), Report = following }));
+            Require(await fx.A.ObserveAsync("d/new.txt", default) is not null && await fx.A.ObserveAsync("d", default) is not null,
+                "ordinary propagation never expands the folder delete over its unreviewed child");
             Require(fx.Store.OpenNotices(fx.Pair.PairId).Any(notice =>
-                    notice.ReasonKey == "deletion-evidence-pending" && notice.Path == "d"),
-                "the blocked folder delete leaves a pending-evidence notice for the folder");
-            Require(!result.FirstSyncComplete, "the pending held child keeps the first sync incomplete for a later run");
+                notice.ReasonKey == "deletion-evidence-pending" && notice.Path == "d"),
+                "the blocked ordinary folder delete retains its pending-evidence notice");
         }
         finally
         {
             Cleanup(root);
         }
-        Console.WriteLine("PASS Cli_ReviewDeletes_HeldChildBlocksFolderDelete");
+        Console.WriteLine("PASS Cli_ReviewDeletes_HeldChildBlocksFolderDelete sleeping=" + sleeping);
     }
 
     // Fourth review finding 1: the reviewed held child resolves and finishes in the same apply, but the folder delete
@@ -380,12 +413,11 @@ internal static partial class RunCliChecks
                 "the reviewed held child resolves and its delete finishes in this apply");
             Require(await fx.A.ObserveAsync("d", CancellationToken.None) is not null,
                 "the evidence-blocked folder is not deleted in the same apply");
-            Require(!first.FirstSyncComplete,
-                "an evidence-blocked folder delete keeps the first sync incomplete");
-            var second = await runtime.ApplyFirstSyncAsync(fx.Pair.PairId, EmptyChoices, false, null, _ => { },
-                CancellationToken.None);
-            Require(second.Failed == 0 && second.FirstSyncComplete,
-                "the next apply replans the folder once nothing is held under it");
+            Require(first.FirstSyncComplete,
+                "an evidence-blocked folder is retained as ordinary retry work after completion");
+            var second = await fx.Run().IncrementalAsync(fx.Pair.PairId, new Progress<RunProgress>(), default);
+            Require(second.Failed == 0 && fx.Store.FirstSyncDone(fx.Pair.PairId),
+                "ordinary sync replans the folder once nothing is held under it");
             Require(await fx.A.ObserveAsync("d", CancellationToken.None) is null &&
                 await fx.B.ObserveAsync("d", CancellationToken.None) is null,
                 "the folder deletion propagates instead of the folder being recreated on Dropbox");
@@ -416,7 +448,7 @@ internal static partial class RunCliChecks
                 { ResolveDeleted = local.Mtime.AddHours(1), ContentHash = local.Hash });
             var result = await runtime.ApplyFirstSyncAsync(fx.Pair.PairId, EmptyChoices, false, null,
                 _ => { }, CancellationToken.None);
-            Require(result.UnreviewedPending == 1 && !result.FirstSyncComplete,
+            Require(result.UnreviewedPending == 1 && result.FirstSyncComplete,
                 "a deletion-evidence victim appearing after prepare stays pending for review");
             Require(fx.WriterA.Deletes == 0 && fx.WriterA.Preserves == 0 && fx.WriterB.Calls == 0 &&
                 (await fx.A.ObserveAsync("d/x.txt", CancellationToken.None))?.Hash == local.Hash,
@@ -427,10 +459,8 @@ internal static partial class RunCliChecks
             // A newly reviewed held path with different known content restores rather than deletes.
             fx.Provider.AddInventory(fx.Pair.B, new MissedDeletionEvidenceInventory(fx.B)
                 { ResolveDeleted = local.Mtime.AddHours(1), ContentHash = new string('a', 64) });
-            await runtime.PrepareFirstSyncAsync(fx.Pair.PairId, _ => { }, CancellationToken.None, EmptyChoices);
-            var restored = await runtime.ApplyFirstSyncAsync(fx.Pair.PairId, EmptyChoices, false, null,
-                _ => { }, CancellationToken.None);
-            Require(restored.Failed == 0 && restored.FirstSyncComplete && fx.WriterB.Puts == 1 &&
+            var restored = await fx.Run().IncrementalAsync(fx.Pair.PairId, new Progress<RunProgress>(), default);
+            Require(restored.Failed == 0 && fx.Store.FirstSyncDone(fx.Pair.PairId) && fx.WriterB.Puts == 1 &&
                 fx.WriterA.Deletes == 0 && fx.WriterA.Preserves == 0 &&
                 (await fx.A.ObserveAsync("d/x.txt", CancellationToken.None))?.Hash == local.Hash &&
                 (await fx.B.ObserveAsync("d/x.txt", CancellationToken.None))?.Hash == local.Hash &&
@@ -449,8 +479,14 @@ internal static partial class RunCliChecks
     // cannot be the one refusing it: the delete-review guard is.
     private static async Task Cli_ReviewDeletes_NewChoiceVictimIsRefusedAsync()
     {
+        foreach (var both in new[] { false, true })
+        {
         var fx = Build();
+        fx.A.Seed("d", "", ItemKind.Folder);
+        fx.B.Seed("d", "", ItemKind.Folder);
         fx.A.Seed("d/x.txt", "a");
+        var writes = new RecordingWriter(fx.A);
+        fx.Provider.AddWriter(fx.Pair.A, writes);
         const string choices = """{"oneSided":[{"prefix":"d/","side":"Local","action":"remove"}]}""";
         var root = TempRoot();
         try
@@ -458,17 +494,31 @@ internal static partial class RunCliChecks
             var runtime = Runtime(fx, root);
             await runtime.PrepareFirstSyncAsync(fx.Pair.PairId, _ => { }, CancellationToken.None, choices);
             fx.A.Seed("d/new", "", ItemKind.Folder);
-            var message = await ApplyRefusalAsync(runtime, fx, choices);
-            Require(message?.Contains("run prepare again", StringComparison.Ordinal) == true,
-                "a new one-sided choice victim that appeared after prepare is refused");
-            Require(fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0,
-                "the refused choice delete makes no writer call");
+            if (both) fx.B.Seed("d/new", "", ItemKind.Folder);
+            var result = await runtime.ApplyFirstSyncAsync(fx.Pair.PairId, choices, false, null, _ => { }, default);
+            Require(result.FirstSyncComplete, "new unreviewed victims do not refuse the run");
+            var effects = writes.Calls.Where(call => !call.StartsWith("Observe:", StringComparison.Ordinal) &&
+                !call.StartsWith("OpenRead:", StringComparison.Ordinal)).ToArray();
+            Require(effects.SequenceEqual(new[] { "Preserve:d/x.txt", "Delete:d/x.txt" }) && fx.WriterB.Calls == 0,
+                "the exact writer set is only recovery and deletion of the individually reviewed x.txt");
+            Require(await fx.A.ObserveAsync("d", default) is not null && await fx.B.ObserveAsync("d", default) is not null &&
+                await fx.A.ObserveAsync("d/new", default) is not null &&
+                (await fx.B.ObserveAsync("d/new", default) is not null) == both,
+                "the parent and every existing new child survive with no unreviewed writes");
+            if (!both)
+            {
+                Require(fx.Store.SyncRetryAt(fx.Pair.PairId, "d/new") is not null, "the unreviewed local child is deferred");
+                await fx.Run().IncrementalAsync(fx.Pair.PairId, new Progress<RunProgress>(), default);
+                Require(await fx.A.ObserveAsync("d/new", default) is not null && await fx.B.ObserveAsync("d/new", default) is not null,
+                    "ordinary sync subsequently copies the new local child rather than deleting it");
+            }
         }
         finally
         {
             Cleanup(root);
         }
-        Console.WriteLine("PASS Cli_ReviewDeletes_NewChoiceVictimIsRefused");
+        Console.WriteLine("PASS Cli_ReviewDeletes_NewChoiceVictimIsRefused both=" + both);
+        }
     }
 
     // The reviewed deletes are recorded by prepare and, when apply sees exactly the same ones, it applies them.
@@ -563,6 +613,9 @@ internal static partial class RunCliChecks
         var grown = Build();
         grown.A.Seed("a", "", ItemKind.Folder);
         grown.A.Seed("a/x.txt", "hi");
+        var independent = grown.A.Seed("outside.txt", "independent");
+        var writer = new RecordingWriter(grown.A);
+        grown.Provider.AddWriter(grown.Pair.A, writer);
         var grownRoot = TempRoot();
         try
         {
@@ -571,11 +624,17 @@ internal static partial class RunCliChecks
             // An empty folder adds no file bytes, so the remove-growth budget check passes and the delete-review
             // guard is what refuses the new collapsed-folder victim.
             grown.A.Seed("a/y", "", ItemKind.Folder);
-            var message = await ApplyRefusalAsync(runtime, grown, choices);
-            Require(message?.Contains("run prepare again", StringComparison.Ordinal) == true,
-                "a child that grows a collapsed choice folder delete after prepare is refused");
-            Require(grown.WriterA.Calls == 0 && grown.WriterB.Calls == 0,
-                "the refused collapsed folder delete makes no writer call");
+            var result = await runtime.ApplyFirstSyncAsync(grown.Pair.PairId, choices, false, null, _ => { }, default);
+            Require(result.FirstSyncComplete && result.Failed == 0, "grown collapsed choice does not refuse independent work");
+            Require(writer.Calls.All(call => call.StartsWith("Observe:", StringComparison.Ordinal) ||
+                call == "OpenRead:outside.txt") && grown.WriterB.Puts == 1 && grown.WriterB.Calls == 1,
+                "zero writes under the held folder; only the independent reviewed copy executes");
+            Require(await grown.A.ObserveAsync("a", default) is not null &&
+                await grown.A.ObserveAsync("a/x.txt", default) is not null && await grown.A.ObserveAsync("a/y", default) is not null &&
+                (await grown.B.ObserveAsync("outside.txt", default))?.Hash == independent.Hash,
+                "all children of the collapsed choice survive while other reviewed work applies");
+            Require(grown.Store.OpenNotices(grown.Pair.PairId).Any(notice => notice.Path == "a" && notice.ReasonKey == "reviewed-folder-grew"),
+                "grown folder choice has an explicit re-review notice");
         }
         finally
         {

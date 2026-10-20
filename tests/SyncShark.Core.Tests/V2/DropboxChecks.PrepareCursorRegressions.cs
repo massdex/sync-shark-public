@@ -140,8 +140,8 @@ internal static partial class DropboxChecks
                 store.Live(RootId, ["matched.txt", "remote-only.txt"]).Count == 0,
                 scenario + ": unresolved delta deletes prune phantom rows without losing the saved cursor or relisting");
             Require(store.DeletionEvidenceRows(pair.PairId, RootId).Any(row =>
-                row.Path == "remote-only.txt" && row.Failure is { } failure && failure.Released == released),
-                scenario + ": fixture exercises the intended pending versus permanently released evidence lane");
+                row.Path == "remote-only.txt" && row.Failure is { Released: true }),
+                scenario + ": permanent and transient history failures both release to one durable evidence hold");
             var full = await run.PreviewFirstSyncApplyResolvedAsync(pair.PairId, null, null, [], matches,
                 new Progress<RunProgress>(), CancellationToken.None);
             // Generation/action IDs are intentionally fresh; compare the semantic plan instead.
@@ -164,19 +164,17 @@ internal static partial class DropboxChecks
                 local.FailNextWrites = 1;
                 var failed = await runtime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { },
                     CancellationToken.None);
-                var retained = FirstSyncChoicesState.Load(productRoot, pair.PairId, store)!;
-                var checkpoint = retained.InventoryCursors.Single(entry => entry.RootId == RootId).Cursor;
-                Require(failed.Failed == 1 && !store.FirstSyncDone(pair.PairId) &&
-                    string.IsNullOrEmpty(store.Cursor(RootId)) &&
+                var checkpoint = store.Cursor(RootId)!;
+                Require(failed.Failed == 1 && store.FirstSyncDone(pair.PairId) &&
+                    !string.IsNullOrEmpty(checkpoint) &&
                     store.DeletionEvidenceRows(pair.PairId, RootId).Any(row => row.Failure is { Released: true }),
                     "released-evidence fixture retains a refreshed checkpoint after an unrelated failed download");
                 h.Wire.SeedChangePage(checkpoint, [], false, "released-next-delta");
                 var listsBeforeRetry = h.Wire.ListRequests.Count;
                 var feedsBeforeRetry = h.Wire.ContinueCursors.Count;
                 // Rebuild inventory/runtime: the historical released rows survive, but their phantom live rows do not.
-                var (retryRuntime, _) = PrepareCursorRuntime(h, local, pair, store, productRoot);
-                var retried = await retryRuntime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { },
-                    CancellationToken.None);
+                var (_, retryRun) = PrepareCursorRuntime(h, local, pair, store, productRoot);
+                var retried = await retryRun.IncrementalAsync(pair.PairId, new Progress<RunProgress>(), CancellationToken.None);
                 Require(retried.Failed == 0 && store.FirstSyncDone(pair.PairId) &&
                     h.Wire.ListRequests.Count == listsBeforeRetry &&
                     h.Wire.ContinueCursors.Skip(feedsBeforeRetry).FirstOrDefault() == checkpoint &&
@@ -190,7 +188,12 @@ internal static partial class DropboxChecks
             var applied = await runtime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { },
                 CancellationToken.None);
             Require(applied.Failed == 0 && store.FirstSyncDone(pair.PairId) &&
-                await local.ObserveAsync("matched.txt", CancellationToken.None) is null &&
+                await local.ObserveAsync("matched.txt", CancellationToken.None) is not null,
+                "post-preview matched deletion waits for ordinary sync after completion");
+            var safeCursor = store.Cursor(RootId)!;
+            h.Wire.SeedChangePage(safeCursor, [], false, safeCursor);
+            await run.IncrementalAsync(pair.PairId, new Progress<RunProgress>(), default);
+            Require(await local.ObserveAsync("matched.txt", CancellationToken.None) is null &&
                 await local.ObserveAsync("remote-only.txt", CancellationToken.None) is null,
                 scenario + ": resumed public apply completes without retrying a phantom download");
         }
@@ -223,32 +226,28 @@ internal static partial class DropboxChecks
             var (runtime, run) = PrepareCursorRuntime(h, local, pair, store, productRoot);
             var applied = await runtime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { },
                 CancellationToken.None);
-            var pending = FirstSyncChoicesState.Load(productRoot, pair.PairId, store);
-            Require(applied.Failed == 0 && applied.Deferred > 0 && !store.FirstSyncDone(pair.PairId) &&
-                string.IsNullOrEmpty(store.Cursor(RootId)) && pending is not null &&
-                pending.InventoryCursors.Any(entry => entry.RootId == RootId && entry.Cursor == "deferred-refreshed") &&
+            var pending = store.SyncRetryAt(pair.PairId, "held.txt");
+            Require(applied.Failed == 0 && applied.Deferred == 0 && store.FirstSyncDone(pair.PairId) &&
+                store.Cursor(RootId) == "deferred-refreshed" && pending is not null &&
                 await local.ObserveAsync("ordinary.txt", CancellationToken.None) is not null &&
                 await local.ObserveAsync("held.txt", CancellationToken.None) is not null,
-                "nonfailed partial apply completes unrelated work but cannot promote a cursor while evidence is deferred");
+                "nonfailed partial apply completes unrelated work and promotes the refreshed safe cursor despite the evidence hold");
             Require(h.Wire.Calls.Count(call => call == "/2/files/list_revisions") == 1 &&
                 !h.Wire.Calls.Any(call => call.Contains("/delete", StringComparison.Ordinal) ||
                     call.Contains("/restore", StringComparison.Ordinal) || call.Contains("/upload", StringComparison.Ordinal) ||
                     call.Contains("/move", StringComparison.Ordinal) || call.Contains("/copy", StringComparison.Ordinal)) &&
                 store.Baselines(pair.PairId).All(row => row.A.Path != "held.txt" && row.B.Path != "held.txt"),
                 "permanent Unknown is held after one probe: no retry, delete, restore, upload or held-path baseline");
-            Require(pending!.HeldDeletions.Any(item => item.Path == "held.txt") &&
+            Require(pending!.Held?.Path == "held.txt" &&
                 store.DeletionEvidenceRows(pair.PairId, RootId).All(item => item.Path != "held.txt"),
-                "unanswered authority remains in the held review and is not cached as resolved deletion evidence");
-            // Inspect the real planner after terminal Unknown; absence of endpoint writes alone cannot prove this.
-            var plan = await run.PreviewFirstSyncAsync(pair.PairId, new Progress<RunProgress>(), CancellationToken.None);
-            Require(plan.Actions.All(action => action.Path != "held.txt" && action.FromPath != "held.txt") &&
-                plan.HeldDeletions.Any(item => item.Path == "held.txt"),
-                "terminal Unknown creates no held-path plan action and retains the pending deletion review");
+                "unanswered authority remains in the durable held row and is not cached as resolved deletion evidence");
+            Require(pending.ReviewedActions is { Count: 0 } && pending.ProposedActions is null &&
+                store.UnresolvedIntents(pair.PairId).All(action => action.Path != "held.txt" && action.FromPath != "held.txt"),
+                "terminal Unknown retains no executable held-path action, only evidence recheck input");
         }
         using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System))
-            Require(!store.FirstSyncDone(pair.PairId) && string.IsNullOrEmpty(store.Cursor(RootId)) &&
-                FirstSyncChoicesState.Load(productRoot, pair.PairId, store) is { } reopened &&
-                reopened.HeldDeletions.Any(item => item.Path == "held.txt"),
-                "deferred non-promotion and the pending review survive SQLite reopen");
+            Require(store.FirstSyncDone(pair.PairId) && store.Cursor(RootId) == "deferred-refreshed" &&
+                store.SyncRetryAt(pair.PairId, "held.txt")?.Held?.Path == "held.txt",
+                "completion, safe cursor and held evidence input survive SQLite reopen");
     }
 }

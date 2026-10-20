@@ -101,8 +101,9 @@ internal static partial class RunCliChecks
                 notice.Detail.Contains("folder contents", StringComparison.Ordinal) &&
                 notice.Detail.Contains("skipped; no changes applied", StringComparison.Ordinal)),
                 "the exact ancestor has an explicit notice that its entire effect and contents were skipped");
-            Require(fx.Store.Pair(fx.Pair.PairId)?.Excluded.SequenceEqual(["node_modules/keep"]) == true,
-                "a blocked path is never persisted as a rebuildable exclusion");
+            Require(fx.Store.Pair(fx.Pair.PairId)!.Excluded.Contains("node_modules/keep") &&
+                fx.Store.Pair(fx.Pair.PairId)!.Excluded.Contains("node_modules"),
+                "the reviewed rebuildable exclusion persists while the protected child and cloud tree stay untouched");
             Require(await fx.B.ObserveAsync("node_modules", CancellationToken.None) == cloudFolder &&
                 await fx.B.ObserveAsync("node_modules/x.js", CancellationToken.None) == cloudFile &&
                 await fx.A.ObserveAsync("node_modules/x.js", CancellationToken.None) == localFile &&
@@ -490,8 +491,10 @@ internal static partial class RunCliChecks
     }
 
     // An unfinished removal keeps the pair in first-sync mode and saves no exclusions, so the removal is retried.
-    private static async Task Cli_Completion_NoExclusionsWhenRemovalFailsAsync()
+    internal static async Task Cli_Completion_NoExclusionsWhenRemovalFailsAsync()
     {
+        foreach (var grows in new[] { false, true })
+        {
         var fx = Build();
         fx.A.Seed("package.json", "{}");
         fx.A.Seed("node_modules", "", ItemKind.Folder);
@@ -509,13 +512,29 @@ internal static partial class RunCliChecks
             var result = await runtime.ApplyFirstSyncAsync(fx.Pair.PairId, choices, false, null, _ => { },
                 CancellationToken.None);
             Require(result.Failed > 0, "the cloud removal failed");
-            Require(!fx.Store.FirstSyncDone(fx.Pair.PairId) && fx.Store.Pair(fx.Pair.PairId)?.Excluded.Count == 0,
-                "no exclusions and no completion when the removal did not finish");
+            Require(fx.Store.FirstSyncDone(fx.Pair.PairId) && fx.Store.Pair(fx.Pair.PairId)!.Excluded.Contains("node_modules"),
+                "completion persists the reviewed exclusion even when removal is unfinished");
+            var puts = fx.WriterB.Puts;
+            var deletes = fx.WriterB.Deletes;
+            if (grows) fx.B.Seed("node_modules/new.txt", "unreviewed cloud child");
+            await fx.Run().IncrementalAsync(fx.Pair.PairId, new Progress<RunProgress>(), default);
+            await fx.Run().IncrementalAsync(fx.Pair.PairId, new Progress<RunProgress>(), default);
+            Require(fx.WriterB.Puts == puts && await fx.A.ObserveAsync("node_modules/x.js", default) is not null,
+                "later retries never re-upload the excluded rebuildable or remove its local content");
+            if (grows)
+                Require(await fx.B.ObserveAsync("node_modules/new.txt", default) is not null &&
+                    await fx.B.ObserveAsync("node_modules/x.js", default) is not null && fx.WriterB.Deletes == deletes &&
+                    fx.Store.OpenNotices(fx.Pair.PairId).Any(notice => notice.Path == "node_modules" && notice.ReasonKey == "reviewed-folder-grew"),
+                    "new cloud child changes the frozen signature: whole reviewed removal stays held, with no deletes");
+            else
+                Require(await fx.B.ObserveAsync("node_modules", default) is null,
+                    "the unchanged reviewed cloud removal finishes on a later retry");
         }
         finally
         {
             Cleanup(root);
         }
-        Console.WriteLine("PASS Cli_Completion_NoExclusionsWhenRemovalFails");
+        Console.WriteLine("PASS Cli_Completion_NoExclusionsWhenRemovalFails grows=" + grows);
+        }
     }
 }

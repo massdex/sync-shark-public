@@ -38,7 +38,8 @@ internal sealed class ProgressDelivery
                 {
                     lock (_gate)
                     {
-                        if (!_abandoned) failed(error);
+                        try { if (!_abandoned) failed(error); }
+                        catch (Exception) { /* A display-error callback is also best-effort. */ }
                     }
                 }
             }

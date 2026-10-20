@@ -68,6 +68,25 @@ public static partial class Planner
         return new HashRequest(a.ToArray(), b.ToArray());
     }
 
+    // An unlinked inventory at unique, unmapped paths has no cross-row create destination or
+    // folder move. Within-row hash needs were already collected above; one-sided creates target
+    // an absent path, and conflict labels are allocated against occupancy. Avoid two action drafts.
+    // Linked/mapped scopes retain the general projection: occupancy alone cannot model folder moves.
+    private static bool OnlyUnlinkedPaths(IReadOnlyList<PlanRow> rows)
+    {
+        var occupied = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var row in rows)
+        {
+            if (row.Base is not null || row.A is null && row.B is null ||
+                row.A is { } a && DropboxNameMapping.MatchPath(a) != a.Path ||
+                row.B is { } b && DropboxNameMapping.MatchPath(b) != b.Path ||
+                row.A is { } left && row.B is { } right &&
+                    (!PathEqual(left.Path, right.Path) || left.Kind != right.Kind) ||
+                !occupied.Add((row.A ?? row.B)!.Path)) return false;
+        }
+        return true;
+    }
+
     /// <summary>A neutral label rule for collision discovery; labels only pick free paths and never reach a plan.</summary>
     private static readonly LabelRule DiscoveryLabel = new("{name} [{side}]{ext}", "s", TimeSpan.Zero, "A", "B");
 
@@ -81,7 +100,8 @@ public static partial class Planner
     /// names a present file without a hash, so with none there is nothing to draft.
     /// </summary>
     private static IEnumerable<(Side Side, string Path)> CollisionHashNeeds(IReadOnlyList<PlanRow> rows) =>
-        !rows.Any(r => r.A is { Kind: ItemKind.File, Hash: null } || r.B is { Kind: ItemKind.File, Hash: null })
+        !rows.Any(r => r.A is { Kind: ItemKind.File, Hash: null } || r.B is { Kind: ItemKind.File, Hash: null }) ||
+        OnlyUnlinkedPaths(rows)
             ? Enumerable.Empty<(Side, string)>()
             : new[] { false, true }.SelectMany(firstSync =>
                 BuildDraft(string.Empty, rows, new PlanOptions(TimeSpan.Zero, firstSync, DiscoveryLabel, DiscoveryLabelAttempts)).HashNeeds);

@@ -104,7 +104,9 @@ public sealed partial class Executor : IExecutor
             if (grouped.TryGetValue(intents[index].ActionId, out var result))
             {
                 results[index] = result;
-                progress?.Report(++completed);
+                completed++;
+                try { progress?.Report(completed); }
+                catch (Exception) { /* Reporting cannot undo a durable reconciliation result. */ }
             }
         await Parallel.ForEachAsync(Enumerable.Range(0, intents.Count)
             .Where(index => !grouped.ContainsKey(intents[index].ActionId)), new ParallelOptions
@@ -140,7 +142,9 @@ public sealed partial class Executor : IExecutor
             }
             results[index] = result;
             // Only now, after this intent's durable commit, has one item actually completed.
-            progress?.Report(Interlocked.Increment(ref completed));
+            var count = Interlocked.Increment(ref completed);
+            try { progress?.Report(count); }
+            catch (Exception) { /* Reporting cannot undo a durable reconciliation result. */ }
         }).ConfigureAwait(false);
         return results;
     }

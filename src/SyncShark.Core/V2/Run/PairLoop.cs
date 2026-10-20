@@ -194,9 +194,12 @@ internal sealed class PairLoop
     {
         // The report carries its real completion instant, so the tray announces this run at its true time and can
         // order two completions without inventing a timestamp of its own.
+        if (_last is { Deferred: > 0 } previous && report.Deferred < previous.Deferred)
+            _backoff = TimeSpan.Zero; // A bounded backlog is draining; don't exponentially slow useful progress.
         _last = report with { CompletedUtc = _in.Time.GetUtcNow() };
         if (report.Outcome is RunOutcomes.Stopped or RunOutcomes.Paused) return;
-        if (report.Outcome == RunOutcomes.Failed || report.FailureCount > 0) ScheduleRetry();
+        if (report.Outcome == RunOutcomes.Failed || report.FailureCount > 0 || report.Failures.Count > 0 || report.Deferred > 0 ||
+            report.DeletionEvidencePending.Count > 0) ScheduleRetry();
         else _backoff = TimeSpan.Zero;
     }
 
@@ -210,7 +213,7 @@ internal sealed class PairLoop
 
     private void Hold(Exception error)
     {
-        _heldUntilKick = error is EndpointAccessException or SyncRunRefusedException;
+        _heldUntilKick = error is EndpointAccessException;
         _held = error switch
         {
             EndpointAccessException => AutoSyncReasons.AccountAccess,

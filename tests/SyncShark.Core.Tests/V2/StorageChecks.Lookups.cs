@@ -41,6 +41,10 @@ internal static partial class StorageChecks
             "Live's leaf lookup uses the stored leaf key");
         Require(plans.Any(line => line.StartsWith("Live:", StringComparison.Ordinal) && line.Contains("dir_key (path_key=?)")),
             "Live's folder lookup uses the stored folder key");
+        Require(plans.Any(line => line.StartsWith("LiveBatch:", StringComparison.Ordinal) && Regex.IsMatch(line, leafKey)),
+            "LiveBatch's leaf lookup uses the stored leaf key");
+        Require(plans.Any(line => line.StartsWith("LiveBatch:", StringComparison.Ordinal) && line.Contains("dir_key (path_key=?)")),
+            "LiveBatch's folder lookup uses the stored folder key");
         Require(plans.Any(line => line.StartsWith("LiveUnder:", StringComparison.Ordinal) && Regex.IsMatch(line, leafKey)),
             "LiveUnder's prefix item uses the stored leaf key");
         Require(plans.Count(line => line.StartsWith("BaselinesTouching", StringComparison.Ordinal) &&

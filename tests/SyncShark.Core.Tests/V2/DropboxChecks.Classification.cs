@@ -148,8 +148,8 @@ internal static partial class DropboxChecks
         using (var connection = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + SqliteStateStore.DatabasePath(state)))
         {
             connection.Open();
-            Require((long)StoreSchema.Scalar(connection, null, "PRAGMA user_version;")! == 11,
-                "classification v9, observation v10 and rehash v11 publish coordinated schema v11");
+            Require((long)StoreSchema.Scalar(connection, null, "PRAGMA user_version;")! == 12,
+                "classification, observation, rehash and item retries publish coordinated schema v12");
         }
     }
 

@@ -179,21 +179,32 @@ internal static partial class RunCliChecks
     private static async Task Cli_Choices_RemoveMayNotGrowAsync()
     {
         const string remove = """{"oneSided":[{"prefix":"a","side":"Local","action":"remove"}]}""";
-        Action<Fixture>[] growth = [fx => fx.A.Seed("a/new.txt", "n"), fx => fx.A.Seed("a/x.txt", "much longer")];
-        foreach (var grow in growth)
+        foreach (var newFile in new[] { true, false })
         {
             var fx = Build();
             fx.A.Seed("a/x.txt", "hi");
+            fx.A.Seed("outside.txt", "independent reviewed work");
+            var writer = new RecordingWriter(fx.A);
+            fx.Provider.AddWriter(fx.Pair.A, writer);
             var root = TempRoot();
             try
             {
                 var runtime = Runtime(fx, root);
                 await runtime.PrepareFirstSyncAsync(fx.Pair.PairId, _ => { }, CancellationToken.None, remove);
-                grow(fx);
-                var message = await ApplyRefusalAsync(runtime, fx, remove);
-                Require(message?.Contains("run prepare again", StringComparison.Ordinal) == true,
-                    "a remove that grew since prepare is refused");
-                Require(fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0, "the refused remove makes no writer call");
+                if (newFile) fx.A.Seed("a/new.txt", "n");
+                else fx.A.Seed("a/x.txt", "much longer");
+                var result = await runtime.ApplyFirstSyncAsync(fx.Pair.PairId, remove, false, null, _ => { }, default);
+                Require(result.FirstSyncComplete && result.Failed == 0, "growth does not refuse independent reviewed work");
+                var effects = writer.Calls.Where(call => !call.StartsWith("Observe:", StringComparison.Ordinal) &&
+                    !call.StartsWith("OpenRead:", StringComparison.Ordinal)).ToArray();
+                Require(effects.SequenceEqual(newFile ? new[] { "Preserve:a/x.txt", "Delete:a/x.txt" } : Array.Empty<string>()),
+                    "only the unchanged individually reviewed file may be deleted; an enlarged victim gets zero writes");
+                Require(fx.WriterB.Puts == 1 && fx.WriterB.Calls == 1 && await fx.B.ObserveAsync("outside.txt", default) is not null,
+                    "independent copy proceeds with no unreviewed remote writes");
+                Require(await fx.A.ObserveAsync(newFile ? "a/new.txt" : "a/x.txt", default) is not null &&
+                    (newFile ? fx.Store.SyncRetryAt(fx.Pair.PairId, "a/new.txt") is not null :
+                        fx.Store.OpenNotices(fx.Pair.PairId).Any(notice => notice.Path == "a/x.txt" && notice.ReasonKey == "reviewed-folder-grew")),
+                    "new or enlarged victim survives with durable retry input or an attention notice");
             }
             finally
             {

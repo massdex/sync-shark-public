@@ -32,8 +32,8 @@ internal static partial class StorageChecks
         using (var connection = new SqliteConnection("Data Source=" + SqliteStateStore.DatabasePath(data)))
         {
             connection.Open();
-            Require((long)StoreSchema.Scalar(connection, null, "PRAGMA user_version;")! == 11,
-                "directory mapping v7 followed by refused index v8 uses coordinated schema v11");
+            Require((long)StoreSchema.Scalar(connection, null, "PRAGMA user_version;")! == 12,
+                "directory mapping v7 followed by refused index v8 uses coordinated schema v12");
             Require((long)StoreSchema.Scalar(connection, null,
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='fs_refused';")! == 1,
                 "refused index follows directory mapping migration");

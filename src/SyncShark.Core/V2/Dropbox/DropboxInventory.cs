@@ -292,13 +292,33 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
         }
         var failures = _known.DeletionEvidenceRows(_pairId, _root.RootId).Where(row => row.Failure is not null)
             .ToDictionary(row => row.Path, StringComparer.OrdinalIgnoreCase);
-        // A later incarnation starts a new history budget. Keep the open notice's planner hold,
-        // but never let an old failed deletion hide a future deletion of a re-created remote file.
+        // A later incarnation retires obsolete evidence and its decision, including evidence whose
+        // successful probe already replaced the failure row. Query only observed upserts, never all retries.
         var recreated = feed.GroupBy(change => change.Path, StringComparer.OrdinalIgnoreCase)
-            .Where(group => group.Last().Entry is not null && failures.ContainsKey(group.Key))
+            .Where(group => group.Last().Entry is not null && (failures.ContainsKey(group.Key) ||
+                _known.SyncRetryAt(_pairId, group.Key) is { Kind: "deletion-evidence" or "decision", Held: not null }))
             .Select(group => group.Key).ToArray();
         _known.RemoveDeletionEvidence(_pairId, _root.RootId, recreated);
-        foreach (var path in recreated) failures.Remove(path);
+        foreach (var path in recreated)
+        {
+            failures.Remove(path);
+            if (_known.SyncRetryAt(_pairId, path) is { Kind: "deletion-evidence" or "decision", Held: not null })
+                _known.ClearSyncRetry(_pairId, path);
+        }
+        if (recreated.Length > 0)
+        {
+            var presentAgain = recreated.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var notice in _known.OpenNotices(_pairId).Where(notice => presentAgain.Contains(notice.Path) &&
+                notice.ReasonKey is "deletion-review" or "deletion-history-unavailable" or "deletion-evidence-pending"))
+                if (notice.NoticeId is not null) _known.CloseNotice(notice.NoticeId, "remote-recreated");
+        }
+        // Upgrade previously released failures into the same ordinary retry queue, including
+        // empty feeds. Recreating a file above resets evidence but never authorizes a stale deletion.
+        foreach (var failure in failures.Values.Where(row => row.Failure!.Released))
+            if (_known.SyncRetryAt(_pairId, failure.Path) is null)
+                _known.SaveSyncRetry(_pairId, new SyncRetry(failure.Path, "deletion-evidence",
+                    failure.Failure!.Attempts, "Deletion history was unavailable.", DateTimeOffset.MinValue,
+                    Held: new HeldDeletion(failure.Path, _side == Side.A ? Side.B : Side.A)));
         var released = failures.Values.Where(row => row.Failure!.Released).Select(row => row.Path)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var deletePaths = deleted.Keys.Where(path => !folders.Contains(path) && !noFileVictim.Contains(path) &&
@@ -321,13 +341,13 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
             var previous = failures.GetValueOrDefault(path)?.Failure;
             var attempts = (previous?.Attempts ?? 0) + (previous?.Generation == gen ? 0 : 1);
             var first = previous?.FirstUtc ?? now;
-            var release = result.PermanentFailure || attempts >= 3 || now - first >= TimeSpan.FromHours(24);
-            // Persist the notice before recording release: a crash cannot advance a cursor without its hold.
-            // Do not re-raise old released notices on later runs (a user's dismissal must stick).
-            if (release)
-                _known.AddNotices([new Notice(_pairId, 19, NoticeKind.Info, path,
-                    $"Deletion history could not be read for {path}; kept locally; options: delete locally / keep / retry",
-                    "deletion-history-unavailable")]);
+            // Persist item-owned retry input BEFORE releasing this cursor. The retained path stays
+            // protected, but unrelated changes no longer replay while history is unavailable.
+            var oldRetry = _known.SyncRetryAt(_pairId, path);
+            if (oldRetry is null)
+                _known.SaveSyncRetry(_pairId, new SyncRetry(path, "deletion-evidence", 1, result.Reason,
+                    now.AddSeconds(10), Held: new HeldDeletion(path, _side == Side.A ? Side.B : Side.A)));
+            var release = true;
             _known.StoreDeletionEvidence(_pairId, _root.RootId,
                 [new DeletionEvidenceRecord(path, null, Failure: new(attempts, first, gen, release))]);
             if (release) released.Add(path);
@@ -335,11 +355,9 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
         var changes = new List<Change>();
         foreach (var change in collapsed)
         {
-            // Do not ingest an unresolved deletion, or an ancestor replacement/deletion that would erase it.
-            // The old cursor replays these paths next run; unrelated changes can still make progress.
-            if (!firstSync && change.Entry is null && released.Contains(change.Path)) continue;
-            // Released paths remain planner-held by their notice, not inventory-held: ingest later
-            // uploads and ancestor changes rather than silently advancing past them.
+            // Released tombstones are observations, not local-delete authority. Their durable retry row
+            // protects the local victim in both directions while the remote absence is ingested and the cursor advances.
+            // Keeping a phantom remote row would make a later explicit choice fail its OppositeAbsent guard.
             if (!firstSync && pending.Keys.Where(path => !released.Contains(path)).Any(path => PairPath.IsSelfOrUnder(change.Path, path) ||
                 PairPath.IsUnder(path, change.Path))) continue;
             if (change.Entry is null)

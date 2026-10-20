@@ -10,12 +10,33 @@ internal static class LocalChecks
     internal const string InstallationId = "localv2install0001";
     internal const string PairId = "pair00001";
 
-    private static string _base = string.Empty;
+    private static string _base = DefaultTestBase();
+
+    private static string DefaultTestBase()
+    {
+        var configured = Environment.GetEnvironmentVariable("SYNCSHARK_TEST_ROOT");
+        var root = string.IsNullOrWhiteSpace(configured) ? Path.GetTempPath() : configured;
+        if (!Path.IsPathFullyQualified(root))
+            throw new InvalidOperationException("SYNCSHARK_TEST_ROOT must be an absolute test directory.");
+        return RejectDropbox(Path.GetFullPath(root));
+    }
+
+    private static string SafeTestPath(string path) => RejectDropbox(Path.GetFullPath(path, DefaultTestBase()));
+
+    private static string RejectDropbox(string path)
+    {
+        var dropbox = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Dropbox")
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (path.Equals(dropbox, StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith(dropbox + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Test fixtures must never be created under the user's Dropbox folder.");
+        return path;
+    }
 
     /// <summary>Runs the local inventory, delta and writer checks against fresh temp folders.</summary>
     public static async Task RunAsync(string root, bool realCloudFiles = true)
     {
-        _base = Path.GetFullPath(root);
+        _base = SafeTestPath(root);
         Directory.CreateDirectory(_base);
         await FreeSpaceAdmissionChecks.RunAsync().ConfigureAwait(false);
         await LocalInventoryChecks.RunAsync().ConfigureAwait(false);
@@ -28,10 +49,29 @@ internal static class LocalChecks
         Console.WriteLine("v2 local checks passed.");
     }
 
+    internal static Task RunConstituentAsync(string root, string constituent)
+    {
+        _base = SafeTestPath(root);
+        Directory.CreateDirectory(_base);
+        return constituent switch
+        {
+            "FreeSpaceAdmission" => FreeSpaceAdmissionChecks.RunAsync(),
+            "LocalInventory" => LocalInventoryChecks.RunAsync(),
+            "LocalDelta" => LocalDeltaChecks.RunAsync(),
+            "LocalWriter" => LocalWriterChecks.RunAsync(),
+            "DirectDownload" => DirectDownloadChecks.RunAsync(),
+            "StubReplacement" => StubReplacementChecks.RunAsync(),
+            _ => throw new ArgumentException("Unknown local constituent: " + constituent)
+        };
+    }
+
     /// <summary>A fresh per-check root whose parent holds its private control namespace, so both are cleaned together.</summary>
     internal static string FreshRoot(string name)
     {
-        var parent = Path.Combine(_base, name);
+        if (string.IsNullOrWhiteSpace(name) || name == "." || Path.IsPathRooted(name) ||
+            name.Split('/', '\\').Any(part => part == ".."))
+            throw new ArgumentException("A fixture name must stay inside its explicit test base.", nameof(name));
+        var parent = RejectDropbox(Path.GetFullPath(name, _base));
         if (Directory.Exists(parent)) Directory.Delete(parent, true);
         var root = Path.Combine(parent, "root");
         Directory.CreateDirectory(root);

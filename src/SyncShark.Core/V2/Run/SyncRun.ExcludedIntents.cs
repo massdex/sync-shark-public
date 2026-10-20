@@ -90,7 +90,7 @@ public sealed partial class SyncRun
             .Select(entry => entry.Action).ToArray();
         await SyncByteProgressStream.ReportCurrentProcessAsync("First-sync completion",
             $"{outstanding.Count} unresolved effect(s), including {excluded.Length} excluded, awaiting provider confirmation; " +
-            "completion is pending reconciliation. " + string.Join(", ", excluded.SelectMany(RowPaths)
+            "saved for later verification without blocking first-sync completion. " + string.Join(", ", excluded.SelectMany(RowPaths)
                 .Distinct(StringComparer.OrdinalIgnoreCase)), ProcessMessageKind.Notice);
         return outstanding.Count;
     }

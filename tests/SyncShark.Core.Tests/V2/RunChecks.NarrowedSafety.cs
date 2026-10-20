@@ -61,6 +61,11 @@ internal static partial class RunChecks
             var fx = Build();
             var folder = fx.B.Seed("folder", "", ItemKind.Folder);
             fx.B.Seed("folder/keep.tmp", "keep");
+            if (kind == ActionKind.Delete)
+            {
+                fx.A.Seed("folder", "", ItemKind.Folder);
+                fx.A.Seed("folder/local.txt", "local content must survive");
+            }
             var run = fx.Run();
             await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
             var pair = fx.Pair with { IgnoreRules = ["FileExtension:tmp"] };
@@ -87,8 +92,26 @@ internal static partial class RunChecks
             Require((await MapAsync(fx.B)).ContainsKey("folder/keep.tmp"), "newly ignored child survives");
             Require(report.Deferred == 0 && fx.Store.FirstSyncDone(pair.PairId),
                 "explicitly skipped ancestor does not block first-sync completion");
-            Require(report.RebuildablesBlocked.Count == 0 && !fx.Store.Pair(pair.PairId)!.Excluded.Contains("folder"),
-                "skipped rebuildable is not pending and never becomes a successful-removal exclusion");
+            Require(report.RebuildablesBlocked.Count == 0 &&
+                fx.Store.Pair(pair.PairId)!.Excluded.Contains("folder") == (kind == ActionKind.Delete),
+                "reviewed rebuildable exclusion persists even though narrowing safely skipped its removal");
+            if (kind == ActionKind.Delete)
+            {
+                var notice = fx.Store.OpenNotices(pair.PairId).Single(item => item.ReasonKey == "reviewed-removal-skipped");
+                Require(NoticeChoices.Options(notice).Select(option => option.Choice).SequenceEqual(
+                    new[] { NoticeChoices.OpenFolderSettings, NoticeChoices.Dismiss }), "skipped removal offers settings and dismiss, never unsigned deletion");
+                await run.IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+                Require(fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0 &&
+                    await fx.A.ObserveAsync("folder", default) is not null && await fx.A.ObserveAsync("folder/local.txt", default) is not null &&
+                    await fx.B.ObserveAsync("folder/keep.tmp", default) is not null,
+                    "persisted exclusion never deletes local content or replays an unsigned narrowed removal");
+                Require(fx.Store.OpenNotices(pair.PairId).Any(item => item.NoticeId == notice.NoticeId), "attention notice stays open until dismissed");
+                await run.ApplyRetryNoticeChoiceAsync(pair.PairId, notice.NoticeId!, NoticeChoices.OpenFolderSettings, default);
+                Require(fx.Store.OpenNotices(pair.PairId).Any(item => item.NoticeId == notice.NoticeId), "settings navigation does not acknowledge removal");
+                await run.ApplyRetryNoticeChoiceAsync(pair.PairId, notice.NoticeId!, NoticeChoices.Dismiss, default);
+                Require(fx.Store.OpenNotices(pair.PairId).All(item => item.NoticeId != notice.NoticeId) && fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0,
+                    "dismiss closes the notice without executing anything");
+            }
         }
         {
             var fx = Build();

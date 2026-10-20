@@ -83,6 +83,7 @@ public sealed partial class SyncRun
     private sealed record ReconcileResult(IReadOnlyList<ActionResult> Uncertain, IReadOnlyList<string> Touched)
     {
         public static ReconcileResult None { get; } = new([], []);
+        public IReadOnlyList<string> Protected { get; init; } = [];
     }
 
     internal sealed class Tally(V2Settings? settings = null)
@@ -101,7 +102,7 @@ public sealed partial class SyncRun
         // Membership is also used by first-sync completion and notice closure, not just counts.
         // Share one byte of state per id instead of three independently growing hash collections.
         [Flags]
-        private enum ActionState : byte { None = 0, Planned = 1, Counted = 2, Done = 4, Refused = 8 }
+        private enum ActionState : byte { None = 0, Planned = 1, Counted = 2, Done = 4, Refused = 8, Skipped = 16 }
         private readonly Dictionary<string, ActionState> _actions = new(StringComparer.Ordinal);
         private readonly object _actionGate = new();
 
@@ -115,6 +116,12 @@ public sealed partial class SyncRun
         {
             lock (_actionGate)
                 return (_actions.GetValueOrDefault(actionId) & (ActionState.Done | ActionState.Refused)) != 0;
+        }
+
+        public bool WasSkipped(string actionId)
+        {
+            lock (_actionGate)
+                return (_actions.GetValueOrDefault(actionId) & ActionState.Skipped) != 0;
         }
 
         public bool WasRefused(string actionId)
@@ -217,7 +224,8 @@ public sealed partial class SyncRun
                         else ExtraDone++;
                     }
                     _actions[result.ActionId] = state | ActionState.Counted |
-                        (refused ? ActionState.Refused : result.Outcome == Outcome.Done ? ActionState.Done : ActionState.None);
+                        (refused ? ActionState.Refused : result.Outcome == Outcome.Done ? ActionState.Done :
+                            result.Outcome == Outcome.Skipped ? ActionState.Skipped : ActionState.None);
                 }
             }
             if (result.Outcome is Outcome.Failed or Outcome.Uncertain && Failures.Count < _failureSampleLimit)
@@ -240,16 +248,27 @@ public sealed partial class SyncRun
             action.ProviderEffect?.Kind is "whole-folder-group" or "whole-folder-member" ||
             ReconcileAllowed(prepared, action) && !CarriesNewlyIgnored(pair, action, rules);
         var outstanding = _store.UnresolvedIntents(pair.PairId);
+        var sleeping = new List<ActionResult>();
+        var due = new List<SyncAction>();
+        foreach (var action in outstanding)
+        {
+            var retry = _store.SyncRetryAt(pair.PairId, action.Path);
+            if (retry?.RetryAfter > _time.GetUtcNow() || due.Count >= 256)
+                sleeping.Add(new(action.ActionId, Outcome.Uncertain, null, null, null, retry?.LastError));
+            else due.Add(action);
+        }
+        outstanding = due;
         // Observe protected intents too, but never replay or expand them. Settle before normal reconciliation
         // so an exclusion cannot strand an old executable effect forever.
         var intents = new List<SyncAction>();
         var protectedIntents = new List<SyncAction>();
         foreach (var entry in GuardedActions(outstanding, guard))
             (CanReconcile(entry.Action, entry.Guard) ? intents : protectedIntents).Add(entry.Action);
-        var excludedUncertain = await SettleExcludedIntentsAsync(pair, protectedIntents, ct);
+        var excludedUncertain = (await SettleExcludedIntentsAsync(pair, protectedIntents, ct)).Concat(sleeping).ToArray();
         // The phase's real total from its first line, so progress reads n/of-the-actual-count instead of 0/0.
         throttle.Report(RunPhases.Reconcile, null, 0, intents.Count);
-        if (intents.Count == 0) return new ReconcileResult(excludedUncertain, []);
+        if (intents.Count == 0) return new ReconcileResult(excludedUncertain, [])
+        { Protected = OutstandingFootprints(pair.PairId) };
         // An announced wait: the effects an earlier run left unconfirmed are re-checked now.
         await SyncByteProgressStream.ReportCurrentProcessAsync("Unconfirmed effects",
             $"{intents.Count} effect(s) unconfirmed; re-checking at {_time.GetUtcNow():HH:mm:ss}.", ProcessMessageKind.Notice);
@@ -259,14 +278,38 @@ public sealed partial class SyncRun
         var byId = intents.ToDictionary(intent => intent.ActionId, StringComparer.Ordinal);
         var touched = new List<string>();
         foreach (var result in results)
-            if (result.Outcome == Outcome.Skipped && byId.TryGetValue(result.ActionId, out var action))
+        {
+            if (!byId.TryGetValue(result.ActionId, out var action)) continue;
+            var retry = _store.SyncRetryAt(pair.PairId, action.Path);
+            if (result.Outcome is Outcome.Uncertain or Outcome.Failed)
+                SaveFailedRetry(pair, action.Path, result.Reason, retry);
+            else if (result.Outcome == Outcome.Done)
+                _store.ClearSyncRetry(pair.PairId, action.Path);
+            else if (result.Outcome == Outcome.Skipped)
             {
+                if (retry is not null) _store.SaveSyncRetry(pair.PairId, retry with { RetryAfter = DateTimeOffset.MinValue });
                 touched.Add(action.Path);
                 if (action.FromPath is not null) touched.Add(action.FromPath);
             }
+        }
         return new ReconcileResult(excludedUncertain.Concat(results.Where(result => result.Outcome == Outcome.Uncertain))
-            .ToArray(), touched);
+            .ToArray(), touched) { Protected = OutstandingFootprints(pair.PairId) };
     }
+
+    private RunReport WithReconciliation(RunReport report, ReconcileResult reconciliation) =>
+        reconciliation.Uncertain.Count == 0 ? report : report with
+        {
+            Outcome = report.Outcome == RunOutcomes.Stopped ? report.Outcome : RunOutcomes.Partial,
+            Uncertain = report.Uncertain + reconciliation.Uncertain.Count,
+            Failures = report.Failures.Concat(reconciliation.Uncertain).Take(_settings.FailureSampleLimit).ToArray()
+        };
+
+    // An unresolved effect owns its entire footprint until reconciliation proves its outcome.
+    // Do not replay, overwrite, or expand an ancestor deletion across it; siblings remain runnable.
+    private IReadOnlyList<string> OutstandingFootprints(string pairId) => _store.UnresolvedIntents(pairId)
+        .SelectMany(action => new[] { action.Path, action.FromPath, action.Source?.Path, action.ExpectedTarget?.Path })
+        .Where(path => path is not null).Select(path => path!)
+        .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
 
     // The local disk walk and the remote (Dropbox) listing use different resources, so read the two sides at once.
     // Each side runs on its own task: the local walk enumerates synchronously (PilotLocalScanner commits only on a
@@ -589,7 +632,7 @@ public sealed partial class SyncRun
     }
 
     private async Task<IReadOnlyList<PlanRow>> HashAndJoinAsync(PairDef pair, Func<RunScope.Scope> loadScope,
-        BothScan scan, bool firstSync, ProgressThrottle throttle, CancellationToken ct)
+        BothScan scan, bool firstSync, ProgressThrottle throttle, CancellationToken ct, Action<HashRequest>? refresh = null)
     {
         throttle.Report(RunPhases.Comparing, null, 0, 0);
         var rows = JoinRows(loadScope(), scan, firstSync);
@@ -598,6 +641,7 @@ public sealed partial class SyncRun
         // Requests retain only paths; release the old joined inventory before hashing and reloading.
         rows = [];
         await PatchHashesAsync(pair, scan, requests, ct);
+        refresh?.Invoke(requests);
         return JoinRows(loadScope(), scan, firstSync);
     }
 
@@ -656,7 +700,7 @@ public sealed partial class SyncRun
     /// </summary>
     private async Task<(Plan Plan, IReadOnlyList<PlanRow> FinalRows)> DecideWithHashedCopiesAsync(PairDef pair,
         BothScan scan, IReadOnlyList<PlanRow> rows, Func<IReadOnlyList<PlanRow>> reload,
-        Func<IReadOnlyList<PlanRow>, Plan> decide, ProgressThrottle throttle, CancellationToken ct)
+        Func<IReadOnlyList<PlanRow>, Plan> decide, ProgressThrottle throttle, CancellationToken ct, Action<HashRequest>? refresh = null)
     {
         var plan = decide(rows);
         var victims = UnhashedFolderVictims(pair, plan);
@@ -670,6 +714,7 @@ public sealed partial class SyncRun
         victims = null!;
         throttle.Report(RunPhases.Hashing, null, 0, request.PathsA.Count + request.PathsB.Count);
         await PatchHashesAsync(pair, scan, request, ct);
+        refresh?.Invoke(request);
         // finding 4 (review fix): the caller captures the prepare-matched states from these final
         // reloaded rows, so a size-only difference resolved by the hash pass never produces a false copy-back.
         var finalRows = reload();
@@ -891,7 +936,7 @@ public sealed partial class SyncRun
             if (notice.NoticeId is not null &&
                 (notice.ReasonKey == "name-mapping-collision" || !PlanNotices.AwaitsAcknowledgement(notice)) &&
                 notice.ReasonKey != ExcludedIntentNoticeKey && notice.ReasonKey != ProviderNameRefusedException.NoticeKey &&
-                notice.ReasonKey != HydrationFallbackNoticeKey &&
+                notice.ReasonKey != HydrationFallbackNoticeKey && !NoticeChoices.IsRemovalAttention(notice) &&
                 evaluated(notice.Path) && !unsettled.Contains(notice.Path))
                 _store.CloseNotice(notice.NoticeId, "resolved");
     }

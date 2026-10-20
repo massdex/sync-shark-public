@@ -99,36 +99,25 @@ internal static partial class DropboxChecks
             var listingsBeforeFailure = h.Wire.ListRequests.Count;
             using var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System);
             var (runtime, _) = PrepareCursorRuntime(h, local, pair, store, productRoot);
-            var reviewedBefore = FirstSyncChoicesState.Load(productRoot, pair.PairId, store)
-                ?? throw new InvalidOperationException("Missing prepared review before failed apply.");
-            var headerBefore = store.ReadPrepare(pair.PairId);
-            var matchedRowsBefore = store.CountPrepareRows(headerBefore!.Generation, PrepareDatabase.Matches);
+            Require(FirstSyncChoicesState.Load(productRoot, pair.PairId, store) is not null,
+                "a retained reviewed prepare authorizes the initial attempt");
             local.FailNextWrites = 1;
             var failed = await runtime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { },
                 CancellationToken.None);
-            Require(failed.Failed == 1 && local.FailNextWrites == 0 && !store.FirstSyncDone(pair.PairId) &&
-                string.IsNullOrEmpty(store.Cursor(RootId)) &&
+            Require(failed.Failed == 1 && local.FailNextWrites == 0 && store.FirstSyncDone(pair.PairId) &&
+                store.Cursor(RootId) == appliedCursor &&
                 await local.ObserveAsync("after-prepare.txt", CancellationToken.None) is null,
-                "a failed executor effect leaves first sync unfinished and does not commit the refreshed cursor");
+                "a failed executor effect completes first sync and commits only the refreshed safe cursor");
             Require(h.Wire.ContinueCursors.Skip(feedsBeforeFailure).FirstOrDefault() == preparedCursor &&
                 h.Wire.ListRequests.Count == listingsBeforeFailure &&
                 store.Live(RootId, ["after-prepare.txt"]).Count == 1,
                 "the interrupted apply had already consumed the delta and persisted its inventory before failure");
-            var reviewedAfter = FirstSyncChoicesState.Load(productRoot, pair.PairId, store)
-                ?? throw new InvalidOperationException("Failed apply discarded the prepared review.");
-            Require(reviewedBefore.Database is not null && reviewedAfter.Database is not null &&
-                headerBefore == store.ReadPrepare(pair.PairId) &&
-                matchedRowsBefore == store.CountPrepareRows(headerBefore.Generation, PrepareDatabase.Matches) &&
-                store.PrepareCursorForPair(pair.PairId, RootId) is not null &&
-                !File.Exists(Path.Combine(productRoot, "v2", "first-sync-p1.choices.json")),
-                "pending refresh updates v6 cursor rows only: same generation, metadata and lazy matches; no JSON rewrite");
-            Require(System.Text.Json.JsonSerializer.Serialize(reviewedBefore with
-                { InventoryCursors = [], InventoryScope = null }) ==
-                System.Text.Json.JsonSerializer.Serialize(reviewedAfter with
-                { InventoryCursors = [], InventoryScope = null }),
-                "refreshing pending cursors preserves the entire frozen review, including digest, matches and deletes");
-            Require(reviewedAfter.InventoryCursors.Any(entry => entry.RootId == RootId && entry.Cursor == appliedCursor),
-                "a failed effect retains the successfully refreshed inventory cursor inside the pending prepare");
+            Require(FirstSyncChoicesState.Load(productRoot, pair.PairId, store) is null &&
+                store.SyncRetryAt(pair.PairId, "after-prepare.txt")?.ReviewedActions is { Count: > 0 } actions &&
+                actions.All(action => action.Kind != ActionKind.Delete && action.ExpectedTarget is null),
+                "completed review is retired; only the stamped failed copy survives, never fresh deletion authority");
+            Require(store.Cursor(RootId) == appliedCursor,
+                "a failed item retains the successfully refreshed safe cursor after first-sync completion");
             h.Wire.SeedChangePage(appliedCursor, [], false, appliedCursor);
             // The next block reopens SQLite and rebuilds runtime/inventory. Its first feed resumes the
             // refreshed PENDING cursor, while the successful root cursor must remain uncommitted.
@@ -140,7 +129,7 @@ internal static partial class DropboxChecks
         using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System))
         {
             // No prepare inventory, run, runtime or open store survives this boundary.
-            var (runtime, _) = PrepareCursorRuntime(h, local, pair, store, productRoot);
+            var (runtime, run) = PrepareCursorRuntime(h, local, pair, store, productRoot);
             if (scenario == "unchanged")
             {
                 var refused = false;
@@ -154,9 +143,11 @@ internal static partial class DropboxChecks
                     string.IsNullOrEmpty(store.Cursor(RootId)) && !store.FirstSyncDone(pair.PairId),
                     "retaining a prepare cursor never bypasses choice binding or promotes a refused apply");
             }
-            var applied = await runtime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { },
-                CancellationToken.None);
-            Require(applied.Failed == 0 && store.FirstSyncDone(pair.PairId),
+            var failedCount = scenario == "failed-apply"
+                ? (await run.IncrementalAsync(pair.PairId,
+                    new Progress<RunProgress>(), CancellationToken.None)).Failed
+                : (await runtime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { }, CancellationToken.None)).Failed;
+            Require(failedCount == 0 && store.FirstSyncDone(pair.PairId),
                 scenario + ": resumed CLI apply completes successfully");
             Require(h.Wire.ContinueCursors.Skip(feedsBeforeApply).FirstOrDefault() ==
                 (scenario == "failed-apply" ? appliedCursor : preparedCursor),
@@ -185,6 +176,10 @@ internal static partial class DropboxChecks
             }
             if (scenario == "local-delete")
             {
+                Require(await h.Writer().ObserveAsync("matched.txt", default) is not null,
+                    "first-sync apply never executes the matched post-preview delete");
+                h.Wire.SeedChangePage(appliedCursor, [], false, appliedCursor);
+                await run.IncrementalAsync(pair.PairId, new Progress<RunProgress>(), default);
                 Require(await h.Writer().ObserveAsync("matched.txt", CancellationToken.None) is null &&
                     await local.ObserveAsync("matched.txt", CancellationToken.None) is null,
                     "D71 postprepare deletion is ordinary sync, not resurrected or refused by review guards");
@@ -252,11 +247,8 @@ internal static partial class DropboxChecks
             local.FailNextWrites = 1;
             var failed = await runtime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { },
                 CancellationToken.None);
-            var pending = FirstSyncChoicesState.Load(productRoot, pair.PairId, store);
-            Require(injected && failed.Failed == 1 && !store.FirstSyncDone(pair.PairId) &&
-                string.IsNullOrEmpty(store.Cursor(RootId)) &&
-                pending is not null && pending.InventoryCursors.Any(entry =>
-                    entry.RootId == RootId && entry.Cursor == "race-list-drained"),
+            Require(injected && failed.Failed == 1 && store.FirstSyncDone(pair.PairId) &&
+                store.Cursor(RootId) == "race-list-drained" && store.SyncRetryAt(pair.PairId, "queued.txt") is not null,
                 "failed fallback apply checkpoints its last fully drained cursor, never a late latest cursor");
             Require(store.Live(RootId, ["between-list-and-refresh.txt"]).Count == 0 &&
                 await local.ObserveAsync("between-list-and-refresh.txt", CancellationToken.None) is null,
@@ -266,9 +258,8 @@ internal static partial class DropboxChecks
         var listsBefore = h.Wire.ListRequests.Count;
         using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System))
         {
-            var (runtime, _) = PrepareCursorRuntime(h, local, pair, store, productRoot);
-            var retried = await runtime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { },
-                CancellationToken.None);
+            var (_, run) = PrepareCursorRuntime(h, local, pair, store, productRoot);
+            var retried = await run.IncrementalAsync(pair.PairId, new Progress<RunProgress>(), CancellationToken.None);
             Require(retried.Failed == 0 && store.FirstSyncDone(pair.PairId) &&
                 h.Wire.ContinueCursors.Skip(feedsBefore).FirstOrDefault() == "race-list-drained" &&
                 h.Wire.ListRequests.Count == listsBefore && store.Cursor(RootId) == "race-retried" &&

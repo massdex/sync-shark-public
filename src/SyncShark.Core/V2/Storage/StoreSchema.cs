@@ -6,7 +6,7 @@ namespace Massdex.SyncShark.V2;
 internal static class StoreSchema
 {
     /// <summary>The schema version written to and required by <c>PRAGMA user_version</c>; any schema change bumps it.</summary>
-    public const int Version = 11;
+    public const int Version = 12;
 
     /// <summary>The state database path relative to the app data root.</summary>
     public const string DatabaseRelativePath = @"v2\state.db";
@@ -108,6 +108,12 @@ internal static class StoreSchema
           payload TEXT NOT NULL, PRIMARY KEY(root_id,ordinal));
         """;
 
+    private const string RetryDdl = """
+        CREATE TABLE IF NOT EXISTS sync_retry(pair_no INTEGER NOT NULL, path_key TEXT NOT NULL,
+          json TEXT NOT NULL, retry_after INTEGER NOT NULL, PRIMARY KEY(pair_no,path_key));
+        CREATE INDEX IF NOT EXISTS sync_retry_due ON sync_retry(pair_no,retry_after,path_key);
+        """;
+
     private const string RehashDdl = """
         CREATE TABLE IF NOT EXISTS local_rehash(root_no INTEGER NOT NULL, object_id TEXT NOT NULL,
           last_attempt INTEGER NOT NULL, reason TEXT NOT NULL, PRIMARY KEY(root_no, object_id)) WITHOUT ROWID;
@@ -139,6 +145,7 @@ internal static class StoreSchema
         if (fromVersion < 10) Execute(connection, null, ObservationDdl);
         using var final = connection.BeginTransaction();
         Execute(connection, final, RehashDdl);
+        Execute(connection, final, RetryDdl);
         Execute(connection, final, $"PRAGMA user_version={Version};");
         final.Commit();
     }
@@ -173,7 +180,7 @@ internal static class StoreSchema
 
     private static readonly string[] ExpectedNames =
     [
-        "dir", "root", "pair", "generation", "file_state", "tombstone", "sync_point", "pending_effect", "recovery",
+        "dir", "root", "pair", "generation", "file_state", "tombstone", "sync_point", "pending_effect", "sync_retry", "sync_retry_due", "recovery",
         "notice", "local_rehash", "rehash_retry", "deletion_evidence", "dir_key", "dir_mapped_key", "fs_obj", "fs_flagged", "fs_refused", "sp_a_obj", "sp_b_obj", "sp_a_dir", "sp_b_dir",
 
         "pe_unresolved", "rc_pair", "nt_open", "prepare_header", "prepare_row", "prepare_lookup", "prepare_cursor",
@@ -252,6 +259,7 @@ internal static class StoreSchema
         using var transaction = connection.BeginTransaction();
         Execute(connection, transaction, Ddl);
         Execute(connection, transaction, RehashDdl);
+        Execute(connection, transaction, RetryDdl);
         Execute(connection, transaction, FlaggedIndexDdl);
         Execute(connection, transaction, PrepareDdl);
         Execute(connection, transaction, ClassificationDdl);
@@ -284,6 +292,8 @@ internal static class StoreSchema
             Execute(connection, transaction, ListingDdl);
             transaction.Commit();
         }
+        // Additive feature storage is presence-guarded on every compatible open, not gated by a version bump.
+        Execute(connection, null, RetryDdl);
         var names = new HashSet<string>(StringComparer.Ordinal);
         using (var command = Command(connection, null,
             "SELECT name FROM sqlite_master WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%';"))

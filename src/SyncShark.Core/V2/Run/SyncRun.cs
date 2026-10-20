@@ -110,12 +110,21 @@ public sealed partial class SyncRun : ISyncRun
         if (frozen is { Count: 0 }) return new RebuildableResolution([], [], sides.Cloud);
         var localRoot = sides.Local == Side.A ? pair.A : pair.B;
         var cloudRoot = sides.Cloud == Side.A ? pair.A : pair.B;
-        var local = _store.Live(localRoot.RootId);
-        var cloud = _store.Live(cloudRoot.RootId);
         if (frozen is not null)
-            return new RebuildableResolution([], RebuildableDetector.Retained(frozen, local, localRoot.RootPath, cloud),
-                sides.Cloud);
-        var detected = RebuildableDetector.Detect(local, RebuildableDetector.DiskReader(localRoot.RootPath));
+        {
+            var prefixes = frozen.Select(folder => folder.Path).ToArray();
+            // Some markers are siblings (package.json, *.csproj, next.config.*), not descendants.
+            // Read their immediate directories, never widen to the parents' entire subtrees.
+            var parents = prefixes.Select(path => RowCodec.Split(path).Parent).Distinct(StringComparer.OrdinalIgnoreCase);
+            var local = prefixes.SelectMany(path => _store.LiveChildren(localRoot.RootId, path))
+                .Concat(parents.SelectMany(parent => _store.LiveChildren(localRoot.RootId, parent)))
+                .DistinctBy(item => item.Path, StringComparer.Ordinal).ToArray();
+            return new RebuildableResolution([], RebuildableDetector.Retained(frozen,
+                local, localRoot.RootPath, _store.Live(cloudRoot.RootId, prefixes)), sides.Cloud);
+        }
+        // Detection must still see all local candidates. Only detected folders need cloud occupancy.
+        var detected = RebuildableDetector.Detect(_store.Live(localRoot.RootId), RebuildableDetector.DiskReader(localRoot.RootPath));
+        var cloud = _store.Live(cloudRoot.RootId, detected.Select(folder => folder.Path));
         return new RebuildableResolution(detected, RebuildableDetector.ChosenScoped(detected, cloud, types!), sides.Cloud);
     }
 
@@ -332,13 +341,11 @@ public sealed partial class SyncRun : ISyncRun
         return statuses;
     }
 
-    // The chosen rebuildable folders join the pair's exclusions as the first sync completes: a path is saved when its
-    // cloud removal finished or the cloud held nothing; an unfinished or blocked removal is not saved, so the pair
-    // stays in first-sync mode and the removal is retried.
+    // The user's rebuildable exclusion survives completion even when its cloud removal needs a later retry.
+    // Otherwise ordinary sync could upload the deliberately excluded local tree again.
     private void PersistRebuildables(PairDef pair, IReadOnlyList<RebuildableStatus> statuses)
     {
-        var saved = statuses.Where(status => !status.RemovalUnfinished && !status.Blocked && !status.Skipped)
-            .Select(status => status.Path).ToArray();
+        var saved = statuses.Select(status => status.Path).ToArray();
         if (saved.Length == 0) return;
         var merged = pair.Excluded.Concat(saved).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         if (merged.Length != pair.Excluded.Count) _store.SavePair(pair with { Excluded = merged });
@@ -360,14 +367,7 @@ public sealed partial class SyncRun : ISyncRun
         await _endpoints.PrepareAsync(pair, ct);
         var throttle = new ProgressThrottle(progress, _time, _settings.ProgressInterval);
         var reconcile = await ReconcileAsync(pair, throttle, ct, narrowedIgnoreRules);
-        if (reconcile.Uncertain.Count > 0)
-        {
-            if (reconcile.Uncertain.All(result => result.RetryAfterSeconds is not null))
-                throw new SyncRunPendingVerificationException(Unverified(reconcile.Uncertain),
-                    reconcile.Uncertain.Max(result => result.RetryAfterSeconds!.Value));
-            throw new SyncRunRefusedException(Unverified(reconcile.Uncertain));
-        }
-        var before = LeftAlone(pair);
+        var before = LeftAlone(pair).WithPending(reconcile.Protected);
         var inventoryScope = InventoryScope(pair);
         var scan = await ScanBothAsync(pair, throttle, ct, inventoryCursors, firstSync: true);
         // An approvable first-sync plan needs both sides read in full: a missing subtree would look absent.
@@ -389,7 +389,8 @@ public sealed partial class SyncRun : ISyncRun
         // probe or the held lane. They are ordinary planning input (persisted baselines are excluded the same way),
         // so a cache miss can neither hold nor block their post-prepare propagation.
         // Keep the prepared lookup lazy: a database-backed dictionary must not enumerate all matches.
-        var evidence = await PrepareDeferredEvidenceAsync(pair, scanner.LoadFull(pair), rebuildablePaths, matchedAtPrepare,
+        RunScope.Scope? inventory = scanner.LoadFull(pair);
+        var evidence = await PrepareDeferredEvidenceAsync(pair, inventory, rebuildablePaths, matchedAtPrepare,
             scan, ct);
         scan = evidence.Scan;
         // (third-review finding 1): held paths are hidden from the planner's rows, so the planner
@@ -397,15 +398,17 @@ public sealed partial class SyncRun : ISyncRun
         var heldPaths = evidence.Held.Count == 0
             ? null
             : evidence.Held.Select(held => held.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var rows = await HashAndJoinAsync(pair, () => WithoutHeld(scanner.LoadFull(pair), evidence.Held), scan, true, throttle, ct);
+        inventory = WithoutHeld(inventory, evidence.Held);
+        void refresh(HashRequest request) => inventory = scanner.RefreshHashes(pair, inventory!, request);
+        var rows = await HashAndJoinAsync(pair, () => inventory!, scan, true, throttle, ct, refresh);
         throttle.Report(RunPhases.Planning, null, 0, 0);
         var deciding = DecideWithHashedCopiesAsync(pair, scan, rows,
-            () => JoinRows(WithoutHeld(scanner.LoadFull(pair), evidence.Held), scan, true),
+            () => JoinRows(inventory!, scan, true),
             pass => ApplySafetyFilter(pair, ActionPredicates(pair, links, selection), Planner.Decide(pairId,
                 Math.Max(scan.A.Gen, scan.B.Gen), pass,
                 Options(pair, true, winners, oneSided, selection, matchedAtPrepare, heldPaths))
                 with { NarrowedIgnoreRules = narrowedIgnoreRules ?? [] }),
-            throttle, ct);
+            throttle, ct, refresh);
         rows = [];
         var (decided, planningRows) = await deciding;
         deciding = null!;
@@ -426,6 +429,7 @@ public sealed partial class SyncRun : ISyncRun
                     .Select(row => new MatchedPair(row.A!.Path, row.A!, row.B!)).ToArray(),
             };
         planningRows = [];
+        inventory = null;
         plan = FreezeFolderDeletes(pair, plan) with
         {
             ScanCursorA = scan.A.CursorAfter, ScanCursorB = scan.B.CursorAfter,
@@ -470,41 +474,43 @@ public sealed partial class SyncRun : ISyncRun
         await _endpoints.PrepareAsync(pair, ct);
         var throttle = new ProgressThrottle(progress, _time, _settings.ProgressInterval);
         var reconcile = await ReconcileAsync(pair, throttle, ct, approved.NarrowedIgnoreRules);
-        if (reconcile.Uncertain.Count > 0) return FailedRun(pairId, reconcile.Uncertain);
+        approved = ApplySafetyFilter(pair,
+            ActionPredicates(pair, LeftAlone(pair).WithPending(reconcile.Protected), reviewedSelection), approved);
         // Decision 54 addendum, execution-time half: re-check the plan's delete victims here, under this run's gate,
         // right before executing. A scan that interleaved after apply's own preview (e.g. a concurrent plan command)
         // may have added a child to the store; the Executor's folder expansion reads it live, so a child the reviewed
         // prepare never listed is refused rather than deleted.
+        if (reviewedDeletes is not null) approved = DeferUnreviewedDeletes(pair, approved, reviewedDeletes);
         RefuseUnreviewedDeletes(pair, approved, reviewedDeletes);
+        if (approved.FirstSyncOptions?.MatchedAtPrepare is { } matches)
+            approved = DeferPostPreviewChanges(pair, approved, matches);
+        foreach (var held in approved.UnreviewedHeldDeletions)
+            if (_store.SyncRetryAt(pairId, held.Path)?.Kind != "decision")
+                _store.SaveSyncRetry(pairId, new(held.Path, "post-preview", 0, "", DateTimeOffset.MinValue, Held: held));
         var openNotices = _store.OpenNotices(pair.PairId);
         _store.AddNotices(approved.Notices);
         var execution = await ExecuteWithEvidenceAsync(approved, pair, throttle, reviewedDeletes, ct);
         approved = execution.Plan;
         var tally = execution.Tally;
-        if (execution.Pending.Count > 0)
+        if (execution.Pending.Count > 0 && execution.EvidenceUnavailable)
         {
             var alreadyPending = openNotices.Where(notice => notice.ReasonKey == "deletion-evidence-pending")
                 .Select(notice => notice.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
             _store.AddNotices(execution.Pending.Where(path => !alreadyPending.Contains(path))
                 .Select(path => new Notice(pairId, 4, NoticeKind.Info, path,
-                    "Deletion evidence is pending; this first sync is not complete.", "deletion-evidence-pending")));
+                    "Deletion evidence is pending; this item will be retried without blocking other files.", "deletion-evidence-pending")));
         }
         // The approved plan came from a full-scope preview, so every path was re-evaluated for it.
         var pendingEvidence = execution.Pending.ToHashSet(StringComparer.OrdinalIgnoreCase);
         if (!ct.IsCancellationRequested) CloseResolvedNotices(openNotices, approved, tally, path => !pendingEvidence.Contains(path));
-        // Genuinely unfinished reviewed effects keep first sync open because incremental sync has no first-sync
-        // choices. Intentional safety skips are terminal instead: their notices explain that the entire effect was
-        // left alone and subsequent ordinary sync may retain or copy included content.
-        // A rebuildable removal can finish, find the cloud already absent, or be intentionally safety-skipped.
-        // The skipped case neither blocks completion nor adds a rebuildable exclusion. Other blocked paths
-        // (including local-link re-check drops) and failed removals stay incomplete and are listed for the user.
+        // Decision 85: unfinished reviewed work is retained as item-owned retry input and visible issues.
+        // The reviewed exclusion persists even when its removal is unfinished; exclusion grants no deletion authority.
         var statuses = RebuildableStatuses(pair, rebuildables?.Cloud, approved, tally, rebuildablePaths);
         var blockedRebuildables = statuses.Where(status => status.Blocked).Select(status => status.Path).ToArray();
         // Decision 64: user-decision Holds (ties, needs-decision rows) do not block completion; their paths stay
         // pending (left alone on both sides) while their notices are open, and the user's decision is applied later.
-        // (fourth review, finding 1): a folder delete the planner held over a pending evidence path
-        // is not a user decision; it stays unfinished, so the first sync stays incomplete and the next apply replans
-        // the folder against the same prepare record (an incremental run would recreate it instead).
+        // Evidence-blocked work is not a user decision. Retain its evidence input before promoting cursors;
+        // the later ordinary run must still prove deletion safety rather than interpret missing evidence as absence.
         var evidenceBlocked = approved.Notices.Where(notice => notice.ReasonKey == PlanNotices.DeletionEvidencePending.Key)
             .Select(notice => notice.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var unfinished = approved.Actions.Where(action =>
@@ -520,8 +526,11 @@ public sealed partial class SyncRun : ISyncRun
         var unresolvedIntents = await CompletionIntentPreflightAsync(pair);
         var deferred = execution.Pending.Count + dropped + blockedRebuildables.Length + unfinished.Length +
             unconfirmed.Count(path => !alreadyDeferred.Contains(path)) + unresolvedIntents;
-        if (deferred == 0 && tally.Failed == 0 && tally.Uncertain == 0 && !ct.IsCancellationRequested)
+        if (!ct.IsCancellationRequested && !execution.EvidenceUnavailable)
         {
+            ParkFirstSyncWork(pair, approved, tally,
+                execution.Pending.Concat(_store.UnresolvedIntents(pairId).Select(action => action.Path)),
+                unconfirmed, blockedRebuildables);
             // The exclusions are written immediately before the done marker (the store offers no combined
             // transaction, and none is added for this): a crash between the two leaves them saved without the marker,
             // so the apply simply re-runs, and there is never a window in which the first sync is done but its
@@ -531,11 +540,11 @@ public sealed partial class SyncRun : ISyncRun
             _store.MarkFirstSyncDone(pairId);
         }
         throttle.Flush();
-        var report = BuildReport(pairId, approved, tally, ct.IsCancellationRequested);
+        var report = WithReconciliation(BuildReport(pairId, approved, tally, ct.IsCancellationRequested), reconcile);
         return report with
         {
             Outcome = ct.IsCancellationRequested ? RunOutcomes.Stopped : deferred > 0 ? RunOutcomes.Partial : report.Outcome,
-            Deferred = deferred,
+            Deferred = _store.FirstSyncDone(pairId) ? 0 : deferred,
             DeletionEvidencePending = execution.Pending,
             ReviewedDeletionEvidencePendingCount = approved.HeldDeletions
                 .Select(held => held.Path).Distinct(StringComparer.OrdinalIgnoreCase).Count(pendingEvidence.Contains),
@@ -557,14 +566,19 @@ public sealed partial class SyncRun : ISyncRun
         RefuseLayout(pair);
         await _endpoints.PrepareAsync(pair, ct);
         var throttle = new ProgressThrottle(progress, _time, _settings.ProgressInterval);
+        var reviewScopes = _store.DueSyncRetries(pairId, _time.GetUtcNow(), 256)
+            .SelectMany(retry => retry.ReviewedActions ?? []).Where(action => action.RebuildableRemove)
+            .Select(action => action.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        // Exclusion remains the user's ordinary-sync policy. Pending reviewed removals still need
+        // current inventory for their original stamp/signature check; never validate against hidden stale rows.
+        var observationPair = reviewScopes.Count == 0 ? pair : pair with
+        { Excluded = pair.Excluded.Where(path => !reviewScopes.Contains(path)).ToArray() };
         var reconcile = await ReconcileAsync(pair, throttle, ct);
-        if (reconcile.Uncertain.Count > 0) return FailedRun(pairId, reconcile.Uncertain);
-
         BothScan scan;
-        var before = LeftAlone(pair);
+        var before = LeftAlone(pair).WithPending(reconcile.Protected);
         try
         {
-            scan = await ScanBothAsync(pair, throttle, ct);
+            scan = await ScanBothAsync(observationPair, throttle, ct);
         }
         catch (Exception error) when (error is not (OperationCanceledException or EndpointAccessException))
         {
@@ -574,11 +588,18 @@ public sealed partial class SyncRun : ISyncRun
 
         // Finding 1 (Astra): a link or stub that disappears in this run still protects its path for the whole run.
         var current = LeftAlone(pair);
+        var retryCount = _store.CountSyncRetries(pairId);
+        var retries = _store.DueSyncRetries(pairId, _time.GetUtcNow(), 256);
+        var activeRetries = retries.Select(item => item.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var retryHeld = retries.Where(item => item.Held is not null).Select(item => item.Held!).ToArray();
         var pendingEvidence = scan.A.PendingDeletionEvidence.Concat(scan.B.PendingDeletionEvidence)
             .GroupBy(entry => entry.Key, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.First().Value, StringComparer.OrdinalIgnoreCase);
-        var links = before.With(current).WithPending(PendingDecisions(pairId, decisions))
-            .WithPending(pendingEvidence.Keys);
+        var heldPaths = PendingDecisions(pairId, decisions).Concat(pendingEvidence.Keys)
+            .Concat(retryHeld.Select(item => item.Path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var links = before.With(current).WithPending(heldPaths)
+            .WithRetryProtection((path, descendants) => retryCount > activeRetries.Count &&
+                _store.RetryProtected(pairId, path, activeRetries, descendants));
         var predicates = Predicates(pair, links);
         var scanner = new RunScope(_store, predicates.A, predicates.B, links, rules: PairInclude.IgnoreRules(pair), decisions: decisions);
         IReadOnlyDictionary<string, Side?>? winners = decisions?.ToDictionary(entry => entry.Key,
@@ -591,13 +612,17 @@ public sealed partial class SyncRun : ISyncRun
                 notice.ReasonKey is FreeSpaceRefusal.InsufficientReasonKey or FreeSpaceRefusal.UnknownSpaceReasonKey or
                     FreeSpaceRefusal.UnknownReserveReasonKey)
             .Select(notice => notice.Path).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        retryPaths = retryPaths.Concat(retries.Select(item => item.Path)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var touched = new List<string>(scan.Touched(reconcile.Touched.Concat(retryPaths)
             .Concat(decisions?.Keys ?? Enumerable.Empty<string>())));
         RunScope.Scope mappingContext = new([], [], []);
+        RunScope.Scope? inventory = null;
         Func<RunScope.Scope> loadScope = () =>
         {
+            if (inventory is not null) return inventory;
             var scope = scan.AnyFull ? scanner.LoadFull(pair) :
                 scanner.LoadTouched(pair, touched, scan.A.ChangeObjectIds, scan.B.ChangeObjectIds);
+            inventory = scope;
             // Keep only small ancestor context, not a second full inventory, between planning passes.
             mappingContext = new([], [], []) { ContextA = scope.ContextA, ContextB = scope.ContextB };
             return scope;
@@ -611,10 +636,12 @@ public sealed partial class SyncRun : ISyncRun
             AddProviderNameRefusalNotice(pair);
             AdvanceCursors(scan);
             throttle.Flush();
-            return new RunReport(pairId, RunOutcomes.Complete, 0, 0, 0, 0, 0, 0, 0, 0, []);
+            return WithReconciliation(new RunReport(pairId, RunOutcomes.Complete, 0, 0, 0, 0, 0, 0, 0, 0, [])
+                { Deferred = retryCount }, reconcile);
         }
 
-        var rows = await HashAndJoinAsync(pair, loadScope, scan, false, throttle, ct);
+        void refresh(HashRequest request) => inventory = scanner.RefreshHashes(pair, loadScope(), request);
+        var rows = await HashAndJoinAsync(pair, loadScope, scan, false, throttle, ct, refresh);
         throttle.Report(RunPhases.Planning, null, 0, 0);
         var rowEvaluated = EvaluatedPaths(rows);
         var mappingRetries = _store.OpenNotices(pairId).Where(n => n.ReasonKey == "name-mapping-collision")
@@ -623,12 +650,13 @@ public sealed partial class SyncRun : ISyncRun
         var deciding = DecideWithHashedCopiesAsync(pair, scan, rows,
             () => JoinRows(loadScope(), scan, false),
             pass => ExpandOccupancyOnce(pair, loadScope, scan,
-                ApplySafetyFilter(pair, ActionPredicates(pair, links), Decide(pair, scan, pass, winners, mappingContext)), touched, links,
-                winners),
-            throttle, ct);
+                ApplySafetyFilter(pair, ActionPredicates(pair, links), Decide(pair, scan, pass, winners, mappingContext, links)), touched, links,
+                winners, () => inventory = null),
+            throttle, ct, refresh);
         rows = [];
         var (decided, _) = await deciding;
         deciding = null!;
+        inventory = null;
         var plan = WithLinksSummary(pair, current, decided);
         plan = plan with { Notices = plan.Notices.Concat(pendingEvidence.Select(entry =>
             new Notice(pairId, 19, NoticeKind.Info, entry.Key, entry.Value,
@@ -637,12 +665,31 @@ public sealed partial class SyncRun : ISyncRun
         {
             ScanCursorA = scan.A.CursorAfter, ScanCursorB = scan.B.CursorAfter,
         };
+        // Never re-freeze retained folder victims: their original signature still guards new children.
+        var rebuildableRetries = retries.SelectMany(item => item.ReviewedActions ?? [])
+            .Where(action => action.RebuildableRemove).Select(action => action.Path)
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var retryPair = pair with { Excluded = pair.Excluded.Where(path => !rebuildableRetries.Contains(path,
+            StringComparer.OrdinalIgnoreCase)).ToArray() };
+        var retrySelection = RebuildableSelection.Sides(pair) is { } retrySides
+            ? new RebuildableSelection(retrySides.Cloud, rebuildableRetries) : null;
+        plan = ApplySafetyFilter(pair, ActionPredicates(retryPair, links, retrySelection),
+            await ApplyReviewedRetriesAsync(pair, plan, retries, ct));
         RaiseLinksSummary(pair, current);
         var openNotices = _store.OpenNotices(pair.PairId);
         _store.AddNotices(plan.Notices);
-        var tally = await ExecuteAsync(plan, pair, throttle, ct);
+        plan = plan with { HeldDeletions = retryHeld, FirstSyncOptions = Options(pair, false, winners, null) };
+        var execution = await ExecuteWithEvidenceAsync(plan, pair, throttle,
+            retries.Where(item => item.HeldReviewed && item.Held is not null && item.HeldExpected is { } expected &&
+                _store.Live(item.Held.Local == Side.A ? pair.A.RootId : pair.B.RootId, [item.Path]).FirstOrDefault() is { } currentHeld &&
+                expected.ObjectId == currentHeld.ObjectId && Content.SideStamp(expected) == Content.SideStamp(currentHeld))
+                .Select(item => FolderDelete.VictimKey(item.Held!.Local, item.Path)).ToHashSet(StringComparer.OrdinalIgnoreCase), ct,
+            allowUnreviewedEvidence: true);
+        plan = execution.Plan;
+        var tally = execution.Tally;
         if (!ct.IsCancellationRequested)
         {
+            UpdateRetryWork(pair, plan, tally, retries, execution.Pending, evaluated, scan.A.Complete && scan.B.Complete);
             CloseResolvedNotices(openNotices, plan, tally, evaluated);
             CloseAppliedDecisions(openNotices, plan, tally, decisions, resolvingNoticeId);
             AcknowledgeVerifiedRehash(pair, scan, plan, tally, evaluated, predicates.A, predicates.B, ct);
@@ -651,7 +698,8 @@ public sealed partial class SyncRun : ISyncRun
         }
         throttle.Report(RunPhases.Finishing, null, tally.Done, 0);
         throttle.Flush();
-        var report = BuildReport(pairId, plan, tally, ct.IsCancellationRequested);
+        var report = WithReconciliation(BuildReport(pairId, plan, tally, ct.IsCancellationRequested), reconcile)
+            with { Deferred = _store.CountSyncRetries(pairId) };
         return pendingEvidence.Count == 0 ? report : report with
         {
             Outcome = string.Equals(report.Outcome, RunOutcomes.Complete, StringComparison.Ordinal)
@@ -662,7 +710,7 @@ public sealed partial class SyncRun : ISyncRun
 
     // After the first Decide, load any create targets the touched scope missed and decide once more.
     private Plan ExpandOccupancyOnce(PairDef pair, Func<RunScope.Scope> loadScope, BothScan scan, Plan plan,
-        List<string> touched, LinkExclusions links, IReadOnlyDictionary<string, Side?>? winners)
+        List<string> touched, LinkExclusions links, IReadOnlyDictionary<string, Side?>? winners, Action invalidate)
     {
         if (scan.AnyFull) return plan;
         var scope = loadScope();
@@ -681,15 +729,20 @@ public sealed partial class SyncRun : ISyncRun
         }
         if (extra.Count == 0) return plan;
         touched.AddRange(extra);
+        invalidate(); // The cached scope belongs to the previous touched-path identity.
         scope = loadScope();
         var rows = JoinRows(scope, scan, false);
-        return ApplySafetyFilter(pair, ActionPredicates(pair, links), Decide(pair, scan, rows, winners, scope));
+        return ApplySafetyFilter(pair, ActionPredicates(pair, links), Decide(pair, scan, rows, winners, scope, links));
     }
 
     private Plan Decide(PairDef pair, BothScan scan, IReadOnlyList<PlanRow> rows,
-        IReadOnlyDictionary<string, Side?>? winners, RunScope.Scope scope) =>
+        IReadOnlyDictionary<string, Side?>? winners, RunScope.Scope scope, LinkExclusions links) =>
         Planner.Decide(pair.PairId, Math.Max(scan.A.Gen, scan.B.Gen), rows,
-            Options(pair, false, winners, null) with { MappingContextA = scope.ContextA, MappingContextB = scope.ContextB });
+            // Hidden held children must prevent collapse before the action guard drops their parent delete.
+            // Otherwise independent matched child deletes disappear with that collapsed parent.
+            Options(pair, false, winners, null, matchedAtPrepare: new RetryMatches(_store, pair.PairId))
+                with { MappingContextA = scope.ContextA, MappingContextB = scope.ContextB,
+                    ProtectedDescendants = links.Contains });
 
     // Decision 64: the paths of open user-decision notices, except the ones being decided in this run.
     private IEnumerable<string> PendingDecisions(string pairId, IReadOnlyDictionary<string, Side>? deciding) =>
@@ -750,7 +803,8 @@ public sealed partial class SyncRun : ISyncRun
         IReadOnlyList<OneSidedChoice>? oneSided, RebuildableSelection? rebuildables = null,
         IReadOnlyDictionary<string, PrepareMatch>? matchedAtPrepare = null, IReadOnlySet<string>? heldPaths = null) =>
         new(_settings.TieWindow, firstSync, LabelFor(pair), _settings.MaxLabelAttempts, winners, oneSided, rebuildables,
-            matchedAtPrepare, heldPaths) { ObservedAt = _time.GetUtcNow() };
+            matchedAtPrepare, heldPaths)
+        { ObservedAt = _time.GetUtcNow(), ProviderA = pair.A.Provider, ProviderB = pair.B.Provider };
 
     private LabelRule LabelFor(PairDef pair) => new(_settings.KeepBothLabelFormat, _settings.KeepBothTimeFormat,
         TimeZoneInfo.Local.GetUtcOffset(_time.GetUtcNow()),
@@ -828,6 +882,7 @@ public sealed partial class SyncRun : ISyncRun
             .Select(local => (local.Root, local.Side, Probe: new LocalLeftAloneProbe(local.Root.RootPath, stubs)))
             .ToArray();
         if (locals.Length == 0) return approved;
+        var lockedRemovals = new HashSet<string>(StringComparer.Ordinal);
         bool Drops(SyncAction action)
         {
             if (action.Kind is not (ActionKind.Delete or ActionKind.Move or ActionKind.Update)) return false;
@@ -838,7 +893,11 @@ public sealed partial class SyncRun : ISyncRun
                 {
                     if (path is null) continue;
                     var state = local.Probe.Inspect(path);
-                    if (state == LocalLeftAloneProbe.State.Unknown) return true;
+                    if (state == LocalLeftAloneProbe.State.Unknown)
+                    {
+                        if (action is { Kind: ActionKind.Delete, FirstSyncChoice: true }) lockedRemovals.Add(action.ActionId);
+                        return true;
+                    }
                     if (state == LocalLeftAloneProbe.State.Protected) return true;
                     if (state == LocalLeftAloneProbe.State.Linked && !rebuildable) return true;
                     if (state == LocalLeftAloneProbe.State.Present && action is { Kind: ActionKind.Delete, OppositeAbsent: true } &&
@@ -849,7 +908,28 @@ public sealed partial class SyncRun : ISyncRun
             return false;
         }
         var dropped = approved.Actions.Where(Drops).Select(action => action.ActionId).ToHashSet(StringComparer.Ordinal);
+        var lockNotices = new List<Notice>();
         if (dropped.Count == 0) return approved;
+        // A lock does not revoke a reviewed removal. Keep its original stamps/signature;
+        // other changed-path skips carry only ordinary input, never invented deletion authority.
+        foreach (var action in approved.Actions.Where(action => dropped.Contains(action.ActionId)))
+        {
+            if (_store.SyncRetryAt(pair.PairId, action.Path)?.Kind == "decision") continue;
+            if (lockedRemovals.Contains(action.ActionId))
+            {
+                if (_store.SyncRetryAt(pair.PairId, action.Path)?.ReviewedActions is not { Count: > 0 })
+                    _store.SaveSyncRetry(pair.PairId, new(action.Path, "reviewed-removal", 1,
+                        "The local path could not be checked; the reviewed removal will retry without copying it back.",
+                        DateTimeOffset.MinValue, ReviewedActions: [action]));
+                var lockNotice = new Notice(pair.PairId, 40, NoticeKind.Info, action.Path,
+                    "The local path could not be checked. The reviewed removal is retained and will retry; nothing was copied or deleted.",
+                    "sync-retry");
+                lockNotices.Add(lockNotice);
+                _store.AddNotices([lockNotice]);
+            }
+            else if (_store.SyncRetryAt(pair.PairId, action.Path) is null)
+                _store.SaveSyncRetry(pair.PairId, new(action.Path, "post-preview", 0, "", DateTimeOffset.MinValue));
+        }
         var notice = new Notice(pair.PairId, LinkExclusions.Rule, NoticeKind.Info, string.Empty,
             $"the local folder changed after the preview (a new link, placeholder or item, or a path that could not be " +
             $"checked); {dropped.Count} planned effects there were not applied and will be planned again",
@@ -857,7 +937,7 @@ public sealed partial class SyncRun : ISyncRun
         return approved with
         {
             Actions = approved.Actions.Where(action => !dropped.Contains(action.ActionId)).ToArray(),
-            Notices = approved.Notices.Append(notice).ToArray()
+            Notices = approved.Notices.Concat(lockNotices).Append(notice).ToArray()
         };
     }
 
@@ -982,10 +1062,14 @@ public sealed partial class SyncRun : ISyncRun
                 continue;
             }
             skipped.Add(action);
+            if (action.RebuildableRemove && CarriesNewlyIgnored(pair, action, rules))
+                notices.Add(new Notice(pair.PairId, 40, NoticeKind.UserDecision, action.Path,
+                    "The reviewed cloud removal was skipped because new ignore rules protect files inside. Nothing was removed." +
+                    NoticeChoices.RemovalAttentionHelp, "reviewed-removal-skipped"));
             notices.Add(new Notice(pair.PairId, OutsidePairRule, NoticeKind.Info, action.Path,
                 PlanNotices.OutsidePairArea.Detail +
                 " Entire planned effect, including any folder contents and related collision cleanup, skipped; no changes applied." +
-                " Normal subsequent sync may retain or copy included contents. No skipped rebuildable exclusion is added." +
+                " Normal subsequent sync may retain or copy included contents. Reviewed rebuildable exclusions are retained at completion." +
                 " Leave the protection in place, or include the item and resync.",
                 PlanNotices.OutsidePairArea.Key));
         }

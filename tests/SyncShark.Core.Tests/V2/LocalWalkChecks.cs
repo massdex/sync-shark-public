@@ -30,13 +30,12 @@ internal static class LocalWalkChecks
 
     private static string Fresh(string name)
     {
-        // Set SYNCSHARK_TEST_ROOT to a disposable test directory.
-        // Never fall back to the working directory or a synced mirror.
+        // Local runs set SYNCSHARK_TEST_ROOT to a disposable test directory. CI may supply
+        // its own disposable volume. Never fall back to the working directory/Dropbox mirror.
         var configured = Environment.GetEnvironmentVariable("SYNCSHARK_TEST_ROOT");
         if (string.IsNullOrWhiteSpace(configured)) return LocalChecks.FreshRoot("local-walk-" + name);
         var path = Path.GetFullPath(Path.Combine(configured, "local-walk-" + name, Guid.NewGuid().ToString("N"), "root"));
-        var mirror = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Dropbox");
-        if (path.StartsWith(mirror, StringComparison.OrdinalIgnoreCase))
+        if (path.StartsWith(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Dropbox") + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Local walk fixtures must not run under the Dropbox mirror.");
         Directory.CreateDirectory(path);
         return path;

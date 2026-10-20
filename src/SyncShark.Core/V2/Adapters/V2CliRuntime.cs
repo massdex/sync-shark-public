@@ -270,6 +270,8 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
             // A new prepare supersedes the last one, even when its document is refused; it authorizes an apply
             // only once its preview succeeded.
             FirstSyncChoicesState.Clear(_productRoot, pairId, _store);
+            foreach (var retry in _store.ReadSyncRetries(pairId))
+                if (retry.Kind is "first-sync" or "post-preview") _store.ClearSyncRetry(pairId, retry.Path);
             var choices = await ParseChoicesAsync(pair, choicesJson, ct);
             // One detection only: the preview returns the resolution its plan used, and the report and the frozen
             // record are both built from that same object.
@@ -387,12 +389,19 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
             // Newly held paths are pending a separate review, not effects authorized by this apply.
             // Partition before charging potential removes so they cannot inflate the frozen budget.
             plan = FirstSyncChoicesState.PartitionHeldDeletions(prepared, plan);
+            plan = _run.DeferPostPreviewChanges(pair, plan, matched);
+            var reviewed = FirstSyncChoicesState.ReviewedDeleteKeys(prepared);
+            plan = _run.DeferUnreviewedDeletes(pair, plan, reviewed);
             plan = FirstSyncChoicesState.BindCarriedIgnoredBudgets(prepared, plan);
             var effects = ChoiceEffects(pair, plan, choices.OneSided);
-            FirstSyncChoicesState.RefuseRemoveGrowth(prepared, choices.OneSided, effects);
+            var grown = FirstSyncChoicesState.GrownRemoveChoices(prepared, choices.OneSided, effects);
+            if (grown.Count > 0)
+            {
+                plan = _run.HoldGrownRemoveChoices(pair, plan, choices.OneSided, grown);
+                effects = ChoiceEffects(pair, plan, choices.OneSided);
+            }
             // only first-sync choice deletes and unreviewed deletion-evidence deletes need to be in
             // the reviewed set; ordinary deletion propagation after a successful prepare is ongoing sync.
-            var reviewed = FirstSyncChoicesState.ReviewedDeleteKeys(prepared);
             FirstSyncChoicesState.RefuseUnreviewedDeletes(reviewed,
                 FolderDelete.SplitVictims(_store, pair, plan, reviewed).Guarded);
             // The refreshed observation is durable before effects start, independently of execution success.
@@ -448,7 +457,9 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
                     (report.RebuildablesBlocked.Count == 0 ? "" : " The cloud copy could not be removed for: " +
                         string.Join(", ", report.RebuildablesBlocked) + ".")
                 : null,
-            BlockedRebuildables = report.RebuildablesBlocked
+            BlockedRebuildables = report.RebuildablesBlocked,
+            OpenIssues = _store.OpenNotices(pair.PairId).GroupBy(notice => notice.ReasonKey ?? notice.Kind.ToString())
+                .ToDictionary(group => group.Key, group => group.Count())
         };
 
     /// <inheritdoc />

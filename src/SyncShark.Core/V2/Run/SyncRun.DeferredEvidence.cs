@@ -62,24 +62,26 @@ public sealed partial class SyncRun
             scope.Baselines.Where(item => !paths.Contains(item.A.Path) && !paths.Contains(item.B.Path)).ToArray());
     }
 
-    private sealed record DeferredExecution(Plan Plan, Tally Tally, IReadOnlyList<string> Pending);
+    private sealed record DeferredExecution(Plan Plan, Tally Tally, IReadOnlyList<string> Pending,
+        bool EvidenceUnavailable = false);
 
     // A single result consumer owns the tally and progress throttle. Evidence and ordinary effects run concurrently;
     // each resolved path re-enters the normal executor, retaining its recovery and conditional-write guards.
     private async Task<DeferredExecution> ExecuteWithEvidenceAsync(Plan approved, PairDef pair,
-        ProgressThrottle throttle, IReadOnlySet<string>? reviewedDeletes, CancellationToken ct)
+        ProgressThrottle throttle, IReadOnlySet<string>? reviewedDeletes, CancellationToken ct,
+        bool allowUnreviewedEvidence = false)
     {
         if (approved.HeldDeletions.Count == 0)
         {
             Trace("0 held deletes skipped Recovery (identical to Dropbox history)");
-            return new(approved, await ExecuteAsync(approved, pair, throttle, ct),
-                approved.UnreviewedHeldDeletions.Select(item => item.Path).ToArray());
+            return new(approved, await ExecuteAsync(approved, pair, throttle, ct), []);
         }
+        var parkedFootprints = LinkExclusions.None.WithPending(OutstandingFootprints(pair.PairId));
         var held = approved.HeldDeletions.ToDictionary(item => item.Path, StringComparer.OrdinalIgnoreCase);
         if (held.Values.Any(item => item.Rule != HeldDeletion.NewerDeletionRule))
             throw new SyncRunRefusedException("Unknown held deletion rule; prepare again.");
-        if (reviewedDeletes is null || held.Values.Any(item =>
-            !reviewedDeletes.Contains(FolderDelete.VictimKey(item.Local, item.Path))))
+        if (!allowUnreviewedEvidence && (reviewedDeletes is null || held.Values.Any(item =>
+            !reviewedDeletes.Contains(FolderDelete.VictimKey(item.Local, item.Path)))))
             throw new SyncRunRefusedException("Every held path requires explicit reviewed deletion approval.");
         // RQ-141: one exclusion snapshot for the lane, not a root scan per action. Folder refreshes
         // invalidate it under the same gate as their writes. Retain every protection seen this run
@@ -93,7 +95,7 @@ public sealed partial class SyncRun
             {
                 if (refresh || heldGuard is null || guardVersion != _heldRefreshVersion)
                 {
-                    leftAlone = leftAlone.With(LeftAlone(pair));
+                    leftAlone = leftAlone.With(LeftAlone(pair)).WithPending(OutstandingFootprints(pair.PairId));
                     heldGuard = ActionPredicates(pair, leftAlone);
                     guardVersion = _heldRefreshVersion;
                 }
@@ -126,6 +128,7 @@ public sealed partial class SyncRun
         foreach (var action in approved.SkippedActions)
             tally.Add(pair, action, SafetySkipped(action));
         var skippedRecovery = 0;
+        var evidenceUnavailable = false;
         // The merged ordinary/held lane must propagate the executor's backpressure instead of
         // draining bounded executor queues into an unbounded second queue. All writes use stop.Token;
         // if the consumer fails or is cancelled, finally cancels blocked writers before joining them.
@@ -168,6 +171,16 @@ public sealed partial class SyncRun
                             if (_endpoints.Inventory(cloud) is not IDeferredDeletionEvidence source) continue;
                             var paths = group.Where(item => !heldFolders.Contains(item.Path) && !answered.ContainsKey(item.Path))
                                 .Select(item => item.Path).ToArray();
+                            // Released history failures already require a user choice. Do not make that
+                            // choice depend on the same unavailable history probe ever succeeding.
+                            var released = paths.Where(path => _store.SyncRetryAt(pair.PairId, path) is { Kind: "deletion-evidence", Held: not null })
+                                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                            foreach (var path in released)
+                            {
+                                answered.TryAdd(path, 0);
+                                evidence.Writer.TryWrite((path, new SyncRemoteDeletionEvidence(null, "Released evidence requires a decision.", LookupFailed: true)));
+                            }
+                            paths = paths.Where(path => !released.Contains(path)).ToArray();
                             await source.ResolveDeletionEvidenceAsync(paths, (path, resolved) =>
                             {
                                 answered.TryAdd(path, 0);
@@ -177,12 +190,12 @@ public sealed partial class SyncRun
                         // A per-path lookup failure comes back as LookupFailed without a callback and without an
                         // exception, so the pass ends normally; any path still unanswered gets another pass.
                         var unanswered = held.Values.Count(item => !heldFolders.Contains(item.Path) && !answered.ContainsKey(item.Path));
-                        if (unanswered == 0 || attempt >= 12) break;
+                        if (unanswered == 0 || attempt >= 2) break;
                         Trace($"deletion evidence pass {attempt} left {unanswered} path(s) unanswered; retrying in {backoff.TotalSeconds:N0}s");
                         await Task.Delay(backoff, token);
                         backoff = TimeSpan.FromSeconds(Math.Min(300, backoff.TotalSeconds * 2));
                     }
-                    catch (Exception error) when (error is not PairPausedException && !ct.IsCancellationRequested && attempt < 12 &&
+                    catch (Exception error) when (error is not PairPausedException && !ct.IsCancellationRequested && attempt < 2 &&
                         ProviderTransientFailure.IsTransient(error, ct))
                     {
                         Trace($"deletion evidence pass {attempt} interrupted ({error.GetType().Name}); {answered.Count} resolved, " +
@@ -193,7 +206,12 @@ public sealed partial class SyncRun
                 }
             }
             catch (Exception error) when (error is not PairPausedException && !ct.IsCancellationRequested)
-            { Trace("deletion evidence pending: " + error.GetType().Name); }
+            {
+                // A failed service-level probe with no answers is an outage, not a collection of failed items.
+                // Keep the reviewed run resumable; ordinary siblings that already succeeded remain committed.
+                evidenceUnavailable = answered.IsEmpty && ProviderTransientFailure.IsTransient(error, ct);
+                Trace("deletion evidence pending: " + error.GetType().Name);
+            }
             finally { evidence.Writer.TryComplete(); }
         }, token);
         var resolve = Task.Run(async () =>
@@ -278,8 +296,58 @@ public sealed partial class SyncRun
             {
                 try
                 {
+                    var heldRetry = _store.SyncRetryAt(pair.PairId, rule.Path);
+                    // A released-evidence decision owns the path until the user chooses. A replayed held
+                    // lane (a repeated first-sync apply, for example) must never act under stale prepare
+                    // authority while its decision notice is still open.
+                    if (heldRetry?.Kind == "decision")
+                    { lock (sync) pending.Add(rule.Path); return; }
+                    if (parkedFootprints.Covers(rule.Path) || parkedFootprints.Contains(rule.Path))
+                    { lock (sync) pending.Add(rule.Path); return; }
                     var isFolder = heldFolders.Contains(rule.Path);
                     var cloud = rule.Local == Side.A ? pair.B : pair.A;
+                    if (heldRetry is { Kind: "deletion-evidence" } released)
+                    {
+                        var survivorRoot = rule.Local == Side.A ? pair.A : pair.B;
+                        var survivor = await _endpoints.Writer(survivorRoot).ObserveAsync(rule.Path, token);
+                        var remoteNow = await _endpoints.Writer(cloud).ObserveAsync(rule.Path, token);
+                        if (remoteNow is not null || survivor is null)
+                        {
+                            _store.ClearSyncRetry(pair.PairId, rule.Path);
+                            _store.RemoveDeletionEvidence(pair.PairId, cloud.RootId, [rule.Path]);
+                            foreach (var oldNotice in _store.OpenNotices(pair.PairId).Where(item =>
+                                PairPath.Same(item.Path, rule.Path) && item.ReasonKey is "deletion-review" or "deletion-history-unavailable"))
+                                if (oldNotice.NoticeId is not null) _store.CloseNotice(oldNotice.NoticeId, "recreated");
+                            if (remoteNow is not null)
+                                _store.SaveSyncRetry(pair.PairId, new(rule.Path, "post-preview", 0, "", DateTimeOffset.MinValue));
+                            lock (sync) pending.Remove(rule.Path);
+                            return; // Current inventory is ordinary sync input on the next run, never old delete authority.
+                        }
+                        // Released history always ends in an explicit decision; it is never retried forever.
+                        // A hash is not required for Delete: the proposal is stamped and Recovery-first, so
+                        // the executor re-checks the victim. A folder or a flagged survivor gets no deletion
+                        // authority at all: only keep/restore and ignore are offered, and the ordinary safety
+                        // guards still refuse a restore that would write over protected content.
+                        var deletable = survivor.Kind == ItemKind.File && survivor.Flags == ItemFlags.None;
+                        var proposal = new SyncAction(PlanIds.ActionId(pair.PairId, approved.Gen, 40, ActionKind.Delete,
+                            rule.Local, rule.Path), 40, ActionKind.Delete, rule.Local, rule.Path, null, null,
+                            survivor, true, null) { OppositeAbsent = true };
+                        var attention = new Notice(pair.PairId,
+                            deletable ? NoticeChoices.DeletionReviewRule : NoticeChoices.DeletionReviewRestoreOnlyRule,
+                            NoticeKind.UserDecision, rule.Path,
+                            deletable
+                                ? "Dropbox reports this file deleted. Nothing was deleted or uploaded. Choose Delete with Recovery, Keep and restore to Dropbox, or Ignore."
+                                : "Dropbox reports this item deleted. Nothing was deleted or uploaded. Choose Keep and restore to Dropbox, or Ignore to exclude this path from sync.",
+                            "deletion-review");
+                        _store.AddNotices([attention]);
+                        _store.SaveSyncRetry(pair.PairId, released with { Kind = "decision", RetryAfter = DateTimeOffset.MaxValue,
+                            HeldReviewed = false, ReviewedActions = null, ProposedActions = [proposal] });
+                        foreach (var oldNotice in _store.OpenNotices(pair.PairId).Where(item => PairPath.Same(item.Path, rule.Path) &&
+                            item.ReasonKey is "sync-retry" or "deletion-evidence-pending"))
+                            if (oldNotice.NoticeId is not null) _store.CloseNotice(oldNotice.NoticeId, "decision-required");
+                        lock (sync) { notices.Add(attention); pending.Add(rule.Path); }
+                        return;
+                    }
                     var deleteFolder = isFolder &&
                         _endpoints.Inventory(cloud) is IDeferredDeletionEvidence source &&
                         source.IsAtOrUnderExactTombstone(rule.Path);
@@ -313,6 +381,30 @@ public sealed partial class SyncRun
                     bool blocked;
                     lock (sync) blocked = resolved.Actions.Any(FolderDelete.Expands) && pending.Any(path => PairPath.IsUnder(path, rule.Path));
                     if (blocked) { lock (sync) pending.Add(rule.Path); return; }
+                    if (allowUnreviewedEvidence && resolved.Actions.Any(action => action.Kind == ActionKind.Delete) &&
+                        (reviewedDeletes is null || !reviewedDeletes.Contains(FolderDelete.VictimKey(rule.Local, rule.Path))))
+                    {
+                        // Evidence proves history, never consent. Preserve the proposed stamped actions separately
+                        // from reviewed actions until the user explicitly chooses delete.
+                        var retry = _store.SyncRetryAt(pair.PairId, rule.Path) ??
+                            new SyncRetry(rule.Path, "decision", 0, "", DateTimeOffset.MaxValue, Held: rule);
+                        var notice = new Notice(pair.PairId, 40, NoticeKind.UserDecision, rule.Path,
+                            "Dropbox history indicates a deletion that was not reviewed. Choose delete, keep/restore, or ignore; nothing was deleted.",
+                            "deletion-review");
+                        // Publish the decision hold before retiring automatic scheduling: a crash must never
+                        // expose the path between an active retry and its durable decision notice.
+                        _store.AddNotices([notice]);
+                        _store.SaveSyncRetry(pair.PairId, retry with
+                        {
+                            Kind = "decision", RetryAfter = DateTimeOffset.MaxValue,
+                            ReviewedActions = null, HeldReviewed = false, ProposedActions = resolved.Actions
+                        });
+                        foreach (var oldNotice in _store.OpenNotices(pair.PairId).Where(item =>
+                            PairPath.Same(item.Path, rule.Path) && item.ReasonKey is "sync-retry" or "deletion-evidence-pending"))
+                            if (oldNotice.NoticeId is not null) _store.CloseNotice(oldNotice.NoticeId, "decision-required");
+                        lock (sync) { notices.Add(notice); pending.Add(rule.Path); }
+                        return;
+                    }
                     RefuseUnreviewedDeletes(pair, resolved, reviewedDeletes);
                     int count, uploadsNow, deletesNow;
                     var report = false;
@@ -399,8 +491,7 @@ public sealed partial class SyncRun
         }
         Trace($"{skippedRecovery} held deletes skipped Recovery (identical to Dropbox history)");
         return new(approved with { Actions = actions, Notices = notices, SkippedActions = skipped }, tally,
-            pending.Concat(approved.UnreviewedHeldDeletions.Select(item => item.Path))
-                .Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal).ToArray());
+            pending.Order(StringComparer.Ordinal).ToArray(), evidenceUnavailable);
     }
 
     private async Task<IReadOnlyList<ItemState>> RefreshDescendantsAsync(RootDef root, Side side,

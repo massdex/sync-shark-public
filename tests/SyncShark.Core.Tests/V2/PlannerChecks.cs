@@ -21,7 +21,8 @@ internal static partial class PlannerChecks
         Rule05b_FirstSyncBoundary();
         Rule06_DeletedOneSide();
         Rule06b_DeletedByKnownAbsence();
-        Rule06c_Decision69RecoverySkip();
+        Rule06c_LocalTargetWithDropboxOppositeSkipsRecovery();
+        EqualRevision_ProviderMatrix();
         Rule07_DeletedVsEdited();
         Rule08_DeletedVsMoved();
         Rule08b_DeletedVsMovedFolder();
@@ -156,8 +157,8 @@ internal static partial class PlannerChecks
     {
         var row = Row(Base("k1", F("x", "idA", "h1"), F("x", "idB", "h1")), null, F("x", "idB", "h1"), Ev(A: true));
         var plan = Decide(row);
-        // Decision 69: the surviving local copy hashes to the deleted Dropbox revision (A is the deleted side here).
-        AssertActions(plan, new Exp(ActionKind.Delete, Side.B, "x", null, false, 6, null, "k1"));
+        // Dropbox-target deletes retain app Recovery provenance even when the hashes match.
+        AssertActions(plan, new Exp(ActionKind.Delete, Side.B, "x", null, true, 6, null, "k1"));
         AssertEmptyNotices(plan);
     }
 
@@ -166,15 +167,16 @@ internal static partial class PlannerChecks
         var row = Row(Base("k1", F("x", "idA", "h1"), F("x", "idB", "h1")), null, F("x", "idB", "h1"),
             new Evidence(false, false, KnownA: true, KnownB: true));
         var plan = Decide(row);
-        AssertActions(plan, new Exp(ActionKind.Delete, Side.B, "x", null, false, 6, null, "k1"));
+        AssertActions(plan, new Exp(ActionKind.Delete, Side.B, "x", null, true, 6, null, "k1"));
         AssertEmptyNotices(plan);
     }
 
     /// <summary>
-    /// Decision 69 extended to ordinary baseline propagation: a rule-6 local delete skips Recovery only on an
-    /// exact current-hash/deleted-revision match; a different or unknown hash keeps the Recovery copy.
+    /// Decision 69 extended to ordinary baseline propagation: a rule-6 delete skips Recovery only when the
+    /// target is local, the opposite side is Dropbox, and the current hash exactly matches the deleted
+    /// revision; any other target keeps the Recovery copy, as does a different or unknown hash.
     /// </summary>
-    private static void Rule06c_Decision69RecoverySkip()
+    private static void Rule06c_LocalTargetWithDropboxOppositeSkipsRecovery()
     {
         // Local is A and Dropbox is B; B's baseline row is the revision Dropbox deleted.
         var identical = Row(Base("k1", F("x", "idA", "h1"), F("x", "idB", "h1")), F("x", "idA", "h1"), null, Ev(B: true));

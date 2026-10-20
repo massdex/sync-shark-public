@@ -1070,8 +1070,12 @@ public sealed partial class DropboxPilotClient(
 
         async Task Report(string detail, int count)
         {
-            if (onProgress is not null)
-                await onProgress(new("Reading Dropbox Inventory", _root, count, detail));
+            try
+            {
+                if (onProgress is not null)
+                    await onProgress(new("Reading Dropbox Inventory", _root, count, detail));
+            }
+            catch (Exception) { /* Inventory display is best-effort, never inventory evidence. */ }
         }
         var listWatch = System.Diagnostics.Stopwatch.StartNew();
         Trace($"list entries start ({listWatch.ElapsedMilliseconds} ms)");

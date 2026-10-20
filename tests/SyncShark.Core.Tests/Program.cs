@@ -13,6 +13,18 @@ using Massdex.SyncShark;
 using Microsoft.Data.Sqlite;
 #pragma warning disable CS8321
 
+if (args is ["--v2-local-constituent-checks", var constituentRoot, var constituent])
+{
+    await Massdex.SyncShark.V2.LocalChecks.RunConstituentAsync(constituentRoot, constituent);
+    return 0;
+}
+
+if (args is ["--first-sync-completion-checks"])
+{
+    await Massdex.SyncShark.V2.RunChecks.FirstSyncCompletionChecksAsync();
+    return 0;
+}
+
 if (args is ["--upload-payload-checks"])
 {
     await UploadPayloadChecks.RunAsync();
@@ -74,6 +86,12 @@ var inheritedTestProductRoot = args switch
     _ => null
 };
 using var isolatedProductRuntime = new IsolatedTestProductRuntime(inheritedTestProductRoot);
+
+if (args is ["--v2-million-memory-checks"])
+{
+    await Massdex.SyncShark.V2.RunChecks.MillionItemPrepareMemoryAsync();
+    return 0;
+}
 
 if (args is ["--essential-successor-checks", var successorRoot])
 {

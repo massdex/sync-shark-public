@@ -242,12 +242,13 @@ internal static class FirstSyncChoicesState
     }
 
     /// <summary>
-    /// Decision 54 addendum: refuses an apply when any remove choice would now delete more files or bytes than
-    /// its prepare reported (new one-sided files appeared since). Copies and every other rule are not limited.
+    /// Decisions 54/85: identifies grown remove choices to hold without refusing unrelated work.
+    /// Copies and every other rule are not limited.
     /// </summary>
-    public static void RefuseRemoveGrowth(Prepared prepared, IReadOnlyList<OneSidedChoice> choices,
+    public static IReadOnlyList<OneSidedChoice> GrownRemoveChoices(Prepared prepared, IReadOnlyList<OneSidedChoice> choices,
         IReadOnlyList<SyncCliChoiceEffectData> effects)
     {
+        var grown = new List<OneSidedChoice>();
         var reported = prepared.OneSided.ToDictionary(
             stored => FirstSyncChoices.ChoiceKey(stored.Side, stored.Prefix), StringComparer.OrdinalIgnoreCase);
         for (var index = 0; index < choices.Count; index++)
@@ -257,10 +258,9 @@ internal static class FirstSyncChoicesState
             var key = FirstSyncChoices.ChoiceKey(FirstSyncChoices.SideText(choices[index].Present), choices[index].Prefix);
             if (reported.TryGetValue(key, out var then) && now.Files <= then.Files && now.Bytes <= then.Bytes)
                 continue;
-            throw new SyncCliReviewException(
-                $"The remove choice for '{now.Prefix}' would now remove {now.Files} files ({now.Bytes} bytes), more " +
-                "than the last prepare reported — run prepare again.");
+            grown.Add(choices[index]);
         }
+        return grown;
     }
 
     /// <summary>

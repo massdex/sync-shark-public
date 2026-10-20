@@ -66,6 +66,11 @@ public sealed partial class SqliteStateStore
                 "DELETE FROM deletion_evidence WHERE pair_no=$p AND (root_no=$a OR root_no=$b) " +
                 "AND (path_key=$k OR substr(path_key,1,length($k)+1)=$k||'/');",
                 ("$p", pairNo), ("$a", rootA), ("$b", rootB), ("$k", key));
+            // Re-inclusion starts matching afresh; retained prepare stamps must not revive an old deletion.
+            StoreSchema.Execute(_connection, transaction,
+                "DELETE FROM sync_retry WHERE pair_no=$p " +
+                "AND (path_key=$k OR substr(path_key,1,length($k)+1)=$k||'/');",
+                ("$p", pairNo), ("$k", key));
         }
         StoreSchema.Execute(_connection, transaction, "UPDATE pair SET def_json=$j WHERE pair_no=$p;",
             ("$j", JsonSerializer.Serialize(included, RowCodec.Json)), ("$p", pairNo));

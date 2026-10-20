@@ -15,6 +15,17 @@ public partial class MainWindow
         _noticeOptionBusy = true;
         try
         {
+            if (option.Choice == V2.NoticeChoices.OpenFolderSettings)
+            {
+                var pair = PairRows.FirstOrDefault(item => item.Id == row.PairId)
+                    ?? throw new InvalidOperationException("This folder pair is no longer listed. Refresh Folder Pairs.");
+                NavigateTo("Pairs");
+                PairList.SelectedItem = pair;
+                ExpandPairRow(pair);
+                ShowPairEditorStatus("Review selection and ignore rules for: " + row.Path);
+                ShowStatus("Folder settings opened. The notice stays open; no files changed.");
+                return;
+            }
             SharedPresentation.SetInlineFeedback(ConflictActionFeedback, "Recording your choice…", isError: false);
             var batch = await _authorityHost.ResolveConflictSelectionCommandAsync(
                 [new(new(row.ConflictId ?? "", row.PairId, row.Path, row.ConflictGeneration ?? 0),
