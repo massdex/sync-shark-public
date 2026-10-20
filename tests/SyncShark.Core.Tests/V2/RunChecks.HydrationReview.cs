@@ -311,6 +311,41 @@ internal static partial class RunChecks
             Require(fx.WriterB.Puts == 0 && fx.WriterA.Deletes == 0,
                 "a restored hold never uploads or deletes while its evidence is unresolved");
         }
+
+        // RQ-052: a run that is paused counts nothing, even when Dropbox answered the lookup before the
+        // pause was noticed. The pause arrives as an exception in a sibling lane, not as token
+        // cancellation, so the evidence lane must consult PairPause directly. The same answered lookup in
+        // a running pair still spends exactly one attempt.
+        using (var pausedStore = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(),
+                   "restored-paused-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System))
+        {
+            var pausedFx = Build(suppliedStore: pausedStore);
+            var pausedItem = pausedFx.A.Seed("held.txt", "content");
+            pausedStore.SaveSyncRetry(pausedFx.Pair.PairId, new SyncRetry(pausedItem.Path, "deletion-evidence",
+                0, "", DateTimeOffset.MinValue, Held: new HeldDeletion(pausedItem.Path, Side.A), ReprobeEvidence: true));
+            pausedStore.MarkFirstSyncDone(pausedFx.Pair.PairId);
+            var pauseAfterAnswer = true;
+            pausedFx.Provider.AddInventory(pausedFx.Pair.B, new DeferredInventory(pausedFx.B)
+            {
+                LookupFailure = true,
+                AfterAnswer = () =>
+                {
+                    if (pauseAfterAnswer) pausedStore.SetPairPaused(pausedFx.Pair.PairId, true);
+                }
+            });
+            var pausedRun = pausedFx.Run();
+            await pausedRun.IncrementalAsync(pausedFx.Pair.PairId, new RecordingProgress(), default);
+            Require(pausedStore.SyncRetryAt(pausedFx.Pair.PairId, pausedItem.Path) is { Attempts: 0, EvidenceReleased: false },
+                "a paused run counts no restored-hold attempt even after Dropbox answered the lookup");
+
+            pauseAfterAnswer = false;
+            pausedStore.SetPairPaused(pausedFx.Pair.PairId, false);
+            pausedStore.SaveSyncRetry(pausedFx.Pair.PairId,
+                pausedStore.SyncRetryAt(pausedFx.Pair.PairId, pausedItem.Path)! with { RetryAfter = DateTimeOffset.MinValue });
+            await pausedRun.IncrementalAsync(pausedFx.Pair.PairId, new RecordingProgress(), default);
+            Require(pausedStore.SyncRetryAt(pausedFx.Pair.PairId, pausedItem.Path) is { Attempts: 1, EvidenceReleased: false },
+                "a running pair still spends the restored-hold budget on an answered lookup");
+        }
         Console.WriteLine("PASS RestoredEvidenceBudgetChecks");
     }
 

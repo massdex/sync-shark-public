@@ -270,12 +270,13 @@ public sealed partial class SyncRun
             {
                 // F1 (owner decision): the three-failed-run budget counts ONLY runs in which Dropbox actually
                 // answered the deletion-history lookup for this item (a per-path error or "unavailable"). A run
-                // where the provider or network was unreachable, the session was refused, or the run was cancelled
-                // or stopped counts nothing, so one outage cannot spend every restored hold's budget. This lane
-                // still owns Attempts for reprobe rows (SaveFailedRetry preserves them).
+                // where the provider or network was unreachable, the session was refused, or the run was cancelled,
+                // stopped or paused counts nothing, so one outage cannot spend every restored hold's budget. A pause
+                // is an exception after the answers, not token cancellation, so it is checked explicitly here. This
+                // lane still owns Attempts for reprobe rows (SaveFailedRetry preserves them).
                 try
                 {
-                    if (!token.IsCancellationRequested)
+                    if (!token.IsCancellationRequested && !PairPause.IsPaused)
                         foreach (var item in held.Values.Where(item => !heldFolders.Contains(item.Path) &&
                             answeredUnavailable.ContainsKey(item.Path)))
                             if (_store.SyncRetryAt(pair.PairId, item.Path) is { ReprobeEvidence: true, Kind: not "decision" } retry)

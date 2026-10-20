@@ -1180,10 +1180,12 @@ public static class SyncCliRegistry
                      V2.NoticeChoices.IsRetainedVersionChoice(selected.ToLowerInvariant()));
                 if (invocation.Name is not null || invocation.Options?.ContainsKey("--offset") == true ||
                     invocation.Value("--page-token") is not null || noticeChoice)
-                    return await operations.ResolveNoticeAsync(invocation.PairId!, RequirePath(invocation),
+                    // Key-only pair notices carry an empty path: Windows PowerShell 5.1 drops a "" argument
+                    // to a native exe, and the v2 runtime itself enforces --path for item notices.
+                    return await operations.ResolveNoticeAsync(invocation.PairId!, invocation.Path ?? string.Empty,
                         RequireChoice(invocation), invocation.Key, invocation.Generation, invocation.AccountId,
                         cancellationToken, new NoticeActionInput(invocation.Name, invocation.Offset, invocation.Value("--page-token")));
-                return await operations.ResolveConflictAsync(invocation.PairId!, RequirePath(invocation),
+                return await operations.ResolveConflictAsync(invocation.PairId!, invocation.Path ?? string.Empty,
                     RequireChoice(invocation), invocation.Key, invocation.Generation, invocation.AccountId,
                     cancellationToken, Progress);
             }

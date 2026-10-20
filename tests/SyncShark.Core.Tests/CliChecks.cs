@@ -1219,6 +1219,17 @@ internal static partial class CliChecks
             "--name", "Folder/Sub", "--key", "notice-a", "--generation", "0", "--yes"]);
         Require(chooseFolder.Name == "Folder/Sub",
             "choose folder carries the user supplied pair-relative folder path");
+        // F1: a key-only pair notice carries an empty path. Windows PowerShell 5.1 drops a "" argument
+        // to a native exe, so dispatch must not refuse before the v2 runtime's own item-notice check
+        // (which still demands --path for item notices) can see the exact notice.
+        var pairNotice = new PairNoticeDispatchRuntime();
+        var pairNoticeResult = await RunCliAsync(["--cli", "conflicts", "resolve", "--pair", "pair-a",
+            "--choice", Massdex.SyncShark.V2.NoticeChoices.RetryNow, "--key", "notice-a",
+            "--generation", "0", "--yes", "--json"], () => pairNotice);
+        Require(pairNoticeResult.ExitCode == 0 && pairNotice.NoticePath == string.Empty &&
+                pairNotice.NoticeChoice == Massdex.SyncShark.V2.NoticeChoices.RetryNow &&
+                pairNotice.DisposeCount == 1,
+            "a key-only pair notice resolves with --key and --generation and no --path");
         await LocalPathArgumentChecksAsync();
         foreach (var choice in new[] { "review-removal", "review-removal-a", "review-removal-b", "confirm-removal", "removal-next-page", "removal-previous-page" })
         {
@@ -2735,6 +2746,33 @@ internal static partial class CliChecks
                 return true;
         }
         return false;
+    }
+
+    // F1: records the exact arguments dispatch hands to the notice route. The v2 runtime keeps its own
+    // "--path is required for item notices" refusal; this fake only proves dispatch never refuses first.
+    private sealed class PairNoticeDispatchRuntime : SyncCliOperationsBase, ISyncCliRuntime, ISyncCliOperations
+    {
+        protected override SyncAuthorityRuntimeHost Host => throw new InvalidOperationException("No host needed.");
+        protected override PilotStateAuthority StateAuthority => throw new InvalidOperationException("No state needed.");
+        public override string Mode => "fixture";
+        internal string? NoticePath { get; private set; }
+        internal string? NoticeChoice { get; private set; }
+        internal int DisposeCount { get; private set; }
+
+        Task<SyncCliRunData> ISyncCliOperations.ResolveNoticeAsync(string pairId, string relativePath,
+            string choice, string? conflictId, long? generation, string? accountId,
+            CancellationToken cancellationToken, NoticeActionInput input)
+        {
+            NoticePath = relativePath;
+            NoticeChoice = choice;
+            return Task.FromResult(new SyncCliRunData(pairId, "Pair A", 0, 0, 0, 0, 0, false));
+        }
+
+        public override ValueTask DisposeAsync()
+        {
+            DisposeCount++;
+            return ValueTask.CompletedTask;
+        }
     }
 
     private static ISyncCliRuntime NeverOpensState() =>

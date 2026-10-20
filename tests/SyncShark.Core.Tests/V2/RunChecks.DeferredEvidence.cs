@@ -562,6 +562,9 @@ internal static partial class RunChecks
         public bool ProviderOutage { get; init; }
         public bool Pause { get; set; }
         public bool LookupFailure { get; init; }
+        // Runs after every per-path answer, so a check can pause the pair when Dropbox has already
+        // answered (the paused-run budget case) instead of before the lane starts.
+        public Action? AfterAnswer { get; init; }
         public bool CancelWithoutCaller { get; init; }
         public IReadOnlyDictionary<string, DateTimeOffset?> Cached { get; init; } = new Dictionary<string, DateTimeOffset?>();
         public DateTimeOffset? Deleted { get; init; }
@@ -591,6 +594,7 @@ internal static partial class RunChecks
             foreach (var path in paths)
                 resolved(ResolvedPath?.Invoke(path) ?? path, new SyncRemoteDeletionEvidence(Cached.TryGetValue(path, out var cached) ? cached : Deleted,
                     "probed Dropbox deletion", LookupFailed: LookupFailure, ContentHash: HistoryHashes.GetValueOrDefault(path)));
+            AfterAnswer?.Invoke();
         }
         public Task<Snapshot> FullAsync(long gen, Func<string, bool> include, IProgress<string> progress,
             CancellationToken ct) => inner.FullAsync(gen, include, progress, ct);

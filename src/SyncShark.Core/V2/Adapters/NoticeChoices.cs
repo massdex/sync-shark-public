@@ -227,7 +227,7 @@ public static class NoticeChoices
                new(RemoveRule, "Remove rule"), new(KeepRule, "Keep rule (ignore this notice)")]
             : notice.ReasonKey == "deletion-evidence-pending"
             ? [new(CheckHistoryAgain, "Check history again"), new(ReviewDeletion, "Review deletion evidence"),
-               new(Ignore, "Keep; exclude from sync")]
+               new(Ignore, "Keep this copy; stop syncing this path")]
             : notice.ReasonKey == "links-excluded"
             ? [new(ShowRemaining, "Review links (50 per page; optional cursor)", RequestsName: true)]
             : notice.ReasonKey == "link-item"

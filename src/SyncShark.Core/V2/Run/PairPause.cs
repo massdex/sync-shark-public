@@ -23,10 +23,14 @@ internal sealed class PairPause : IDisposable
         Current.Value = this;
     }
     internal static PairPause Begin(IStateStore store, string pair, Func<bool>? requested = null) => new(store, pair, requested);
+    // A durable or active-run pause requested in this scope. Work that must not count a paused run reads
+    // this; work that must stop calls Check. Both observe the same two sources.
+    internal static bool IsPaused =>
+        Current.Value is { } pause &&
+        (pause._requested?.Invoke() == true || pause._store?.CachedPairPaused(pause._pair) == true);
     internal static void Check()
     {
-        if (Current.Value is { } pause && (pause._requested?.Invoke() == true || pause._store?.CachedPairPaused(pause._pair) == true))
-            throw new PairPausedException(pause._pair);
+        if (Current.Value is { } pause && IsPaused) throw new PairPausedException(pause._pair);
     }
     public void Dispose() => Current.Value = _previous;
 }

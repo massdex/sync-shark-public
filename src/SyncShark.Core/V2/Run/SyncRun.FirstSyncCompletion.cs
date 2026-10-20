@@ -150,7 +150,10 @@ public sealed partial class SyncRun
                 remaining.Remove(item.Path);
                 if (excluded && item.Held is not null) _store.SuspendHeldRetry(pair.PairId, item);
                 else _store.ClearSyncRetry(pair.PairId, item.Path);
-                if (item.Held is { } held)
+                // RQ-052: an excluded held item is suspended, not settled. Keep its stored evidence while it
+                // is excluded; re-inclusion starts a fresh probe (SavePairIncluded invalidates cached evidence
+                // first), so an exclusion never destroys the deletion history.
+                if (!excluded && item.Held is { } held)
                     _store.RemoveDeletionEvidence(pair.PairId, held.Local == Side.A ? pair.B.RootId : pair.A.RootId, [item.Path]);
                 foreach (var notice in notices[item.Path])
                     if (notice.NoticeId is not null) _store.CloseNotice(notice.NoticeId, excluded ? "exclude" : "resolved");
