@@ -121,14 +121,36 @@ internal static class StorageExplicitRetryChecks
     private static async Task AtomicRetryAsync(string root, Queue queue)
     {
         using var fixture = new Fixture(root, queue);
+        if (queue == Queue.Refresh)
+        {
+            // Refresh failure reports the newly observed revision before the old receipt is replaced.
+            // Retry targets the entity, not an equality check against that old receipt's scope.
+            var metadata = fixture.Notice(0)?.Storage ?? throw new InvalidOperationException("Missing refresh notice.");
+            StorageNotices.Report(fixture.Store, fixture.Pair, fixture.Files[0].Path,
+                metadata with { Scope = StorageNotices.ReceiptScope(fixture.Pointer(0).Remote with { Revision = "revision-2" }) },
+                new IOException("Synthetic refresh failure after remote observation"));
+        }
         var notice = fixture.Notice(0) ?? throw new InvalidOperationException(queue + ": missing dispatch fixture notice.");
-        // The real dispatcher path must not pre-write due=0: the targeted drain itself writes the durable
-        // UserRequested sentinel and claims atomically, so no background page can claim it as Normal.
-        await fixture.ApplyRetryAsync(notice);
-        Require(fixture.Calls == 1 && !fixture.Pending(0),
-            queue + ": real notice Retry dispatches exactly one requested target");
-        Require(fixture.Notice(0) is null,
-            queue + ": real notice Retry closes only the executed target's notice");
+        // A direct CLI has no native provider: it must queue, not try to execute with missing fixture
+        // delegates or throw before saving the request. The background host alone claims the marker.
+        Require(!fixture.RequestMissingJob() && fixture.Due(0) > fixture.Clock.NowMs,
+            queue + ": a stale job id does not falsely report a persisted request");
+        var cli = new V2CliRuntime(null, fixture.Store, null!, null!, root);
+        await cli.ResolveConflictAsync(fixture.Pair.PairId, notice.Path, NoticeChoices.RetryNow,
+            notice.NoticeId, 0, null, CancellationToken.None);
+        Require(fixture.Due(0) == StorageDue.UserRequested && fixture.Pending(0) && fixture.Calls == 0,
+            queue + ": direct CLI persists the atomic request without native execution");
+        Require(fixture.Notice(0)?.NoticeId == notice.NoticeId && fixture.Due(1) > fixture.Clock.NowMs,
+            queue + ": queued Retry preserves its notice and leaves unrelated work deferred");
+        await using (var host = fixture.Service())
+            await host.DrainAsync(CancellationToken.None);
+        Require(fixture.Calls == 1 && !fixture.Pending(0) && fixture.Pending(1),
+            queue + ": background host consumes exactly the CLI-requested target");
+        Require(fixture.Notice(0) is null && fixture.Notice(1) is not null,
+            queue + ": successful host retry closes only the executed target's notice");
+        await using (var host = fixture.Service())
+            await host.DrainAsync(CancellationToken.None);
+        Require(fixture.Calls == 1, queue + ": another host turn cannot replay the consumed CLI request");
     }
 
     private static async Task FailedAsync(string root, Queue queue)
@@ -381,6 +403,12 @@ internal static class StorageExplicitRetryChecks
                 default: Store.DeferStoragePointer(Pointer(i), delay); break;
             }
         }
+        internal bool RequestMissingJob() => _queue switch
+        {
+            Queue.Settlement => Store.RequestStorageSettlement(Settlement(0) with { JobId = long.MaxValue }),
+            Queue.Offline => Store.RequestStorageHydration(Hydration(0) with { JobId = long.MaxValue }),
+            _ => Store.RequestStoragePointer(Pointer(0) with { JobId = long.MaxValue })
+        };
         internal void Request(int i)
         {
             switch (_queue)

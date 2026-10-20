@@ -155,14 +155,15 @@ public sealed partial class SqliteStateStore
 
     // Persist one explicit Retry without running it. Only an existing queued row is marked, so a completed
     // entity is never recreated; the negative due marker survives pause and is consumed by the claim below.
-    internal void RequestStorageSettlement(StorageSettlement job) => InStore(() =>
+    internal bool RequestStorageSettlement(StorageSettlement job) => InStore(() =>
     {
-        if (!_storageEnabled) return;
+        if (!_storageEnabled) return false;
         StoreSchema.Execute(_connection, null,
             "UPDATE storage_settlement SET state='pending',due=$requested WHERE job_id=$id AND root_id=$r AND object_id=$o " +
             "AND remote_binding=$b AND remote_json=$j;",
             ("$requested", StorageDue.UserRequested), ("$id", job.JobId), ("$r", job.RootId), ("$o", job.ObjectId),
             ("$b", job.RemoteBinding), ("$j", JsonSerializer.Serialize(job.Remote)));
+        return StoreSchema.Changes(_connection, null) != 0;
     });
 
     internal bool IsStorageSettlementRequested(StorageSettlement job) => InStore(() => _storageEnabled &&

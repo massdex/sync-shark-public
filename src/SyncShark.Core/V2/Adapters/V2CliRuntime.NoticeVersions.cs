@@ -28,7 +28,8 @@ public sealed partial class V2CliRuntime
         if (selected is { Closed: false } && StorageNotices.HandlesAtPath(selected.Value.Notice, relativePath) &&
             _store is SqliteStateStore storage)
         {
-            await StorageNotices.ApplyAsync(storage, RequireStorageConnections(), selected.Value.Notice, choice, cancellationToken, IsStoragePaused);
+            await StorageNotices.ApplyAsync(storage, StorageNoticeConnections, selected.Value.Notice, choice,
+                cancellationToken, IsStoragePaused, Console.Error.WriteLine);
             return new SyncCliRunData(pairId, pair.Name, 0, 0, 0, 0, 0, false);
         }
         if (selected is { Closed: false } &&

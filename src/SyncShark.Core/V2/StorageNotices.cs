@@ -169,8 +169,9 @@ internal static class StorageNotices
                 yield return nested;
     }
 
-    internal static async Task ApplyAsync(SqliteStateStore store, CloudFilesLifetime connections,
-        Notice notice, string choice, CancellationToken ct, Func<PairDef, bool>? paused = null)
+    internal static async Task ApplyAsync(SqliteStateStore store, CloudFilesLifetime? connections,
+        Notice notice, string choice, CancellationToken ct, Func<PairDef, bool>? paused = null,
+        Action<string>? progress = null)
     {
         var item = notice.Storage ?? throw new InvalidOperationException("Not a storage notice.");
         if (choice is not (NoticeChoices.Ignore or NoticeChoices.RetryNow))
@@ -186,6 +187,48 @@ internal static class StorageNotices
             // Ignore suppresses this exact cause, not all future work on this identity.
             // Automatic retries can still succeed or expose a different cause/revision.
             store.CloseNotice(notice.NoticeId!, choice);
+            return;
+        }
+        if (connections is null)
+        {
+            ct.ThrowIfCancellationRequested();
+            // Direct CLI cannot perform native work. Persist the request, without claiming it, so the
+            // background host can consume the same atomic sentinel used by attended Retry.
+            var queued = false;
+            if (item.Operation == "settlement" &&
+                store.StorageSettlementFor(item.RootId, item.ObjectId, item.RemoteBinding) is { } settlement &&
+                (item.Scope is null || ReceiptScope(settlement.Remote) == item.Scope))
+            {
+                queued = store.RequestStorageSettlement(settlement);
+            }
+            // A refresh failure can name the newly observed revision while the receipt still holds the
+            // old revision. Request the current entity job; its normal revalidation protects the revision.
+            else if (item.Operation == "remote-update" &&
+                store.StoragePointerFor(item.RootId, item.ObjectId, item.RemoteBinding) is { JobId: > 0 } pointerJob)
+            {
+                queued = store.RequestStoragePointer(pointerJob);
+            }
+            else if (item.Operation == "offline" &&
+                store.StorageHydrationFor(item.RootId, item.ObjectId) is { } hydrationJob)
+            {
+                queued = store.RequestStorageHydration(hydrationJob);
+            }
+            var inactivePair = !pair.Enabled || store.PairPaused(pair.PairId) || (paused?.Invoke(pair) ?? false);
+            string message;
+            if (queued)
+                message = inactivePair
+                    ? "Retry queued; it will run when the pair resumes. Start the background app with autosync start, or open the app."
+                    : "Retry queued; the background app will retry it now. If it is not running, use autosync start or open the app.";
+            else if (item.ObjectId.Length == 0)
+            {
+                store.ClearStorageRootBackoff(item.RootId);
+                message = "The pair retry delay is cleared. Start the background app with autosync start, or open the app; " +
+                    "pending work retries on its normal schedule. Retry this notice in the app to verify the pair immediately.";
+            }
+            else
+                message = "This verification needs the Sync Shark background app. Start it with autosync start, or open the app, " +
+                    "then Retry this notice there. The notice stays open; no verification was performed.";
+            progress?.Invoke(message);
             return;
         }
         if (item.Operation == "hydration")

@@ -144,11 +144,12 @@ public sealed partial class SqliteStateStore
         StoreSchema.Scalar(_connection, null, "SELECT 1 FROM storage_hydration WHERE job_id=$id AND root_id=$r AND object_id=$o AND due=$requested;",
             ("$id", job.JobId), ("$r", job.RootId), ("$o", job.ObjectId), ("$requested", StorageDue.UserRequested)) is not null);
 
-    internal void RequestStorageHydration(StorageHydrationJob job) => InStore(() =>
+    internal bool RequestStorageHydration(StorageHydrationJob job) => InStore(() =>
     {
-        if (!_storageEnabled) return;
+        if (!_storageEnabled) return false;
         StoreSchema.Execute(_connection, null, "UPDATE storage_hydration SET due=$requested WHERE job_id=$id AND root_id=$r AND object_id=$o;",
             ("$requested", StorageDue.UserRequested), ("$id", job.JobId), ("$r", job.RootId), ("$o", job.ObjectId));
+        return StoreSchema.Changes(_connection, null) != 0;
     });
 
     internal StorageClaim TryClaimStorageHydration(StorageHydrationJob job) => InStore(() =>
@@ -169,11 +170,12 @@ public sealed partial class SqliteStateStore
         StoreSchema.Scalar(_connection, null, "SELECT 1 FROM storage_refresh WHERE job_id=$id AND root_id=$r AND object_id=$o AND remote_binding=$b AND due=$requested;",
             ("$id", job.JobId), ("$r", job.RootId), ("$o", job.ObjectId), ("$b", job.RemoteBinding), ("$requested", StorageDue.UserRequested)) is not null);
 
-    internal void RequestStoragePointer(StorageSettlement job) => InStore(() =>
+    internal bool RequestStoragePointer(StorageSettlement job) => InStore(() =>
     {
-        if (!_storageEnabled) return;
+        if (!_storageEnabled) return false;
         StoreSchema.Execute(_connection, null, "UPDATE storage_refresh SET due=$requested WHERE job_id=$id AND root_id=$r AND object_id=$o AND remote_binding=$b;",
             ("$requested", StorageDue.UserRequested), ("$id", job.JobId), ("$r", job.RootId), ("$o", job.ObjectId), ("$b", job.RemoteBinding));
+        return StoreSchema.Changes(_connection, null) != 0;
     });
 
     internal StorageClaim TryClaimStoragePointer(StorageSettlement job) => InStore(() =>

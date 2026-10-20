@@ -16,9 +16,6 @@ public sealed partial class V2CliRuntime
             PauseStateProjection.AccountPaused(saved, pair.B.AccountId, now);
     }
 
-    private CloudFilesLifetime RequireStorageConnections() => StorageNoticeConnections ??
-        throw new IOException("The storage intent is retained. Start the background host and Retry; a short-lived CLI process cannot own Cloud Files hydration.");
-
     private Task SettleAfterRunAsync(CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
