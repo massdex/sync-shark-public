@@ -5,7 +5,7 @@ namespace Massdex.SyncShark.V2;
 public sealed partial class SqliteStateStore
 {
     public void ObserveJournal(string pairId, string volume, long serial, ulong journal, long next,
-        long maximum, long free, bool gap, DateTimeOffset now) => InStore(() =>
+        long maximum, long free, bool gap, DateTimeOffset now, bool deferNotice = false) => InStore(() =>
     {
         SyncSharkJournalNative.Volume(volume);
         var old = ReadJournal(serial);
@@ -25,10 +25,14 @@ public sealed partial class SqliteStateStore
         if (target > maximum && !state.Never && (state.NotBefore is null || now >= state.NotBefore) &&
             (prior is null || prior.Value.Closed))
         {
-            state = state with { Requested = target, NoticePair = pairId };
-            _notices.Add(transaction, RequirePair(pairId), new Notice(pairId, 0, NoticeKind.Info, volume,
+            state = state with { Requested = target, NoticePair = state.Requested > 0 ? state.NoticePair : pairId };
+            if (!deferNotice)
+            {
+                var presentation = state.NoticePair!;
+                _notices.Add(transaction, RequirePair(presentation), new Notice(presentation, 0, NoticeKind.Info, volume,
                 $"Windows' change history on {volume} is too small; enlarge to {target / (double)JournalSizing.Minimum:0.##} GB. Sync continues, using a full scan when history is missing.",
                 JournalSizing.Key(serial)), now.ToUnixTimeMilliseconds());
+            }
         }
         StoreSchema.Execute(_connection, transaction,
             "INSERT INTO journal_volume(serial,volume,state_json) VALUES($s,$v,$j) ON CONFLICT(serial) DO UPDATE SET volume=$v,state_json=$j;",
@@ -36,15 +40,41 @@ public sealed partial class SqliteStateStore
         transaction.Commit();
     });
 
-    internal Notice? PendingJournal(long serial) => InStore(() =>
+    internal sealed record JournalPending(long Serial, string Volume, JournalSizingState State);
+
+    internal JournalPending? PendingJournal(long serial) => InStore(() =>
     {
         var state = ReadJournal(serial);
         if (state is null || state.Never || state.Requested <= 0 || state.NoticePair is null ||
-            PairNo(state.NoticePair) is not { } pairNo) return null;
+            PairNo(state.NoticePair) is null) return null;
         var volume = StoreSchema.Scalar(_connection, null, "SELECT volume FROM journal_volume WHERE serial=$s;", ("$s", serial)) as string;
-        if (string.IsNullOrEmpty(volume)) return null;
-        var notice = _notices.ById(pairNo, ShortId.Make("n", state.NoticePair, "0", RowCodec.Key(volume), JournalSizing.Key(serial)));
-        return notice is not null && !notice.Value.Closed ? notice.Value.Notice : null;
+        return string.IsNullOrEmpty(volume) ? null : new JournalPending(serial, volume, state);
+    });
+
+    internal void FinishSilentJournal(JournalPending request, bool grew, string explanation) => InStore(() =>
+    {
+        // An attended choice or drive replacement can win while maintenance is in flight.
+        var pending = PendingJournal(request.Serial);
+        if (pending is null || pending.Volume != request.Volume || pending.State.NoticePair != request.State.NoticePair ||
+            pending.State.Requested != request.State.Requested) return;
+        var state = pending.State;
+        using var transaction = _connection.BeginTransaction();
+        if (grew)
+        {
+            state = state with { Requested = 0, NotBefore = _clock.GetUtcNow().AddDays(1) };
+            StoreSchema.Execute(_connection, transaction, "UPDATE journal_volume SET state_json=$j WHERE serial=$s;",
+                ("$j", JsonSerializer.Serialize(state)), ("$s", request.Serial));
+            var id = ShortId.Make("n", state.NoticePair!, "0", RowCodec.Key(request.Volume), JournalSizing.Key(request.Serial));
+            _notices.CloseResolved(transaction, RequirePair(state.NoticePair!), id, JournalSizing.Enlarge);
+        }
+        else
+        {
+            _notices.Add(transaction, RequirePair(state.NoticePair!), new Notice(state.NoticePair!, 0,
+                NoticeKind.Info, request.Volume, explanation +
+                " Sync continues with ordinary scanning. Retry with Enlarge (UAC), choose Not now, or Ignore with Never.",
+                JournalSizing.Key(request.Serial)), _clock.GetUtcNow().ToUnixTimeMilliseconds());
+        }
+        transaction.Commit();
     });
 
     private JournalSizingState? ReadJournal(long serial) =>

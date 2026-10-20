@@ -1,5 +1,4 @@
 using System.Buffers.Binary;
-using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.Versioning;
 using Microsoft.Win32.SafeHandles;
@@ -23,21 +22,26 @@ internal static partial class SyncDiscoveryClient
     internal static async Task<bool> TryGrowJournalAsync(SyncDiscoveryRoot root, long maximum)
     {
         if (!OperatingSystem.IsWindows() || !IsInstalled) return false;
+        return await TryGrowJournalCoreAsync(ct => GrowJournalWindowsAsync(root, maximum, ct), TimeProvider.System).ConfigureAwait(false);
+    }
+
+    internal static async Task<bool> TryGrowJournalCoreAsync(Func<CancellationToken, Task<bool>> grow, TimeProvider clock)
+    {
         // Maintenance never queues behind inventory. The next run can try again or offer UAC.
         if (!await Gate.WaitAsync(0).ConfigureAwait(false)) return false;
         try
         {
-            if (DateTimeOffset.UtcNow < _journalRetryAfter) return false;
+            if (clock.GetUtcNow() < _journalRetryAfter) return false;
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-            var success = await GrowJournalWindowsAsync(root, maximum, timeout.Token).ConfigureAwait(false);
-            if (!success) _journalRetryAfter = DateTimeOffset.UtcNow.AddHours(1);
+            var success = await grow(timeout.Token).ConfigureAwait(false);
+            if (!success) _journalRetryAfter = clock.GetUtcNow().AddHours(1);
             return success;
         }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or Win32Exception or
-            System.Runtime.InteropServices.COMException or InvalidOperationException or ArgumentException or
-            OperationCanceledException or System.Runtime.InteropServices.ExternalException or
-            Microsoft.CSharp.RuntimeBinder.RuntimeBinderException)
-        { _journalRetryAfter = DateTimeOffset.UtcNow.AddHours(1); return false; }
+        catch (Exception error)
+        {
+            Trace.TraceWarning("Automatic journal enlargement failed: {0}", error.GetType().Name);
+            _journalRetryAfter = clock.GetUtcNow().AddHours(1); return false;
+        }
         finally { Gate.Release(); }
     }
 
@@ -63,14 +67,25 @@ internal static partial class SyncDiscoveryClient
             await using var stream = new FileStream(handle, FileAccess.ReadWrite, 4096, isAsync: true);
             await stream.WriteAsync(request, ct).ConfigureAwait(false);
             await stream.FlushAsync(ct).ConfigureAwait(false);
+            return await ReadJournalReplyAsync(stream, ct).ConfigureAwait(false);
+        }
+        finally { if (lease != IntPtr.Zero) Native.Close(lease); Native.Close(prepared); }
+    }
+    internal static async Task<bool> ReadJournalReplyAsync(Stream stream, CancellationToken ct)
+    {
+        try
+        {
             var reply = new byte[16];
             await stream.ReadExactlyAsync(reply, ct).ConfigureAwait(false);
             if (BinaryPrimitives.ReadUInt32LittleEndian(reply) != 12 || BinaryPrimitives.ReadUInt32LittleEndian(reply.AsSpan(4)) != 5)
                 return false;
             await stream.WriteAsync(new byte[] { 0xa5 }, ct).ConfigureAwait(false);
             await stream.FlushAsync(ct).ConfigureAwait(false);
-            return BinaryPrimitives.ReadUInt32LittleEndian(reply.AsSpan(8)) == 0;
+            var error = BinaryPrimitives.ReadUInt32LittleEndian(reply.AsSpan(8));
+            if (error != 0) Trace.TraceWarning("Journal worker returned Windows error {0}; the enlargement notice remains available.", error);
+            return error == 0;
         }
-        finally { if (lease != IntPtr.Zero) Native.Close(lease); Native.Close(prepared); }
+        catch (EndOfStreamException) { return false; } // Previous workers reject operation 2 by closing the pipe.
     }
+
 }

@@ -123,32 +123,44 @@ static DWORD read_request(Worker *w) {
     }
     return ssd_admit_roots(w->request.roots,w->request.root_count,w->client_token,&w->admission);
 }
-/* The authenticated root admission above remains mandatory. This operation cannot create a
-   missing journal, shrink one, select arbitrary device paths, or bypass the hard/free-space caps. */
+/* Root admission is mandatory. Only grow an observed existing journal; an external
+   administrator can race deletion, so verify the journal identity after the change too. */
 static DWORD grow_journal(Worker *w) {
-    WCHAR mount[MAX_PATH],fs[32];DWORD serial=0,component=0,flags=0,bytes=0,error=0;
-    if(!GetVolumePathNameW(w->request.roots[0].path,mount,ARRAYSIZE(mount)))return GetLastError();
-    if(wcslen(mount)!=3 || mount[1]!=L':')return ERROR_NOT_SUPPORTED;
-    if(!GetVolumeInformationW(mount,NULL,0,&serial,&component,&flags,fs,ARRAYSIZE(fs)))return GetLastError();
-    if(serial!=w->request.volume_serial || wcscmp(fs,L"NTFS"))return ERROR_NOT_SUPPORTED;
-    ULARGE_INTEGER free_bytes;
-    if(!GetDiskFreeSpaceExW(mount,&free_bytes,NULL,NULL))return GetLastError();
+    WCHAR mount[50],fs[32];DWORD serial=0,component=0,flags=0,bytes=0,error=0;
     HANDLE volume=CreateFileW(ssd_admission_volume(w->admission),GENERIC_READ|GENERIC_WRITE,
         FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,NULL,OPEN_EXISTING,0,NULL);
-    if(volume==INVALID_HANDLE_VALUE)return GetLastError();
+    if(volume==INVALID_HANDLE_VALUE){error=GetLastError();goto reply;}
+    if(!GetVolumeInformationByHandleW(volume,NULL,0,&serial,&component,&flags,fs,ARRAYSIZE(fs)))
+        {error=GetLastError();goto reply;}
+    if(serial!=w->request.volume_serial || wcscmp(fs,L"NTFS")){error=ERROR_NOT_SUPPORTED;goto reply;}
+    /* The admitted GUID, not an elevated-token drive-letter mapping. */
+    wcscpy(mount,ssd_admission_volume(w->admission));wcscat(mount,L"\\");
+    ULARGE_INTEGER free_bytes;
+    if(!GetDiskFreeSpaceExW(mount,&free_bytes,NULL,NULL)){error=GetLastError();goto reply;}
     USN_JOURNAL_DATA current={0};
     if(!DeviceIoControl(volume,FSCTL_QUERY_USN_JOURNAL,NULL,0,&current,sizeof(current),&bytes,NULL))error=GetLastError();
     else {
+        ULONGLONG cap=free_bytes.QuadPart/20;
+        if(cap>8589934592ULL)cap=8589934592ULL;
+        ULONGLONG delta=current.AllocationDelta>134217728ULL?current.AllocationDelta:134217728ULL;
         ULONGLONG target=w->request.journal_maximum;
-        if(target>free_bytes.QuadPart/20)target=free_bytes.QuadPart/20;
-        if(target>8589934592ULL)target=8589934592ULL;
-        if(target>current.MaximumSize) {
-            CREATE_USN_JOURNAL_DATA request={0};request.MaximumSize=target;
-            request.AllocationDelta=current.AllocationDelta>134217728ULL?current.AllocationDelta:134217728ULL;
-            if(!DeviceIoControl(volume,FSCTL_CREATE_USN_JOURNAL,&request,sizeof(request),NULL,0,&bytes,NULL))error=GetLastError();
+        if(target<=current.MaximumSize)error=ERROR_ALREADY_EXISTS;
+        else {
+            if(target>(cap>delta?cap-delta:0))target=cap>delta?cap-delta:0;
+            if(target<=current.MaximumSize)error=ERROR_DISK_FULL;
+            else {
+                CREATE_USN_JOURNAL_DATA request={0};request.MaximumSize=target;request.AllocationDelta=delta;
+                if(!DeviceIoControl(volume,FSCTL_CREATE_USN_JOURNAL,&request,sizeof(request),NULL,0,&bytes,NULL))error=GetLastError();
+                else {
+                    USN_JOURNAL_DATA after={0};
+                    if(!DeviceIoControl(volume,FSCTL_QUERY_USN_JOURNAL,NULL,0,&after,sizeof(after),&bytes,NULL))error=GetLastError();
+                    else if(after.UsnJournalID!=current.UsnJournalID)error=ERROR_JOURNAL_ENTRY_DELETED;
+                }
+            }
         }
     }
-    CloseHandle(volume);
+reply:
+    if(volume!=INVALID_HANDLE_VALUE)CloseHandle(volume);
     BYTE reply[16]={0};DWORD length=12,kind=5;
     memcpy(reply,&length,4);memcpy(reply+4,&kind,4);memcpy(reply+8,&error,4);
     DWORD transport=io(w->pipe,TRUE,reply,sizeof(reply),w->deadline);if(transport)return transport;

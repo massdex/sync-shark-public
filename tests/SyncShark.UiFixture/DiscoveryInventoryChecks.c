@@ -212,6 +212,15 @@ int wmain(int argc,WCHAR **argv) {
     BYTE wire_buffer[256];DWORD wire_length=ssd_reply_header(&request,wire_buffer,sizeof(wire_buffer)),written;
     check(wire_length==SSD_WIRE_HEADER_BYTES&&WriteFile(wire_request,wire_buffer,wire_length,&written,NULL)&&written==wire_length,"Native request header uses the exact shared format");
     SsdRequest decoded={0};check(!ssd_request_header(&decoded,wire_buffer,wire_length),"Native request header decoder binds both roots");
+    check(decoded.operation==1,"Inventory operation is recorded");
+    DWORD operation=2;memcpy(wire_buffer+8,&operation,4);
+    check(!ssd_request_header(&decoded,wire_buffer,wire_length)&&decoded.operation==2,"Grow operation is accepted and recorded");
+    operation=0;memcpy(wire_buffer+8,&operation,4);
+    check(ssd_request_header(&decoded,wire_buffer,wire_length)==ERROR_INVALID_DATA,"Operation zero is refused");
+    operation=3;memcpy(wire_buffer+8,&operation,4);
+    check(ssd_request_header(&decoded,wire_buffer,wire_length)==ERROR_INVALID_DATA,"Unknown operation is refused");
+    operation=1;memcpy(wire_buffer+8,&operation,4);
+    check(!ssd_request_header(&decoded,wire_buffer,wire_length),"Restore inventory header for projection checks");
     for(DWORD i=0;i<2;i++) {
         DWORD units=(DWORD)wcslen(roots[i].path);ULONGLONG root_id=roots[i].file_id;
         check(WriteFile(wire_request,&root_id,8,&written,NULL)&&written==8&&WriteFile(wire_request,&units,4,&written,NULL)&&written==4&&
