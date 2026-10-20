@@ -11,7 +11,7 @@ internal static class StorageQueuePlanChecks
     internal static Task RunAsync(string root)
     {
         if (Directory.Exists(root)) throw new InvalidOperationException("Use a fresh disposable queue-plan fixture directory.");
-        using (var store = SqliteStateStore.Open(root, V2Settings.Default))
+        using (var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System))
         {
             var local = new RootDef("local", SyncProviders.Local, null, root, "id:local:00000001:0000000000000001");
             var remote = new RootDef("remote", SyncProviders.Dropbox, "account", "/Remote", "remote-root");
@@ -147,7 +147,7 @@ internal static class StorageQueuePlanChecks
                 """;
             command.ExecuteNonQuery();
         }
-        using var reopened = SqliteStateStore.Open(root, V2Settings.Default);
+        using var reopened = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System);
         using var check = Open(root);
         RequestedIndexesMatchSentinel(check);
         QueueQueriesUseSearchRanges(check);
