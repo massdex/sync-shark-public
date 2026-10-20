@@ -464,15 +464,28 @@ internal static class ExcludedNestedPairPartitionChecks
         var beforeRevision = await ScalarAsync(fixture.DatabasePath,
             "SELECT configuration_revision FROM sync_pair WHERE pair_id='" + parent.Id + "'");
 
+        var includedWithOwnership = retainedParent with
+        {
+            SelectionRules = ownership.Select(name => new SyncSelectionRule(name, false)).ToArray()
+        };
+        Require(SyncPairPartitionPolicy.DecideCorrespondingIncluded(includedWithOwnership, retainedChild) ==
+                SyncPairPartitionRelation.CorrespondingIncluded,
+            "ENP-15 removing only the data exclusion preserves the supported corresponding overlap");
         var noExclusion = retainedParent with
         {
-            SelectionRules = ownership.Select(name => new SyncSelectionRule(name, false)).ToArray(),
+            // Included corresponding overlaps are supported only with private control
+            // ownership still excluded. Removing all exclusions must remain unsafe.
+            SelectionRules = [],
             PolicyRevision = retainedParent.PolicyRevision + 1
         };
+        Require(SyncPairPartitionPolicy.Decide(retainedParent, retainedChild) == SyncPairPartitionRelation.NestedAllowed &&
+                SyncPairPartitionPolicy.Decide(noExclusion, retainedChild) == SyncPairPartitionRelation.NestedRefused &&
+                SyncPairPartitionPolicy.DecideCorrespondingIncluded(noExclusion, retainedChild) != SyncPairPartitionRelation.CorrespondingIncluded,
+            "ENP-15 the fixture changes from a valid excluded partition to a unsafe overlap with exposed private control ownership");
         var refusedRemoval = await TrySaveAsync(store,
             new SyncPairSet([noExclusion, retainedChild], noExclusion.Id));
         Require(refusedRemoval.Length > 0,
-            "ENP-15 the real Store refuses a saved policy edit that removes the nested child exclusion: " +
+            "ENP-15 the real Store refuses a saved policy edit that removes the child and private control exclusions: " +
             (refusedRemoval.Length == 0 ? "not refused" : refusedRemoval));
 
         var exceptionRules = new List<SyncSelectionRule> { new(ChildName, false), new(ChildName + "/Included", true) };
@@ -987,6 +1000,8 @@ internal static class ExcludedNestedPairPartitionChecks
         var databasePath = IOPath.Combine(root, "authority.db");
         var database = new SyncAuthorityDatabase(databasePath);
         await database.InitializeAsync(Installation, ProfileId, SourceRevision, CapabilityJson);
+        var product = new SyncProductStateStore(instance.StateAuthority);
+        await product.UpdateAsync(current => current with { InstallationId = Installation });
         var connections = new DropboxConnectionStore(instance.StateAuthority);
         await connections.SaveNewAsync(new DropboxConnectionBinding(DropboxProviderConfiguration.RegisteredClientId,
             AccountId, CloudNamespaceId, CloudNamespaceId, DropboxProviderConfiguration.ContentAccess,
@@ -2445,6 +2460,10 @@ internal static class ExcludedNestedPairPartitionChecks
         var databasePath = IOPath.Combine(root, "authority.db");
         var database = new SyncAuthorityDatabase(databasePath);
         await database.InitializeAsync(Installation, ProfileId, SourceRevision, CapabilityJson);
+        // The product aggregate and the authority database describe the same installation.
+        // Saving a connection otherwise creates an unrelated default installation identity.
+        var product = new SyncProductStateStore(instance.StateAuthority);
+        await product.UpdateAsync(current => current with { InstallationId = Installation });
         var connections = new DropboxConnectionStore(instance.StateAuthority);
         var connection = new DropboxConnectionBinding(DropboxProviderConfiguration.RegisteredClientId, AccountId,
             "ns-nested-431", "ns-nested-431", DropboxProviderConfiguration.ContentAccess,
