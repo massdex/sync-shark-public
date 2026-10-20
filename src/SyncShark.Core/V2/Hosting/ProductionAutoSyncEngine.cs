@@ -25,9 +25,7 @@ public sealed class ProductionAutoSyncEngine : IAutoSyncHostEngine
             _composition = EngineComposition.Open(new EngineHostInputs(root, authority.StateAuthority, _http),
                 V2Settings.Default, TimeProvider.System);
             _cloudFiles = new CloudFilesLifetime(_composition.Endpoints.CreateCloudFiles,
-                pair => Directory.Exists(pair.A.RootPath) &&
-                    WindowsCloudFilesProvider.ReadRegisteredSyncRootFileId(pair.A.RootPath) is not null &&
-                    !WindowsCloudFilesProvider.IsStatusOnlySyncRoot(PairMapping.ToSyncPair(pair, false, V2Settings.Default)),
+                pair => CloudFilesLifetime.IsRegisteredPair(pair, V2Settings.Default),
                 (SqliteStateStore)_composition.Store, _composition.Endpoints.ObserveStorageRemoteAsync);
             // Independent of run/pause state: retained pointers still need foreground hydration.
             _cloudFiles.Reconnect(_composition.Store.Pairs(), CancellationToken.None, (pair, error) =>
@@ -37,10 +35,12 @@ public sealed class ProductionAutoSyncEngine : IAutoSyncHostEngine
                     "cloud-files-binding-needs-review") }));
             _cli = V2CliRuntime.Borrow(authority, _composition, root);
             _cli.StorageNoticeConnections = _cloudFiles;
+            _cli.StoragePaused = Paused;
+            _composition.Endpoints.NewPointerProvider = (pair, ct) => _cloudFiles.RequireProvider(pair, ct);
             _choices = new HostNoticeChoiceQueue(_composition.Store, ExecuteCliAsync);
             _auto = _composition.StartAutoSync(Paused,
                 () => TimeSpan.FromMinutes(_automation.Load().IntervalMinutes));
-            _settlement = new StorageSettlementService((SqliteStateStore)_composition.Store, _cloudFiles);
+            _settlement = new StorageSettlementService((SqliteStateStore)_composition.Store, _cloudFiles, paused: Paused);
             _settlement.Start();
         }
         catch { _cloudFiles?.Dispose(); _composition?.Dispose(); _http.Dispose(); throw; }
@@ -162,7 +162,7 @@ public sealed class ProductionAutoSyncEngine : IAutoSyncHostEngine
         _composition.Store.SavePair(pair with { Enabled = enabled });
     }
 
-    public Task StopAsync() => _choices.StopAsync(() => _auto.StopAsync());
+    public Task StopAsync() => _choices.StopAsync(() => Task.WhenAll(_auto.StopAsync(), _settlement.StopAsync()));
 
     public async ValueTask DisposeAsync()
     {

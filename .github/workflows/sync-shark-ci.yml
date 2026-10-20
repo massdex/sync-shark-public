@@ -148,6 +148,9 @@ jobs:
           - suite: storage
             flag: --v2-storage-checks
             takes-root: true
+          - suite: files-on-demand-storage
+            flag: --fod-storage-checks
+            takes-root: true
           - suite: dropbox
             flag: --v2-dropbox-checks
             takes-root: true

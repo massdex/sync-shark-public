@@ -108,7 +108,7 @@ public sealed partial class SqliteStateStore
         if (!descendants) return false;
         if (path.Length == 0)
             return StoreSchema.Scalar(_connection, null,
-                "SELECT 1 FROM file_state INDEXED BY fs_flagged WHERE root_no=$r AND flags!=0 AND (flags & 256)!=0 LIMIT 1;",
+                "SELECT 1 FROM file_state INDEXED BY fs_flagged WHERE root_no=$r AND (flags & ~512) != 0 AND (flags & 256)!=0 LIMIT 1;",
                 ("$r", root.Value)) is not null;
         var key = RowCodec.Key(path);
         return StoreSchema.Scalar(_connection, null,

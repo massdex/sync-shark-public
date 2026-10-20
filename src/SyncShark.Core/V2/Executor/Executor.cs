@@ -437,9 +437,16 @@ public sealed partial class Executor : IExecutor
             ? new Dictionary<string, string>(StringComparer.Ordinal)
             : await GateAsync(() => BaselineKeysByObject(pair.PairId, folder.Target, descendants), ct)
                 .ConfigureAwait(false);
+        var localDropbox = string.Equals((folder.Target == Side.A ? pair.A : pair.B).Provider,
+                SyncProviders.Local, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals((folder.Target == Side.A ? pair.B : pair.A).Provider,
+                SyncProviders.Dropbox, StringComparison.OrdinalIgnoreCase);
         var children = descendants.Select(item => new SyncAction(folder.ActionId + ":" + item.Path.ToLowerInvariant(),
             folder.Rule, ActionKind.Delete, folder.Target, item.Path, null, null, item,
-            RecoveryFirst: item.Kind == ItemKind.File, keys.GetValueOrDefault(item.ObjectId))).ToList();
+            // No bytes are lost by removing a verified fully-dehydrated reference. The local
+            // writer rechecks ownership and physical state exclusively; hydration/edit races fail.
+            RecoveryFirst: item.Kind == ItemKind.File && !(localDropbox && item.Flags.HasFlag(ItemFlags.OwnedPointer)),
+            keys.GetValueOrDefault(item.ObjectId))).ToList();
         children.Add(folder with { RecoveryFirst = false });
         if (whole(folder, descendants.Count)) trees.Add(new WholeFolder(children, descendants));
         else expanded.AddRange(children);

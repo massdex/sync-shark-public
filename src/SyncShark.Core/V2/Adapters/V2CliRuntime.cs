@@ -108,10 +108,13 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
             var composition = EngineComposition.Open(
                 new EngineHostInputs(productRoot, instanceLock.StateAuthority, SharedHttp), V2Settings.Default,
                 TimeProvider.System);
-            return new V2CliRuntime(instanceLock, composition.Store, composition.Run, composition.Roots, productRoot)
+            var runtime = new V2CliRuntime(instanceLock, composition.Store, composition.Run, composition.Roots, productRoot)
             {
                 _composition = composition
             };
+            // Lazily connect only when an explicitly online-only item actually needs a pointer.
+            composition.Endpoints.NewPointerProvider = (pair, ct) => runtime.RequireStorageConnections().RequireProvider(pair, ct);
+            return runtime;
         }
         catch
         {

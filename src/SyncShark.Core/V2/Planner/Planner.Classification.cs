@@ -30,7 +30,7 @@ public static partial class Planner
 
     private static bool Comparable(ItemState? item) =>
         item is not null && item.Kind == ItemKind.File &&
-        (item.Flags & (ItemFlags.Ignored | ItemFlags.Unreadable | ItemFlags.Locked | ItemFlags.Placeholder | ItemFlags.NeedsRehash)) == 0;
+        (item.Flags & (ItemFlags.Ignored | ItemFlags.Unreadable | ItemFlags.Locked | ItemFlags.Placeholder | ItemFlags.NeedsRehash | ItemFlags.OwnedPointer)) == 0;
 
     private static void NeedSameVersion(SortedSet<string> set, ItemState? cur, ItemState baseSameSide)
     {
@@ -65,6 +65,13 @@ public static partial class Planner
         }
         foreach (var (side, path) in CollisionHashNeeds(rows))
             (side == Side.A ? a : b).Add(path);
+        // Collision discovery also proposes hashes; owned pointer metadata is the only
+        // permitted content identity, even when that identity is incomplete.
+        foreach (var row in rows)
+        {
+            if (IsOwnedPointer(row.A)) a.Remove(row.A!.Path);
+            if (IsOwnedPointer(row.B)) b.Remove(row.B!.Path);
+        }
         return new HashRequest(a.ToArray(), b.ToArray());
     }
 

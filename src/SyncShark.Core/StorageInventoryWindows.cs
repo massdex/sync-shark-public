@@ -1,11 +1,13 @@
 using System.Runtime.InteropServices;
+using System.Security;
 using System.Security.Principal;
 using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
 
 namespace Massdex.SyncShark;
 
-public sealed record StorageRootRegistration(string Path, string Provider, string Evidence);
+public sealed record StorageRootRegistration(string Path, string Provider, string Evidence,
+    string? RegistrationId = null);
 public sealed record StorageLocalObservation(string Path, bool Directory, string Availability,
     long? LogicalBytes, long? ResidentBytes, bool MayEnumerate, string Evidence);
 
@@ -13,24 +15,43 @@ public sealed record StorageLocalObservation(string Path, bool Directory, string
 // enumeration. Unsupported no-recall enumeration is an incomplete observation, not a retry without flags.
 public static class StorageInventoryWindows
 {
-    public static IReadOnlyList<StorageRootRegistration> RegisteredRoots()
+    /// <summary>
+    /// Reads every SyncRootManager registration for the current user. False means the registry or user identity could
+    /// not be inspected (fail closed); an empty true result means there really are no registrations. RegistrationId is
+    /// the Windows SyncRootManager entry id, not the provider's root file id.
+    /// </summary>
+    public static bool TryRegisteredRoots(out IReadOnlyList<StorageRootRegistration> roots)
     {
-        if (!OperatingSystem.IsWindows()) return [];
-        var result = new List<StorageRootRegistration>();
-        using var roots = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\SyncRootManager");
-        var sid = WindowsIdentity.GetCurrent().User?.Value;
-        if (sid is null) return result;
-        foreach (var id in roots?.GetSubKeyNames() ?? [])
+        roots = [];
+        if (!OperatingSystem.IsWindows()) return false;
+        try
         {
-            using var root = roots!.OpenSubKey(id); using var paths = root?.OpenSubKey("UserSyncRoots");
-            if (paths?.GetValue(sid, null, RegistryValueOptions.DoNotExpandEnvironmentNames) is not string path ||
-                !Path.IsPathFullyQualified(path)) continue;
-            result.Add(new(Path.GetFullPath(path).TrimEnd('\\'), id.Contains("dropbox", StringComparison.OrdinalIgnoreCase)
-                ? "Dropbox" : id.StartsWith("Massdex.SyncShark!", StringComparison.Ordinal) ? "Sync Shark" : id.Split('!')[0],
-                "Windows SyncRootManager registration; may remain after the provider stops"));
+            using var manager = Registry.LocalMachine.OpenSubKey(
+                @"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\SyncRootManager");
+            var sid = WindowsIdentity.GetCurrent().User?.Value;
+            if (manager is null || sid is null) return false;
+            var result = new List<StorageRootRegistration>();
+            foreach (var id in manager.GetSubKeyNames())
+            {
+                using var root = manager.OpenSubKey(id); using var paths = root?.OpenSubKey("UserSyncRoots");
+                if (paths?.GetValue(sid, null, RegistryValueOptions.DoNotExpandEnvironmentNames) is not string path ||
+                    !Path.IsPathFullyQualified(path)) continue;
+                result.Add(new(Path.GetFullPath(path).TrimEnd('\\'), id.Contains("dropbox", StringComparison.OrdinalIgnoreCase)
+                    ? "Dropbox" : id.StartsWith("Massdex.SyncShark!", StringComparison.Ordinal) ? "Sync Shark" : id.Split('!')[0],
+                    "Windows SyncRootManager registration; may remain after the provider stops", id));
+            }
+            roots = result;
+            return true;
         }
-        return result;
+        catch (Exception error) when (error is SecurityException or UnauthorizedAccessException or IOException or
+                                        ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
     }
+
+    public static IReadOnlyList<StorageRootRegistration> RegisteredRoots() =>
+        TryRegisteredRoots(out var roots) ? roots : [];
 
     public static string ValidateRoot(string path)
     {

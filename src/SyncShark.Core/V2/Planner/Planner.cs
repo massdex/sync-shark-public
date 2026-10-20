@@ -50,7 +50,18 @@ public static partial class Planner
         var ctx = new Context(pairId, o, ordered, Occupancy(ordered, Side.A), Occupancy(ordered, Side.B));
         foreach (var row in ordered)
         {
-            try { Dispatch(ctx, row); }
+            try
+            {
+                var start = ctx.Draft.Count;
+                Dispatch(ctx, row);
+                if (ctx.Draft.Skip(start).Any(entry => ReadsOwnedPointer(entry.Action)))
+                {
+                    ctx.TruncateDraft(start);
+                    ctx.Notices.RemoveAll(notice => PairPath.Same(notice.Path, PrimaryPath(row)) &&
+                        notice.Kind is NoticeKind.KeepBoth or NoticeKind.AutoConflict or NoticeKind.EditBeatsDelete);
+                    HoldPlanningFailure(ctx, row, new InvalidOperationException(PointerReadPending));
+                }
+            }
             catch (Exception error) when (error is not OperationCanceledException)
             { HoldPlanningFailure(ctx, row, error); }
         }
@@ -92,6 +103,12 @@ public static partial class Planner
             ctx.Draft[i] = (row, action with { Kind = ActionKind.Hold, RecoveryFirst = false });
             AddNotice(ctx, 30, NoticeKind.UserDecision, action.Path, MappingAmbiguous);
         }
+        // Collision post-passes can turn a metadata-only move into a copy. Hold the whole
+        // row (including Forget/Delete siblings), not just its unsafe half.
+        var pointerReads = ctx.Draft.Where(entry => ReadsOwnedPointer(entry.Action))
+            .Select(entry => entry.Row).ToHashSet();
+        foreach (var row in pointerReads)
+            HoldPlanningFailure(ctx, row, new InvalidOperationException(PointerReadPending));
         var failures = LinkExclusions.None.WithPending(ctx.FailedPaths);
         bool touches(string path) => failures.Covers(path) || failures.Contains(path);
         ctx.Draft = ctx.Draft.Where(entry => !touches(entry.Action.Path) &&
@@ -100,14 +117,25 @@ public static partial class Planner
         return ctx;
     }
 
+    private const string PointerReadPending =
+        "Online-only content cannot be copied or replaced by this operation; make the item available offline and retry";
+
+    private static bool IsOwnedPointer(ItemState? item) => item?.Flags.HasFlag(ItemFlags.OwnedPointer) == true;
+
+    private static bool ReadsOwnedPointer(SyncAction action) =>
+        action.Kind is ActionKind.CopyNew or ActionKind.Update or ActionKind.KeepBoth &&
+            (IsOwnedPointer(action.Source) || IsOwnedPointer(action.ExpectedTarget)) ||
+        action.RecoveryFirst && IsOwnedPointer(action.ExpectedTarget);
+
     private static void HoldPlanningFailure(Context ctx, PlanRow row, Exception error)
     {
         foreach (var path in new[] { row.A?.Path, row.B?.Path, row.Base?.A.Path, row.Base?.B.Path }
             .Where(path => path is not null).Select(path => path!).Distinct(StringComparer.OrdinalIgnoreCase).DefaultIfEmpty(string.Empty))
         {
             ctx.FailedPaths.Add(path);
-            ctx.Notices.Add(new Notice(ctx.PairId, 40, NoticeKind.Info, path,
-                "Planning could not complete: " + error.Message + ". Retry after correcting this item, or Ignore to exclude it from sync.", "sync-retry"));
+            var notice = new Notice(ctx.PairId, 40, NoticeKind.Info, path,
+                "Planning could not complete: " + error.Message + ". Retry after correcting this item, or Ignore to exclude it from sync.", "sync-retry");
+            if (ctx.NoticeKeys.Add(notice)) ctx.Notices.Add(notice);
         }
     }
 
@@ -143,12 +171,9 @@ public static partial class Planner
                 }
             return;
         }
-        // Owned pointers carry verified content identity but are not readable upload sources.
-        // Never apply the foreign-stub replacement rule to them, even when replacement is enabled.
-        if (row.A?.Flags.HasFlag(ItemFlags.OwnedPointer) == true ||
-            row.B?.Flags.HasFlag(ItemFlags.OwnedPointer) == true)
-            return;
-        if (TryStub(ctx, row))
+        // Owned pointers participate in identity/content comparison and structural sync.
+        // Only foreign placeholders use rule 35; content-reading effects are guarded separately.
+        if (!IsOwnedPointer(row.A) && !IsOwnedPointer(row.B) && TryStub(ctx, row))
             return;                                                                       // rule 35 (before choices)
         if (sA == RowState.Unreadable || sB == RowState.Unreadable)
         {
@@ -410,6 +435,12 @@ public static partial class Planner
 
         /// <summary>The user's winners (rule 32) by case-insensitive path, built once.</summary>
         public IReadOnlyDictionary<string, Side?> Winners { get; }
+
+        public void TruncateDraft(int count)
+        {
+            draft.RemoveRange(count, draft.Count - count);
+            index = null;
+        }
 
         /// <summary>Draft action id → the folder moves (by action id) that rebased it; a redirect follows only these.</summary>
         public Dictionary<string, HashSet<string>> RebasedBy { get; } = new(StringComparer.Ordinal);

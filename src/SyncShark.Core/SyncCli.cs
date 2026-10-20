@@ -249,8 +249,8 @@ public static class SyncCli
         text.AppendLine("Options");
         text.AppendLine("  --pair <exact-pair-id>       exact retained sync pair id (never a name, index or prefix)");
         text.AppendLine("  --account <exact-id>         exact retained provider account id; required by account-specific actions");
-        text.AppendLine($"  --limit <1..{ActivityMaximumLimit}>            maximum activity rows returned");
-        text.AppendLine("  --offset <0..n>              activity rows to skip");
+        text.AppendLine($"  --limit <1..{ActivityMaximumLimit}>            maximum rows returned by a list command");
+        text.AppendLine("  --offset <0..n>              list rows to skip");
         text.AppendLine("  --timeout-seconds <seconds>   optional scan/run/apply deadline, 0.001..86400; safe cancellation,");
         text.AppendLine("                               not a process kill; completed work and operation logs are retained");
         text.AppendLine("  --yes                        required by the mutating actions listed below; never implies approval of first sync, conflicts,");

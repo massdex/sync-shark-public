@@ -23,7 +23,8 @@ public sealed record WindowsCloudFileIdentity(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ContentAlgorithm = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? AccountId = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? RemoteRootId = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? RemoteRoot = null)
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? RemoteRoot = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? V2OwnershipToken = null)
 {
     public const string CurrentMarker = "massdex.sync-shark.cloud-files.v1";
 
@@ -132,6 +133,9 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
     private const int StatusCancelled = unchecked((int)0xC0000120);
     private const int StatusUnsuccessful = unchecked((int)0xC0000001);
     private const int TransferChunkBytes = 4 * 1024 * 1024;
+    // Windows allows a fetch callback roughly 60 s. A burst (Explorer thumbnails, antivirus, multi-file open) queues
+    // for a bounded time instead of failing the ninth read; on timeout the I/O still completes before its notice.
+    private const int FetchAdmissionTimeoutMs = 30_000;
     private SyncPair _pair;
     private readonly ISyncRemoteRangeStore? _ranges;
     private readonly Func<CancellationToken, Task> _verifyRemoteRoot;
@@ -143,8 +147,10 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
     private IntPtr _callbackTable;
     private long _connectionKey;
     private int _disposed;
-    // Admission happens before allocating a task or a transfer buffer. Reads never wait on a sync-run gate.
+    // Bound active reads AND waiting reads before allocating a task. Waiting never blocks a native callback
+    // thread or a sync-run gate; only eight admitted requests may allocate transfer buffers concurrently.
     private readonly SemaphoreSlim _fetchSlots = new(8, 8);
+    private readonly SemaphoreSlim _fetchAdmission = new(72, 72); // eight active plus at most 64 waiting
     public event Action<string, Exception>? FetchFailed;
     public event Action<string>? FetchSucceeded;
     private void ReportFetchFailure(string path, Exception error)
@@ -188,6 +194,24 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
     }
     public string RootPath => _pair.LocalRoot;
     public bool RegisteredByThisInstance { get; private set; }
+    /// <summary>True only when this provider created the native registration; an existing registration is never
+    /// adopted or recorded as v2-owned. A provider-name prefix is not ownership.</summary>
+    public bool CreatedRegistration { get; private set; }
+    /// <summary>The exact native root identity a durable ownership record must store, never a path prefix guess.</summary>
+    public string RegisteredRootPath => Path.GetFullPath(_pair.LocalRoot);
+    public ulong RegisteredRootFileId => _pair.LocalRootFileId;
+    /// <summary>The v2-generated GUID read from native SyncRootIdentity; Explorer publication is irrelevant.</summary>
+    private string? _createdRegistrationId;
+    public string? RegistrationId
+    {
+        get
+        {
+            var token = ReadRootRegistration(RegisteredRootPath)?.OwnershipToken;
+            if (_createdRegistrationId is not null && token != _createdRegistrationId)
+                throw new IOException("The newly created native ownership identity changed.");
+            return token;
+        }
+    }
     public bool IsConnected => Volatile.Read(ref _connectionKey) != 0;
     private uint _publishedStatus = 1;
 
@@ -245,21 +269,35 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
         using var rootLease = PilotDirectoryLease.Open(root,
             new PilotDirectoryIdentity(_pair.LocalVolumeSerialNumber, _pair.LocalRootFileId));
         if (ReconnectBoundRoot(root)) { rootLease.VerifyBinding(); return; }
-        if (_binding is not null)
-            for (var ancestor = Directory.GetParent(root); ancestor is not null; ancestor = ancestor.Parent)
-                if (ReadRegisteredSyncRootFileId(ancestor.FullName) is not null)
-                    throw new IOException("An ancestor is already a registered sync root. Nothing was changed. " +
-                        "Choose a separate root, keep files offline, or explicitly arrange a provider handover.");
         var hadOwnedRegistration = TryReadOwnedPlaceholder(root, out var priorRegistration) &&
                                    priorRegistration is not null;
+        // Existing registrations are never connected, refreshed or removed by this path. SyncRootManager gives the
+        // exact registered paths without walking the tree, so a large pair costs nothing here.
+        if (!StorageInventoryWindows.TryRegisteredRoots(out var registeredRoots))
+            throw new IOException("The registered sync-root list could not be inspected; nothing was changed. " +
+                "Choose a separate root or retry when Windows registration data is readable.");
+        foreach (var registered in registeredRoots)
+        {
+            if (Relation(root, registered.Path) is not { } relation) continue;
+            // A registration of this exact root owned by this pair is the retained-registration path below.
+            if (relation == "self" && hadOwnedRegistration) continue;
+            throw new IOException((relation == "self" ? "The folder is" : relation == "ancestor"
+                    ? "An ancestor folder is" : "A descendant folder is") +
+                " already a registered sync root. Nothing was changed and no registration was connected. " +
+                "Choose a separate root, keep files offline, or explicitly arrange a provider handover.");
+        }
         if (hadOwnedRegistration &&
             (priorRegistration!.Identity.AccountId is not null ||
              !priorRegistration.Identity.CanRefreshRootFor(_pair.Id, _pair.Provider)))
             throw new IOException(
                 "The local folder is already a Cloud Files sync root owned by another Sync Shark pair.");
         var registeredDuringCurrentTransaction = RegisteredByThisInstance;
+        var createdThisCall = false;
 
-        var identity = (_binding?.RootIdentity() ?? WindowsCloudFileIdentity.Root(_pair.Id, _pair.Provider)).Serialize();
+        var rootIdentity = _binding?.RootIdentity() ?? WindowsCloudFileIdentity.Root(_pair.Id, _pair.Provider);
+        // Only explicit creation reaches here for v2. Never stamp or refresh a pre-existing registration.
+        var newOwnershipToken = _binding is null ? null : Guid.NewGuid().ToString("D");
+        var identity = (rootIdentity with { V2OwnershipToken = newOwnershipToken }).Serialize();
         var identityHandle = GCHandle.Alloc(identity, GCHandleType.Pinned);
         try
         {
@@ -300,17 +338,22 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
                 // CfRegisterSyncRoot may report success while refreshing the same retained
                 // registration. Only a root that was not already owned was created by this
                 // transaction and may be rolled back by it.
-                RegisteredByThisInstance = registeredDuringCurrentTransaction || !hadOwnedRegistration;
+                createdThisCall = !hadOwnedRegistration;
+                RegisteredByThisInstance = registeredDuringCurrentTransaction || createdThisCall;
             }
         }
         finally
         {
             identityHandle.Free();
         }
+        CreatedRegistration |= createdThisCall;
+        if (createdThisCall) _createdRegistrationId = newOwnershipToken;
 
         try
         {
             rootLease.VerifyBinding();
+            if (_binding is not null && RegistrationId != newOwnershipToken)
+                throw new IOException("The new native registration did not retain its ownership GUID.");
             Connect(root);
         }
         catch (Exception original)
@@ -336,6 +379,14 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
         }
         if (ReadRegisteredSyncRootFileId(root.Path) is not null || IsCloudFilesPlaceholder(root.Path))
             throw new IOException("Another cloud provider owns this folder or its parent. Its registration was not changed.");
+        if (!StorageInventoryWindows.TryRegisteredRoots(out var registeredRoots))
+            throw new IOException("The registered sync-root list could not be inspected; nothing was changed.");
+        foreach (var registered in registeredRoots)
+        {
+            if (Relation(root.Path, registered.Path) is not { } relation) continue;
+            throw new IOException((relation == "ancestor" ? "An ancestor folder is" : "A registered folder is") +
+                " already a registered sync root. Nothing was changed and no registration was connected.");
+        }
         var identity = WindowsCloudFileIdentity.Root(pair.Id, pair.Provider).Serialize();
         var pinned = GCHandle.Alloc(identity, GCHandleType.Pinned);
         try
@@ -395,6 +446,8 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
             !info.Identity.IsBoundTo(_pair.Id, _pair.Provider))
             throw new IOException("The new registration binding changed; rollback was refused.");
         _binding?.RequireRoot(info);
+        if (_binding is not null && (_createdRegistrationId is null || RegistrationId != _createdRegistrationId))
+            throw new IOException("The new registration ownership GUID changed; rollback was refused.");
         RequireNoDependentPointers();
         root.VerifyBinding();
         Disconnect();
@@ -898,6 +951,59 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
         return System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(data);
     }
 
+    /// <summary>
+    /// Pure overlap classification over the registered root paths Windows reports (SyncRootManager, current user).
+    /// No filesystem walk: a 1M-item pair costs nothing. Returns the first overlap and its relation, never guesses.
+    /// </summary>
+    internal static (string Path, string Relation)? RegisteredPathOverlap(string root, IReadOnlyList<string> registeredPaths)
+    {
+        var full = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar);
+        foreach (var registered in registeredPaths)
+            if (Relation(full, registered) is { } relation)
+                return (Path.GetFullPath(registered).TrimEnd(Path.DirectorySeparatorChar), relation);
+        return null;
+    }
+
+    private static string? Relation(string root, string registered)
+    {
+        try
+        {
+            var path = Path.GetFullPath(registered).TrimEnd(Path.DirectorySeparatorChar);
+            var full = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar);
+            if (string.Equals(path, full, StringComparison.OrdinalIgnoreCase)) return "self";
+            if (IsUnder(full, path)) return "ancestor";
+            if (IsUnder(path, full)) return "descendant";
+            return null;
+        }
+        catch (Exception error) when (error is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return null; // An unparsable registry path cannot be a match; overlap inspection still fails closed below.
+        }
+    }
+
+    private static bool IsUnder(string candidate, string parent) =>
+        candidate.Length > parent.Length &&
+        candidate.StartsWith(parent + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Read-only overlap check for a prospective managed root. Returns null when no self, ancestor or descendant is
+    /// registered; otherwise one deferral reason. Fails closed when SyncRootManager cannot be inspected. Never
+    /// registers, connects, refreshes, unregisters or enumerates the folder tree, so it is safe during an active run.
+    /// Callers still check durable v2 ownership, platform and volume eligibility separately.
+    /// </summary>
+    internal static string? RegisteredOverlapReason(string root)
+    {
+        if (!StorageInventoryWindows.TryRegisteredRoots(out var roots))
+            return "the registered sync-root list could not be inspected";
+        return RegisteredPathOverlap(root, roots.Select(entry => entry.Path).ToList()) is not { } overlap ? null
+            : overlap.Relation switch
+            {
+                "self" => "the folder is already a registered Cloud Files sync root",
+                "ancestor" => "an ancestor folder is already a registered Cloud Files sync root",
+                _ => "a descendant folder is already a registered Cloud Files sync root"
+            };
+    }
+
     public static bool IsCloudFilesPlaceholder(string path)
     {
         if (!OperatingSystem.IsWindows() || (!File.Exists(path) && !Directory.Exists(path))) return false;
@@ -1096,7 +1202,12 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
         if (info.CallbackContext == IntPtr.Zero) return;
         var handle = GCHandle.FromIntPtr(info.CallbackContext);
         if (handle.Target is not WindowsCloudFilesProvider provider) return;
-        if (provider._transfers.TryGetValue(info.TransferKey, out var cancellation)) cancellation.Cancel();
+        if (provider._transfers.TryGetValue(info.TransferKey, out var cancellation))
+        {
+            // A racing admission timeout may have disposed the source after removing the transfer.
+            try { cancellation.Cancel(); }
+            catch (ObjectDisposedException) { }
+        }
     }
 
     private void StartFetch(Native.CallbackInfo info, Native.CallbackFetchData parameters)
@@ -1118,28 +1229,46 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
                 parameters.RequiredLength, StatusUnsuccessful);
             return;
         }
-        if (!_fetchSlots.Wait(0))
+        // Copy the callback's current path now: the native pointer is valid only while this callback runs. The
+        // embedded identity keeps the stale creation path, so a renamed pointer would otherwise report the wrong
+        // notice location. The exact revision identity below is deliberately untouched.
+        var callbackPath = CallbackRelativePath(info.NormalizedPath, info.VolumeDosName, identity.RelativePath,
+            _pair.LocalRoot);
+        // Reserve bounded queue capacity before allocating a task or cancellation source. Only a full queue
+        // fails immediately; normal bursts await a worker asynchronously and leave this callback thread free.
+        if (!_fetchAdmission.Wait(0))
         {
-            ReportFetchFailure(identity.RelativePath, new IOException("Hydration capacity is busy. Close unused reads and Retry, or Ignore the notice."));
             ExecuteTransfer(info, IntPtr.Zero, parameters.RequiredFileOffset,
                 parameters.RequiredLength, StatusUnsuccessful);
+            ReportFetchFailure(callbackPath,
+                new IOException("The hydration queue is full. Retry the read after other requests finish, or Ignore the notice."));
             return;
         }
         var cancellation = new CancellationTokenSource();
         if (!_transfers.TryAdd(info.TransferKey, cancellation))
         {
-            _fetchSlots.Release();
             cancellation.Dispose();
+            _fetchAdmission.Release();
             ExecuteTransfer(info, IntPtr.Zero, parameters.RequiredFileOffset,
                 parameters.RequiredLength, StatusUnsuccessful);
             return;
         }
         _ = Task.Run(async () =>
         {
+            var admitted = false;
             try
             {
+                admitted = await _fetchSlots.WaitAsync(FetchAdmissionTimeoutMs, cancellation.Token).ConfigureAwait(false);
+                if (!admitted)
+                {
+                    ExecuteTransfer(info, IntPtr.Zero, parameters.RequiredFileOffset,
+                        parameters.RequiredLength, StatusUnsuccessful);
+                    ReportFetchFailure(callbackPath,
+                        new IOException("Hydration waited too long for capacity. Retry the read, or Ignore the notice."));
+                    return;
+                }
                 await FetchAsync(info, parameters, identity, cancellation.Token);
-                try { FetchSucceeded?.Invoke(identity.RelativePath); }
+                try { FetchSucceeded?.Invoke(callbackPath); }
                 catch { /* Persistence cannot change the completed Windows I/O. */ }
             }
             catch (OperationCanceledException)
@@ -1149,17 +1278,82 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
             }
             catch (Exception error)
             {
-                ReportFetchFailure(identity.RelativePath, error);
+                // Windows owns the completion status; the durable notice is queued only after that completion.
                 ExecuteTransfer(info, IntPtr.Zero, parameters.RequiredFileOffset,
                     parameters.RequiredLength, StatusUnsuccessful);
+                ReportFetchFailure(callbackPath, error);
             }
             finally
             {
                 _transfers.TryRemove(info.TransferKey, out _);
                 cancellation.Dispose();
-                _fetchSlots.Release();
+                if (admitted) _fetchSlots.Release();
+                _fetchAdmission.Release();
             }
         });
+    }
+
+    /// <summary>
+    /// Copies the callback's current path into managed memory while the native pointers are still valid. The Cloud
+    /// Files normalized path is volume-relative (for example <c>\SyncRoot\Folder\file</c>), so it is composed with
+    /// VolumeDosName, resolved against the bound root and strictly containment-checked. Returns the embedded identity
+    /// path when the callback path is absent, malformed, outside the root or unsafe. Never changes the revision identity.
+    /// </summary>
+    internal static string CallbackRelativePath(IntPtr normalizedPath, IntPtr volumeDosName, string embedded,
+        string root)
+    {
+        if (!TryReadNativePath(normalizedPath, out var current)) return embedded;
+        string? relative = null;
+        if (TryReadNativePath(volumeDosName, out var volume))
+        {
+            var drive = volume.StartsWith(@"\\?\", StringComparison.Ordinal) ? volume[4..] : volume;
+            var composed = drive.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
+                Path.DirectorySeparatorChar + current.TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            relative = RelativeInsideRoot(root, composed);
+        }
+        // A volume-less, genuinely root-relative value is accepted defensively (managed helper/tests only). A
+        // leading separator is the native volume-relative shape and is not reinterpreted without its volume.
+        if (relative is null && current.Length > 0 &&
+            current[0] != Path.DirectorySeparatorChar && current[0] != Path.AltDirectorySeparatorChar)
+            relative = RelativeInsideRoot(root, current);
+        return relative ?? embedded;
+    }
+
+    private static string? RelativeInsideRoot(string root, string candidate)
+    {
+        try
+        {
+            string full;
+            if (Path.IsPathFullyQualified(candidate)) full = Path.GetFullPath(candidate);
+            else
+            {
+                var normalizedRoot = PilotPath.NormalizeLocalRoot(root);
+                full = Path.GetFullPath(Path.Combine(normalizedRoot,
+                    candidate.Replace('\\', Path.DirectorySeparatorChar)
+                        .TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)));
+            }
+            if (!PilotPath.IsPathInside(root, full)) return null;
+            var relative = Path.GetRelativePath(Path.GetFullPath(root), full);
+            if (relative is "" or ".") return null;
+            return PilotPath.NormalizeRelative(relative);
+        }
+        catch (Exception error) when (error is ArgumentException or IOException or NotSupportedException)
+        {
+            return null;
+        }
+    }
+
+    private static bool TryReadNativePath(IntPtr value, out string text)
+    {
+        text = string.Empty;
+        if (value == IntPtr.Zero) return false;
+        const int maximumCharacters = 32_768;
+        var length = 0;
+        while (length < maximumCharacters && Marshal.ReadInt16(value, length * 2) != 0) length++;
+        if (length is 0 or >= maximumCharacters) return false;
+        try { text = Marshal.PtrToStringUni(value, length) ?? string.Empty; }
+        catch (Exception error) when (error is ArgumentException or AccessViolationException) { return false; }
+        return text.Length > 0;
     }
 
     private async Task FetchAsync(Native.CallbackInfo info, Native.CallbackFetchData parameters,
@@ -1189,6 +1383,31 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
             cancellationToken);
         if (target.Written != requestedLength || downloaded.Offset != offset ||
             downloaded.Length != requestedLength || downloaded.TotalSize != identity.LogicalSize ||
+            !string.Equals(downloaded.FileId, identity.DropboxId, StringComparison.Ordinal) ||
+            !string.Equals(downloaded.Revision, identity.DropboxRevision, StringComparison.Ordinal) ||
+            !string.Equals(downloaded.ContentHash, identity.ContentHash, StringComparison.OrdinalIgnoreCase))
+            throw new IOException("The hydrated range differs from the exact provider placeholder identity.");
+    }
+
+    /// <summary>
+    /// Proves the placeholder's exact remote revision through one bounded 4 KiB ranged read, without hydrating the
+    /// local file. Used by a foreground Retry so verification never depends on cached local bytes or a full hydrate.
+    /// A zero-length object has no byte endpoint; its verified identity is all the caller can check.
+    /// </summary>
+    internal async Task VerifyHydrationAsync(WindowsCloudFileIdentity identity, CancellationToken cancellationToken)
+    {
+        if (!identity.IsBoundTo(_pair.Id, _pair.Provider))
+            throw new IOException("The hydration identity belongs to another pair or provider.");
+        var length = Math.Min(identity.LogicalSize, 4096);
+        if (length <= 0) return;
+        if (_ranges is not { } ranges)
+            throw new NotSupportedException("This provider cannot verify a bounded hydration range.");
+        var expected = new PilotRemoteEntry(identity.RelativePath, PilotEntryKind.File, identity.DropboxId,
+            identity.DropboxRevision, identity.LogicalSize, identity.ContentHash, identity.ModifiedUtc);
+        await _verifyRemoteRoot(cancellationToken).ConfigureAwait(false);
+        var downloaded = await ranges.DownloadRangeAsync(expected, 0, length, Stream.Null, cancellationToken)
+            .ConfigureAwait(false);
+        if (downloaded.Offset != 0 || downloaded.Length != length || downloaded.TotalSize != identity.LogicalSize ||
             !string.Equals(downloaded.FileId, identity.DropboxId, StringComparison.Ordinal) ||
             !string.Equals(downloaded.Revision, identity.DropboxRevision, StringComparison.Ordinal) ||
             !string.Equals(downloaded.ContentHash, identity.ContentHash, StringComparison.OrdinalIgnoreCase))

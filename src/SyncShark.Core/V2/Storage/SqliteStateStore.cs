@@ -129,6 +129,8 @@ public sealed partial class SqliteStateStore : IStateStore
         var rootNo = RootNo(snapshot.RootId) ?? throw new InvalidOperationException($"Unknown root {snapshot.RootId}");
         RequireOpenGen(null, snapshot.Gen, rootNo);
         _files.WriteSnapshot(snapshot, rootNo);
+        CleanupStorageItems();
+        BindStoragePathIntents(snapshot.RootId);
         FollowQuarantineNotices(snapshot.RootId);
         ObserveDefenderGrants(snapshot.RootId, publish: true);
     });
@@ -140,6 +142,8 @@ public sealed partial class SqliteStateStore : IStateStore
         var rootNo = RootNo(delta.RootId) ?? throw new InvalidOperationException($"Unknown root {delta.RootId}");
         RequireOpenGen(null, delta.Gen, rootNo);
         _files.WriteDelta(delta, rootNo);
+        CleanupStorageItems();
+        BindStoragePathIntents(delta.RootId);
         FollowQuarantineNotices(delta.RootId);
         ObserveDefenderGrants(delta.RootId, publish: true);
     });
@@ -381,6 +385,10 @@ public sealed partial class SqliteStateStore : IStateStore
             }
             else if (result.Outcome == Outcome.Done)
             {
+                if (action.ExpectedTarget is { } oldStorageItem &&
+                    (action.Kind == ActionKind.Delete ||
+                     (action.Target == Side.A ? result.NewA : result.NewB) is { } newStorageItem && newStorageItem.ObjectId != oldStorageItem.ObjectId))
+                    RemoveStorageEntity(transaction, (action.Target == Side.A ? pair.A : pair.B).RootId, oldStorageItem.ObjectId);
                 QueueConfirmedStorageReceipt(transaction, pair, action, result);
                 RebindDefenderGrant(transaction, pair, action, result);
                 if (action.ConflictRestore && (action.Target == Side.A ? result.NewA : result.NewB) is { } restoredItem)
@@ -418,6 +426,7 @@ public sealed partial class SqliteStateStore : IStateStore
             }
         }
         transaction.Commit();
+        CleanupStorageItems();
     });
 
     public void RecordIntent(string pairId, SyncAction action) => RecordIntents(pairId, [action]);

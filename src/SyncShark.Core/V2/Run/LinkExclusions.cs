@@ -30,7 +30,6 @@ internal sealed class LinkExclusions
     private readonly HashSet<string> _nonLocalLinks;
     private readonly HashSet<string> _stubs;
     private readonly HashSet<string> _pending;
-    private readonly RehashProtection? _owned;
     private readonly RehashProtection? _rehash;
     private readonly Func<string, bool, bool>? _retryProtection;
     private readonly HashSet<string> _all;
@@ -38,9 +37,8 @@ internal sealed class LinkExclusions
 
     private LinkExclusions(IEnumerable<string> links, IEnumerable<string> stubs, IEnumerable<string>? pending = null,
         IEnumerable<string>? nonLocalLinks = null, RehashProtection? rehash = null,
-        Func<string, bool, bool>? retryProtection = null, RehashProtection? owned = null)
+        Func<string, bool, bool>? retryProtection = null)
     {
-        _owned = owned;
         _links = new HashSet<string>(links, StringComparer.OrdinalIgnoreCase);
         _nonLocalLinks = new HashSet<string>(nonLocalLinks ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase);
         _stubs = new HashSet<string>(stubs, StringComparer.OrdinalIgnoreCase);
@@ -55,9 +53,9 @@ internal sealed class LinkExclusions
     }
 
     /// <summary>A bounded consumer's immutable overflow answers; ordinary snapshots are shared.</summary>
-    internal bool RequiresBatch => _rehash?.RequiresBatch == true || _owned?.RequiresBatch == true;
+    internal bool RequiresBatch => _rehash?.RequiresBatch == true;
     internal LinkExclusions ForPaths(IEnumerable<string> paths) => !RequiresBatch ? this :
-        new(_links, _stubs, _pending, _nonLocalLinks, _rehash?.ForPaths(paths), _retryProtection, _owned?.ForPaths(paths));
+        new(_links, _stubs, _pending, _nonLocalLinks, _rehash?.ForPaths(paths), _retryProtection);
 
     /// <summary>Nothing left alone.</summary>
     internal static LinkExclusions None { get; } = new(Array.Empty<string>(), Array.Empty<string>());
@@ -86,7 +84,7 @@ internal sealed class LinkExclusions
                 .Concat(store.DefenderGrantHoldPaths(pair.A.RootId)).Concat(store.DefenderGrantHoldPaths(pair.B.RootId))
                 .Concat(HasRootDecisionHold(store, pair.PairId) ? new[] { string.Empty } : Array.Empty<string>())
                 .Concat(store.OpenNotices(pair.PairId).Where(n => PlanNotices.HasPathScope(n) && n.Quarantine is not null).Select(n => n.Path)),
-            nonLocalLinks: nonLocalLinks, rehash: new RehashProtection(store, pair), owned: new RehashProtection(store, pair, ItemFlags.OwnedPointer));
+            nonLocalLinks: nonLocalLinks, rehash: new RehashProtection(store, pair));
     }
 
     /// <summary>
@@ -96,7 +94,7 @@ internal sealed class LinkExclusions
     internal LinkExclusions With(LinkExclusions after) =>
         new(_links.Concat(after._links), _stubs.Concat(after._stubs), _pending.Concat(after._pending),
             _nonLocalLinks.Concat(after._nonLocalLinks), after._rehash ?? _rehash,
-            after._retryProtection ?? _retryProtection, after._owned ?? _owned);
+            after._retryProtection ?? _retryProtection);
 
     /// <summary>
     /// Decision 64: also leaves alone, on both sides, every path whose user-decision notice is open (a first-sync tie
@@ -104,12 +102,12 @@ internal sealed class LinkExclusions
     /// decision notices themselves are listed.
     /// </summary>
     internal LinkExclusions WithPending(IEnumerable<string> pending) =>
-        new(_links, _stubs, _pending.Concat(pending), _nonLocalLinks, _rehash, _retryProtection, _owned);
+        new(_links, _stubs, _pending.Concat(pending), _nonLocalLinks, _rehash, _retryProtection);
 
     internal LinkExclusions WithRetryProtection(Func<string, bool, bool> protection) =>
-        new(_links, _stubs, _pending, _nonLocalLinks, _rehash, protection, _owned);
+        new(_links, _stubs, _pending, _nonLocalLinks, _rehash, protection);
 
-    internal int Count => (int)Math.Min(int.MaxValue, _all.Count + (_rehash?.Count ?? 0) + (_owned?.Count ?? 0) + (_retryProtection is null ? 0 : 1));
+    internal int Count => (int)Math.Min(int.MaxValue, _all.Count + (_rehash?.Count ?? 0) + (_retryProtection is null ? 0 : 1));
 
     /// <summary>The recorded link paths (the baselines under them are forgotten, see SyncRun).</summary>
     internal IReadOnlyCollection<string> Links => _links;
@@ -118,8 +116,7 @@ internal sealed class LinkExclusions
     /// <summary>True when the path is protected or lies under a protected path (checks the path and each ancestor).</summary>
     internal bool Covers(string path)
     {
-        if (_retryProtection?.Invoke(path, false) == true || _rehash?.Touches(path, descendants: false) == true ||
-            _owned?.Touches(path, descendants: false) == true) return true;
+        if (_retryProtection?.Invoke(path, false) == true || _rehash?.Touches(path, descendants: false) == true) return true;
         if (_all.Count == 0) return false;
         if (_all.Contains(string.Empty)) return true;
         for (var current = path; current.Length > 0; current = Parent(current))
@@ -129,7 +126,7 @@ internal sealed class LinkExclusions
 
     /// <summary>True when a protected path lies strictly under the path (or the path is the whole pair).</summary>
     internal bool Contains(string path) => _retryProtection?.Invoke(path, true) == true ||
-        _rehash?.Touches(path, descendants: true) == true || _owned?.Touches(path, descendants: true) == true ||
+        _rehash?.Touches(path, descendants: true) == true ||
         _all.Count > 0 && (path.Length == 0 || _containers.Contains(path));
 
     /// <summary>Ordinary copy/source predicates protect every held path, including hash debt.</summary>
@@ -155,7 +152,7 @@ internal sealed class LinkExclusions
 
     // The same protection without the LOCAL links (cloud links, stubs and pending decisions only).
     private LinkExclusions? _withoutLocalLinks;
-    private LinkExclusions WithoutLocalLinks => _withoutLocalLinks ??= new(_nonLocalLinks, _stubs, _pending, rehash: _rehash, retryProtection: _retryProtection, owned: _owned);
+    private LinkExclusions WithoutLocalLinks => _withoutLocalLinks ??= new(_nonLocalLinks, _stubs, _pending, rehash: _rehash, retryProtection: _retryProtection);
 
     /// <summary>
     /// True when the path is protected by anything other than a local link: a cloud link, a left-alone stub or an

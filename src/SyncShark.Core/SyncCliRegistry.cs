@@ -388,7 +388,7 @@ public static class SyncCliRegistry
             SyncCliRequestKind.State, "none", "persists online-only intent; does not immediately remove local bytes",
             "retained authority", "direct|running-application", "--pair,--path", Mutating: true, RequiresPair: true),
         new("storage offline", "storage offline --pair <exact-id> --path <relative-path>",
-            SyncCliRequestKind.State, "none", "persists offline intent", "retained authority",
+            SyncCliRequestKind.State, "none", "persists offline intent; existing pointers are not downloaded (bulk offline is phase 2)", "retained authority",
             "direct|running-application", "--pair,--path", Mutating: true, RequiresPair: true),
         new("storage inherit", "storage inherit --pair <exact-id> --path <relative-path>",
             SyncCliRequestKind.State, "none", "removes an identity storage override", "retained authority",

@@ -378,8 +378,10 @@ public sealed class PilotLocalScanner
                     WindowsCloudFilesProvider.TryReadOwnedPlaceholder(exactPath, out ownedPlaceholder) &&
                     ownedPlaceholder is not null && ownedPlaceholder.Identity.ObjectKind != "root" &&
                     ownedPlaceholder.Identity.IsBoundTo(expectedPairId, contentProvider) &&
-                    ownedPlaceholder.SyncRootFileId == rootLease.Identity.FileId &&
-                    string.Equals(ownedPlaceholder.Identity.RelativePath, relative, StringComparison.OrdinalIgnoreCase);
+                    ownedPlaceholder.SyncRootFileId == rootLease.Identity.FileId && ownedPlaceholder.FileId != 0;
+                // Ownership belongs to the item, not its serialized old path. A local rename or
+                // enclosing folder move keeps its native file/root identity and exact cloud revision.
+                // Demoting such an item to a foreign stub would silently prevent move propagation.
                 if (CloudFilesAware && !owned && PilotPath.IsUnsafeAttributes(attributes))
                 {
                     DirectoryEntryInfo? listed;

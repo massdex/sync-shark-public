@@ -52,12 +52,20 @@ internal static class FilesOnDemandNativeChecks
             Console.WriteLine("SKIP Files On-Demand: native registration is unsupported: " + error.Message);
             return;
         }
+        // The lifetime ownership gate records only a registration this process created.
+        if (!initialProvider.CreatedRegistration)
+            throw new IOException("The disposable fixture root was not created by this process.");
+        var registrationId = initialProvider.RegistrationId ??
+            throw new IOException("Windows did not return the disposable sync-root ownership GUID.");
+        if (!Guid.TryParseExact(registrationId, "D", out var ownershipGuid) || ownershipGuid == Guid.Empty)
+            throw new IOException("The disposable registration did not contain a fresh v2 ownership GUID.");
         Exception? originalFailure = null;
         try
         {
             // Simulate host loss after receipt persistence but before conversion.
             provider.Dispose();
-            provider = new WindowsCloudFilesProvider(binding, source, root, SyncDirectoryStorage.CloudOnly);
+            provider = new WindowsCloudFilesProvider(binding, source, root, SyncDirectoryStorage.CloudOnly)
+                { ExpectedRegistrationId = registrationId };
             provider.RegisterAndConnect();
             WindowsCloudFilesProvider.BeforeDehydrateForTest = file => File.WriteAllBytes(file, new byte[content.Length]);
             var rejectedEdit = false;
@@ -99,6 +107,7 @@ internal static class FilesOnDemandNativeChecks
             using (var uploadStore = SqliteStateStore.Open(database, V2Settings.Default, TimeProvider.System))
             {
                 uploadStore.SavePair(pair);
+                uploadStore.RecordStorageRegistration(localRoot.RootId, root, registrationId);
                 var generation = uploadStore.BeginGeneration(localRoot.RootId, "snapshot");
                 uploadStore.WriteSnapshot(new Snapshot(localRoot.RootId, Side.A, generation, "cursor", [uploaded], []));
                 uploadStore.SetStoragePolicy(localRoot.RootId, localRoot.RootObjectId, "online-only");
@@ -121,7 +130,8 @@ internal static class FilesOnDemandNativeChecks
                 if (restarted.StorageSettlementPage().Count != 0 || source.Uploads != 1)
                     throw new IOException("Restarted production settlement did not acknowledge exactly one upload.");
             }
-            provider = new WindowsCloudFilesProvider(binding, source, root, SyncDirectoryStorage.CloudOnly);
+            provider = new WindowsCloudFilesProvider(binding, source, root, SyncDirectoryStorage.CloudOnly)
+                { ExpectedRegistrationId = registrationId };
             provider.RegisterAndConnect();
             if (!WindowsCloudFilesProvider.TryReadOwnedPlaceholder(path, out var converted) || converted is null ||
                 !converted.State.IsInSync || converted.State.Availability != SyncCloudFileAvailability.OnlineOnly)
@@ -129,7 +139,8 @@ internal static class FilesOnDemandNativeChecks
             if (source.Reads != 0) throw new IOException("Conversion unexpectedly fetched bytes.");
             // Simulate loss after native conversion but before durable settlement acknowledgement.
             provider.Dispose();
-            provider = new WindowsCloudFilesProvider(binding, source, root, SyncDirectoryStorage.CloudOnly);
+            provider = new WindowsCloudFilesProvider(binding, source, root, SyncDirectoryStorage.CloudOnly)
+                { ExpectedRegistrationId = registrationId };
             provider.RegisterAndConnect();
             var resumed = await provider.ConvertVerifiedSyncedFileAsync(remote, dehydrateOverride: true);
             if (!resumed.State.IsInSync || resumed.State.Availability != SyncCloudFileAvailability.OnlineOnly || source.Reads != 0)
@@ -142,6 +153,7 @@ internal static class FilesOnDemandNativeChecks
                 new PlanOptions(TimeSpan.Zero, true, new LabelRule("{name}", "yyyyMMdd", TimeSpan.Zero, "A", "B"), 10));
             if (pointerPlan.Actions.Any(action => action.Source?.ObjectId == pointer.ObjectId || action.Kind == ActionKind.Delete))
                 throw new IOException("Planner used a pointer as an upload source or deletion evidence.");
+            await FilesOnDemandNativePointerChecks.VerifyRenameAsync(root, path, binding.PairId, pointer, () => source.Reads);
             byte[] read;
             using (PairPause.Begin(null!, binding.PairId, () => true))
             {
@@ -156,6 +168,12 @@ internal static class FilesOnDemandNativeChecks
             if (hydrated.Flags.HasFlag(ItemFlags.OwnedPointer) || hydrated.ObjectId != pointer.ObjectId ||
                 hydrated.Hash != pointer.Hash || hydrated.Size != pointer.Size || hydrated.Mtime != pointer.Mtime)
                 throw new IOException("Hydration-only transition changed the content fingerprint.");
+            var readsBeforeCreate = source.Reads;
+            NewPointerNativeChecks.CheckCreateOnly(provider, local, remote, path, () =>
+            {
+                if (source.Reads != readsBeforeCreate)
+                    throw new IOException("Creating a new pointer downloaded bytes.");
+            });
             var nextBytes = System.Text.Encoding.UTF8.GetBytes("new remote revision with a different size");
             using var nextStream = new MemoryStream(nextBytes);
             var nextHash = await SyncContentIdentity.ComputeAsync(SyncProviders.Dropbox, nextStream, CancellationToken.None);
@@ -201,11 +219,10 @@ internal static class FilesOnDemandNativeChecks
             var failedIo = false;
             try { await File.ReadAllBytesAsync(path); } catch (IOException) { failedIo = true; }
             if (!failedIo) throw new IOException("Failed hydration did not fail Windows I/O.");
-            var hydrationNotice = verifyStore.OpenNotices(pair.PairId).Single(n => n.Storage?.Operation == "hydration");
+            var hydrationNotice = await WaitForHydrationNoticeAsync(verifyStore, pair.PairId);
             source.FailReads = false;
             await StorageNotices.ApplyAsync(verifyStore, verifyLifetime, hydrationNotice, NoticeChoices.RetryNow, CancellationToken.None);
-            if (verifyStore.OpenNotices(pair.PairId).Any(n => n.Storage?.Operation == "hydration"))
-                throw new IOException("Successful hydration Retry did not close the durable notice.");
+            await WaitUntilHydrationNoticesClosedAsync(verifyStore, pair.PairId);
             if (!(await File.ReadAllBytesAsync(path)).SequenceEqual(nextBytes))
                 throw new IOException("Updated pointer did not hydrate the new exact revision.");
             await provider.ConvertVerifiedSyncedFileAsync(next, dehydrateOverride: true, expectedLocalIdentity: uploadedIdentity);
@@ -213,11 +230,22 @@ internal static class FilesOnDemandNativeChecks
             failedIo = false;
             try { await File.ReadAllBytesAsync(path); } catch (IOException) { failedIo = true; }
             if (!failedIo) throw new IOException("Second failed hydration did not fail Windows I/O.");
-            hydrationNotice = verifyStore.OpenNotices(pair.PairId).Single(n => n.Storage?.Operation == "hydration");
+            hydrationNotice = await WaitForHydrationNoticeAsync(verifyStore, pair.PairId);
+            // The notice worker is asynchronous: a successful hydration must eventually close the open notice.
+            source.FailReads = false;
+            if (!(await File.ReadAllBytesAsync(path)).SequenceEqual(nextBytes))
+                throw new IOException("A successful hydration after a reported failure returned the wrong bytes.");
+            await WaitUntilHydrationNoticesClosedAsync(verifyStore, pair.PairId);
+            await provider.ConvertVerifiedSyncedFileAsync(next, dehydrateOverride: true, expectedLocalIdentity: uploadedIdentity);
+            source.FailReads = true;
+            failedIo = false;
+            try { await File.ReadAllBytesAsync(path); } catch (IOException) { failedIo = true; }
+            if (!failedIo) throw new IOException("Third failed hydration did not fail Windows I/O.");
+            hydrationNotice = await WaitForHydrationNoticeAsync(verifyStore, pair.PairId);
             var readsBeforeIgnore = source.Reads;
             await StorageNotices.ApplyAsync(verifyStore, verifyLifetime, hydrationNotice, NoticeChoices.Ignore, CancellationToken.None);
-            if (verifyStore.OpenNotices(pair.PairId).Any(n => n.Storage?.Operation == "hydration") ||
-                !verifyStore.StorageOperationIgnored(pair.PairId, hydrationNotice.Storage!) ||
+            await WaitUntilHydrationNoticesClosedAsync(verifyStore, pair.PairId);
+            if (!verifyStore.StorageOperationIgnored(pair.PairId, hydrationNotice.Storage!) ||
                 !WindowsCloudFilesProvider.TryReadOwnedPlaceholder(path, out var ignoredPointer) || ignoredPointer is null ||
                 ignoredPointer.State.Availability != SyncCloudFileAvailability.OnlineOnly ||
                 ignoredPointer.Identity.DropboxRevision != next.Revision || source.Reads != readsBeforeIgnore)
@@ -243,7 +271,8 @@ internal static class FilesOnDemandNativeChecks
                 provider.Dispose();
                 if (WindowsCloudFilesProvider.ReadRegisteredSyncRootFileId(root) is not null)
                 {
-                    using var cleanup = new WindowsCloudFilesProvider(binding, source, root, SyncDirectoryStorage.CloudOnly);
+                    using var cleanup = new WindowsCloudFilesProvider(binding, source, root, SyncDirectoryStorage.CloudOnly)
+                        { ExpectedRegistrationId = registrationId };
                     cleanup.RegisterAndConnect();
                     await cleanup.UnregisterAsync(CancellationToken.None);
                 }
@@ -256,6 +285,33 @@ internal static class FilesOnDemandNativeChecks
                 throw new AggregateException("Native check failed and fixture cleanup also failed; root may remain.",
                     originalFailure, cleanupError);
             }
+        }
+    }
+
+    // Hydration notices are persisted by a bounded background writer, so a native read cannot assume the row is
+    // visible the instant Windows reports the failed I/O. These waits are bounded, never unconditional sleeps.
+    private static async Task<Notice> WaitForHydrationNoticeAsync(SqliteStateStore store, string pairId)
+    {
+        var deadline = Environment.TickCount64 + 10_000;
+        while (true)
+        {
+            if (store.OpenNotices(pairId).FirstOrDefault(notice => notice.Storage?.Operation == "hydration") is { } found)
+                return found;
+            if (Environment.TickCount64 >= deadline)
+                throw new IOException("The hydration notice was not persisted within the bounded wait.");
+            await Task.Delay(25).ConfigureAwait(false);
+        }
+    }
+
+    private static async Task WaitUntilHydrationNoticesClosedAsync(SqliteStateStore store, string pairId)
+    {
+        var deadline = Environment.TickCount64 + 10_000;
+        while (true)
+        {
+            if (!store.OpenNotices(pairId).Any(notice => notice.Storage?.Operation == "hydration")) return;
+            if (Environment.TickCount64 >= deadline)
+                throw new IOException("The hydration notice did not close within the bounded wait.");
+            await Task.Delay(25).ConfigureAwait(false);
         }
     }
 

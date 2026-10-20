@@ -69,7 +69,7 @@ public static class PlanNotices
     /// never imply a root hold. A typed quarantine may explicitly hold the root itself.
     /// Actual root scan failures remain protected by scan/retry evidence, not display text.
     /// </summary>
-    public static bool HasPathScope(Notice notice) => notice.DefenderHistory is null &&
+    public static bool HasPathScope(Notice notice) => notice.DefenderHistory is null && notice.Storage is null &&
         (notice.Path.Length > 0 || notice.Quarantine is not null);
 
     /// <summary>

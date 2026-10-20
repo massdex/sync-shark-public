@@ -67,7 +67,8 @@ internal static class StoreSchema
 
     // Performance-only, additive index; no persisted row format changes or version bump.
     private const string FlaggedIndexDdl =
-        "CREATE INDEX IF NOT EXISTS fs_flagged ON file_state(root_no) WHERE flags != 0;" +
+        "CREATE INDEX IF NOT EXISTS fs_flagged ON file_state(root_no) WHERE (flags & ~512) != 0;" +
+        "CREATE INDEX IF NOT EXISTS fs_owned ON file_state(root_no) WHERE (flags & 512) != 0;" +
         "CREATE INDEX IF NOT EXISTS fs_refused ON file_state(root_no, kind) WHERE (flags & 64) != 0;" +
         "CREATE INDEX IF NOT EXISTS fs_quarantine ON file_state(root_no, kind) WHERE (flags & 128) != 0;";
 
@@ -293,7 +294,13 @@ internal static class StoreSchema
     // version includes all preceding feature objects; interrupted backfills resume before stamping.
     private static void EnsureFeatureSchema(SqliteConnection connection, long fromVersion)
     {
+        var newRefreshQueue = Scalar(connection, null, "SELECT 1 FROM sqlite_master WHERE name='storage_refresh';") is null;
         Execute(connection, null, FilesOnDemandSchema.Ddl);
+        if (newRefreshQueue)
+            Execute(connection, null, "INSERT OR IGNORE INTO storage_refresh(root_id,object_id,remote_binding,due) " +
+                "SELECT root_id,object_id,remote_binding,0 FROM storage_item WHERE availability='OnlineOnly';");
+        if (Scalar(connection, null, "SELECT sql FROM sqlite_master WHERE name='fs_flagged';") is string flagged &&
+            !flagged.Contains("~512", StringComparison.Ordinal)) Execute(connection, null, "DROP INDEX fs_flagged;");
         Execute(connection, null, QuarantineDdl);
         EnsureDefenderColumns(connection, null);
         Execute(connection, null, FlaggedIndexDdl);
@@ -361,7 +368,8 @@ internal static class StoreSchema
         "run_summary", "run_summary_pair", "nt_pair_reason",
         "deletion_classification", "deletion_classification_path", "observation_checkpoint",
         "listing_checkpoint", "listing_page", "pair_pause", "local_walk", "local_walk_page",
-        "storage_policy", "storage_item", "storage_settlement", "storage_pending",
+        "storage_policy", "storage_item", "storage_settlement", "storage_pending", "storage_online_policy",
+        "storage_path_intent", "storage_intent_due", "storage_policy_sweep", "storage_remote_object", "storage_refresh", "storage_refresh_due", "storage_cleanup", "storage_registration", "fs_owned",
     ];
 
     /// <summary>A command bound to the connection and optional transaction (Microsoft.Data.Sqlite requires it).</summary>
@@ -477,7 +485,6 @@ internal static class StoreSchema
         Execute(connection, null, ClassificationDdl);
         Execute(connection, null, ObservationDdl);
         EnsureFeatureSchema(connection, version);
-        Execute(connection, null, FilesOnDemandSchema.Ddl);
         var names = new HashSet<string>(StringComparer.Ordinal);
         using (var command = Command(connection, null,
             "SELECT name FROM sqlite_master WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%';"))

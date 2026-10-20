@@ -25,9 +25,9 @@ internal sealed class FileStateReader
     // The explicit nonzero predicate matches the partial index; the bit mask alone cannot imply it to SQLite.
     private const string LiveFlaggedSql =
         $"SELECT {Columns} FROM file_state f INDEXED BY fs_flagged JOIN dir d ON d.dir_no = f.dir_no " +
-        "WHERE f.root_no=$r AND f.flags != 0 AND (f.flags & $f) != 0 ORDER BY d.path, f.name;";
+        "WHERE f.root_no=$r AND (f.flags & ~512) != 0 AND (f.flags & $f) != 0 ORDER BY d.path, f.name;";
 
-    private const string FlaggedPredicate = "f.root_no=$r AND f.flags != 0 AND (f.flags & $f) != 0";
+    private const string FlaggedPredicate = "f.root_no=$r AND (f.flags & ~512) != 0 AND (f.flags & $f) != 0";
     private const string LiveFlaggedCountSql =
         "SELECT COUNT(*) FROM file_state f INDEXED BY fs_flagged WHERE " + FlaggedPredicate + ";";
     // No sort: examples may be in index order, so LIMIT bounds decoded rows and avoids a root-sized sort.
@@ -38,12 +38,16 @@ internal sealed class FileStateReader
         $"SELECT {Columns} FROM file_state f INDEXED BY fs_flagged JOIN dir d ON d.dir_no=f.dir_no " +
         "WHERE " + FlaggedPredicate + " AND f.kind=$kind;";
 
-    private static string FlaggedSql(string sql, ItemFlags flags) => flags == ItemFlags.ProviderNameRefused
+    private static string FlaggedSql(string sql, ItemFlags flags) => flags == ItemFlags.OwnedPointer
+        ? sql.Replace("INDEXED BY fs_flagged", "INDEXED BY fs_owned").Replace("(f.flags & ~512) != 0", "(f.flags & 512) != 0")
+        : (flags & ItemFlags.OwnedPointer) != 0
+            ? sql.Replace("INDEXED BY fs_flagged", "INDEXED BY fs_obj").Replace("(f.flags & ~512) != 0", "f.flags != 0")
+        : flags == ItemFlags.ProviderNameRefused
         ? sql.Replace("INDEXED BY fs_flagged", "INDEXED BY fs_refused")
-            .Replace("f.flags != 0 AND (f.flags & $f) != 0", "(f.flags & 64) != 0 AND (f.flags & $f) != 0")
+            .Replace("(f.flags & ~512) != 0 AND (f.flags & $f) != 0", "(f.flags & 64) != 0 AND (f.flags & $f) != 0")
         : flags == ItemFlags.Quarantined
             ? sql.Replace("INDEXED BY fs_flagged", "INDEXED BY fs_quarantine")
-                .Replace("f.flags != 0 AND (f.flags & $f) != 0", "(f.flags & 128) != 0 AND (f.flags & $f) != 0")
+                .Replace("(f.flags & ~512) != 0 AND (f.flags & $f) != 0", "(f.flags & 128) != 0 AND (f.flags & $f) != 0")
             : sql;
 
     private static string BatchedPathsSql(string values) =>

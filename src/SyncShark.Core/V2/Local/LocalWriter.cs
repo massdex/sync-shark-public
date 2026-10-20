@@ -5,7 +5,7 @@ using System.Text.Json;
 namespace Massdex.SyncShark.V2;
 
 /// <summary>Applies planned effects to one local NTFS folder through the conditional local endpoint store.</summary>
-public sealed class LocalWriter : IEndpointWriter, ISyncTransferResourceEndpoint,
+public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResourceEndpoint,
     ILocalFreeSpaceAdmission, ISyncDirectDownloadTarget, ILocalRetainedNoticeReader, IRecoveryAvailability
 
 {
@@ -95,8 +95,12 @@ public sealed class LocalWriter : IEndpointWriter, ISyncTransferResourceEndpoint
     /// reserves its victim's bytes on the recovery volume. The reservation is held until the action finishes, and a
     /// refusal leaves no intent, so nothing can be replayed.
     /// </remarks>
+    internal NewPointerDownload? NewPointers { get; set; }
+
     public Task<FreeSpaceAdmission> AdmitFreeSpaceAsync(SyncAction action, CancellationToken ct) =>
-        _freeSpace.AdmitAsync(action, _rootPath, _recoveryRoot, ct);
+        NewPointers is not null && NewPointerDownload.IsNewFile(action)
+            ? _freeSpace.AdmitAsync(0, _rootPath, true, 0, _recoveryRoot, ct)
+            : _freeSpace.AdmitAsync(action, _rootPath, _recoveryRoot, ct);
 
     private void RequireAvailableRecovery(SyncAction action)
     {
@@ -112,6 +116,8 @@ public sealed class LocalWriter : IEndpointWriter, ISyncTransferResourceEndpoint
         {
             ArgumentNullException.ThrowIfNull(a);
             ArgumentNullException.ThrowIfNull(content);
+            if (a.ExpectedTarget?.Flags.HasFlag(ItemFlags.OwnedPointer) == true)
+                throw new IOException("The online-only target needs a metadata-only refresh. Retry storage settlement or rescan; no local bytes were opened.");
             using var operation = RunOperations.Begin(RunOperationKind.LocalWrite, RunOperations.Short(a.Path));
             using var tracked = RunOperationStream.Touching(content, operation.Touch);
             content = tracked;
@@ -156,6 +162,18 @@ public sealed class LocalWriter : IEndpointWriter, ISyncTransferResourceEndpoint
         {
             ArgumentNullException.ThrowIfNull(a);
             ArgumentNullException.ThrowIfNull(source);
+            if (a.ExpectedTarget?.Flags.HasFlag(ItemFlags.OwnedPointer) == true)
+                throw new IOException("The online-only target needs a metadata-only refresh. Retry storage settlement or rescan; no local bytes were opened.");
+            if (NewPointers is { } pointers &&
+                await pointers.TryCreateAsync(a, source, ct).ConfigureAwait(false) is { } pointer)
+                return pointer;
+            // New-file admission reserved metadata only. If policy selected ordinary bytes (including a
+            // concurrent policy change), reserve those bytes now rather than relying on stale policy.
+            var byteAdmission = NewPointers is not null && NewPointerDownload.IsNewFile(a)
+                ? await _freeSpace.AdmitAsync(a, _rootPath, _recoveryRoot, ct).ConfigureAwait(false)
+                : FreeSpaceAdmission.Granted;
+            using var byteReservation = byteAdmission.Reservation;
+            if (byteAdmission.Refusal is { } refusal) throw new IOException(refusal.Detail);
             var planned = a.Source;
             var hash = planned?.Hash;
             if (planned is null || planned.Kind != ItemKind.File || hash is null)
@@ -364,6 +382,8 @@ public sealed class LocalWriter : IEndpointWriter, ISyncTransferResourceEndpoint
             ArgumentNullException.ThrowIfNull(a);
             if (a.FromPath is null || a.ExpectedTarget is null)
                 throw new ArgumentException("A local Move requires a source path and its expected target.", nameof(a));
+            if (a.ExpectedTarget.Flags.HasFlag(ItemFlags.OwnedPointer))
+                return await MoveOwnedPointerAsync(a, ct).ConfigureAwait(false);
             using var operation = RunOperations.Begin(RunOperationKind.LocalWrite, "move " + RunOperations.Short(a.Path));
             var current = await RequireTargetAsync(a.FromPath, a.ExpectedTarget, ct).ConfigureAwait(false);
             await EnsureParentsAsync(a.Path, ct).ConfigureAwait(false);
@@ -381,6 +401,7 @@ public sealed class LocalWriter : IEndpointWriter, ISyncTransferResourceEndpoint
         {
             ArgumentNullException.ThrowIfNull(a);
             var expected = a.ExpectedTarget ?? throw new ArgumentException("A local Delete requires its expected target.", nameof(a));
+            if (expected.Flags.HasFlag(ItemFlags.OwnedPointer)) { DeleteOwnedPointer(a, ct); return; }
             if (expected.Kind == ItemKind.File && await IsPreservedAsync(a, ct).ConfigureAwait(false)) return;
             var current = await RequireTargetAsync(a.Path, expected, ct).ConfigureAwait(false);
             var entry = expected.Kind == ItemKind.Folder ? LocalItems.ToStoreEntry(expected) : current;
@@ -462,6 +483,8 @@ public sealed class LocalWriter : IEndpointWriter, ISyncTransferResourceEndpoint
     {
         try
         {
+            ct.ThrowIfCancellationRequested();
+            if (ObserveOwnedPointer(path) is { } pointer) return pointer;
             var current = await _store.FindEntryAtPathAsync(path, ct).ConfigureAwait(false);
             return current is null ? null : LocalItems.FromStore(current, LocalItems.FullPath(_rootPath, current.RelativePath));
         }

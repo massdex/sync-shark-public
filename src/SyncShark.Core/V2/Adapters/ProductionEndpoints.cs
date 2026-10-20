@@ -9,6 +9,8 @@ public sealed record PairEndpoints(IInventorySource InventoryA, IInventorySource
 /// <summary>Opens the real Local/Dropbox endpoints per pair at run time; refusals happen before any effect.</summary>
 public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatchSource
 {
+    internal Func<PairDef, CancellationToken, WindowsCloudFilesProvider>? NewPointerProvider { get; set; }
+
     // Deliberately not called by PrepareAsync/OpenAsync: CLI previews must never register a provider.
     internal ICloudFilesConnection CreateCloudFiles(PairDef pair, WindowsCloudFilesBinding binding,
         SyncDirectoryStorage defaultStorage)
@@ -259,6 +261,28 @@ public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatc
         // Direct downloads use a target-volume partial, with no product-spool demand.
         var writer = await OpenLocalWriterAsync(_store, root, side, pair, checkedSide.Installation!, recovery, ct,
             _settings, _paths.DatabasePath, _time, checkedSide.RecoveryUnavailable).ConfigureAwait(false);
+        if (_store is SqliteStateStore storage && side == Side.A && pair.B.Provider == SyncProviders.Dropbox &&
+            storage.HasOnlineStoragePolicy(root.RootId))
+        {
+            bool Eligible(string path)
+            {
+                if (!storage.HasOnlineStoragePolicy(root.RootId)) return false;
+                var current = storage.Pair(pair.PairId);
+                if (current is null) throw new IOException("The pair was removed. Rescan before creating pointers.");
+                PairMapping.CloudFilesBinding(pair).RequireSame(PairMapping.CloudFilesBinding(current));
+                if (current.Excluded.Any(prefix => PairPath.IsSelfOrUnder(path, prefix)) ||
+                    SyncIgnorePolicy.IsIgnored(path, false, PairInclude.IgnoreRules(current)))
+                    throw new ExpectedTargetMismatchException("The path was excluded before pointer creation. Resync to apply the current selection.");
+                return storage.ResolveStoragePolicy(root, path) == "online-only";
+            }
+            writer.NewPointers = new NewPointerDownload(Eligible, async (remote, path, token) =>
+            {
+                if (!Eligible(path)) throw new ExpectedTargetMismatchException("Storage policy changed. Resync before creating the pointer.");
+                var provider = NewPointerProvider?.Invoke(pair, token) ?? throw new IOException(
+                    "Online-only storage is not connected. Retry with the Cloud Files host running or choose available offline.");
+                return await writer.CreateNewPointerAsync(remote, path, provider, token).ConfigureAwait(false);
+            });
+        }
         return (inventory, writer);
 
     }

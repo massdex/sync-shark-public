@@ -7,6 +7,7 @@ internal static partial class PlannerChecks
 
     private static void RunStubChecks()
     {
+        OwnedPointerChecks();
         Rule35_StubReplacedRegardlessOfNewestWins();
         Rule35b_StubWithoutCounterpartOnlyNotice();
         Rule35c_StubNeverDeletedByChoiceOrEvidence();

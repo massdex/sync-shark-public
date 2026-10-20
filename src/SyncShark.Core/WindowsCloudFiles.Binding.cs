@@ -56,9 +56,17 @@ public sealed partial class WindowsCloudFilesProvider
     private bool ReconnectBoundRoot(string root)
     {
         if (_binding is null) return false;
-        var registeredId = ReadRegisteredSyncRootFileId(root);
-        if (registeredId is null) return false;
-        if (registeredId != _binding.RootFileId ||
+        var registration = ReadRootRegistration(root);
+        if (registration is null)
+        {
+            if (ExpectedRegistrationId is not null)
+                throw new IOException("The recorded native registration disappeared; it was not recreated.");
+            return false;
+        }
+        if (ExpectedRegistrationId is null || registration.OwnershipToken != ExpectedRegistrationId ||
+            registration.FileId != _binding.RootFileId || registration.Identity is not { } identity ||
+            identity.AccountId != _binding.AccountId || identity.RemoteRootId != _binding.RemoteRootId ||
+            identity.RemoteRoot != _binding.RemoteRoot || !identity.IsBoundTo(_binding.PairId, _binding.Provider) ||
             !TryReadOwnedPlaceholder(root, out var info) || info is null)
             throw new IOException("Another provider or root owns the Cloud Files registration.");
         _binding.RequireRoot(info);
