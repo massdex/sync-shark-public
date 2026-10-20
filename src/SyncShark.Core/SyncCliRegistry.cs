@@ -124,9 +124,9 @@ public static class SyncCliRegistry
             "give one prefix for all logs or one per log in matching order",
             "the v2 store and exclusive product/run locks", "direct", "--pair,--dry-run,--yes,--local-date,--from,--to,--exclude-list,--after,--provenance-log,--provenance-prefix",
             Mutating: true, RequiresPair: true),
-        new("dates restore", "dates restore --audit-log <file> [--dry-run]", SyncCliRequestKind.State, "explicit command",
+        new("dates restore", "dates restore --audit-log <file> [--dry-run] [--yes]", SyncCliRequestKind.State, "yes",
             "restores audited original dates only while repaired date, file identity and content still match",
-            "the v2 store and exclusive product/run locks", "direct", "--audit-log,--dry-run", Mutating: true),
+            "the v2 store and exclusive product/run locks", "direct", "--audit-log,--dry-run,--yes", Mutating: true),
         new("dates report-mismatch", "dates report-mismatch --pair <exact-id> [--local-date yyyy-MM-dd | --from <local-date-or-time> --to <local-date-or-time>] [--exclude-list <file>] [--after <key>] [--provenance-log <file> ...] [--provenance-prefix <relative-prefix> ...]",
             SyncCliRequestKind.State, "none", "read-only date mismatch report; writes a CSV path list, never changes file dates or content; missing write provenance is unknown, not proof of a user edit",
             "the v2 store and exclusive product/run locks", "direct", "--pair,--local-date,--from,--to,--exclude-list,--after,--provenance-log,--provenance-prefix", RequiresPair: true),
@@ -859,6 +859,8 @@ public static class SyncCliRegistry
             }
             _ = V2.DateRepair.UtcRange(Day("--local-date"), V2.DateRepairBound.Parse(options.GetValueOrDefault("--from")), V2.DateRepairBound.Parse(options.GetValueOrDefault("--to")), TimeZoneInfo.Local);
         }
+        if (command == "dates restore" && !options.ContainsKey("--dry-run") && !options.ContainsKey("--yes"))
+            throw new SyncCliUsageException("Use dates restore --audit-log <file> --dry-run to review, or add --yes to restore dates.");
         if (command == "dates repair" && !options.ContainsKey("--dry-run") && !options.ContainsKey("--yes"))
             throw new SyncCliUsageException("Use dates repair --pair <id> --dry-run to review, or add --yes to repair dates.");
         if (row.RequiresYes && (row.MutationOption is null || options.ContainsKey(row.MutationOption)) &&
@@ -1772,7 +1774,7 @@ public static class SyncCliRegistry
                 foreach (var rule in preview.Rules) builder.AppendLine("  " + rule);
                 foreach (var warning in preview.Warnings) builder.AppendLine("  warning: " + warning);
                 foreach (var item in preview.Examples)
-                    builder.AppendLine($"  {item.Recommendation}: {item.RelativePath} â€” {item.Reason}");
+                    builder.AppendLine($"  {item.Recommendation}: {item.RelativePath} — {item.Reason}");
                 builder.AppendLine("  Selection is unchanged. Use folders include --pair " + preview.PairId +
                     " --path \"" + preview.RelativePath + "\" --yes to include it for the next run.");
                 break;
@@ -1886,7 +1888,7 @@ public static class SyncCliRegistry
         foreach (var row in rebuildables)
         {
             builder.AppendLine($"  rebuildable {row.Id}{(row.Chosen ? " (chosen to stop syncing)" : "")}: " +
-                               $"{row.Folders} folder(s), {row.Files} file(s), {row.Bytes} byte(s) â€” {row.Explanation}" +
+                               $"{row.Folders} folder(s), {row.Files} file(s), {row.Bytes} byte(s) — {row.Explanation}" +
                                (row.Examples.Count == 0 ? "" : " e.g. " + string.Join(", ", row.Examples)));
             foreach (var folder in row.Candidates ?? [])
                 builder.AppendLine($"    {folder.Path} (chosen={folder.Chosen.ToString().ToLowerInvariant()})");

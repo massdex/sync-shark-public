@@ -55,7 +55,7 @@ internal static class DateProvenanceChecks
         LocalChecks.Require(locals.All(item => File.GetLastWriteTimeUtc(Path.Combine(files, item.Path)) == now.UtcDateTime),
             "mismatch reporting changes no dates");
         var repaired = await DateRepair.RunAsync(store, pair, Remote, root, false, [], CancellationToken.None);
-        LocalChecks.Require(repaired.Changed == 1 && repaired.MissingWriteHistory == 1 && repaired.LocalDateNotWritten == 1 &&
+        LocalChecks.Require(repaired.Changed == 1 && repaired.Examples.Single().Evidence == "restore-notice" && repaired.MissingWriteHistory == 1 && repaired.LocalDateNotWritten == 1 &&
             File.GetLastWriteTimeUtc(Path.Combine(files, "user-date")) == now.UtcDateTime &&
             File.GetLastWriteTimeUtc(Path.Combine(files, "no-history")) == now.UtcDateTime &&
             File.ReadAllText(repaired.ReportFile).Contains("OldUtc"),

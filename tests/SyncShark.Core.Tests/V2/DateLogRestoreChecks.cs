@@ -18,6 +18,11 @@ internal static class DateLogRestoreChecks
         var sources = DateProvenanceLog.Sources(invocation.ProvenanceLogs, invocation.ProvenancePrefixes);
         LocalChecks.Require(sources.Count == 2 && sources[0].Prefix == "Parent" && sources[1].Prefix == "", "repeatable scope mapping");
         LocalChecks.Require(SyncCliRegistry.Parse(["--cli", "dates", "restore", "--audit-log", "audit.jsonl", "--dry-run"]).Flag("--dry-run"), "restore CLI");
+        LocalChecks.Require(SyncCliRegistry.Parse(["--cli", "dates", "restore", "--audit-log", "audit.jsonl", "--yes"]).Flag("--yes"), "restore explicit confirmation");
+        var needsYes = false;
+        try { SyncCliRegistry.Parse(["--cli", "dates", "restore", "--audit-log", "audit.jsonl"]); }
+        catch (SyncCliUsageException) { needsYes = true; }
+        LocalChecks.Require(needsYes, "real restore requires explicit yes");
         var files = Path.Combine(root, "files"); Directory.CreateDirectory(files);
         using var store = SqliteStateStore.Open(Path.Combine(root, "state"), StorageChecks.Fast, TimeProvider.System);
         var pair = new PairDef("log-repair", "Log repair", LocalChecks.RootOf(files, "a"),
@@ -41,6 +46,8 @@ internal static class DateLogRestoreChecks
             locals.Add(local with { Hash = null }); // fresh locked hash is sufficient even without a stored hash
             if (name != "absent") logs.Add(SyncCliRegistry.FormatProgress($"Applying: {name} (5/100)", now.AddTicks(delta)));
         }
+        DateProvenanceChecks.Seed(store, pair, locals.Single(item => item.Path == "absent") with
+            { Hash = LocalChecks.BlockHash(LocalChecks.Bytes("same")) }, Path.Combine(root, "state"));
         store.WriteSnapshot(new Snapshot("a", Side.A, gen, "cursor", locals, []));
         var logPath = Path.Combine(root, "apply.err.txt"); File.WriteAllLines(logPath, logs);
         var evidence = DateProvenanceLog.Sources([logPath], []);
@@ -50,8 +57,14 @@ internal static class DateLogRestoreChecks
         var report = await DateRepair.RunAsync(store, pair, Remote, root, true, [], CancellationToken.None,
             reportMismatch: true, provenanceSources: evidence);
         LocalChecks.Require(report.Mismatches == 8 && File.ReadAllText(report.CsvFile!).Contains("log-correlated"), "mismatch includes both evidence classes");
+        var dryRun = await DateRepair.RunAsync(store, pair, Remote, root, true, [], CancellationToken.None, provenanceSources: evidence);
+        LocalChecks.Require(dryRun.Eligible == 4 && dryRun.Examples.All(item => item.Evidence == "log"),
+            "log required even with matching DB notice; dry-run evidence recorded");
         var repair = await DateRepair.RunAsync(store, pair, Remote, root, false, [], CancellationToken.None, provenanceSources: evidence);
         LocalChecks.Require(repair.Changed == 4 && repair.Skipped == 4, "inclusive zero/two second edges; absent, outside events and changed content untouched");
+        LocalChecks.Require(repair.Examples.All(item => item.Evidence == "log") &&
+            File.GetLastWriteTimeUtc(Path.Combine(files, "absent")) == now.UtcDateTime,
+            "DB notice alone cannot bypass supplied log; repaired evidence recorded");
         var preview = await DateRepair.RestoreAsync(store, pair, repair.ReportFile, root, true, [], CancellationToken.None);
         LocalChecks.Require(preview.Eligible == 4 && preview.Changed == 0 && File.GetLastWriteTimeUtc(Path.Combine(files, "zero")) == now.AddYears(-2).UtcDateTime,
             "restore dry-run changes no timestamp");

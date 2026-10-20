@@ -2,12 +2,15 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SqliteStateStore
 {
+    private bool _dateLogRequired;
+
     // v12 deletes resolved intents and has no general completed-transfer history. Never infer a write
     // from a baseline, generation, prepare, Recovery archive (the predecessor), or a pending intent.
     // The retained-version-restored notice is emitted in CommitResults only after a successful restore;
     // its Winner records the actual published identity/hash/mtime. Closed notices remain useful evidence.
     internal void PrepareDateWriteEvidence(string pairId, IReadOnlyList<DateProvenanceSource>? sources = null) => InStore(() =>
     {
+        _dateLogRequired = sources is { Count: > 0 };
         StoreSchema.Execute(_connection, null,
             "CREATE TEMP TABLE IF NOT EXISTS date_log_evidence(path TEXT,written INTEGER,PRIMARY KEY(path,written)) WITHOUT ROWID; DELETE FROM date_log_evidence;");
         using (var transaction = _connection.BeginTransaction())
@@ -47,6 +50,7 @@ public sealed partial class SqliteStateStore
     internal string? DateWriteSkipReason(Side side, ItemState local, string? hash) => InStore(() =>
     {
         if (DateLogCorrelated(local)) return null;
+        if (_dateLogRequired) return "required Sync Shark provenance log match unavailable";
         const string missing = "reliable Sync Shark local write history unavailable";
         if (StoreSchema.Scalar(_connection, null,
             "SELECT 1 FROM date_write_evidence WHERE side=$side AND path=$path AND object_id=$id LIMIT 1;",

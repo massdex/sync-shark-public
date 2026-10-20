@@ -4,6 +4,7 @@ namespace Massdex.SyncShark.V2;
 
 public sealed record DateRepairExample(string Path, DateTimeOffset OldUtc, DateTimeOffset NewUtc, string Outcome)
 {
+    public string? Evidence { get; init; }
     public string? Hash { get; init; }
     public string? ObjectId { get; init; }
     public string? ObjectKey { get; init; }
@@ -169,6 +170,7 @@ internal static partial class DateRepair
                     var cloud = side == Side.A ? baseline.B : baseline.A;
                     if (local.Kind != ItemKind.File) return;
                     Interlocked.Increment(ref examined);
+                    string evidence = "none";
                     try
                     {
                         if (localErrors.TryGetValue(local.Path, out var localError)) throw new IOException("Local inventory: " + localError);
@@ -179,6 +181,7 @@ internal static partial class DateRepair
                         if (SyncIgnorePolicy.IsIgnored(local.Path, false, ignores)) throw new IOException("Ignored by rule.");
                         if (store.DateRepairHeld(pair, baseline)) throw new IOException("Held or quarantined.");
                         var provenance = store.DateWriteSkipReason(side, local, saved.Hash);
+                        evidence = store.DateLogCorrelated(local) ? "log" : provenance is null ? "restore-notice" : "none";
                         if (!reportMismatch && provenance is not null)
                         {
                             if (provenance == "reliable Sync Shark local write history unavailable") Interlocked.Increment(ref missingHistory);
@@ -229,10 +232,10 @@ internal static partial class DateRepair
                             if (provenance == "reliable Sync Shark local write history unavailable") Interlocked.Increment(ref missingHistory);
                             else if (provenance is not null) Interlocked.Increment(ref notWritten);
                             Interlocked.Increment(ref mismatches);
-                            var evidence = store.DateLogCorrelated(local with { Mtime = old }) ? "log-correlated" : "no evidence";
+                            evidence = store.DateLogCorrelated(local with { Mtime = old }) ? "log-correlated" : provenance is null ? "restore-notice" : "no evidence";
                             lock (logGate) csv!.WriteLine(string.Join(",", Cell(local.Path), Cell(old.ToString("O")),
                                 Cell(current.Mtime.ToString("O")), Cell(evidence)));
-                            Record(new { Path = local.Path, OldUtc = old, NewUtc = current.Mtime, Outcome = "mismatch", Reason = provenance });
+                            Record(new { Path = local.Path, OldUtc = old, NewUtc = current.Mtime, Outcome = "mismatch", Evidence = evidence, Reason = provenance });
                             return;
                         }
                         // An already-stamped crash survivor needs only the database reconcile; original observed
@@ -240,7 +243,7 @@ internal static partial class DateRepair
                         if (provenance is not null && old != current.Mtime) throw new IOException(provenance);
                         Interlocked.Increment(ref eligible);
                         var example = new DateRepairExample(local.Path, old, current.Mtime, dryRun ? "would-repair" : "intent")
-                        { Hash = verifiedHash, ObjectId = objectId, ObjectKey = baseline.ObjectKey, Size = file.Length };
+                        { Evidence = evidence, Hash = verifiedHash, ObjectId = objectId, ObjectKey = baseline.ObjectKey, Size = file.Length };
                         Record(example);
                         // Persist the actual held-handle OldUtc, including a crash survivor whose inventory is stale.
                         lock (logGate) logFile.Flush(true);
@@ -261,7 +264,7 @@ internal static partial class DateRepair
                     catch (Exception error) when (ItemFailure(error))
                     {
                         Interlocked.Increment(ref skipped);
-                        Record(new { Path = local.Path, Outcome = "skipped", Reason = error.Message });
+                        Record(new { Path = local.Path, Outcome = "skipped", Evidence = evidence, Reason = error.Message });
                     }
                 }).ConfigureAwait(false);
                 after = page[^1].ObjectKey;
