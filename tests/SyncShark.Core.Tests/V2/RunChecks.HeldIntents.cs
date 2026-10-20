@@ -524,8 +524,10 @@ internal static partial class RunChecks
         Require(store.CompleteRehash(fx.Pair.A.RootId, oneLive, oneLive.Hash ?? one.Hash!) &&
             store.CompleteRehash(fx.Pair.A.RootId, twoLive, twoLive.Hash ?? two.Hash!),
             "setup: both verification holds settle between review and apply");
+        // Model the completed outside copy with its actual destination state; Done must form a valid baseline.
+        var copiedOne = fx.B.Seed(one.Path, "one");
         store.CommitResult(fx.Pair.PairId, store.BeginGeneration(fx.Pair.A.RootId, "outside"), first,
-            new ActionResult(first.ActionId, Outcome.Done, null, null, null, null));
+            new ActionResult(first.ActionId, Outcome.Done, null, copiedOne, null, null));
         var report = await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), CancellationToken.None);
         Require(store.CountHeldIntents(fx.Pair.PairId) == 0 && report.PendingVerification == 0,
             "apply resolved every verification hold");

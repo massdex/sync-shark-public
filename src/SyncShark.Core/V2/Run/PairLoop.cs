@@ -88,7 +88,14 @@ internal sealed class PairLoop
             Publish(AutoStatus.Held, _held);
             // All holds retry at the safety poll; reconnect or Retry can wake them sooner.
             var wake = await WaitAsync([], _in.SafetyInterval(), stop).ConfigureAwait(false);
-            if (wake.Kind == WakeKind.Timeout) _held = null;
+            if (wake.Kind == WakeKind.Timeout)
+            {
+                _held = null;
+                // A refused run keeps its existing watches, whose startup signals are already consumed.
+                // Make this poll's retry due now rather than waiting for another signal or safety interval.
+                // A failed watch setup has no watches and still uses the normal arm-and-settle path.
+                if (_watches.Count > 0) _retryAt = _in.Time.GetUtcNow();
+            }
             return false;
         }
         if (_retryAt is { } retryAt)

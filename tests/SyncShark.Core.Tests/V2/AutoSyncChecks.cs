@@ -175,7 +175,8 @@ internal static partial class AutoSyncChecks
             await Until(() => rig.Status("p1") == AutoStatus.Held, "the pair is held");
             Require(rig.State("p1").Reason?.Key == reason.Key, "held with reason " + reason.Key);
             await rig.ParkedAsync(AutoStatus.Held);
-            rig.Clock.Advance(SafetyPoll * 3);
+            // One poll must retry the incomplete run without a new watch signal or another clock advance.
+            rig.Clock.Advance(SafetyPoll);
             if (error is SyncRunRefusedException or EndpointAccessException)
             {
                 await Until(() => rig.Run.Runs("p1") == 2, "ordinary refusal is re-evaluated on the safety poll");
