@@ -41,14 +41,15 @@ public static class PlanNotices
     public static readonly NoticeReason NeedDecision = new("needs-decision", "needs your decision");
 
     /// <summary>
-    /// A folder delete is deferred because a held deletion-evidence path is under it , third
-    /// review): deleting the folder would remove the hidden child without review.
+    /// A folder delete is deferred because a protected child is under it , third
+    /// review): deleting the folder would remove the hidden child without review. Keep the stable
+    /// pending-evidence notice identity, but describe all child protections, not only evidence holds.
     /// </summary>
     public static readonly NoticeReason DeletionEvidencePending = new("deletion-evidence-pending",
-        "deletion evidence is pending; this folder is kept until it is resolved");
-
-    public static readonly NoticeReason ProtectedChildPending = new("protected-child-pending",
         "this folder contains protected or pending children; kept until those children are resolved");
+
+    // Both names describe the same folder hold; do not create a second lifecycle identity.
+    public static readonly NoticeReason ProtectedChildPending = DeletionEvidencePending;
 
     public static readonly NoticeReason CloudFilesBindingNeedsReview = new(
         "cloud-files-binding-needs-review", "Cloud Files binding needs review", AwaitsAcknowledgement: true);

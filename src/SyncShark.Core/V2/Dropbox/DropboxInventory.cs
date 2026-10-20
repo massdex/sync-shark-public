@@ -277,8 +277,10 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
                 if (notice.NoticeId is not null) _known.CloseNotice(notice.NoticeId, "remote-recreated");
         }
         // Upgrade previously released failures into the same ordinary retry queue, including
-        // empty feeds. Recreating a file above resets evidence but never authorizes a stale deletion.
-        foreach (var failure in failures.Values.Where(row => row.Failure!.Released))
+        // empty feeds. Respect Ignore/exclusion just as for fresh feed entries: its cached failure
+        // must not recreate the retry and reopen a decision the user explicitly dismissed.
+        // Recreating a file above resets evidence but never authorizes a stale deletion.
+        foreach (var failure in failures.Values.Where(row => row.Failure!.Released && include(row.Path)))
             if (_known.SyncRetryAt(_pairId, failure.Path) is null)
                 _known.SaveSyncRetry(_pairId, new SyncRetry(failure.Path, "deletion-evidence",
                     failure.Failure!.Attempts, "Deletion history was unavailable.", DateTimeOffset.MinValue,

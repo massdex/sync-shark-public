@@ -135,7 +135,7 @@ public static partial class Planner
                 !HeldUnder(ctx, action))
                 continue;
             ctx.Draft[index] = (row, action with { Kind = ActionKind.Hold, RecoveryFirst = false });
-            AddNotice(ctx, action.Rule, NoticeKind.Info, action.Path, PlanNotices.ProtectedChildPending);
+            AddNotice(ctx, action.Rule, NoticeKind.Info, action.Path, PlanNotices.DeletionEvidencePending);
         }
         return ctx.Draft;
     }
