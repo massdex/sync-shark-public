@@ -44,7 +44,7 @@ public sealed partial class SqliteStateStore
         OR ($gap=1 AND (($done=0 AND EXISTS(SELECT 1 FROM file_state f INDEXED BY fs_obj
           WHERE f.root_no=$r AND f.object_id>$after AND f.kind=0))
           OR EXISTS(SELECT 1 FROM local_gap_item gi CROSS JOIN file_state f INDEXED BY fs_obj
-            ON f.root_no=gi.root_no AND f.object_id=gi.object_id WHERE gi.root_no=$r)));
+            ON f.root_no=gi.root_no AND f.object_id=gi.object_id WHERE gi.root_no=$r AND f.kind=0)));
         """;
 
     private static void BindProtection(SqliteCommand command, long root, ItemFlags flags,
