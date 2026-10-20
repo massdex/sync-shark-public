@@ -54,7 +54,7 @@ if (args is ["--v2-local-constituent-checks", var constituentRoot, var constitue
 if (args is ["--retry-protection-checks"])
 {
     Massdex.SyncShark.V2.RetryProtectionChecks.Run();
-    return;
+    return 0;
 }
 
 if (args is ["--blocker-checks"])
