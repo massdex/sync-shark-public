@@ -9,6 +9,21 @@ public sealed partial class SyncRun
     private readonly object _heldRefreshSync = new();
     private long _heldRefreshVersion; // Protected by _heldRefreshSync, as are held inventory writes.
 
+    private void WriteRestoredEvidenceNotices(string pairId, IEnumerable<string> paths)
+    {
+        var oldRetries = _store.OpenNotices(pairId).Where(notice => notice.ReasonKey == "sync-retry")
+            .ToLookup(notice => notice.Path, StringComparer.OrdinalIgnoreCase);
+        foreach (var path in paths)
+            if (_store.SyncRetryAt(pairId, path) is { Held: not null, ReprobeEvidence: true, Kind: not "decision" } retry)
+            {
+                foreach (var old in oldRetries[path])
+                    if (old.NoticeId is not null) _store.CloseNotice(old.NoticeId, "evidence-pending");
+                WriteNotices([new Notice(pairId, 4, NoticeKind.Info, path,
+                    "Deletion evidence is pending: " + (string.IsNullOrWhiteSpace(retry.LastError) ? "The provider could not confirm deletion history." : retry.LastError) +
+                    " Retry or Ignore this item; other files continue. If history remains unavailable, choose how to resolve the survivor.", "deletion-evidence-pending")]);
+            }
+    }
+
     private sealed record PreparedEvidence(BothScan Scan, IReadOnlyList<HeldDeletion> Held, int Resolved);
     private sealed record HeldPlanResult(Plan Plan, bool RecoverySkipped);
 
@@ -79,6 +94,9 @@ public sealed partial class SyncRun
         }
         var parkedFootprints = LinkExclusions.None.WithPending(OutstandingFootprints(pair.PairId));
         var held = approved.HeldDeletions.ToDictionary(item => item.Path, StringComparer.OrdinalIgnoreCase);
+        var releasedAtStart = held.Keys.Where(path => _store.SyncRetryAt(pair.PairId, path) is
+            { Kind: "deletion-evidence", Held: not null } retry && (!retry.ReprobeEvidence || retry.EvidenceReleased))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var unapproved = held.Values.Where(item => item.Rule != HeldDeletion.NewerDeletionRule ||
             !allowUnreviewedEvidence && (reviewedDeletes is null || !reviewedDeletes.Contains(FolderDelete.VictimKey(item.Local, item.Path))))
             .Select(item => item.Path).ToArray();
@@ -169,6 +187,7 @@ public sealed partial class SyncRun
             // checkpointed as they finish, so a retry repeats no completed lookup. A non-transient failure, or the
             // retry allowance running out, leaves the remaining paths pending for the next run, as before.
             var answered = new System.Collections.Concurrent.ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
+            var failures = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var backoff = TimeSpan.FromSeconds(30);
             try
             {
@@ -184,7 +203,7 @@ public sealed partial class SyncRun
                                 .Select(item => item.Path).ToArray();
                             // Released history failures already require a user choice. Do not make that
                             // choice depend on the same unavailable history probe ever succeeding.
-                            var released = paths.Where(path => _store.SyncRetryAt(pair.PairId, path) is { Kind: "deletion-evidence", Held: not null, ReprobeEvidence: false })
+                            var released = paths.Where(releasedAtStart.Contains)
                                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
                             foreach (var path in released)
                             {
@@ -195,6 +214,7 @@ public sealed partial class SyncRun
                             await source.ResolveDeletionEvidenceAsync(paths, (path, resolved) =>
                             {
                                 answered.TryAdd(path, 0);
+                                if (resolved.LookupFailed) failures[path] = resolved.Reason;
                                 evidence.Writer.TryWrite((path, resolved));
                             }, token);
                         }
@@ -221,9 +241,25 @@ public sealed partial class SyncRun
                 // A failed service-level probe with no answers is an outage, not a collection of failed items.
                 // Keep the reviewed run resumable; ordinary siblings that already succeeded remain committed.
                 evidenceUnavailable = answered.IsEmpty && ProviderTransientFailure.IsTransient(error, ct);
+                foreach (var item in held.Values.Where(item => !heldFolders.Contains(item.Path) && !answered.ContainsKey(item.Path)))
+                    failures[item.Path] = error.Message;
                 Trace("deletion evidence pending: " + error.GetType().Name);
             }
-            finally { evidence.Writer.TryComplete(); }
+            finally
+            {
+                // Exhausting the existing bounded probe pass releases restored history to a
+                // decision on its next due run, never to an upload and never to an endless wait.
+                try
+                {
+                    if (!token.IsCancellationRequested)
+                        foreach (var item in held.Values.Where(item => !heldFolders.Contains(item.Path) &&
+                        (!answered.ContainsKey(item.Path) || failures.ContainsKey(item.Path))))
+                        if (_store.SyncRetryAt(pair.PairId, item.Path) is { ReprobeEvidence: true, Kind: not "decision" } retry)
+                            _store.SaveSyncRetry(pair.PairId, retry with { EvidenceReleased = true,
+                                LastError = failures.GetValueOrDefault(item.Path) ?? "Deletion history did not return an answer within the retry budget." });
+                }
+                finally { evidence.Writer.TryComplete(); }
+            }
         }, token);
         var resolve = Task.Run(async () =>
         {
@@ -318,7 +354,7 @@ public sealed partial class SyncRun
                     var cloud = rule.Local == Side.A ? pair.B : pair.A;
                     // Re-inclusion revoked old evidence, not the hold. An unanswered/failed probe
                     // cannot enter the released-survivor decision path (or create an upload).
-                    if (heldRetry is { ReprobeEvidence: true } &&
+                    if (!isFolder && heldRetry is { ReprobeEvidence: true } && !releasedAtStart.Contains(rule.Path) &&
                         (deletionEvidence is null || deletionEvidence.LookupFailed))
                     { lock (sync) pending.Add(rule.Path); return; }
                     if (heldRetry is { Kind: "deletion-evidence" } released)

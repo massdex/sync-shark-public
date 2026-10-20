@@ -20,10 +20,14 @@ internal sealed partial class NoticeTable
         // Only the pre-fa93b15f refused-name notices used the path-bearing legacy id; newer repair notices never did.
         if (notice.ReasonKey is "provider-name-refused" or "windows-name-invalid")
         {
-            if (LegacyFoldDone(transaction, pairNo, notice.ReasonKey)) return;
-            FoldLegacyRepairRows(transaction, pairNo, notice.PairId, notice.Rule, notice.ReasonKey);
-            MarkLegacyFoldDone(transaction, pairNo, notice.ReasonKey);
-            return;
+            if (!LegacyFoldDone(transaction, pairNo, notice.ReasonKey))
+            {
+                FoldLegacyRepairRows(transaction, pairNo, notice.PairId, notice.Rule, notice.ReasonKey);
+                MarkLegacyFoldDone(transaction, pairNo, notice.ReasonKey);
+            }
+            // The marker suppresses broad rescans, not the indexed exact legacy-id lookup.
+            // A legacy writer can still publish this identity after the one-time sweep.
+
         }
         var legacyId = ShortId.Make("n", notice.PairId, notice.Rule.ToString(CultureInfo.InvariantCulture),
             RowCodec.Key(notice.Path), notice.ReasonKey, repair.Side.ToString(), repair.Item.ObjectId);

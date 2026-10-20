@@ -372,7 +372,12 @@ public sealed partial class SyncRun : ISyncRun
         RecordScanRetries(pair, scan);
         CloseObservedRepairs(pair, scan);
         var current = LeftAlone(pair);
-        var links = before.With(current).WithPending(ScanFailures(scan)).WithPending(PendingDecisions(pairId, null));
+        var restored = _store.DueSyncRetries(pairId, _time.GetUtcNow(), 256)
+            .Where(retry => retry.ReprobeEvidence && retry.Held is not null &&
+                !pair.Excluded.Any(path => PairPath.IsSelfOrUnder(retry.Path, path))).ToArray();
+        var noActiveRetries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var links = before.With(current).WithPending(ScanFailures(scan)).WithPending(PendingDecisions(pairId, null))
+            .WithRetryProtection((path, descendants) => _store.RetryProtected(pairId, path, noActiveRetries, descendants, restoredOnly: true));
         var predicates = Predicates(pair, links);
         // Resolved once, before the deletion probe: its persisted-snapshot selection is what the report and the
         // plan both read, and it also keeps its rebuildable paths out of the deletion-evidence lookup below.
@@ -390,6 +395,8 @@ public sealed partial class SyncRun : ISyncRun
         RunScope.Scope? inventory = scanner.LoadFull(pair);
         var evidence = await PrepareDeferredEvidenceAsync(pair, inventory, rebuildablePaths, matchedAtPrepare,
             scan, ct);
+        evidence = evidence with { Held = evidence.Held.Concat(restored.Select(retry => retry.Held!))
+            .DistinctBy(held => held.Path, StringComparer.OrdinalIgnoreCase).ToArray() };
         scan = evidence.Scan;
         // (third-review finding 1): held paths are hidden from the planner's rows, so the planner
         // must know them to refuse an ordinary folder delete that would expand over one.
@@ -459,8 +466,10 @@ public sealed partial class SyncRun : ISyncRun
         var reviewedSelection = rebuildables?.Cloud is { } reviewedCloud
             ? new RebuildableSelection(reviewedCloud, rebuildablePaths)
             : null;
+        var noActiveRetries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var actionPredicates = ActionPredicates(pair, LeftAlone(pair).WithPending(
-            _store.ReadSyncRetries(pairId).Where(retry => retry.Kind == "scan" || retry.ReadRoots is { Count: > 0 }).Select(retry => retry.Path)), reviewedSelection);
+            _store.ReadSyncRetries(pairId).Where(retry => retry.Kind == "scan" || retry.ReadRoots is { Count: > 0 }).Select(retry => retry.Path))
+            .WithRetryProtection((path, descendants) => _store.RetryProtected(pairId, path, noActiveRetries, descendants, restoredOnly: true)), reviewedSelection);
         approved = ApplySafetyFilter(pair, actionPredicates, approved);
         // Astra fix 1: a link or stub created on the local side after the preview is not in the store yet. Every
         // destructive effect is re-checked against the local filesystem (its path and ancestors, listing only) and
@@ -483,7 +492,8 @@ public sealed partial class SyncRun : ISyncRun
         if (approved.FirstSyncOptions?.MatchedAtPrepare is { } matches)
             approved = DeferPostPreviewChanges(pair, approved, matches);
         foreach (var held in approved.UnreviewedHeldDeletions)
-            if (_store.SyncRetryAt(pairId, held.Path)?.Kind != "decision")
+            if (_store.SyncRetryAt(pairId, held.Path) is not { ReprobeEvidence: true } &&
+                _store.SyncRetryAt(pairId, held.Path)?.Kind != "decision")
                 _store.SaveSyncRetry(pairId, new(held.Path, "post-preview", 0, "", DateTimeOffset.MinValue, Held: held));
         var openNotices = _store.OpenNotices(pair.PairId);
         RetainPlanningFailures(pair, approved);
@@ -501,6 +511,7 @@ public sealed partial class SyncRun : ISyncRun
                 .Select(path => new Notice(pairId, 4, NoticeKind.Info, path,
                     "Deletion evidence is pending; this item will be retried without blocking other files.", "deletion-evidence-pending")));
         }
+        WriteRestoredEvidenceNotices(pairId, execution.Pending);
         // The approved plan came from a full-scope preview, so every path was re-evaluated for it.
         var pendingEvidence = execution.Pending.ToHashSet(StringComparer.OrdinalIgnoreCase);
         if (!ct.IsCancellationRequested) CloseResolvedNotices(openNotices, approved, tally, path => !pendingEvidence.Contains(path));
@@ -694,9 +705,8 @@ public sealed partial class SyncRun : ISyncRun
         plan = execution.Plan;
         var tally = execution.Tally;
         var unresolvedEvidence = execution.Pending.Where(path =>
-            _store.SyncRetryAt(pairId, path) is { Held: not null, Kind: not "decision" }).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        WriteNotices(unresolvedEvidence.Select(path => new Notice(pairId, 4, NoticeKind.Info, path,
-            "Deletion evidence is pending; this item will be retried without blocking other files.", "deletion-evidence-pending")));
+            _store.SyncRetryAt(pairId, path) is { Held: not null, ReprobeEvidence: true, Kind: not "decision" }).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        WriteRestoredEvidenceNotices(pairId, unresolvedEvidence);
         if (!ct.IsCancellationRequested)
         {
             UpdateRetryWork(pair, plan, tally, retries, execution.Pending, evaluated, scan.A.Complete && scan.B.Complete);

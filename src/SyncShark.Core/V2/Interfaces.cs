@@ -184,10 +184,11 @@ public interface IStateStore : IDisposable
     IEnumerable<SyncRetry> ReadSyncRetries(string pairId);
     void SaveSyncRetry(string pairId, SyncRetry retry);
     void ClearSyncRetry(string pairId, string path);
+    void SuspendHeldRetry(string pairId, SyncRetry retry);
     SyncRetry? SyncRetryAt(string pairId, string path);
     IReadOnlyList<SyncRetry> DueSyncRetries(string pairId, DateTimeOffset now, int limit);
     int CountSyncRetries(string pairId);
-    bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants);
+    bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants, bool restoredOnly = false);
 
     /// <summary>Several results in one transaction (the Executor's group commit, B-124); the default commits each.</summary>
     void CommitResults(string pairId, long gen, IReadOnlyList<(SyncAction Action, ActionResult Result)> results)

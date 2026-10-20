@@ -16,13 +16,26 @@ internal sealed class InMemoryStateStore : IStateStore
     public IReadOnlyList<SyncRetry> DueSyncRetries(string pairId, DateTimeOffset now, int limit) =>
         ReadSyncRetries(pairId).Where(item => item.RetryAfter <= now).OrderBy(item => item.RetryAfter).Take(Math.Clamp(limit, 1, 256)).ToArray();
     public int CountSyncRetries(string pairId) => ReadSyncRetries(pairId).Count(item => item.RetryAfter < DateTimeOffset.MaxValue);
-    public bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants) =>
-        ReadSyncRetries(pairId).Any(item => !active.Contains(item.Path) && (descendants
+    public bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants, bool restoredOnly = false) =>
+        ReadSyncRetries(pairId).Any(item => (!restoredOnly || item.ReprobeEvidence) &&
+            !(item.ReprobeEvidence && item.RetryAfter == DateTimeOffset.MaxValue) && !active.Contains(item.Path) && (descendants
             ? PairPath.IsSelfOrUnder(item.Path, path) : PairPath.IsSelfOrUnder(path, item.Path)));
     public void SaveSyncRetry(string pairId, SyncRetry retry)
     { lock (_gate) _retries[(pairId, retry.Path.ToUpperInvariant())] = retry; }
     public void ClearSyncRetry(string pairId, string path)
     { lock (_gate) _retries.Remove((pairId, path.ToUpperInvariant())); }
+
+    public void SuspendHeldRetry(string pairId, SyncRetry retry)
+    {
+        lock (_gate)
+        {
+            SaveSyncRetry(pairId, new(retry.Path, "deletion-evidence", 0, retry.LastError,
+                DateTimeOffset.MaxValue, Held: retry.Held, ReprobeEvidence: true));
+            foreach (var notice in _notices.Where(n => n.PairId == pairId && PairPath.Same(n.Path, retry.Path) &&
+                n.ReasonKey is "sync-retry" or "deletion-evidence-pending"))
+                _closedNotices[notice.NoticeId!] = NoticeChoices.Exclude;
+        }
+    }
 
     private const long LiveToGen = long.MaxValue;
 
@@ -358,24 +371,23 @@ internal sealed class InMemoryStateStore : IStateStore
                 if (_deletionEvidence.TryGetValue(previous.PairId + "\n" + root, out var evidence))
                     foreach (var path in evidence.Keys.Where(item => paths.Any(prefix =>
                         PairPath.IsSelfOrUnder(item, prefix))).ToArray()) evidence.Remove(path);
+            var heldRows = ReadSyncRetries(previous.PairId).Where(retry => retry.Held is not null)
+                .ToDictionary(retry => retry.Path, StringComparer.OrdinalIgnoreCase);
             if (RebuildableSelection.Sides(included) is { } sides)
-            {
-                var heldPaths = ReadSyncRetries(previous.PairId).Where(retry => retry.Held is not null).Select(retry => retry.Path)
-                    .Concat(_notices.Where(notice => notice.PairId == previous.PairId && notice.ReasonKey == "deletion-evidence-pending" &&
-                        notice.NoticeId is not null && _closedNotices.TryGetValue(notice.NoticeId, out var choice) &&
-                        choice is NoticeChoices.Ignore or NoticeChoices.Exclude).Select(notice => notice.Path))
-                    .Where(candidate => paths.Any(prefix => PairPath.IsSelfOrUnder(candidate, prefix)) &&
-                        !included.Excluded.Any(retained => PairPath.IsSelfOrUnder(candidate, retained)))
-                    .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-                foreach (var heldPath in heldPaths)
-                    SaveSyncRetry(previous.PairId, new(heldPath, "deletion-evidence", 0, "", DateTimeOffset.MinValue,
-                        Held: new HeldDeletion(heldPath, sides.Local), ReprobeEvidence: true));
-            }
+                foreach (var notice in _notices.Where(notice => notice.PairId == previous.PairId && notice.ReasonKey == "deletion-evidence-pending" &&
+                    notice.NoticeId is not null && _closedNotices.TryGetValue(notice.NoticeId, out var choice) &&
+                    choice is NoticeChoices.Ignore or NoticeChoices.Exclude))
+                    heldRows.TryAdd(notice.Path, new(notice.Path, "deletion-evidence", 0, "", DateTimeOffset.MinValue,
+                        Held: new HeldDeletion(notice.Path, sides.Local)));
+            foreach (var retry in heldRows.Values.Where(retry => paths.Any(prefix => PairPath.IsSelfOrUnder(retry.Path, prefix)) &&
+                !included.Excluded.Any(retained => PairPath.IsSelfOrUnder(retry.Path, retained))))
+                SaveSyncRetry(previous.PairId, new(retry.Path, "deletion-evidence", 0, "", DateTimeOffset.MinValue,
+                    Held: retry.Held, ReprobeEvidence: true));
             // Mirror SavePairIncluded: removing an exclusion reverses its Ignore, so a fresh problem at the path
             // may raise its notice again.
             foreach (var notice in _notices.Where(item => item.PairId == previous.PairId && item.NoticeId is not null &&
                          paths.Any(prefix => PairPath.IsSelfOrUnder(item.Path, prefix))).ToArray())
-                if (_closedNotices.TryGetValue(notice.NoticeId!, out var choice) && choice == NoticeChoices.Ignore)
+                if (_closedNotices.TryGetValue(notice.NoticeId!, out var choice) && choice is NoticeChoices.Ignore or NoticeChoices.Exclude)
                     _closedNotices[notice.NoticeId!] = null;
             var affected = UnresolvedIntents(previous.PairId).Where(action =>
                 new[] { action.Path, action.FromPath, action.Source?.Path, action.ExpectedTarget?.Path }

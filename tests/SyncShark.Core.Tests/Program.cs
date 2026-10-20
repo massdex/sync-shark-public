@@ -26,6 +26,12 @@ if (args is ["--blocker-checks"])
     return 0;
 }
 
+if (args is ["--reincluded-evidence-checks"])
+{
+    await Massdex.SyncShark.V2.RunChecks.ReincludedEvidenceChecksAsync();
+    return 0;
+}
+
 if (args is ["--first-sync-completion-checks"])
 {
     await Massdex.SyncShark.V2.RunChecks.FirstSyncCompletionChecksAsync();

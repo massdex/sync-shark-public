@@ -991,9 +991,10 @@ internal static partial class ExecutorChecks
         public SyncRetry? SyncRetryAt(string pairId, string path) => _inner.SyncRetryAt(pairId, path);
         public IReadOnlyList<SyncRetry> DueSyncRetries(string pairId, DateTimeOffset now, int limit) => _inner.DueSyncRetries(pairId, now, limit);
         public int CountSyncRetries(string pairId) => _inner.CountSyncRetries(pairId);
-        public bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants) => _inner.RetryProtected(pairId, path, active, descendants);
+        public bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants, bool restoredOnly = false) => _inner.RetryProtected(pairId, path, active, descendants, restoredOnly);
         public void SaveSyncRetry(string pairId, SyncRetry retry) => _inner.SaveSyncRetry(pairId, retry);
         public void ClearSyncRetry(string pairId, string path) => _inner.ClearSyncRetry(pairId, path);
+    public void SuspendHeldRetry(string pairId, SyncRetry retry) => _inner.SuspendHeldRetry(pairId, retry);
         public void RequireRehash(string rootId, ItemState item, string reason) => _inner.RequireRehash(rootId, item, reason);
         public bool CompleteRehash(string rootId, ItemState item, string hash) => _inner.CompleteRehash(rootId, item, hash);
         public IReadOnlyList<ItemState> RehashCandidates(string rootId, int limit) => _inner.RehashCandidates(rootId, limit);

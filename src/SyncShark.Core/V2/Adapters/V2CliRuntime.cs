@@ -532,7 +532,7 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
                     FirstSyncChoicesState.Clear(_productRoot, pairId, _store);
                     // Partial first-sync applies also own baselines and deletion evidence (decision 81).
                     var verificationIntents = _store.SavePairIncluded(pair, pair with { Excluded = excluded });
-                    warnings = [$"Re-included history was forgotten. Files deleted on one side while excluded will be copied back; newer differing files win, with ties or unknown times held. {verificationIntents} retained intents require verify-only reconciliation; none will be blindly replayed."];
+                    warnings = [$"Re-included history was forgotten. Files deleted on one side while excluded will be copied back, except items with an unresolved deletion hold are re-checked and need your decision first; newer differing files win, with ties or unknown times held. {verificationIntents} retained intents require verify-only reconciliation; none will be blindly replayed."];
                 }
             }
             var saved = RequirePair(pairId);

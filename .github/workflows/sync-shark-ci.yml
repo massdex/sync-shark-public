@@ -143,6 +143,9 @@ jobs:
           - suite: blockers
             flag: --blocker-checks
             takes-root: false
+          - suite: reincluded-evidence
+            flag: --reincluded-evidence-checks
+            takes-root: false
           - suite: local-offline
             flag: --v2-local-offline-checks
             takes-root: true

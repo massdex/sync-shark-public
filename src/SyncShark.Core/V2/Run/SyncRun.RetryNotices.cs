@@ -135,11 +135,9 @@ public sealed partial class SyncRun
                 var paths = CreateExclusions.Validate(pair.Excluded.Concat([notice.Path, notice.Repair?.Destination ?? notice.Path]).ToArray());
                 if (saveNarrowerPair is not null) saveNarrowerPair(pair, pair with { Excluded = paths });
                 else _store.SavePair(pair with { Excluded = paths });
-                var held = _store.SyncRetryAt(pairId, notice.Path)?.Held;
-                _store.ClearSyncRetry(pairId, notice.Path);
-                if (held is not null)
-                    _store.SaveSyncRetry(pairId, new(notice.Path, "deletion-evidence", 0, "",
-                        DateTimeOffset.MaxValue, Held: held, ReprobeEvidence: true));
+                var retry = _store.SyncRetryAt(pairId, notice.Path);
+                if (retry?.Held is not null) _store.SuspendHeldRetry(pairId, retry);
+                else _store.ClearSyncRetry(pairId, notice.Path);
                 // Retain pending effects for verify-only reconciliation under the normal exclusion policy.
             }
             _store.CloseNotice(noticeId, choice);

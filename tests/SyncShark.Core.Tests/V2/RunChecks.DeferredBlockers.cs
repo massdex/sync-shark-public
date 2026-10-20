@@ -59,6 +59,7 @@ internal static partial class RunChecks
             "hydration failure remains one actionable notice");
         await HydrationReviewChecksAsync();
         await DeletionIgnoreReincludeChecksAsync();
+        await RestoredHoldReviewChecksAsync();
         await ExportBlockerChecksAsync();
         LegacyRepairNoticeChecks();
         await BlockerGuidanceChecksAsync();

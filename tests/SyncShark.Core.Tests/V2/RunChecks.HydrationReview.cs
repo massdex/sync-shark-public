@@ -142,4 +142,87 @@ internal static partial class RunChecks
         Require(await fx.B.ObserveAsync("folder/new.txt", default) is not null,
             "ordinary new file beneath a re-included folder uploads normally");
     }
+    internal static async Task ReincludedEvidenceChecksAsync()
+    {
+        await DeletionIgnoreReincludeChecksAsync();
+        await RestoredHoldReviewChecksAsync();
+        LegacyRepairNoticeChecks();
+    }
+
+    private static async Task RestoredHoldReviewChecksAsync()
+    {
+        foreach (var scenario in new[] { "folder", "partial-first-sync", "released", "recreated", "cli" })
+        {
+            using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "restored-hold-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System);
+            var fx = Build(suppliedStore: store);
+            var item = fx.A.Seed("held", "content", scenario == "folder" ? ItemKind.Folder : ItemKind.File);
+            store.SaveSyncRetry(fx.Pair.PairId, new(item.Path, "post-preview", 0, "original failure", DateTimeOffset.MinValue,
+                Held: new HeldDeletion(item.Path, Side.A)));
+            store.AddNotices([new(fx.Pair.PairId, 4, NoticeKind.Info, item.Path, "history pending", "deletion-evidence-pending")]);
+            var run = fx.Run();
+            var notice = store.OpenNotices(fx.Pair.PairId).Single();
+            if (scenario == "cli")
+            {
+                var runtime = new V2CliRuntime(null, store, run, new EndpointRootProbe(fx.Provider), Path.GetTempPath());
+                await runtime.SetSelectionAsync(fx.Pair.PairId, item.Path, "exclude", default);
+                store.MarkFirstSyncDone(fx.Pair.PairId);
+                await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            }
+            else await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, notice.NoticeId!, NoticeChoices.Exclude, default);
+            Require(store.SyncRetryAt(fx.Pair.PairId, item.Path) is { Held: not null, RetryAfter: var due } && due == DateTimeOffset.MaxValue,
+                "Exclude atomically keeps dormant hold provenance");
+            var excluded = store.Pair(fx.Pair.PairId)!;
+            store.SavePairIncluded(excluded, excluded with { Excluded = [] });
+            if (scenario == "recreated") fx.B.Seed(item.Path, "remote content");
+            fx.Provider.AddInventory(fx.Pair.B, new DeferredInventory(fx.B) { LookupFailure = scenario is "released" or "partial-first-sync" });
+            if (scenario == "partial-first-sync")
+            {
+                var plan = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), default);
+                Require(!plan.Actions.Any(action => action.Path == item.Path && action.Kind != ActionKind.Hold),
+                    "SQLite re-inclusion during partial first sync proposes no upload or deletion");
+                await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), default, ReviewedHeld(plan));
+                Require(fx.WriterB.Puts == 0 && fx.WriterA.Deletes == 0 && store.SyncRetryAt(fx.Pair.PairId, item.Path) is { ReprobeEvidence: true },
+                    "partial first-sync apply preserves restored hold and makes no effect");
+                continue;
+            }
+            store.MarkFirstSyncDone(fx.Pair.PairId);
+            await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            if (scenario == "released")
+            {
+                var retry = store.SyncRetryAt(fx.Pair.PairId, item.Path)!;
+                Require(retry.EvidenceReleased && retry.LastError.Contains("probed Dropbox deletion", StringComparison.Ordinal),
+                    "failed fresh probe exhausts its budget and preserves its reason");
+                var pending = store.OpenNotices(fx.Pair.PairId).Where(n => n.Path == item.Path).ToArray();
+                Require(pending.Length == 1 && pending[0].ReasonKey == "deletion-evidence-pending" && pending[0].Detail.Contains(retry.LastError, StringComparison.Ordinal),
+                    "restored pending hold has exactly one notice with its failure reason");
+                store.SaveSyncRetry(fx.Pair.PairId, retry with { RetryAfter = DateTimeOffset.MinValue });
+                await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            }
+            if (scenario == "recreated")
+                Require(store.SyncRetryAt(fx.Pair.PairId, item.Path)?.Held is null &&
+                    !store.OpenNotices(fx.Pair.PairId).Any(n => n.ReasonKey == "deletion-evidence-pending"),
+                    "recreated remote retires old hold instead of granting deletion");
+            else
+            {
+                var decision = store.OpenNotices(fx.Pair.PairId).Single(n => n.Path == item.Path && n.Kind == NoticeKind.UserDecision);
+                Require(fx.WriterB.Puts == 0 && fx.WriterA.Deletes == 0,
+                    "folder and exhausted evidence both require a decision without effects");
+                if (scenario == "folder") Require(NoticeChoices.Options(decision).Select(option => option.Choice).SequenceEqual(
+                    new[] { NoticeChoices.KeepRestore, NoticeChoices.Ignore }), "restored folder offers restore or ignore, never delete");
+            }
+        }
+        using var paged = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "restored-pages-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System);
+        var many = Build(suppliedStore: paged);
+        var pair = many.Pair with { B = many.Pair.B with { Provider = SyncProviders.Local }, Excluded = ["folder"] };
+        paged.SavePair(pair);
+        for (var index = 0; index < 300; index++)
+            paged.SuspendHeldRetry(pair.PairId, new("folder/" + index.ToString("D4"), "post-preview", 0, "", DateTimeOffset.MinValue,
+                Held: new HeldDeletion("folder/" + index.ToString("D4"), Side.B, "retained-rule")));
+        paged.SavePairIncluded(pair, pair with { Excluded = [] });
+        Require(paged.ReadSyncRetries(pair.PairId).Count(retry => retry.RetryAfter == DateTimeOffset.MinValue &&
+            retry.Held is { Local: Side.B, Rule: "retained-rule" }) == 300,
+            "indexed restore crosses 256 rows and retains stored side/rule even on non-Dropbox pairs");
+        Console.WriteLine("PASS RestoredHoldReviewChecks");
+    }
+
 }

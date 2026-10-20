@@ -72,44 +72,65 @@ public sealed partial class SqliteStateStore
                 "DELETE FROM sync_retry WHERE pair_no=$p AND json_extract(json,'$.Held') IS NULL " +
                 "AND (path_key=$k OR substr(path_key,1,length($k)+1)=$k||'/');",
                 ("$p", pairNo), ("$k", key));
-            // Restore only known unresolved holds, never arbitrary one-sided/new files. Keep no
-            // old stamps or deletion consent. Page inside the same transaction as re-inclusion.
+            // Keyset over affected retry keys; preserve stored side/rule, never old consent.
+            string? afterKey = null;
+            while (true)
+            {
+                var batch = new List<(string Key, SyncRetry Retry)>(256);
+                using (var command = StoreSchema.Command(_connection, transaction,
+                    "SELECT path_key,json FROM sync_retry WHERE pair_no=$p " +
+                    "AND path_key >= $k AND path_key < $hi AND (path_key=$k OR path_key >= $lo) " +
+                    "AND path_key" + (afterKey is null ? ">=" : ">") + "$after ORDER BY path_key LIMIT 256;"))
+                {
+                    command.Parameters.AddWithValue("$p", pairNo);
+                    command.Parameters.AddWithValue("$k", key);
+                    command.Parameters.AddWithValue("$lo", key.Length == 0 ? "" : key + "/");
+                    command.Parameters.AddWithValue("$hi", key.Length == 0 ? "￿" : key + "0");
+                    command.Parameters.AddWithValue("$after", afterKey ?? key);
+                    using var reader = command.ExecuteReader();
+                    while (reader.Read()) batch.Add((reader.GetString(0), JsonSerializer.Deserialize<SyncRetry>(reader.GetString(1), RowCodec.Json)!));
+                }
+                if (batch.Count == 0) break;
+                afterKey = batch[^1].Key;
+                foreach (var row in batch)
+                    if (row.Retry.Held is not null && !included.Excluded.Any(retained => PairPath.IsSelfOrUnder(row.Retry.Path, retained)))
+                        RestoreHold(new(row.Retry.Path, "deletion-evidence", 0, "", DateTimeOffset.MinValue,
+                            Held: row.Retry.Held, ReprobeEvidence: true));
+            }
+            // Legacy notices are keyset-paged too, never a full UNION re-scan per page.
             if (RebuildableSelection.Sides(included) is { } sides)
             {
-                string? afterPath = null;
+                string afterNotice = "";
                 while (true)
                 {
-                    var paths = new List<string>(256);
+                    var batch = new List<(string Id, string Path)>(256);
                     using (var command = StoreSchema.Command(_connection, transaction,
-                        "SELECT path FROM (SELECT json_extract(json,'$.Path') AS path FROM sync_retry " +
-                        "WHERE pair_no=$p AND json_extract(json,'$.Held') IS NOT NULL UNION " +
-                        "SELECT path FROM notice WHERE pair_no=$p AND state='closed' " +
-                        "AND reason_key='deletion-evidence-pending' AND choice IN ('ignore','exclude')) " +
-                        "WHERE (path=$raw COLLATE NOCASE OR substr(path,1,length($raw)+1)=($raw||'/') COLLATE NOCASE) " +
-                        "AND ($after IS NULL OR path>$after) ORDER BY path LIMIT 256;"))
+                        "SELECT notice_id,path FROM notice WHERE notice_id>$after AND pair_no=$p " +
+                        "AND state='closed' AND reason_key='deletion-evidence-pending' AND choice IN ('ignore','exclude') " +
+                        "AND (path=$raw COLLATE NOCASE OR substr(path,1,length($raw)+1)=($raw||'/') COLLATE NOCASE) " +
+                        "ORDER BY notice_id LIMIT 256;"))
                     {
                         command.Parameters.AddWithValue("$p", pairNo);
                         command.Parameters.AddWithValue("$raw", path);
-                        command.Parameters.AddWithValue("$after", (object?)afterPath ?? DBNull.Value);
+                        command.Parameters.AddWithValue("$after", afterNotice);
                         using var reader = command.ExecuteReader();
-                        while (reader.Read()) paths.Add(reader.GetString(0));
+                        while (reader.Read()) batch.Add((reader.GetString(0), reader.GetString(1)));
                     }
-                    if (paths.Count == 0) break;
-                    afterPath = paths[^1];
-                    foreach (var heldPath in paths.Where(candidate => !included.Excluded.Any(retained =>
-                        PairPath.IsSelfOrUnder(candidate, retained))))
-                    {
-                        var retry = new SyncRetry(heldPath, "deletion-evidence", 0, "", DateTimeOffset.MinValue,
-                            Held: new HeldDeletion(heldPath, sides.Local), ReprobeEvidence: true);
-                        StoreSchema.Execute(_connection, transaction,
-                            "INSERT INTO sync_retry(pair_no,path_key,json,retry_after) VALUES($p,$k,$j,$due) " +
-                            "ON CONFLICT(pair_no,path_key) DO UPDATE SET json=excluded.json,retry_after=excluded.retry_after;",
-                            ("$p", pairNo), ("$k", RowCodec.Key(heldPath)),
-                            ("$j", JsonSerializer.Serialize(retry, RowCodec.Json)),
-                            ("$due", retry.RetryAfter.ToUnixTimeMilliseconds()));
-                    }
+                    if (batch.Count == 0) break;
+                    afterNotice = batch[^1].Id;
+                    foreach (var row in batch)
+                        if (!included.Excluded.Any(retained => PairPath.IsSelfOrUnder(row.Path, retained)) &&
+                            StoreSchema.Scalar(_connection, transaction, "SELECT 1 FROM sync_retry WHERE pair_no=$p AND path_key=$k;",
+                                ("$p", pairNo), ("$k", RowCodec.Key(row.Path))) is null)
+                            RestoreHold(new(row.Path, "deletion-evidence", 0, "", DateTimeOffset.MinValue,
+                                Held: new HeldDeletion(row.Path, sides.Local), ReprobeEvidence: true));
                 }
             }
+            void RestoreHold(SyncRetry retry) => StoreSchema.Execute(_connection, transaction,
+                "INSERT INTO sync_retry(pair_no,path_key,json,retry_after) VALUES($p,$k,$j,$due) " +
+                "ON CONFLICT(pair_no,path_key) DO UPDATE SET json=excluded.json,retry_after=excluded.retry_after;",
+                ("$p", pairNo), ("$k", RowCodec.Key(retry.Path)),
+                ("$j", JsonSerializer.Serialize(retry, RowCodec.Json)), ("$due", retry.RetryAfter.ToUnixTimeMilliseconds()));
             // An Ignore on this path was the request to stop syncing it. Removing the exclusion reverses that
             // request, so clear the dismissal: a fresh problem at the path (for example pending deletion evidence)
             // must be visible again instead of staying suppressed by the old ignore.
@@ -117,7 +138,7 @@ public sealed partial class SqliteStateStore
             // would defeat a deliberate dismissal. A path that is still under another retained exclusion stays
             // excluded, so its Ignore is not reversed either.
             var clearIgnore = new StringBuilder(
-                "UPDATE notice SET choice=NULL WHERE pair_no=$p AND state='closed' AND choice=$ignore " +
+                "UPDATE notice SET choice=NULL WHERE pair_no=$p AND state='closed' AND choice IN ($ignore,'exclude') " +
                 "AND reason_key NOT IN ($quota,$stubs) " +
                 "AND (path=$raw COLLATE NOCASE OR (substr(path,1,length($raw)+1)) = ($raw||'/') COLLATE NOCASE)");
             var clearParameters = new List<(string Name, object? Value)>
