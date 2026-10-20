@@ -1,0 +1,124 @@
+namespace Massdex.SyncShark.V2;
+
+internal static partial class DropboxChecks
+{
+    private static async Task DeltaFolderRunsAsync()
+    {
+        using var h = new Harness();
+        var local = new FakeEndpoint(Side.A, "ra") { DropboxHashes = true };
+        local.Seed("empty", "", ItemKind.Folder);
+        h.Wire.SeedFolder("empty");
+        var pair = new PairDef("p1", "delta folders",
+            new RootDef("ra", SyncProviders.Local, null, "C:\\offline-delta-folder", "id:ra"),
+            Root(), [], [], true);
+        h.Known.SavePair(pair);
+        var settings = V2Settings.Default with { ProgressInterval = TimeSpan.Zero, MaxWorkers = 1 };
+        var provider = new FakeEndpointProvider().Add(pair.A, local)
+            .AddInventory(pair.B, h.Inventory).AddWriter(pair.B, h.Writer());
+        var run = new SyncRun(h.Known, new Executor(h.Known, settings, ExecutorChecks.Admission()),
+            provider, settings, TimeProvider.System);
+        var runtime = new V2CliRuntime(null, h.Known, run, new EndpointRootProbe(provider),
+            Path.Combine(_root, "delta-folder-prepare"));
+        await runtime.PrepareFirstSyncAsync("p1", _ => { }, CancellationToken.None);
+        var initial = await runtime.ApplyFirstSyncAsync("p1", null, true, null, _ => { }, CancellationToken.None);
+        Require(initial.Failed == 0 && h.Known.FirstSyncDone("p1"), "folder fixture completes first sync");
+        Require(!string.IsNullOrEmpty(h.Known.Cursor(RootId)),
+            "successful prepared apply commits its cursor without an extra full incremental run");
+        var before = h.Known.Cursor(RootId)!;
+        h.Wire.MoveOutsideRoot("empty", "removed/empty");
+        h.Wire.SeedDeletedEntry("empty");
+        h.Wire.RevisionErrorTag = "not_file";
+        h.Wire.SeedChangePage(before, [h.Wire.ChangeDeleted("/Pilot/empty")], false, "folder-after");
+        h.Wire.SeedChangePage("folder-after", [], false, "folder-next");
+        var revisions = h.Wire.Calls.Count(call => call == "/2/files/list_revisions");
+        var first = await run.IncrementalAsync("p1", new Progress<RunProgress>(), CancellationToken.None);
+        Require(first.Failed == 0 && await local.ObserveAsync("empty", CancellationToken.None) is null &&
+            h.Known.Cursor(RootId) == "folder-after", "incremental folder deletion propagates and advances cursor");
+        var second = await run.IncrementalAsync("p1", new Progress<RunProgress>(), CancellationToken.None);
+        Require(second.Failed == 0 && h.Known.Cursor(RootId) == "folder-next" &&
+            h.Wire.Calls.Count(call => call == "/2/files/list_revisions") == revisions,
+            "second incremental run succeeds; folder deletion never uses revision history");
+    }
+
+    private static async Task DeltaPendingRunsAsync()
+    {
+        using var h = new Harness();
+        var local = new FakeEndpoint(Side.A, "ra") { DropboxHashes = true };
+        local.Seed("gone.txt", "same");
+        local.Seed("finished-folder", "", ItemKind.Folder);
+        h.Wire.SeedFile("gone.txt", "same");
+        h.Wire.SeedFolder("finished-folder");
+        var pair = new PairDef("p1", "delta pending",
+            new RootDef("ra", SyncProviders.Local, null, "C:\\offline-delta-pending", "id:ra"),
+            Root(), [], [], true);
+        h.Known.SavePair(pair);
+        var settings = V2Settings.Default with { ProgressInterval = TimeSpan.Zero, MaxWorkers = 1 };
+        var provider = new FakeEndpointProvider().Add(pair.A, local)
+            .AddInventory(pair.B, h.Inventory).AddWriter(pair.B, h.Writer());
+        var run = new SyncRun(h.Known, new Executor(h.Known, settings, ExecutorChecks.Admission()),
+            provider, settings, TimeProvider.System);
+        var runtime = new V2CliRuntime(null, h.Known, run, new EndpointRootProbe(provider),
+            Path.Combine(_root, "delta-pending-prepare"));
+        await runtime.PrepareFirstSyncAsync("p1", _ => { }, CancellationToken.None);
+        Require((await runtime.ApplyFirstSyncAsync("p1", null, true, null, _ => { }, CancellationToken.None)).Failed == 0,
+            "file fixture completes first sync");
+        Require(!string.IsNullOrEmpty(h.Known.Cursor(RootId)),
+            "successful prepared apply commits its cursor without an extra full incremental run");
+        var before = h.Known.Cursor(RootId)!;
+        h.Wire.MoveOutsideRoot("gone.txt", "removed/gone.txt");
+        h.Wire.SeedDeletedEntry("gone.txt");
+        h.Wire.MoveOutsideRoot("finished-folder", "removed/finished-folder");
+        h.Wire.SeedDeletedEntry("finished-folder");
+        h.Wire.SeedChangePage(before,
+            [h.Wire.ChangeDeleted("/Pilot/gone.txt"), h.Wire.ChangeDeleted("/Pilot/finished-folder")],
+            false, "file-after");
+        // A timed-out request (not caller cancellation) is an unresolved per-path probe, not scan failure.
+        var delays = UseFastHistoryRetryClock(h);
+        var probesBeforeTimeout = h.Wire.Calls.Count(call => call == "/2/files/list_revisions");
+        h.Wire.OnRevisionAsync = _ => throw new TaskCanceledException("scripted request timeout");
+        local.Seed("independent.txt", "keep moving");
+        var first = await run.IncrementalAsync("p1", new Progress<RunProgress>(), CancellationToken.None);
+        Require(first.Failed == 0 && first.DeletionEvidencePending.Contains("gone.txt") &&
+            h.Known.Cursor(RootId) == "file-after" &&
+            await local.ObserveAsync("gone.txt", CancellationToken.None) is not null &&
+            await local.ObserveAsync("finished-folder", CancellationToken.None) is null &&
+            h.Known.Live(RootId, ["gone.txt"]).Count == 0 && h.Known.SyncRetryAt("p1", "gone.txt") is not null &&
+            await h.Writer().ObserveAsync("independent.txt", CancellationToken.None) is not null &&
+            h.Known.OpenNotices("p1").Any(n => n.Path == "gone.txt" &&
+                n.ReasonKey == PlanNotices.DeletionEvidencePending.Key),
+            "failed lookup stays pending with a reason, retains both stored state and cursor, and does not fail run");
+        Require(delays.Count > 0 &&
+            h.Wire.Calls.Count(call => call == "/2/files/list_revisions") > probesBeforeTimeout + 1 &&
+            h.Known.DeletionEvidenceRows("p1", RootId).Single(row => row.Path == "gone.txt").Failure is
+                { Attempts: 1, Released: true },
+            "timeout retries before exhaustion and remains a transient, unreleased history failure");
+        h.Wire.SeedChangePage("file-after", [], false, "file-after");
+        var localWrites = local.WriteCalls;
+        int CloudWrites() => h.Wire.Calls.Count(call => call.Contains("/upload", StringComparison.Ordinal) ||
+            call.Contains("/delete", StringComparison.Ordinal) || call.Contains("/restore", StringComparison.Ordinal));
+        var cloudWrites = CloudWrites();
+        await run.IncrementalAsync("p1", new Progress<RunProgress>(), default);
+        Require(local.WriteCalls == localWrites && CloudWrites() == cloudWrites &&
+            await local.ObserveAsync("gone.txt", default) is not null && await h.Writer().ObserveAsync("gone.txt", default) is null,
+            "ordinary follow-up neither deletes the held local survivor nor resurrects the cloud tombstone");
+        h.Wire.OnRevisionAsync = null;
+        h.Known.SaveSyncRetry("p1", h.Known.SyncRetryAt("p1", "gone.txt")! with { RetryAfter = DateTimeOffset.MinValue });
+        var probesBeforeRetry = h.Wire.Calls.Count(call => call == "/2/files/list_revisions");
+        provider.AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, h.Known, "p1"));
+        var second = await run.IncrementalAsync("p1", new Progress<RunProgress>(), CancellationToken.None);
+        Require(second.Failed == 0 && h.Known.Cursor(RootId) == "file-after" &&
+            await local.ObserveAsync("gone.txt", CancellationToken.None) is not null &&
+            h.Wire.Calls.Count(call => call == "/2/files/list_revisions") == probesBeforeRetry + 1 &&
+            h.Known.OpenNotices("p1").Any(n => n.Path == "gone.txt" && n.ReasonKey == "deletion-review") &&
+            local.WriteCalls == localWrites && CloudWrites() == cloudWrites,
+            "resolved evidence asks for a decision; no delete or resurrection without explicit choice");
+        await run.IncrementalAsync("p1", new Progress<RunProgress>(), default);
+        Require(local.WriteCalls == localWrites && CloudWrites() == cloudWrites &&
+            await local.ObserveAsync("gone.txt", default) is not null, "decision hold remains inert across later runs");
+        var decision = h.Known.OpenNotices("p1").Single(n => n.Path == "gone.txt" && n.ReasonKey == "deletion-review");
+        await run.ApplyRetryNoticeChoiceAsync("p1", decision.NoticeId!, NoticeChoices.DeleteReviewed, default);
+        await run.IncrementalAsync("p1", new Progress<RunProgress>(), default);
+        Require(await local.ObserveAsync("gone.txt", default) is null && CloudWrites() == cloudWrites,
+            "only the explicit reviewed choice deletes the unchanged local survivor under OppositeAbsent");
+    }
+}
