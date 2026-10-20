@@ -497,8 +497,8 @@ internal static partial class Program
     // remains separate and is still executed by the full UI batch.
     private static int RunOriginalManualLogUiChecks(string root, string databasePath, bool inspect)
     {
-        const string originalCommand = "command-7d6eb12fadfe482ebc845373ffacd1eb";
-        const string originalPair = "0bfb3d6b2d0844d48fde3c028bea8161";
+        const string originalCommand = "command-f00d000000000000000000000000001b";
+        const string originalPair = "f00d0000000000000000000000000027";
         var expectedRoot = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "TestData", "Projects", "sync-shark", "build", "home-activity-tray", "ui-integration",

@@ -1945,7 +1945,7 @@ internal static class FocusedUiAcceptanceContract
             observedRequest = request;
             var successor = stale with
             {
-                Id = "f223456789abcdefabcd", LocalRoot = request.LocalRoot,
+                Id = "f00d0000000000000001", LocalRoot = request.LocalRoot,
                 DropboxRoot = request.DropboxFolder.Path, DropboxFolderId = request.DropboxFolder.FolderId,
                 SelectionRules = request.SelectionRules, SelectionDefaultIncluded = request.SelectionDefaultIncluded ?? true,
                 Name = request.Name

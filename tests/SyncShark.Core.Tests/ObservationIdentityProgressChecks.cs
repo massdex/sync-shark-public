@@ -18,7 +18,7 @@ internal static class ObservationIdentityProgressChecks
         if (!string.Equals(source, stagedSource, StringComparison.OrdinalIgnoreCase) ||
             !(root.StartsWith(allocation + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
               root.StartsWith(localAllocation + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) ||
-            pairId != "267aa6c5f2a06620f27e")
+            pairId != "f00d0000000000000028")
             throw new IOException("Use the closed actual staged database, exact parent pair and one fresh owned profiling directory.");
         foreach (var path in new[] { source, root })
             for (var item = path; !string.IsNullOrEmpty(item); item = Path.GetDirectoryName(item))
