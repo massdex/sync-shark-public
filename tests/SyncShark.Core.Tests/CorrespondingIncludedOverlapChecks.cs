@@ -427,7 +427,10 @@ internal static class CorrespondingIncludedOverlapChecks
         // nesting, so the opaque alias fence is exercised here through the SAME two production decision
         // entries the projection uses, with the same independently bound proofs (see OPAQUE-FENCE-OPEN in the
         // result ledger). Real reservations on both retained cloud roots stay available for the fence itself.
+        await RefuseAsync(() => fixture.RegisterLocalPlanningRootAsync());
         await fixture.RetainRootObservationsAsync();
+        Require(await fixture.ActiveRootCountAsync() == 4,
+            "OV637-4 local planning root requires current bound opaque hierarchy, not display ancestry");
         await fixture.CreateParentGoogleOperationAsync("op-opaque-parent", NestedChildName + "/a");
         await fixture.CreateChildGoogleOperationAsync("op-opaque-child-z", "z", fixture.Evidence());
 
@@ -959,9 +962,12 @@ internal static class CorrespondingIncludedOverlapChecks
             await Db.RetainOpaqueHierarchyObservationAsync(ChildSnapshot, Child.Id, "dropbox", 1);
             // Planning requires both endpoints. Admit the local endpoint only after the
             // independently bound cloud observations can prove the complete correspondence.
-            await Db.RegisterRootBindingAsync(ChildLocalRootId, Child.Id, "local", 1, "{}",
-                Child.LocalRoot, partitionCandidate: Child);
+            await RegisterLocalPlanningRootAsync();
         }
+
+        internal Task RegisterLocalPlanningRootAsync() =>
+            Db.RegisterRootBindingAsync(ChildLocalRootId, Child.Id, "local", 1, "{}",
+                Child.LocalRoot, partitionCandidate: Child);
 
         /// <summary>A NEW authority database instance over the SAME file, for the restart leg.</summary>
         internal SyncAuthorityDatabase Reopen() => new SyncAuthorityDatabase(Db.DatabasePath);

@@ -10439,8 +10439,12 @@ public sealed partial class SyncAuthorityDatabase
         // relations; a row that qualifies for neither keeps the strict overlap refusal.
         if (SyncPairPartitionPolicy.AllowsNestedOverlapPath(candidateComparison, comparison, existingPath,
                 candidatePath, retainedPairId, rowSide)) return true;
+        var proofs = await BuildRetainedAliasProofsAsync(connection, transaction,
+            [candidateComparison, comparison], null, cancellationToken);
+        proofs.TryGetValue(candidateComparison.Id, out var candidateProofs);
+        proofs.TryGetValue(comparison.Id, out var retainedProofs);
         return SyncPairPartitionPolicy.AllowsCorrespondingIncludedPath(candidateComparison, comparison, existingPath,
-            candidatePath, retainedPairId, rowSide);
+            candidatePath, retainedPairId, rowSide, candidateProofs, retainedProofs);
     }
 
     private static async Task<SyncPair?> LoadRetainedPairDefinitionAsync(SqliteConnection connection,
