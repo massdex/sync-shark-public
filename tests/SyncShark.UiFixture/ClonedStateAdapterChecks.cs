@@ -221,16 +221,16 @@ internal sealed class ClonedStateAdapter : IAsyncDisposable
         var targetRoot = RequireAllowedDestination(RealStagedSsdRoot, mustBeFresh: true);
         return ContinueRetainedRealClone(sourceRoot, targetRoot,
             fromCapacity
-                ? ["bridge-conflicts.json", "choices-a3d3dda45be83f44de52.json", "review-a3d3dda45be83f44de52.json",
-                   "choices-267aa6c5f2a06620f27e.json", "review-267aa6c5f2a06620f27e.json"]
-                : ["bridge-conflicts.json", "choices-a3d3dda45be83f44de52.json", "review-a3d3dda45be83f44de52.json"]);
+                ? ["bridge-conflicts.json", "choices-f00d0000000000000012.json", "review-f00d0000000000000012.json",
+                   "choices-f00d0000000000000028.json", "review-f00d0000000000000028.json"]
+                : ["bridge-conflicts.json", "choices-f00d0000000000000012.json", "review-f00d0000000000000012.json"]);
     }
 
     internal static object ContinueRetainedRealCloneOnCapacityVolume() => ContinueRetainedRealClone(
         RequireAllowedDestination(RealStagedSsdRoot, mustBeFresh: false),
         RequireAllowedDestination(RealStagedCapacityRoot, mustBeFresh: true),
-        ["bridge-conflicts.json", "choices-a3d3dda45be83f44de52.json", "review-a3d3dda45be83f44de52.json",
-         "choices-267aa6c5f2a06620f27e.json", "review-267aa6c5f2a06620f27e.json"]);
+        ["bridge-conflicts.json", "choices-f00d0000000000000012.json", "review-f00d0000000000000012.json",
+         "choices-f00d0000000000000028.json", "review-f00d0000000000000028.json"]);
 
     private static object ContinueRetainedRealClone(string sourceRoot, string targetRoot, string[] rootFiles)
     {
