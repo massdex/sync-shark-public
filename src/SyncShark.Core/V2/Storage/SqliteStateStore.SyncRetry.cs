@@ -94,11 +94,13 @@ public sealed partial class SqliteStateStore
     });
 
     // An indefinite pair-wide decision hold (Kind decision at the root path) waits for the user; it is not scheduling
-    // debt, so it never makes a completed run look deferred. Real failures and deletion evidence still count.
+    // debt, so it never makes a completed run look deferred. A root decision still carrying PendingNotice failed to
+    // write its notice, so it still needs the fast retry and counts. Real failures and deletion evidence still count.
     public int CountSyncRetries(string pairId) => InStore(() => (int)Math.Min(int.MaxValue,
         (long)StoreSchema.Scalar(_connection, null,
             "SELECT COUNT(*) FROM sync_retry WHERE pair_no=$p AND retry_after<$held " +
-            "AND NOT (path_key=$root AND json_extract(json,'$.Kind')='decision');",
+            "AND NOT (path_key=$root AND json_extract(json,'$.Kind')='decision' " +
+            "AND json_extract(json,'$.PendingNotice') IS NULL);",
             ("$p", RequirePair(pairId)), ("$held", DateTimeOffset.MaxValue.ToUnixTimeMilliseconds()),
             ("$root", RowCodec.Key(string.Empty)))!));
 

@@ -525,6 +525,95 @@ internal static partial class RunChecks
         Console.WriteLine("PASS HeldIntentApplySummaryUsesPostClassification");
     }
 
+    // N1: the root-decision exclusion must not hide a decision whose notice write failed. A root decision row
+    // carrying PendingNotice is waiting for that notice, so it still counts as scheduling debt; once the notice is
+    // written the same row is the indefinite pair-wide hold the exclusion is meant for.
+    private static Task HeldIntentPendingNoticeCountsAsync()
+    {
+        using var store = SqliteStateStore.Open(
+            Path.Combine(Path.GetTempPath(), "held-pending-notice-" + Guid.NewGuid().ToString("N")),
+            Settings, TimeProvider.System);
+        var fx = Build(suppliedStore: store);
+        var attention = new Notice(fx.Pair.PairId, 40, NoticeKind.UserDecision, string.Empty,
+            "deletion review pending", "deletion-review");
+        store.SaveSyncRetry(fx.Pair.PairId,
+            new SyncRetry(string.Empty, "decision", 0, "waiting for the user", DateTimeOffset.MinValue));
+        Require(store.CountSyncRetries(fx.Pair.PairId) == 0,
+            "the root decision hold without a pending notice is still not scheduling debt");
+        store.SaveSyncRetry(fx.Pair.PairId, new SyncRetry(string.Empty, "decision", 0, "Notice: store unavailable",
+            DateTimeOffset.MinValue, PendingNotice: attention));
+        Require(store.CountSyncRetries(fx.Pair.PairId) == 1,
+            "a root decision still waiting for its notice counts as scheduling debt");
+        store.SaveSyncRetry(fx.Pair.PairId,
+            new SyncRetry(string.Empty, "decision", 0, "", DateTimeOffset.MaxValue));
+        Require(store.CountSyncRetries(fx.Pair.PairId) == 0,
+            "once the notice is written the same row is the indefinite pair-wide hold, not debt");
+        Console.WriteLine("PASS HeldIntentPendingNoticeCounts");
+        return Task.CompletedTask;
+    }
+
+    // N2: retirement drops an intent without observing its effect, so a destructive one held by a link or stub stays
+    // pending instead. This is the crash-interrupted case: a first-sync approved cloud delete of a rebuildable folder
+    // was written and the apply crashed before committing, and the next reconcile must not retire it unobserved.
+    private static async Task HeldIntentDestructiveLinkAndStubStayPendingAsync()
+    {
+        foreach (var kind in new[] { ItemFlags.Link, ItemFlags.Placeholder })
+        {
+            var label = kind == ItemFlags.Link ? "link" : "stub";
+            using var store = SqliteStateStore.Open(
+                Path.Combine(Path.GetTempPath(), "held-" + label + "-delete-" + Guid.NewGuid().ToString("N")),
+                Settings, TimeProvider.System);
+            var fx = Build(suppliedStore: store);
+            store.MarkFirstSyncDone(fx.Pair.PairId);
+            // A link protects a whole folder delete; only files count as placeholders, so the stub case deletes a file.
+            var target = kind == ItemFlags.Link
+                ? fx.A.Seed("protected/folder", string.Empty, ItemKind.Folder)
+                : fx.A.Seed("protected/stub.txt", "stub content");
+            if (kind == ItemFlags.Link) fx.A.Seed("protected/folder/child.txt", "child");
+            fx.Provider.AddInventory(fx.Pair.A, new HeldFlaggedInventory(fx.A, target.Path, kind));
+            var settings = kind == ItemFlags.Placeholder
+                ? (Settings with { ReplaceOnlineOnlyStubs = false }) : Settings;
+            var run = new SyncRun(store, fx.Executor, fx.Provider, settings, TimeProvider.System);
+            // The first run stores the link/stub row and raises its standing summary.
+            await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+            var summaryKey = kind == ItemFlags.Link
+                ? LinkExclusions.Reason.Key : LinkExclusions.StubReason.Key;
+            Require(store.OpenNotices(fx.Pair.PairId).Count(notice => notice.ReasonKey == summaryKey) == 1,
+                label + ": setup leaves the standing summary explaining the protected item");
+            var baselinesBefore = store.Baselines(fx.Pair.PairId).Count;
+
+            store.SaveSyncRetry(fx.Pair.PairId,
+                new(target.Path, "sync", 2, "earlier failure", DateTimeOffset.UtcNow.AddMinutes(5)));
+            var action = new SyncAction("held-delete", 31, ActionKind.Delete, Side.B, target.Path, null, null,
+                target, false, "held-delete-key") { RebuildableRemove = true, FirstSyncChoice = true };
+            store.RecordIntent(fx.Pair.PairId, action);
+            var report = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+
+            Require(store.IntentById(fx.Pair.PairId, action.ActionId) is not null &&
+                store.UnresolvedIntents(fx.Pair.PairId).Count == 1,
+                label + ": an unverified destructive intent stays pending instead of retiring under the summary");
+            Require(!store.IsIntentHeld(fx.Pair.PairId, action.ActionId) && store.CountHeldIntents(fx.Pair.PairId) == 0 &&
+                report.PendingVerification == 0,
+                label + ": the pending delete is outside the combined verification summary");
+            Require(report.Uncertain == 0 && report.Failures.Count == 0 && report.Outcome == RunOutcomes.Complete &&
+                report.Deferred == 0,
+                label + ": a pending delete is not a failure, a Partial run or scheduling debt");
+            Require(store.SyncRetryAt(fx.Pair.PairId, target.Path) is { Kind: "sync", RetryAfter: var parked } &&
+                parked == DateTimeOffset.MaxValue && store.CountSyncRetries(fx.Pair.PairId) == 0,
+                label + ": its ordinary retry is parked, so the pending delete schedules no retry loop");
+            Require(store.Baselines(fx.Pair.PairId).Count == baselinesBefore &&
+                fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0,
+                label + ": the pending delete is never applied and writes no baseline");
+
+            // The crash-interrupted intent survives repeated runs: only a verified reconciliation may resolve it.
+            await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+            Require(store.IntentById(fx.Pair.PairId, action.ActionId) is not null &&
+                store.UnresolvedIntents(fx.Pair.PairId).Count == 1 && store.CountSyncRetries(fx.Pair.PairId) == 0,
+                label + ": the unverified delete stays pending on later runs too");
+        }
+        Console.WriteLine("PASS HeldIntentDestructiveLinkAndStubStayPending");
+    }
+
     /// <summary>An inventory that reports one path with a chosen flag, as the real scanners do for links/stubs.</summary>
     private sealed class HeldFlaggedInventory(FakeEndpoint inner, string path, ItemFlags flags) : IInventorySource
     {

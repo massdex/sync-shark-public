@@ -299,8 +299,19 @@ public sealed partial class SyncRun
                 {
                     switch (quarantined ? HoldCause.Pending : HoldCauseOf(protections, action))
                     {
-                        // Links and left-alone stubs never clear by themselves. Retire their intents under the
-                        // existing standing summary; a new notice would duplicate that cause (M2).
+                        // Quarantine, Defender grants and pair-wide decisions stay pending and unsynced on their own
+                        // notice. An unverified destructive effect under a link or stub (a delete, an overwrite or a
+                        // move) stays pending too: retirement drops the intent without observing what it did, so a
+                        // crash-interrupted apply must keep waiting for reconciliation. None of these are background
+                        // verification or retry debt; release any older hold so the combined count never includes them.
+                        case HoldCause.Link or HoldCause.Stub when RecoverySafety.RequiresRecovery(action):
+                        case HoldCause.Pending:
+                            if (rowStates[action.ActionId] == "held") releasedIds.Add(action.ActionId);
+                            ParkRetry(parkedRetries, retry);
+                            break;
+                        // Links and left-alone stubs never clear by themselves. A non-destructive intent has no effect
+                        // to observe, so retire it under the existing standing summary; a new notice would duplicate
+                        // that cause (M2).
                         case HoldCause.Link:
                             retirementGeneration ??= _store.BeginGeneration(pair.A.RootId, RunKind);
                             RetireProtectedIntent(pair, action, retirementGeneration.Value, LinkRetiredReason);
@@ -308,13 +319,6 @@ public sealed partial class SyncRun
                         case HoldCause.Stub:
                             retirementGeneration ??= _store.BeginGeneration(pair.A.RootId, RunKind);
                             RetireProtectedIntent(pair, action, retirementGeneration.Value, StubRetiredReason);
-                            break;
-                        // Quarantine, Defender grants and pair-wide decisions stay pending and unsynced on their own
-                        // notice. They are neither background verification nor retry debt; release any older hold
-                        // so the combined verification count never includes them.
-                        case HoldCause.Pending:
-                            if (rowStates[action.ActionId] == "held") releasedIds.Add(action.ActionId);
-                            ParkRetry(parkedRetries, retry);
                             break;
                         // Rehash/gap debt is the only cause the combined verification summary counts.
                         default:
