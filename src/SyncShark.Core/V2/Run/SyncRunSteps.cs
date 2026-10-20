@@ -890,12 +890,13 @@ public sealed partial class SyncRun
 
     private void AddProviderNameRefusalNotice(PairDef pair)
     {
+        // The deferral problem has one fixed id: the same id the notice is raised with below, so a primary-key
+        // read closes it without materialising every open notice of the pair.
+        var deferredId = ShortId.Make("n", pair.PairId, "40", RowCodec.Key(string.Empty), "refusal-notices-deferred");
         try
         {
             _store.RefreshProviderNameNotices(pair);
             // A refresh that works retires the earlier run's deferral notice: if the next run succeeds the notice goes away.
-            // The id is fixed, so a primary-key read avoids materialising every open notice of the pair.
-            var deferredId = ShortId.Make("n", pair.PairId, "40", RowCodec.Key(string.Empty), "refusal-notices-deferred");
             if (_store.NoticeById(pair.PairId, deferredId) is { Closed: false }) _store.CloseNotice(deferredId, "refreshed");
             // Replace the old aggregate only after the item notices were persisted.
             var summaryId = ShortId.Make("n", pair.PairId, "31", RowCodec.Key(string.Empty), ProviderNameRefusedException.NoticeKey);
@@ -908,7 +909,7 @@ public sealed partial class SyncRun
             {
                 _store.AddNotices([new Notice(pair.PairId, 40, NoticeKind.Info, "",
                     "Item notices could not be refreshed: " + error.Message + ". Sync will refresh them on the next run.",
-                    "refusal-notices-deferred")]);
+                    "refusal-notices-deferred", NoticeId: deferredId)]);
             }
             catch (Exception writeError) when (RunFailure(writeError, CancellationToken.None))
             { RunLog.Trace("Unable to persist refusal refresh notice: " + writeError.Message); }
