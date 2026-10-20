@@ -45,7 +45,7 @@ public sealed partial class V2CliRuntime
         await _authorizationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            progress("Opening Dropbox authorization; the retained account identity must match.");
+            ProgressGuard.Report(progress, "Opening Dropbox authorization; the retained account identity must match.", cancellationToken);
             var coordinator = new DropboxConnectionCoordinator(SharedHttp, new DropboxLoopbackReceiver(),
                 DropboxCredentialsFactory(), new DropboxConnectionStore(authority));
             var binding = await coordinator.ConnectAsync(uri =>

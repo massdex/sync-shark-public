@@ -194,7 +194,7 @@ public sealed partial class SyncRun
             selected ??= new[] { Side.A, Side.B }.Where(side => db.RemovalObservation(session, side).Any(item => PairPath.Same(item.Path, notice.Path))).ToArray();
             var rules = PairInclude.IgnoreRules(pair);
             var protectedPaths = LeftAlone(pair).WithPending(_store.OpenNotices(pair.PairId)
-                .Where(item => item.Kind == NoticeKind.UserDecision &&
+                .Where(item => PlanNotices.HasPathScope(item) && item.Kind == NoticeKind.UserDecision &&
                     !(PairPath.Same(item.Path, notice.Path) && (NoticeChoices.IsRemovalAttention(item) || NoticeChoices.IsRemovalReview(item))))
                 .Select(item => item.Path));
             foreach (var side in new[] { Side.A, Side.B })

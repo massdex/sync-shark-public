@@ -107,6 +107,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - suite: composition
+            flag: --v2-composition-checks
+            takes-root: false
+            drive: c
           - suite: nested-pair
             flag: --excluded-nested-pair-partition-checks
             takes-root: true
@@ -215,12 +219,15 @@ jobs:
           TMP: '${{ runner.temp }}\${{ matrix.suite }}'
         run: |
           $ErrorActionPreference = 'Stop'
-          # TEMP/TMP/SYNCSHARK_TEST_ROOT point at this per-suite scratch folder.
-          $scratch = Join-Path $env:RUNNER_TEMP '${{ matrix.suite }}'
+          # Suites using real journal evidence need both explicit and temporary roots on C:.
+          $base = if ('${{ matrix.drive }}' -eq 'c') { $env:LOCALAPPDATA } else { $env:RUNNER_TEMP }
+          $scratch = Join-Path $base 'syncshark-ci\${{ matrix.suite }}-scratch'
           New-Item -ItemType Directory -Force -Path $scratch | Out-Null
+          $env:TEMP = $scratch
+          $env:TMP = $scratch
+          $env:SYNCSHARK_TEST_ROOT = $scratch
           # The suite's own root must not pre-exist: some suites refuse a
           # directory that already exists.
-          $base = if ('${{ matrix.drive }}' -eq 'c') { $env:LOCALAPPDATA } else { $env:RUNNER_TEMP }
           $root = Join-Path $base 'syncshark-ci\${{ matrix.suite }}-root'
           $exe = Join-Path $env:GITHUB_WORKSPACE 'tests\SyncShark.Core.Tests\bin\${{ env.CONFIGURATION }}\net8.0\SyncShark.Core.Tests.exe'
           if (-not (Test-Path $exe)) { throw "Test executable not found: $exe" }

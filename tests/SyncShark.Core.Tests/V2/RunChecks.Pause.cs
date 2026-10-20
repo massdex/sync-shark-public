@@ -5,7 +5,7 @@ internal static partial class RunChecks
     private static async Task HashPauseAsync(string root)
     {
         using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System);
-        var fx = Build(suppliedStore: sql);
+        var fx = Build(suppliedStore: sql, accountId: PauseAccount);
         for (var i = 0; i < 5; i++) { fx.A.Seed($"{i}.txt", "same"); fx.B.Seed($"{i}.txt", "same"); }
         var inventory = new ScriptedInventory(fx.A) { Hashless = true, OnHash = () => sql.SetPairPaused("p1", true) };
         fx.Provider.AddInventory(fx.Pair.A, inventory);
@@ -43,7 +43,7 @@ internal static partial class RunChecks
     private static async Task FinishedApplyPauseAsync(string root)
     {
         using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System);
-        var fx = Build(suppliedStore: sql);
+        var fx = Build(suppliedStore: sql, accountId: PauseAccount);
         fx.A.Seed("only.txt", "data");
         var run = fx.Run();
         var plan = await run.PreviewFirstSyncAsync("p1", new RecordingProgress(), CancellationToken.None);
@@ -55,6 +55,9 @@ internal static partial class RunChecks
         Require(next.Outcome == RunOutcomes.Paused, "completed apply leaves pause for next run admission");
     }
 
+    private const string PauseAccount = "connection-000000000000000000000000";
+    private const string OtherPauseAccount = "gdrive-connection-000000000000000000000000";
+
     private static SyncPair PauseView(PairDef pair) => PairMapping.ToSyncPair(pair with
         { A = pair.A with { RootObjectId = "id:local:00000001:0000000000000001" } }, true, Settings);
 
@@ -63,7 +66,7 @@ internal static partial class RunChecks
     private static async Task ScopePauseAsync(string root, string scope)
     {
         using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System);
-        var fx = Build(suppliedStore: sql);
+        var fx = Build(suppliedStore: sql, accountId: PauseAccount);
         var run = fx.Run();
         var plan = await run.PreviewFirstSyncAsync("p1", new RecordingProgress(), CancellationToken.None);
         await run.ApplyAsync("p1", plan, new RecordingProgress(), CancellationToken.None);
@@ -100,8 +103,10 @@ internal static partial class RunChecks
         Directory.CreateDirectory(root);
         using var instance = PilotInstanceLock.Acquire(Path.Combine(root, "state", "instance.lock"));
         using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System);
-        var fx = Build(suppliedStore: sql);
+        var fx = Build(suppliedStore: sql, accountId: PauseAccount);
         var run = fx.Run();
+        Require((await FirstSyncAsync(run, fx)).Outcome == RunOutcomes.Complete,
+            "pair 1 fixture completes first sync before between-pairs pause");
         var second = await AddSyncedPairAsync(fx, run, "p2");
         var preferences = new UiPreferencesStore(instance.StateAuthority);
         var host = new V2SyncHost(sql, run, new ObservedExecutor(fx.Executor), null!, Settings,
@@ -158,8 +163,10 @@ internal static partial class RunChecks
     {
         Directory.CreateDirectory(root);
         using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System);
-        var fx = Build(suppliedStore: sql);
+        var fx = Build(suppliedStore: sql, accountId: PauseAccount);
         var run = fx.Run();
+        Require((await FirstSyncAsync(run, fx)).Outcome == RunOutcomes.Complete,
+            "pair 1 fixture completes first sync before between-pairs pause");
         var second = await AddSyncedPairAsync(fx, run, "p2");
         var saved = new UiPreferences(UiPreferencesStore.SystemTheme);
         var host = new V2SyncHost(sql, run, new ObservedExecutor(fx.Executor), null!, Settings,
@@ -179,12 +186,12 @@ internal static partial class RunChecks
                 pausing = false;
                 saved = saved with
                 {
-                    AccountPauses = [new SyncAccountPause("acc", true, null, TimeZoneInfo.Local.Id)]
+                    AccountPauses = [new SyncAccountPause(PauseAccount, true, null, TimeZoneInfo.Local.Id)]
                 };
             });
         var now = TimeProvider.System.GetUtcNow();
         Require(!PauseStateProjection.GlobalPaused(saved, now) &&
-            PauseStateProjection.AccountPaused(saved, "acc", now),
+            PauseStateProjection.AccountPaused(saved, PauseAccount, now),
             "the account pause leaves the global scope untouched");
         Require(result.Items.Count == 1, "the account pause arrives after pair 1 and before pair 2");
         Require(second.Writer.Puts == before && !sql.PairPaused("p1") && !sql.PairPaused("p2"),
@@ -210,7 +217,7 @@ internal static partial class RunChecks
         using var instance = PilotInstanceLock.Acquire(Path.Combine(root, "state", "instance.lock"));
         var clock = new OutputClock();
         using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, clock);
-        var fx = Build(suppliedStore: sql);
+        var fx = Build(suppliedStore: sql, accountId: PauseAccount);
         var run = fx.Run();
         Require((await FirstSyncAsync(run, fx)).Outcome == RunOutcomes.Complete,
             "pair 1 fixture completes its first sync");
@@ -261,7 +268,7 @@ internal static partial class RunChecks
             var checkPaused = false;
             try { PairPause.Check(); }
             catch (PairPausedException) { checkPaused = true; }
-            Require(checkPaused == (account is null or "acc") && Volatile.Read(ref reads) == before + 1,
+            Require(checkPaused == (account is null or PauseAccount) && Volatile.Read(ref reads) == before + 1,
                 "the callback safe point reaches the scope cache and refreshes its pause at two seconds");
             return null;
         };
@@ -274,7 +281,7 @@ internal static partial class RunChecks
                 : PauseStateProjection.AccountPaused(preferences.Load(), account, clock.GetUtcNow()) &&
                     !PauseStateProjection.GlobalPaused(preferences.Load(), clock.GetUtcNow())),
             "mid-pair pause is durable in the requested scope");
-        if (account is null or "acc")
+        if (account is null or PauseAccount)
         {
             Require(result.Items.Count == 1 && summaries.Single().Contains("(" + RunOutcomes.Paused + ")",
                 StringComparison.Ordinal) && fx.WriterB.Puts > 0 && fx.WriterB.Puts < 12,
@@ -297,7 +304,7 @@ internal static partial class RunChecks
                 await preferences.SaveAsync(preferences.Load() with
                 {
                     PauseUntilResumed = true,
-                    AccountPauses = [new SyncAccountPause("acc", true, null, TimeZoneInfo.Local.Id)]
+                    AccountPauses = [new SyncAccountPause(PauseAccount, true, null, TimeZoneInfo.Local.Id)]
                 });
                 var both = preferences.Load();
                 await preferences.SaveAsync(resumeGlobal
@@ -330,7 +337,7 @@ internal static partial class RunChecks
         var writer = new CountingWriter(b);
         var def = new PairDef(id, id,
             new RootDef("ra-" + id, SyncProviders.Local, null, "C:\\" + id, "id:" + id),
-            new RootDef("rb-" + id, SyncProviders.Dropbox, "acc", "/" + id, "id2:" + id), [], [], true);
+            new RootDef("rb-" + id, SyncProviders.Dropbox, fx.Pair.B.AccountId, "/" + id, "id2:" + id), [], [], true);
         fx.Store.SavePair(def);
         fx.Provider.Add(def.A, a).Add(def.B, b).AddWriter(def.B, writer);
         var plan = await run.PreviewFirstSyncAsync(id, new RecordingProgress(), CancellationToken.None);
@@ -364,7 +371,7 @@ internal static partial class RunChecks
     private static async Task DeferredEvidencePauseAsync(string root)
     {
         using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System);
-        var fx = Build(suppliedStore: sql);
+        var fx = Build(suppliedStore: sql, accountId: PauseAccount);
         fx.A.Seed("held.txt", "data");
         var evidence = new DeferredInventory(fx.B);
         fx.Provider.AddInventory(fx.Pair.B, evidence);
@@ -380,7 +387,7 @@ internal static partial class RunChecks
     internal static async Task PauseChecksAsync(string root)
     {
         using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System);
-        var fx = Build(suppliedStore: sql);
+        var fx = Build(suppliedStore: sql, accountId: PauseAccount);
         for (var i = 0; i < 12; i++) fx.A.Seed($"{i:D2}.txt", "payload");
         var run = fx.Run();
         var plan = await run.PreviewFirstSyncAsync("p1", new RecordingProgress(), CancellationToken.None);
@@ -411,14 +418,14 @@ internal static partial class RunChecks
         await ScopePauseAsync(Path.Combine(root, "scope"), "active-run");
         await GlobalPauseBetweenPairsAsync(Path.Combine(root, "global"));
         await AccountPauseBetweenPairsAsync(Path.Combine(root, "account"));
-        await ScopePauseMidPairAsync(Path.Combine(root, "account-mid-pair"), "acc");
-        await ScopePauseMidPairAsync(Path.Combine(root, "other-account-mid-pair"), "other-acc");
+        await ScopePauseMidPairAsync(Path.Combine(root, "account-mid-pair"), PauseAccount);
+        await ScopePauseMidPairAsync(Path.Combine(root, "other-account-mid-pair"), OtherPauseAccount);
         await ScopePauseMidPairAsync(Path.Combine(root, "global-mid-pair"), null);
-        await ScopePauseMidPairAsync(Path.Combine(root, "pause-invalid-data"), "acc",
+        await ScopePauseMidPairAsync(Path.Combine(root, "pause-invalid-data"), PauseAccount,
             new InvalidDataException("Invalid saved pause data."));
-        await ScopePauseMidPairAsync(Path.Combine(root, "pause-io-error"), "acc",
+        await ScopePauseMidPairAsync(Path.Combine(root, "pause-io-error"), PauseAccount,
             new IOException("Preferences temporarily unreadable during save."));
-        await ScopePauseMidPairAsync(Path.Combine(root, "pause-state-damaged"), "acc",
+        await ScopePauseMidPairAsync(Path.Combine(root, "pause-state-damaged"), PauseAccount,
             new StateDamagedException("Pause state is damaged."));
         await DeferredEvidencePauseAsync(Path.Combine(root, "evidence"));
         await HashPauseAsync(Path.Combine(root, "hash-pause"));

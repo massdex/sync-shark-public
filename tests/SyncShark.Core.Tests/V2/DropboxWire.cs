@@ -169,6 +169,15 @@ internal sealed partial class DropboxWire : HttpMessageHandler
     {
         switch (path)
         {
+            // The composition's account seam refreshes a saved credential before its first file request.
+            case "/oauth2/token":
+                return Json(new
+                {
+                    access_token = "fixture-access",
+                    token_type = "bearer",
+                    expires_in = 14400,
+                    account_id = "account-id"
+                });
             case "/2/users/get_current_account":
                 return Json(new
                 {

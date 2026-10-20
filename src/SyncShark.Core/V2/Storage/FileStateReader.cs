@@ -193,11 +193,16 @@ internal sealed class FileStateReader
         return (count, examples);
     }
 
+    // Pinned to the object index: SQLite otherwise plans a root-wide primary-key range for one object,
+    // which the per-change and per-subtree-file callers multiply by the root size.
+    internal const string ByObjectSql =
+        $"SELECT {Columns} FROM file_state f INDEXED BY fs_obj JOIN dir d ON d.dir_no = f.dir_no " +
+        "WHERE f.root_no=$r AND f.object_id=$o LIMIT 1;";
+
     /// <summary>The live row for one object id, or null.</summary>
     public ItemState? ByObject(long rootNo, string objectId)
     {
-        var rows = Query($"SELECT {Columns} FROM file_state f JOIN dir d ON d.dir_no = f.dir_no " +
-            "WHERE f.root_no=$r AND f.object_id=$o LIMIT 1;", [("$r", rootNo), ("$o", objectId)]);
+        var rows = Query(ByObjectSql, [("$r", rootNo), ("$o", objectId)]);
         return rows.Count == 0 ? null : rows[0].Item;
     }
 

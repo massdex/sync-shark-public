@@ -19,6 +19,13 @@ public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatc
             _paths.Spool, defaultStorage);
     }
 
+    internal async Task<PilotRemoteEntry?> ObserveStorageRemoteAsync(PairDef pair, string path, CancellationToken ct)
+    {
+        var client = await _dropbox.OpenAsync(pair.B, ct).ConfigureAwait(false);
+        await client.VerifyRootIdentityAsync(ct).ConfigureAwait(false);
+        return await client.FindEntryAtPathAsync(path, ct).ConfigureAwait(false);
+    }
+
     /// <inheritdoc />
     /// <remarks>
     /// Dispatches on root.Provider (B-118): a local root gets a <see cref="LocalChangeWatch"/> over the product-owned
@@ -56,7 +63,8 @@ public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatc
     private readonly LocalGapWorker? _gapWorker;
 
     internal ValueTask StopGapWorkersAsync() => _gapWorker?.DisposeAsync() ?? ValueTask.CompletedTask;
-    private readonly ConcurrentDictionary<string, (IInventorySource Inventory, IEndpointWriter Writer)> _open =
+    // Only an explicit continuation may reuse a preview's classification. Ordinary opens always start fresh.
+    private readonly ConcurrentDictionary<string, (IInventorySource Inventory, IEndpointWriter Writer, EndpointContinuation? Preview)> _open =
         new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DropboxChangeWatchSource> _dropboxWatches =
         new(StringComparer.Ordinal);
@@ -101,15 +109,20 @@ public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatc
     /// installation identity, Recovery location, Dropbox connection and credential) is checked before any writer is
     /// opened, so a refusal leaves no control namespace or Recovery folder behind.
     /// </summary>
-    public async Task<PairEndpoints> OpenAsync(PairDef pair, CancellationToken ct)
+    public Task<PairEndpoints> OpenAsync(PairDef pair, CancellationToken ct) => OpenAsync(pair, null, ct);
+
+    private async Task<PairEndpoints> OpenAsync(PairDef pair, EndpointContinuation? continuation, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(pair);
         var a = await CheckSideAsync(pair.A, ct).ConfigureAwait(false);
         var b = await CheckSideAsync(pair.B, ct).ConfigureAwait(false);
-        var openedA = await OpenSideAsync(pair, pair.A, Side.A, a, ct).ConfigureAwait(false);
-        var openedB = await OpenSideAsync(pair, pair.B, Side.B, b, ct).ConfigureAwait(false);
-        _open[pair.A.RootId] = openedA;
-        _open[pair.B.RootId] = openedB;
+        if (continuation is not null && (continuation.PairId != pair.PairId ||
+            continuation.RootA != pair.A.RootId || continuation.RootB != pair.B.RootId)) continuation = null;
+        var openedA = await OpenSideAsync(pair, pair.A, Side.A, a, continuation, ct).ConfigureAwait(false);
+        var openedB = await OpenSideAsync(pair, pair.B, Side.B, b, continuation, ct).ConfigureAwait(false);
+        // Consume the preview ownership: even a second apply carrying the old token must open fresh.
+        _open[pair.A.RootId] = (openedA.Inventory, openedA.Writer, null);
+        _open[pair.B.RootId] = (openedB.Inventory, openedB.Writer, null);
         return new PairEndpoints(openedA.Inventory, openedB.Inventory, openedA.Writer, openedB.Writer);
     }
 
@@ -127,7 +140,22 @@ public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatc
     }
 
     /// <inheritdoc />
+    EndpointContinuation? IEndpointProvider.CaptureContinuation(PairDef pair)
+    {
+        // Called under SyncRun's gate immediately after a successful preview, before another run can open roots.
+        if (!_open.TryGetValue(pair.A.RootId, out var a) || !_open.TryGetValue(pair.B.RootId, out var b)) return null;
+        var preview = new EndpointContinuation(pair.PairId, pair.A.RootId, pair.B.RootId, Guid.NewGuid());
+        _open[pair.A.RootId] = (a.Inventory, a.Writer, preview);
+        _open[pair.B.RootId] = (b.Inventory, b.Writer, preview);
+        return preview;
+    }
+
+    /// <inheritdoc />
     public Task PrepareAsync(PairDef pair, CancellationToken ct) => OpenAsync(pair, ct);
+
+    /// <inheritdoc />
+    public Task PrepareAsync(PairDef pair, EndpointContinuation? continuation, CancellationToken ct) =>
+        OpenAsync(pair, continuation, ct);
 
     /// <inheritdoc />
     public IInventorySource Inventory(RootDef root) => Opened(root).Inventory;
@@ -137,7 +165,7 @@ public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatc
 
     private (IInventorySource Inventory, IEndpointWriter Writer) Opened(RootDef root) =>
         _open.TryGetValue(root.RootId, out var opened)
-            ? opened
+            ? (opened.Inventory, opened.Writer)
             : throw new SyncRunRefusedException("The endpoints for this pair were not opened before the run.");
 
     // A side that passed every check: the local Recovery root and installation, or the opened Dropbox client.
@@ -214,13 +242,14 @@ public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatc
     }
 
     private async Task<(IInventorySource Inventory, IEndpointWriter Writer)> OpenSideAsync(PairDef pair, RootDef root,
-        Side side, CheckedSide checkedSide, CancellationToken ct)
+        Side side, CheckedSide checkedSide, EndpointContinuation? continuation, CancellationToken ct)
     {
         if (checkedSide.Client is { } client)
         {
             var dropbox = new DropboxInventory(root, side, client, _store, pair.PairId);
-            // A reopen within the run (apply reopens after its preview) keeps the classification already read.
-            if (_open.TryGetValue(root.RootId, out var previous) && previous.Inventory is DropboxInventory earlier)
+            // Another run on this root replaces the slot and invalidates reuse. Unrelated roots do not.
+            if (continuation is not null && _open.TryGetValue(root.RootId, out var previous) &&
+                previous.Preview == continuation && previous.Inventory is DropboxInventory earlier)
                 dropbox.AdoptClassificationFrom(earlier);
             return (dropbox, new DropboxWriter(root, side, client, _paths.Spool, _settings, PairInclude.IgnoreRules(pair)));
         }

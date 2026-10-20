@@ -33,7 +33,7 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
         IProgress<string>? progress = null) =>
         _client.HydratePrefixAsync(path, rows =>
         {
-            progress?.Report($"Review listing {path}: {rows.Count:N0} entries in page");
+            ProgressGuard.Report(progress, $"Review listing {path}: {rows.Count:N0} entries in page", ct);
             return accept(rows.Where(r => r.Entry is not null).Select(r => DropboxItems.ToItem(r.Entry!)).ToArray());
         }, ct);
 
@@ -184,7 +184,7 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
             IReadOnlySet<string> DeletedAncestors, string BasisCursor)> ListAsync() =>
             await _client.ListEntriesWithDeletedPathsAsync(progress =>
             {
-                p?.Report($"{progress.ObservedCount:N0} items: {progress.Detail}");
+                ProgressGuard.Report(p, $"{progress.ObservedCount:N0} items: {progress.Detail}", ct);
                 return Task.CompletedTask;
             }, ct, include, checkpoint);
         (IReadOnlyList<PilotRemoteEntry> Entries, IReadOnlySet<string> DeletedPaths,

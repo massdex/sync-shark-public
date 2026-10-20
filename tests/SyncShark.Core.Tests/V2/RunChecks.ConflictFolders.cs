@@ -252,10 +252,9 @@ internal static partial class RunChecks
             if (obstruction == "uncertain-root")
             {
                 // A normal sync must settle a receipt-less create instead of stalling the pair.
-                // Keep the source absent so arrival cannot legitimately close this notice.
-                foreach (var path in new[] { "new/in.txt", "new" })
-                    await fx.B.DeleteAsync(new SyncAction("source-gone-" + path, 6, ActionKind.Delete, Side.B, path, null, null,
-                        await fx.B.ObserveAsync(path, CancellationToken.None), false, null), CancellationToken.None);
+                // Keep the source present but exclude this subtree to prevent legitimate arrival.
+                // Deleting the source would instead settle the notice (the no-arrival case above).
+                store.SavePair(fx.Pair with { Excluded = ["new"] });
                 fx.B.Seed("unrelated.txt", "progress");
                 store.MarkFirstSyncDone(fx.Pair.PairId);
                 await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
@@ -287,6 +286,9 @@ internal static partial class RunChecks
             var removedFirst = store.Recoveries(fx.Pair.PairId).Count;
             fx.A.Seed("new/late.txt", "added after the choice");
             if (await HashAt(fx.A, "new/b.txt") is not null) fx.A.Seed("new/b.txt", "changed after the choice");
+            // Observe the live growth before retry, without changing the frozen choice snapshot.
+            store.WriteSnapshot(await fx.A.FullAsync(store.BeginGeneration(fx.Pair.A.RootId, "refresh"),
+                _ => true, null!, CancellationToken.None));
             var retry = await Choose(fx, notice, NoticeChoices.ReplaceExisting);
             Require(retry.Outcome != Outcome.Done, "a folder with kept items is not reported replaced: " + retry.Reason);
             Require(await HashAt(fx.A, "new/late.txt") == HashOf("added after the choice"),
@@ -424,6 +426,34 @@ internal static partial class RunChecks
             store.CompleteGeneration(delta, "c" + ++cursor, true);
         }
         const long expected = 1 + 60_000 + 40 * 1_002;
+        // Check the production query, not a hand-copied equivalent. This phase used to
+        // finish victim paging and then spend hours scanning the root for each flag rewrite.
+        using (var connection = new Microsoft.Data.Sqlite.SqliteConnection(
+            new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+            { DataSource = SqliteStateStore.DatabasePath(root), Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
+                Pooling = false }.ToString()))
+        {
+            connection.Open();
+            void RequireObjectBound(string name, string sql, params (string Name, object Value)[] values)
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText = "EXPLAIN QUERY PLAN " + sql;
+                foreach (var (parameter, value) in values) command.Parameters.AddWithValue(parameter, value);
+                var details = new List<string>();
+                using (var reader = command.ExecuteReader())
+                    while (reader.Read()) details.Add(reader.GetString(3));
+                Require(details.Any(detail => detail.Contains("fs_obj", StringComparison.Ordinal) &&
+                        detail.Contains("object_id=?", StringComparison.Ordinal)) &&
+                        !details.Any(detail => detail.Contains("USING PRIMARY KEY (root_no=?)", StringComparison.Ordinal)),
+                    $"100k-row {name} uses an object-bound index, never a root scan: " + string.Join("; ", details));
+            }
+            RequireObjectBound("debt reconciliation", FileStateTable.ReconcileProtectionSql, ("$r", 1), ("$o", "id:f45000"));
+            RequireObjectBound("held-move probe", FileStateTable.HeldMoveProbeSql,
+                ("$r", 1), ("$o", "id:f45000"), ("$d", 1), ("$n", "x.txt"));
+            RequireObjectBound("rehash-debt reset", FileStateTable.ClearRehashDebtSql, ("$r", 1), ("$o", "id:f45000"));
+            RequireObjectBound("rehash-debt probe", FileStateTable.RehashDebtProbeSql, ("$r", 1), ("$o", "id:f45000"));
+            RequireObjectBound("by-object read", FileStateReader.ByObjectSql, ("$r", 1), ("$o", "id:f45000"));
+        }
         static long Allocated(Action work)
         {
             var before = GC.GetTotalAllocatedBytes(true);

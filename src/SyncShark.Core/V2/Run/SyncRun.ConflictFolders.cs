@@ -24,6 +24,22 @@ public sealed partial class SyncRun
             ContentsSettled = item.Kind == ItemKind.Folder,
         };
 
+    // Metadata-only revocation must also run when the enclosing action is now excluded.
+    // It cannot authorize an effect; it changes only previously carried rows to Kept.
+    private void RevokeProtectedCarriedChoice(SyncAction folder, ActionGuard guards)
+    {
+        long after = -1;
+        while (true)
+        {
+            var page = _store.ChoiceVictims(folder.ActionId, ChoiceVictimState.Carried, ChoicePageSize,
+                false, after, ordinalOrder: true);
+            if (page.Count == 0) break;
+            _store.MarkChoiceVictims(folder.ActionId, page.Where(row => !Allowed(guards, FrozenChild(folder, row.Ord, row.Item)))
+                .Select(row => (row.Ord, ChoiceVictimState.Kept)).ToArray());
+            after = page[^1].Ord;
+        }
+    }
+
     /// <summary>Removes one folder's frozen contents; null when every frozen item is gone, else why it stopped.</summary>
     private async Task<ActionResult?> RemoveFrozenContentsAsync(PairDef pair, SyncAction folder, long gen,
         IEndpointWriter a, IEndpointWriter b, CancellationToken ct)
@@ -44,17 +60,6 @@ public sealed partial class SyncRun
         // Refusal/retained-counterpart checks use indexed existence queries, never a root-wide list per page.
         var guards = ActionPredicates(pair, LeftAlone(pair));
         var carryGuards = guards with { IgnoreRules = null };
-        // Carried is a prior authorization, not a permanent exemption. Recheck changed exclusions even when
-        // no Pending rows remain and the only retry is the enclosing folder delete.
-        long afterCarried = -1;
-        while (true)
-        {
-            var carriedPage = _store.ChoiceVictims(op, ChoiceVictimState.Carried, ChoicePageSize, false, afterCarried, ordinalOrder: true);
-            if (carriedPage.Count == 0) break;
-            _store.MarkChoiceVictims(op, carriedPage.Where(row => !Allowed(carryGuards, FrozenChild(folder, row.Ord, row.Item)))
-                .Select(row => (row.Ord, ChoiceVictimState.Kept)).ToArray());
-            afterCarried = carriedPage[^1].Ord;
-        }
         var carriedChanged = _store.ChoiceCarriedChanged(op, rootId);
         while (true)
         {

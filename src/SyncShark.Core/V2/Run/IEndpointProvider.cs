@@ -16,6 +16,12 @@ public interface IEndpointProvider
         return (Inventory(pair.A), Inventory(pair.B));
     }
 
+    /// <summary>Marks the endpoints opened by this preview for explicit, one-use continuation.</summary>
+    internal EndpointContinuation? CaptureContinuation(PairDef pair) => null;
+
+    /// <summary>Reopens endpoints, reusing classification only from the identified preview when still available.</summary>
+    Task PrepareAsync(PairDef pair, EndpointContinuation? continuation, CancellationToken ct) => PrepareAsync(pair, ct);
+
     /// <summary>Opens this pair's endpoints before the run touches either side; a refusal here has no effect.</summary>
     Task PrepareAsync(PairDef pair, CancellationToken ct) => Task.CompletedTask;
 }

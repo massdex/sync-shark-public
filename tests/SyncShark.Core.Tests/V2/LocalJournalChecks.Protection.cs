@@ -136,13 +136,14 @@ internal static partial class LocalJournalChecks
     private static async Task OverflowConsumers(SqliteStateStore store, string folder, ItemState seed)
     {
         const System.Reflection.BindingFlags hidden = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        Directory.CreateDirectory(Path.Combine(folder, "root"));
         var a = LocalChecks.RootOf(Path.Combine(folder, "root"), "root-local");
         var pair = new PairDef("index-check", "index", a,
             new RootDef("unused", SyncProviders.Dropbox, null, "/", "unused"), [], [], true);
         var protection = new RehashProtection(store, pair);
         var missedQueries = store.ProtectionBatchQueries;
         LocalChecks.Require(protection.Touches("synthetic-0000001", false) &&
-            protection.Touches("SCALE-1/child", false) && protection.Touches("", true) &&
+            protection.Touches("SYNTHETIC-0000001/child", false) && protection.Touches("", true) &&
             !protection.Touches("missing/path", false) && store.ProtectionBatchQueries == missedQueries + 4,
             "unprepared overflow resolves exceptional paths safely without failing the run");
         var prepared = protection.ForPaths(["clear-prepared"]);
@@ -157,7 +158,7 @@ internal static partial class LocalJournalChecks
         var filtered = (IReadOnlyList<ItemState>)typeof(RunScope).GetMethod("Hide", hidden)!.Invoke(scope, [rows, Side.A])!;
         LocalChecks.Require(filtered.Count == 1024 && filtered.All(row => row.Path != "synthetic-0000001"), "production row filtering protects overflow holds");
         LocalChecks.Require(store.ProtectionBatchQueries - queries == 5, "row consumer uses five bounded batches for1025 rows");
-        var mapped = seed with { Path = "provider-spelling", IdentityJson = "{\"dropboxWindowsPath\":\"scale-1\"}" };
+        var mapped = seed with { Path = "provider-spelling", IdentityJson = "{\"dropboxWindowsPath\":\"synthetic-0000001\"}" };
         var mappedResult = (IReadOnlyList<ItemState>)typeof(RunScope).GetMethod("Hide", hidden)!
             .Invoke(scope, [new[] { mapped }, Side.B])!;
         LocalChecks.Require(mappedResult.Count == 0, "overflow row filtering prepares actual and mapped alias paths");
@@ -181,7 +182,7 @@ internal static partial class LocalJournalChecks
         {
             actions[0] with { Path = "clear-target", Source = seed with { Path = "synthetic-0000001" } },
             actions[0] with { Path = "clear-target", Source = null, FromPath = "synthetic-0000001" },
-            actions[0] with { Path = "SCALE-1/child", Source = null },
+            actions[0] with { Path = "SYNTHETIC-0000001/child", Source = null },
             actions[0] with { Path = "", Source = null, Kind = ActionKind.Delete },
         };
         var guarded = (Plan)typeof(SyncRun).GetMethod("ApplySafetyFilter", hidden)!.Invoke(run,
@@ -207,7 +208,7 @@ internal static partial class LocalJournalChecks
             "public notice restore prepares overflow batch and protects notice path before content reads");
 
         foreach (var action in actions)
-            store.RecordIntent(pair.PairId, action with { Path = "scale-1/" + action.ActionId, Source = null });
+            store.RecordIntent(pair.PairId, action with { Path = "synthetic-0000001/" + action.ActionId, Source = null });
         queries = store.ProtectionBatchQueries;
         var preflight = (Task<int>)typeof(SyncRun).GetMethod("CompletionIntentPreflightAsync", hidden)!.Invoke(run, [pair])!;
         LocalChecks.Require(await preflight == 1025 && store.ProtectionBatchQueries == queries + 5,
@@ -216,7 +217,14 @@ internal static partial class LocalJournalChecks
         var reconcile = (Task)typeof(SyncRun).GetMethod("ReconcileAsync", hidden)!.Invoke(run,
             [pair, new ProgressThrottle(null, TimeProvider.System, TimeSpan.Zero), CancellationToken.None, null])!;
         await reconcile;
-        LocalChecks.Require(store.ProtectionBatchQueries == queries + 5 && endpointA.WriteCalls == 0 && endpointB.WriteCalls == 0,
-            "reconciliation handles overflow intents in five batches without replaying protected effects");
+        LocalChecks.Require(store.ProtectionBatchQueries == queries + 1 && endpointA.WriteCalls == 0 && endpointB.WriteCalls == 0 &&
+            store.UnresolvedIntents(pair.PairId).Count == 1025 - 256,
+            "reconciliation admits one bounded 256-intent batch, preserves the remainder and never replays protected effects");
+        queries = store.ProtectionBatchQueries;
+        await (Task)typeof(SyncRun).GetMethod("ReconcileAsync", hidden)!.Invoke(run,
+            [pair, new ProgressThrottle(null, TimeProvider.System, TimeSpan.Zero), CancellationToken.None, null])!;
+        LocalChecks.Require(store.ProtectionBatchQueries == queries + 1 && endpointA.WriteCalls == 0 && endpointB.WriteCalls == 0 &&
+            store.UnresolvedIntents(pair.PairId).Count == 1025 - 512,
+            "next run settles the next 256 retained intents without starvation or protected effects");
     }
 }

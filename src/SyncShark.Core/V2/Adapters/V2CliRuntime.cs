@@ -392,8 +392,9 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
             RunLog.Trace(prepared.InventoryScope == currentScope
                 ? $"first-sync inventory: compatible pending checkpoint ({pendingCursors.Count} cursor(s))"
                 : "first-sync inventory: pending checkpoint unavailable (missing or mismatched scope)");
-            var (plan, rebuildableResolution) = await _run.PreviewFirstSyncApplyResolvedAsync(pairId, choices.Winners,
+            var preview = await _run.PreviewFirstSyncApplyResolvedAsync(pairId, choices.Winners,
                 choices.OneSided, rebuildables, matched, forwarder, ct, pendingCursors, prepared.NarrowedIgnoreRules);
+            var (plan, rebuildableResolution) = preview;
             if (plan.RunUnavailable is { } unavailable)
                 throw new SyncRunPendingVerificationException(unavailable, 30);
             plan = _run.FilterNarrowedPrepare(pair, plan, prepared.NarrowedIgnoreRules);
@@ -425,7 +426,8 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
             prepared = null!;
             // The reviewed set goes into the apply path as well: the run re-checks it at execution time under its own
             // gate, so a scan that interleaved after this preview still cannot delete a victim the prepare never showed.
-            var report = await _run.ApplyAsync(pairId, plan, forwarder, ct, reviewed, rebuildableResolution);
+            var report = await _run.ApplyAsync(pairId, plan, forwarder, ct, reviewed, rebuildableResolution,
+                preview.Continuation);
             await SettleAfterRunAsync(ct).ConfigureAwait(false);
             // The record only authorizes a first sync, so once that is done the record goes. The exclusions were
             // already saved by the run, inside the same completion step that marked the first sync done.

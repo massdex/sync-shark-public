@@ -88,7 +88,7 @@ internal sealed class NoticeTable
             "WHERE notice_id=$id AND NOT ($retry=1 AND COALESCE(choice,'')='ignore') " +
             "AND (state <> 'open' OR ($refresh=1 AND detail <> $detail));",
             ("$retry", NoticeChoices.IsRetryNotice(notice) ? 1 : 0),
-            ("$refresh", JournalSizing.IsNotice(notice) || notice.Quarantine is not null || notice.DefenderHistory is not null || NoticeChoices.IsRetryNotice(notice) || notice.FreeSpace is not null || (notice.Kind == NoticeKind.UserDecision && notice.Detail.Contains(ProviderNameRefusedException.Detail, StringComparison.Ordinal)) || notice.ReasonKey == ProviderNameRefusedException.NoticeKey ? 1 : 0),
+            ("$refresh", notice.Storage is not null || JournalSizing.IsNotice(notice) || notice.Quarantine is not null || notice.DefenderHistory is not null || NoticeChoices.IsRetryNotice(notice) || notice.FreeSpace is not null || (notice.Kind == NoticeKind.UserDecision && notice.Detail.Contains(ProviderNameRefusedException.Detail, StringComparison.Ordinal)) || notice.ReasonKey == ProviderNameRefusedException.NoticeKey ? 1 : 0),
             ("$id", noticeId), ("$kind", notice.Kind.ToString()), ("$path", notice.Path), ("$detail", NoticeDetailCodec.Encode(notice)));
     }
 
@@ -172,6 +172,7 @@ internal sealed class NoticeTable
 
     internal static string Id(Notice notice)
     {
+        if (notice.Storage is not null) return ShortId.Make("ns", notice.PairId, notice.ReasonKey);
         if (notice.RetainedVersion is { } retained) return RetainedId(notice.PairId, retained.ActionId);
         if (notice.ConflictVersions is not null)
             return ShortId.Make("nc", notice.PairId, notice.Rule.ToString(CultureInfo.InvariantCulture), notice.Path,
@@ -241,8 +242,9 @@ internal sealed class NoticeTable
         command.Parameters.AddWithValue("$id", noticeId);
         using var reader = command.ExecuteReader();
         return reader.Read() && reader.GetInt64(0) == pairNo && reader.GetInt64(1) == notice.Rule &&
-            string.Equals(RowCodec.Key(reader.GetString(2)), RowCodec.Key(notice.Path), StringComparison.Ordinal) &&
+            (notice.Storage is not null || string.Equals(RowCodec.Key(reader.GetString(2)), RowCodec.Key(notice.Path), StringComparison.Ordinal)) &&
             string.Equals(reader.GetString(3), notice.ReasonKey, StringComparison.Ordinal) &&
+            (notice.Storage is null || NoticeDetailCodec.Decode(notice with { Detail = reader.GetString(4), Storage = null }).Storage == notice.Storage) &&
             NoticeDetailCodec.Decode(notice with { Detail = reader.GetString(4), RetainedVersion = null })
                 .RetainedVersion?.ActionId == notice.RetainedVersion?.ActionId;
     }

@@ -7,10 +7,10 @@ internal static class NoticeDetailCodec
 {
     private const string Prefix = "sync-shark-notice-v1:";
     private sealed record Payload(string Detail, FreeSpaceNoticeMetadata? FreeSpace,
-        RetainedNoticeVersion? RetainedVersion = null, QuarantineNotice? Quarantine = null, DefenderHistoryNotice? DefenderHistory = null, ConflictNoticeVersions? ConflictVersions = null, ConflictNoticeOperation? ConflictOperation = null, IReadOnlyList<Side>? RemovalSides = null, string? RemovalOriginReason = null);
+        RetainedNoticeVersion? RetainedVersion = null, QuarantineNotice? Quarantine = null, DefenderHistoryNotice? DefenderHistory = null, ConflictNoticeVersions? ConflictVersions = null, ConflictNoticeOperation? ConflictOperation = null, IReadOnlyList<Side>? RemovalSides = null, string? RemovalOriginReason = null, StorageNotice? Storage = null);
 
-    internal static string Encode(Notice notice) => notice.FreeSpace is null && notice.RetainedVersion is null && notice.Quarantine is null && notice.DefenderHistory is null && notice.ConflictVersions is null && notice.ConflictOperation is null && notice.RemovalSides is null && notice.RemovalOriginReason is null ? notice.Detail :
-        Prefix + JsonSerializer.Serialize(new Payload(notice.Detail, notice.FreeSpace, notice.RetainedVersion, notice.Quarantine, notice.DefenderHistory, notice.ConflictVersions, notice.ConflictOperation, notice.RemovalSides, notice.RemovalOriginReason));
+    internal static string Encode(Notice notice) => notice.FreeSpace is null && notice.RetainedVersion is null && notice.Quarantine is null && notice.DefenderHistory is null && notice.ConflictVersions is null && notice.ConflictOperation is null && notice.RemovalSides is null && notice.RemovalOriginReason is null && notice.Storage is null ? notice.Detail :
+        Prefix + JsonSerializer.Serialize(new Payload(notice.Detail, notice.FreeSpace, notice.RetainedVersion, notice.Quarantine, notice.DefenderHistory, notice.ConflictVersions, notice.ConflictOperation, notice.RemovalSides, notice.RemovalOriginReason, notice.Storage));
 
     internal static Notice Decode(Notice notice)
     {
@@ -18,8 +18,8 @@ internal static class NoticeDetailCodec
         try
         {
             var payload = JsonSerializer.Deserialize<Payload>(notice.Detail[Prefix.Length..]);
-            return payload?.Detail is not null && (payload.FreeSpace is not null || payload.RetainedVersion is not null || payload.Quarantine is not null || payload.DefenderHistory is not null || payload.ConflictVersions is not null || payload.ConflictOperation is not null || payload.RemovalSides is not null || payload.RemovalOriginReason is not null)
-                ? notice with { Detail = payload.Detail, FreeSpace = payload.FreeSpace, RetainedVersion = payload.RetainedVersion, Quarantine = payload.Quarantine, DefenderHistory = payload.DefenderHistory, ConflictVersions = payload.ConflictVersions, ConflictOperation = payload.ConflictOperation, RemovalSides = payload.RemovalSides, RemovalOriginReason = payload.RemovalOriginReason }
+            return payload?.Detail is not null && (payload.FreeSpace is not null || payload.RetainedVersion is not null || payload.Quarantine is not null || payload.DefenderHistory is not null || payload.ConflictVersions is not null || payload.ConflictOperation is not null || payload.RemovalSides is not null || payload.RemovalOriginReason is not null || payload.Storage is not null)
+                ? notice with { Detail = payload.Detail, FreeSpace = payload.FreeSpace, RetainedVersion = payload.RetainedVersion, Quarantine = payload.Quarantine, DefenderHistory = payload.DefenderHistory, ConflictVersions = payload.ConflictVersions, ConflictOperation = payload.ConflictOperation, RemovalSides = payload.RemovalSides, RemovalOriginReason = payload.RemovalOriginReason, Storage = payload.Storage }
                 : notice;
         }
         catch (JsonException) { return notice; }

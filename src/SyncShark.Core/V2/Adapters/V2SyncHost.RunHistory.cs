@@ -20,7 +20,7 @@ public sealed partial class V2SyncHost
         Action<string>? onReadProgress = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        onReadProgress?.Invoke("Reading the retained run…");
+        ProgressGuard.Report(onReadProgress, "Reading the retained run…", cancellationToken);
         return Task.FromResult(_store.RunSummaryById(runId) is { } run ? History(run) : null);
     }
 

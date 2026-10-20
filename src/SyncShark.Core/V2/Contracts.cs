@@ -207,7 +207,7 @@ public enum NoticeKind { Info, KeepBoth, EditBeatsDelete, AutoConflict, UserDeci
 /// </summary>
 public sealed record Notice(string PairId, int Rule, NoticeKind Kind, string Path, string Detail, string ReasonKey,
     string? NoticeId = null, FreeSpaceNoticeMetadata? FreeSpace = null,
-    RetainedNoticeVersion? RetainedVersion = null, QuarantineNotice? Quarantine = null, DefenderHistoryNotice? DefenderHistory = null, ConflictNoticeVersions? ConflictVersions = null, ConflictNoticeOperation? ConflictOperation = null, IReadOnlyList<Side>? RemovalSides = null, string? RemovalOriginReason = null);
+    RetainedNoticeVersion? RetainedVersion = null, QuarantineNotice? Quarantine = null, DefenderHistoryNotice? DefenderHistory = null, ConflictNoticeVersions? ConflictVersions = null, ConflictNoticeOperation? ConflictOperation = null, IReadOnlyList<Side>? RemovalSides = null, string? RemovalOriginReason = null, StorageNotice? Storage = null);
 
 public sealed record DefenderHistoryNotice(string RootId, string Batch, long Count, string Cause, RootDef? ReviewedRoot = null,
     DefenderSharedRelease? SharedRelease = null);

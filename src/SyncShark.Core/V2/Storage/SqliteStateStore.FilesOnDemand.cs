@@ -165,12 +165,52 @@ public sealed partial class SqliteStateStore
         return (IReadOnlyList<StorageSettlement>)result;
     });
 
+    internal bool StorageOperationIgnored(string pairId, StorageNotice item) => InStore(() =>
+        StoreSchema.Scalar(_connection, null, "SELECT 1 FROM notice WHERE pair_no=$p AND choice='ignore' AND substr(reason_key,1,length($prefix))=$prefix LIMIT 1;",
+            ("$p", RequirePair(pairId)), ("$prefix", StorageNotices.Prefix(item))) is not null);
+
+    internal void IgnoreStorageSettlement(string root, string item, string binding) => InStore(() =>
+        StoreSchema.Execute(_connection, null, "UPDATE storage_settlement SET state='ignored' WHERE root_id=$r AND object_id=$o AND remote_binding=$b;",
+            ("$r", root), ("$o", item), ("$b", binding)));
+
+    internal void RetryStorageSettlement(string root, string item, string binding) => InStore(() =>
+        StoreSchema.Execute(_connection, null, "UPDATE storage_settlement SET state='pending' WHERE root_id=$r AND object_id=$o AND remote_binding=$b;",
+            ("$r", root), ("$o", item), ("$b", binding)));
+
+    internal IReadOnlyList<StorageSettlement> ChangedStoragePointers(string after = "", int limit = 128) => InStore(() =>
+    {
+        var cursor = after.Length == 0 ? new[] { "", "", "" } : JsonSerializer.Deserialize<string[]>(after)!;
+        if (cursor.Length != 3) throw new ArgumentException("Invalid pointer cursor.", nameof(after));
+        using var command = StoreSchema.Command(_connection, null, """
+            SELECT s.root_id,s.object_id,s.remote_binding,s.remote_json
+            FROM storage_item s JOIN root r ON r.root_id=s.remote_binding
+            JOIN file_state f ON f.root_no=r.root_no AND f.object_id=json_extract(s.remote_json,'$.Id')
+            WHERE s.availability='OnlineOnly' AND (s.root_id,s.object_id,s.remote_binding)>($root,$object,$binding) AND f.kind=0
+              AND f.version_id<>json_extract(s.remote_json,'$.Revision')
+            ORDER BY s.root_id,s.object_id,s.remote_binding LIMIT $limit;
+            """);
+        command.Parameters.AddWithValue("$root", cursor[0]);
+        command.Parameters.AddWithValue("$object", cursor[1]);
+        command.Parameters.AddWithValue("$binding", cursor[2]);
+        command.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 128));
+        var result = new List<StorageSettlement>();
+        using var reader = command.ExecuteReader();
+        while (reader.Read()) result.Add(new(0, reader.GetString(0), reader.GetString(1), reader.GetString(2),
+            JsonSerializer.Deserialize<PilotRemoteEntry>(reader.GetString(3))!));
+        return (IReadOnlyList<StorageSettlement>)result;
+    });
+
+    internal void CompleteStoragePointerUpdate(StorageSettlement prior, PilotRemoteEntry remote) => InStore(() =>
+        StoreSchema.Execute(_connection, null, "UPDATE storage_item SET remote_json=$new WHERE root_id=$r AND object_id=$o AND remote_binding=$b AND remote_json=$old;",
+            ("$new", JsonSerializer.Serialize(remote)), ("$r", prior.RootId), ("$o", prior.ObjectId),
+            ("$b", prior.RemoteBinding), ("$old", JsonSerializer.Serialize(prior.Remote))));
+
     internal bool IsCurrentStorageSettlement(StorageSettlement job) => InStore(() =>
         StoreSchema.Scalar(_connection, null,
             "SELECT 1 FROM storage_settlement WHERE job_id=$id AND remote_json=$j AND state='pending';",
             ("$id", job.JobId), ("$j", JsonSerializer.Serialize(job.Remote))) is not null);
 
-    public void CompleteStorageSettlement(StorageSettlement job, StorageObserved observed) => InStore(() =>
+    public bool CompleteStorageSettlement(StorageSettlement job, StorageObserved observed) => InStore(() =>
     {
         using var tx = _connection.BeginTransaction();
         // CAS protects a newer upload receipt arriving while native conversion was running.
@@ -178,7 +218,7 @@ public sealed partial class SqliteStateStore
         var current = StoreSchema.Scalar(_connection, tx,
             "SELECT 1 FROM storage_settlement WHERE job_id=$id AND remote_json=$j AND state='pending';",
             ("$id", job.JobId), ("$j", json));
-        if (current is null) return;
+        if (current is null) return false;
         StoreSchema.Execute(_connection, tx, """
             INSERT INTO storage_item(root_id,object_id,remote_binding,remote_json,availability,pinned,in_sync)
             VALUES($r,$o,$b,$j,$a,$p,$s) ON CONFLICT(root_id,object_id,remote_binding)
@@ -188,5 +228,6 @@ public sealed partial class SqliteStateStore
             ("$a", observed.Availability), ("$p", observed.Pinned ? 1 : 0), ("$s", observed.InSync ? 1 : 0));
         StoreSchema.Execute(_connection, tx, "DELETE FROM storage_settlement WHERE job_id=$id;", ("$id", job.JobId));
         tx.Commit();
+        return true;
     });
 }

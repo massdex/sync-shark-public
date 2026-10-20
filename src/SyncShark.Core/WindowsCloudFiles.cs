@@ -146,6 +146,7 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
     // Admission happens before allocating a task or a transfer buffer. Reads never wait on a sync-run gate.
     private readonly SemaphoreSlim _fetchSlots = new(8, 8);
     public event Action<string, Exception>? FetchFailed;
+    public event Action<string>? FetchSucceeded;
     private void ReportFetchFailure(string path, Exception error)
     {
         try { FetchFailed?.Invoke(path, error); }
@@ -524,6 +525,44 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
         return result;
     }
 
+    /// <summary>Updates only the exact owned, fully dehydrated object. Never recalls or discards local bytes.</summary>
+    internal WindowsCloudPlaceholderInfo UpdateDehydratedPlaceholder(PilotRemoteEntry previous,
+        PilotRemoteEntry remote, PilotDirectoryIdentity expectedLocalIdentity, Action? revalidate = null)
+    {
+        ThrowIfDisposed();
+        var expected = WindowsCloudFileIdentity.FromRemote(_pair.Id, previous, _pair.Provider);
+        var identity = WindowsCloudFileIdentity.FromRemote(_pair.Id, remote, _pair.Provider);
+        if (previous.Kind != PilotEntryKind.File || remote.Kind != PilotEntryKind.File ||
+            previous.Id != remote.Id || previous.RelativePath != remote.RelativePath)
+            throw new IOException("A pointer update requires the same remote object and path.");
+        var target = PilotPath.ResolveContainedPath(_pair.LocalRoot, identity.RelativePath);
+        using var held = OpenAttributes(target, writeDac: true, exclusive: true);
+        VerifySettlementIdentity(held.Handle, expectedLocalIdentity);
+        if (!TryReadOwnedPlaceholder(held.Handle, false, out var current) || current is null ||
+            (!SameIdentity(current.Identity, expected) && !SameIdentity(current.Identity, identity)) ||
+            ReadStubState(held.Handle) is not { OwnedFullyDehydrated: true } || !current.State.IsInSync)
+            throw new IOException("The pointer was hydrated, modified or replaced. Leave it unchanged and rescan for ordinary conflict handling.");
+        revalidate?.Invoke();
+        if (!SameIdentity(current.Identity, identity))
+        {
+            var bytes = identity.Serialize();
+            var pinned = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+            try
+            {
+                var metadata = Metadata(identity);
+                Check(Native.CfUpdatePlaceholder(held.Handle.DangerousGetHandle(), ref metadata,
+                    pinned.AddrOfPinnedObject(), checked((uint)bytes.Length), IntPtr.Zero, 0,
+                    0x00000002u | 0x00000004u, IntPtr.Zero, IntPtr.Zero), "Updating the dehydrated pointer revision");
+            }
+            finally { pinned.Free(); }
+        }
+        if (!TryReadOwnedPlaceholder(held.Handle, false, out var updated) || updated is null ||
+            !SameIdentity(updated.Identity, identity) || !updated.State.IsInSync ||
+            ReadStubState(held.Handle) is not { OwnedFullyDehydrated: true })
+            throw new IOException("The updated pointer could not be verified. Retry verification; no download was requested.");
+        return updated;
+    }
+
     public WindowsCloudPlaceholderInfo UpdatePlaceholder(PilotRemoteEntry remote, bool dehydrate)
     {
         ThrowIfDisposed();
@@ -610,8 +649,9 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
             {
                 using var held = OpenAttributes(target, writeDac: false, exclusive: true);
                 VerifySettlementIdentity(held.Handle, expectedLocalIdentity);
-                if (ReadStubState(held.Handle) is not { FullyDehydrated: true })
-                    throw new IOException("The placeholder changed before settlement acknowledgement. Retry conversion.");
+                var stubState = ReadStubState(held.Handle);
+                if (stubState is not { OwnedFullyDehydrated: true })
+                    throw new IOException("The placeholder changed before settlement acknowledgement. Retry conversion. Native state: " + stubState);
                 cancellationToken.ThrowIfCancellationRequested();
                 revalidate?.Invoke();
                 return existing;
@@ -878,6 +918,12 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
     internal sealed record StubState(uint PlaceholderState, long OnDiskBytes, long ModifiedBytes,
         int InSyncState, ulong FileId)
     {
+        // Windows reports PARTIALLY_ON_DISK (0x20) even for our zero-resident-byte pointers.
+        // Owned identity was verified by the caller; native byte counts and in-sync state are decisive.
+        // Keep the older foreign-stub replacement predicate separate and unchanged.
+        internal bool OwnedFullyDehydrated => PlaceholderState != uint.MaxValue &&
+            (PlaceholderState & 1) != 0 && (PlaceholderState & 0x10) != 0 &&
+            OnDiskBytes == 0 && ModifiedBytes == 0 && InSyncState == 1;
         internal bool FullyDehydrated => PlaceholderState != uint.MaxValue &&
             (PlaceholderState & 1) != 0 && (PlaceholderState & 0x10) != 0 && (PlaceholderState & 0x20) == 0 &&
             OnDiskBytes == 0 && ModifiedBytes == 0 && InSyncState == 1;
@@ -1093,6 +1139,8 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
             try
             {
                 await FetchAsync(info, parameters, identity, cancellation.Token);
+                try { FetchSucceeded?.Invoke(identity.RelativePath); }
+                catch { /* Persistence cannot change the completed Windows I/O. */ }
             }
             catch (OperationCanceledException)
             {

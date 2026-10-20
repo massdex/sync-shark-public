@@ -39,6 +39,9 @@ public sealed partial class SqliteStateStore
     {
         StoreSchema.Execute(_connection, null,
             "CREATE TEMP TABLE IF NOT EXISTS date_repair_hold(path TEXT PRIMARY KEY) WITHOUT ROWID; DELETE FROM date_repair_hold;");
+        // Empty display notices do not protect a root; explicit durable scope failures/decisions do.
+        if (LinkExclusions.HasRootDecisionHold(this, pairId) || SyncRetryAt(pairId, string.Empty) is { Kind: "scan" })
+            StoreSchema.Execute(_connection, null, "INSERT OR IGNORE INTO date_repair_hold VALUES('');");
         using var command = StoreSchema.Command(_connection, null,
             "SELECT path FROM notice WHERE pair_no=$p AND state='open' AND path<>'' AND reason_key<>'local-download-date' UNION ALL " +
             "SELECT json_extract(action_json,'$.Path') FROM pending_effect WHERE pair_no=$p UNION ALL " +

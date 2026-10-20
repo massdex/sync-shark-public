@@ -190,9 +190,8 @@ internal sealed class FileStateTable
             foreach (var change in heldMoves.Read())
             {
                 var old = change.Entry;
-                if (StoreSchema.Scalar(_connection, batch.Transaction,
-                    "SELECT 1 FROM file_state WHERE root_no=$r AND object_id=$o AND (flags & 128)!=0 " +
-                    "AND NOT(dir_no=$d AND name=$n) LIMIT 1;", ("$r", rootNo), ("$o", old.Item.ObjectId),
+                if (StoreSchema.Scalar(_connection, batch.Transaction, HeldMoveProbeSql,
+                    ("$r", rootNo), ("$o", old.Item.ObjectId),
                     ("$d", old.DirNo), ("$n", old.Name)) is null ||
                     _reader.ReadObjectId(rootNo, old.DirNo, old.Name, batch.Transaction) != old.Item.ObjectId) continue;
                 if (change.Incoming is null)
@@ -476,12 +475,25 @@ internal sealed class FileStateTable
         return Insert(FileStateReader.Entry.Of(live.Parent, live.Name, item), rootNo, batch, debtReconciled: true);
     }
 
+    // Without the explicit object index SQLite can choose the root-only primary-key range,
+    // turning N changed rows in a million-item root into N million-row scans.
+    internal const string ReconcileProtectionSql =
+        "SELECT EXISTS(SELECT 1 FROM local_rehash WHERE root_no=$r AND object_id=$o) | " +
+        "(128 * EXISTS(SELECT 1 FROM file_state INDEXED BY fs_obj WHERE root_no=$r AND object_id=$o AND (flags & 128)!=0));";
+
+    // The same root/object binding for the held-move probe and the rehash-debt write and probe.
+    internal const string HeldMoveProbeSql =
+        "SELECT 1 FROM file_state INDEXED BY fs_obj WHERE root_no=$r AND object_id=$o AND (flags & 128)!=0 " +
+        "AND NOT(dir_no=$d AND name=$n) LIMIT 1;";
+    internal const string ClearRehashDebtSql =
+        "UPDATE file_state INDEXED BY fs_obj SET flags=flags & ~256,hash=NULL WHERE root_no=$r AND object_id=$o;";
+    internal const string RehashDebtProbeSql =
+        "SELECT 1 FROM file_state INDEXED BY fs_obj WHERE root_no=$r AND object_id=$o AND (flags & 256)!=0 LIMIT 1;";
+
     private ItemState ReconcileDebt(ItemState item, long rootNo, SqliteTransaction tx)
     {
         // Both protections belong to the root/object, not its old name. Read before move cleanup.
-        var protection = Convert.ToInt64(StoreSchema.Scalar(_connection, tx,
-            "SELECT EXISTS(SELECT 1 FROM local_rehash WHERE root_no=$r AND object_id=$o) | " +
-            "(128 * EXISTS(SELECT 1 FROM file_state WHERE root_no=$r AND object_id=$o AND (flags & 128)!=0));",
+        var protection = Convert.ToInt64(StoreSchema.Scalar(_connection, tx, ReconcileProtectionSql,
             ("$r", rootNo), ("$o", item.ObjectId)));
         if ((protection & 128) != 0) item = item with { Flags = item.Flags | ItemFlags.Quarantined };
         var debt = (protection & 1) != 0;
@@ -490,8 +502,7 @@ internal sealed class FileStateTable
         if (debt && _reader.AtKey(rootNo, item.Path, tx).Any(row => row.Item.Path == item.Path &&
             row.Item.ObjectId == item.ObjectId && (row.Item.Size != item.Size || row.Item.Mtime != item.Mtime)))
         {
-            StoreSchema.Execute(_connection, tx,
-                "UPDATE file_state SET flags=flags & ~256,hash=NULL WHERE root_no=$r AND object_id=$o;",
+            StoreSchema.Execute(_connection, tx, ClearRehashDebtSql,
                 ("$r", rootNo), ("$o", item.ObjectId));
             // Keep the queue obligation until the changed entity has been planned and settled.
             debt = false;
@@ -500,7 +511,7 @@ internal sealed class FileStateTable
         if (debt && (StoreSchema.Scalar(_connection, tx,
             "SELECT 1 FROM file_state WHERE root_no=$r AND object_id=$o LIMIT 1;",
             ("$r", rootNo), ("$o", item.ObjectId)) is null || StoreSchema.Scalar(_connection, tx,
-            "SELECT 1 FROM file_state WHERE root_no=$r AND object_id=$o AND (flags & 256)!=0 LIMIT 1;",
+            RehashDebtProbeSql,
             ("$r", rootNo), ("$o", item.ObjectId)) is not null))
             return item with { Hash = null, Flags = item.Flags | ItemFlags.NeedsRehash };
         return (item.Flags & ItemFlags.NeedsRehash) == 0 ? item :

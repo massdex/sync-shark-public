@@ -85,7 +85,7 @@ public sealed partial class LocalInventory : IInventorySource
             }
             if (unknown.Count != 0)
             {
-                progress?.Report($"Hashing {hashed:N0} attempted; {unknown.Count:N0} pending in page; {reused:N0} reused");
+                ProgressGuard.Report(progress, $"Hashing {hashed:N0} attempted; {unknown.Count:N0} pending in page; {reused:N0} reused", ct);
                 var refused = await HashSharesAsync(lease, unknown, hashes, ct);
                 if (refused.Count != 0) Accept(refused, await HashScanAsync(lease, refused, ct), hashes);
                 hashed += unknown.Count;
@@ -100,7 +100,7 @@ public sealed partial class LocalInventory : IInventorySource
                     Flags = reason is null ? i.Flags : i.Flags | ItemFlags.Unreadable, IncompleteReason = reason };
             }).ToArray());
             done += page.Length;
-            progress?.Report($"Review {done:N0}/{snapshot.Items.Count:N0} items; hashed {hashed:N0}, reused {reused:N0}");
+            ProgressGuard.Report(progress, $"Review {done:N0}/{snapshot.Items.Count:N0} items; hashed {hashed:N0}, reused {reused:N0}", ct);
         }
         // Enumeration can fail before emitting an entry. Keep an explicit sentinel at that path;
         // its parents are protected, but independent readable siblings remain reviewable (RQ-032/034).
@@ -151,7 +151,7 @@ public sealed partial class LocalInventory : IInventorySource
                 }
                 catch (Exception error) when (sql is not null && error is LocalWalkPolicyChangedException or LocalWalkReplayInvalidException)
                 {
-                    p?.Report("Local walk checkpoint discarded; retrying fresh: " + error.Message);
+                    ProgressGuard.Report(p, "Local walk checkpoint discarded; retrying fresh: " + error.Message, ct);
                     System.Diagnostics.Trace.WriteLine("Local walk checkpoint discarded: " + error.Message);
                     sql.ForgetLocalWalk(rootId);
                     checkpoint = ReadWalkCheckpoint();
@@ -536,7 +536,7 @@ public sealed partial class LocalInventory : IInventorySource
             traverseDirectory: path => include(path) && !LocalItems.IsExcluded(path, _productOwnedRelative) && exactPaths?.Contains(path) != true,
             onInventory: p is null
                 ? null
-                : (path, found) => { p.Report($"{found:N0} items: {path}"); return Task.CompletedTask; },
+                : (path, found) => { ProgressGuard.Report(p, $"{found:N0} items: {path}", ct); return Task.CompletedTask; },
             refreshPaths: refreshPaths, expectedPairId: _pairId, contentProvider: OwnedContentProvider);
     }
 

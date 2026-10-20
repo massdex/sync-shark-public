@@ -325,6 +325,8 @@ public sealed partial class SyncRun
         var completed = operation.Completed.ToHashSet(StringComparer.Ordinal);
         var remaining = operation.Actions.Where(action => !completed.Contains(action.ActionId)).ToArray();
         var guards = ActionPredicates(pair, LeftAlone(pair));
+        foreach (var folder in remaining.Where(FolderDelete.Expands))
+            RevokeProtectedCarriedChoice(folder, guards with { IgnoreRules = null });
         if (remaining.Any(action => !Allowed(guards, action)))
             return Result(Outcome.Skipped, "A remaining path is protected. Restore its inclusion to finish this saved choice.");
         // Observe all independent effects concurrently, including the commit/checkpoint crash window.

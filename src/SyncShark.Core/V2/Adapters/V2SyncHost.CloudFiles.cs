@@ -10,7 +10,8 @@ public sealed partial class V2SyncHost
         _cloudFiles ??= new CloudFilesLifetime(Composition.Endpoints.CreateCloudFiles,
             pair => Directory.Exists(pair.A.RootPath) &&
                 WindowsCloudFilesProvider.ReadRegisteredSyncRootFileId(pair.A.RootPath) is not null &&
-                !WindowsCloudFilesProvider.IsStatusOnlySyncRoot(PairMapping.ToSyncPair(pair, false, _settings)));
+                !WindowsCloudFilesProvider.IsStatusOnlySyncRoot(PairMapping.ToSyncPair(pair, false, _settings)),
+            _store as SqliteStateStore, Composition.Endpoints.ObserveStorageRemoteAsync);
         // Includes disabled pairs: stopping automatic sync must not destroy retained pointer ownership.
         // Hydration pause policy remains a separate later-slice decision.
         var failures = _cloudFiles.Reconnect(_store.Pairs(), ct, (pair, error) =>
@@ -26,8 +27,10 @@ public sealed partial class V2SyncHost
 /// <summary>Host-owned connections, never run-owned. Native registration is the durable reconnect record.</summary>
 internal sealed class CloudFilesLifetime(
     Func<PairDef, WindowsCloudFilesBinding, SyncDirectoryStorage, ICloudFilesConnection> createConnection,
-    Func<PairDef, bool> hasRegistration) : IDisposable
+    Func<PairDef, bool> hasRegistration, SqliteStateStore? noticeStore = null,
+    Func<PairDef, string, CancellationToken, Task<PilotRemoteEntry?>>? observeRemote = null) : IDisposable
 {
+    internal Func<PairDef, string, CancellationToken, Task<PilotRemoteEntry?>>? ObserveRemote { get; } = observeRemote;
     private readonly object _gate = new();
     private readonly Dictionary<string, (WindowsCloudFilesBinding Binding, ICloudFilesConnection Connection)> _open = new();
     private bool _disposed;
@@ -67,6 +70,25 @@ internal sealed class CloudFilesLifetime(
                 return;
             }
             var connection = createConnection(pair, binding, defaultStorage);
+            if (noticeStore is not null && connection is WindowsCloudFilesProvider native)
+            {
+                StorageNotice? Item(string path)
+                {
+                    var full = LocalItems.FullPath(pair.A.RootPath, path);
+                    if (!WindowsCloudFilesProvider.TryReadOwnedPlaceholder(full, out var pointer) || pointer is null ||
+                        !pointer.Identity.IsBoundTo(pair.PairId, pair.B.Provider)) return null;
+                    var (volume, _) = LocalItems.ParseObjectId(pair.A.RootObjectId);
+                    return new(pair.A.RootId, SyncLocalEndpointStore.ObjectId(volume, pointer.FileId), pair.B.RootId, "hydration");
+                }
+                native.FetchFailed += (path, error) =>
+                {
+                    if (Item(path) is { } item) StorageNotices.Report(noticeStore, pair, path, item, error);
+                };
+                native.FetchSucceeded += path =>
+                {
+                    if (Item(path) is { } item) StorageNotices.Complete(noticeStore, pair.PairId, item);
+                };
+            }
             try
             {
                 ct.ThrowIfCancellationRequested();

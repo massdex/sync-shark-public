@@ -404,13 +404,18 @@ public sealed partial class SyncRun
             ? inventoryCursors.GetValueOrDefault(root.RootId)
             : _store.Cursor(root.RootId);
         var coverage = Coverage(pair, side);
-        var observationStore = inventory is DropboxInventory ? _store as SqliteStateStore : null;
+        var observationStore = inventory is DropboxInventory || firstSync && inventory is LocalInventory
+            ? _store as SqliteStateStore : null;
         var observation = observationStore?.ReadInventoryObservation(root);
         string[] hydrate = [];
         var observationOnly = false;
         if (observation is not null)
         {
-            if (coverage.CanReuse(observation.Coverage))
+            // Local preview observations may replay the journal, but cannot hydrate newly included
+            // prefixes like Dropbox. Widening still takes the conservative full-inventory path.
+            if (coverage.CanReuse(observation.Coverage) && (inventory is not LocalInventory ||
+                NtfsUsnCheckpoint.TryParseCursor(observation.Cursor, out _, out _) &&
+                coverage.Widened(observation.Coverage).Length == 0))
             {
                 // The effect/pending cursor owns replay. Observation may be newer after an interrupted
                 // prepare, but must never hide unexecuted paths from an ordinary incremental planner.

@@ -4,7 +4,8 @@ namespace Massdex.SyncShark.V2;
 internal sealed class FilesOnDemandSettlement(SqliteStateStore store,
     Func<StorageSettlement, CancellationToken, Task<StorageObserved>> convert,
     Action<StorageSettlement, Exception> reportFailure,
-    Func<StorageSettlement, bool>? eligible = null)
+    Func<StorageSettlement, bool>? eligible = null,
+    Action<StorageSettlement>? completed = null)
 {
     // One bounded page per scheduling turn; the caller persists the returned cursor or restarts from zero.
     internal async Task<long> RunPageAsync(long after, CancellationToken ct)
@@ -23,7 +24,7 @@ internal sealed class FilesOnDemandSettlement(SqliteStateStore store,
                     var observed = await convert(job, token).ConfigureAwait(false);
                     if (!observed.InSync || observed.Availability != nameof(SyncCloudFileAvailability.OnlineOnly))
                         throw new IOException("Conversion was not confirmed online-only and in-sync. Keep the local file; Retry conversion or Ignore.");
-                    store.CompleteStorageSettlement(job, observed);
+                    if (store.CompleteStorageSettlement(job, observed)) completed?.Invoke(job);
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
                 catch (Exception error) { reportFailure(job, error); }

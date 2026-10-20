@@ -27,7 +27,8 @@ public sealed class ProductionAutoSyncEngine : IAutoSyncHostEngine
             _cloudFiles = new CloudFilesLifetime(_composition.Endpoints.CreateCloudFiles,
                 pair => Directory.Exists(pair.A.RootPath) &&
                     WindowsCloudFilesProvider.ReadRegisteredSyncRootFileId(pair.A.RootPath) is not null &&
-                    !WindowsCloudFilesProvider.IsStatusOnlySyncRoot(PairMapping.ToSyncPair(pair, false, V2Settings.Default)));
+                    !WindowsCloudFilesProvider.IsStatusOnlySyncRoot(PairMapping.ToSyncPair(pair, false, V2Settings.Default)),
+                (SqliteStateStore)_composition.Store, _composition.Endpoints.ObserveStorageRemoteAsync);
             // Independent of run/pause state: retained pointers still need foreground hydration.
             _cloudFiles.Reconnect(_composition.Store.Pairs(), CancellationToken.None, (pair, error) =>
                 _composition.Store.AddNotices(new[] { new Notice(pair.PairId, 38, NoticeKind.Info, string.Empty,
@@ -35,6 +36,7 @@ public sealed class ProductionAutoSyncEngine : IAutoSyncHostEngine
                     " Review the retained root binding and Retry. No registration was removed.",
                     "cloud-files-binding-needs-review") }));
             _cli = V2CliRuntime.Borrow(authority, _composition, root);
+            _cli.StorageNoticeConnections = _cloudFiles;
             _choices = new HostNoticeChoiceQueue(_composition.Store, ExecuteCliAsync);
             _auto = _composition.StartAutoSync(Paused,
                 () => TimeSpan.FromMinutes(_automation.Load().IntervalMinutes));

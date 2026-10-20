@@ -81,10 +81,25 @@ internal static class FilesOnDemandStorageChecks
                 "confirmed result durably schedules its exact revision");
             store.QueueStorageSettlement(local.RootId, "file-object", "remote", remote);
             Require(store.StorageSettlementPage().Count == 1, "duplicate confirmed receipt deduplicates conversion work");
+            var metadata = new StorageNotice(local.RootId, "file-object", "remote", "settlement");
+            for (var attempt = 0; attempt < 2; attempt++)
+                StorageNotices.Report(store, store.Pair("pair")!, remote.RelativePath, metadata, new IOException("synthetic conversion failure"));
+            Require(store.OpenNotices("pair").Count(n => n.Storage is not null) == 1, "storage failure deduplicates by item operation cause");
         }
         using (var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System))
         {
             Require(store.StorageSettlementPage().Count == 1, "receipt survives restart before conversion");
+            var savedNotice = store.OpenNotices("pair").Single(n => n.Storage is not null);
+            Require(savedNotice.Storage!.ObjectId == "file-object" && NoticeChoices.Options(savedNotice).Count == 2,
+                "durable storage metadata and Retry/Ignore options survive restart");
+            using (var connections = new CloudFilesLifetime((_, _, _) => throw new InvalidOperationException("Ignore must not connect"), _ => false))
+                await StorageNotices.ApplyAsync(store, connections, savedNotice, NoticeChoices.Ignore, CancellationToken.None);
+            Require(store.StorageSettlementPage().Count == 0 && store.NoticeById("pair", savedNotice.NoticeId!)!.Value.Closed,
+                "shared Ignore leaves receipt retained but not scheduled, without opening provider");
+            StorageNotices.Report(store, store.Pair("pair")!, remote.RelativePath, savedNotice.Storage!, new IOException("same failure"));
+            Require(!store.OpenNotices("pair").Any(n => n.Storage is not null), "ignored storage cause remains deduplicated");
+            store.CloseNotice(savedNotice.NoticeId!, "resolved");
+            store.RetryStorageSettlement(local.RootId, "file-object", "remote");
             var skippedConversions = 0;
             var skipped = new FilesOnDemandSettlement(store, (_, _) =>
             {
@@ -102,9 +117,12 @@ internal static class FilesOnDemandStorageChecks
             store.QueueStorageSettlement(local.RootId, "file-object", "remote", remote with { Revision = "revision-2" });
             store.CompleteStorageSettlement(old, new("OnlineOnly", false, true));
             Require(store.StorageSettlementPage().Count == 1, "stale completion cannot consume newer receipt");
-            worker = new FilesOnDemandSettlement(store, (_, _) => Task.FromResult(new StorageObserved("OnlineOnly", false, true)), (_, _) => failures++);
+            StorageNotices.Report(store, store.Pair("pair")!, remote.RelativePath, savedNotice.Storage!, new IOException("conversion retry"));
+            worker = new FilesOnDemandSettlement(store, (_, _) => Task.FromResult(new StorageObserved("OnlineOnly", false, true)), (_, _) => failures++,
+                completed: _ => StorageNotices.Complete(store, "pair", savedNotice.Storage!));
             await worker.RunPageAsync(0, CancellationToken.None);
             Require(store.StorageSettlementPage().Count == 0 && failures == 1, "successful conversion acknowledges exact receipt");
+            Require(!store.OpenNotices("pair").Any(n => n.Storage is not null), "successful settlement closes its notice family");
             for (var i = 0; i < 257; i++) store.QueueStorageSettlement(local.RootId, "object-" + i, "binding", remote);
             var first = store.StorageSettlementPage();
             var second = store.StorageSettlementPage(first[^1].JobId);

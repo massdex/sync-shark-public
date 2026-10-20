@@ -52,6 +52,8 @@ internal static class EngineCompositionChecks
         }
 
         await DropboxSideAsync(Path.Combine(root, "dropbox"), http);
+        foreach (var scenario in new[] { "immediate", "standalone", "same-pair", "other-pair" })
+            await ClassificationAdoptionAsync(Path.Combine(root, "classification-adoption", scenario), scenario);
         await RecoverySettingAsync(Path.Combine(root, "recovery"), http);
         await WorkerSettingAsync(Path.Combine(root, "workers"), http);
         await BatchSettingAsync(Path.Combine(root, "batches"), http);
@@ -118,6 +120,82 @@ internal static class EngineCompositionChecks
         var opened = await composition.Endpoints.OpenAsync(pair, default);
         Require(opened.InventoryA is DropboxInventory && opened.WriterB is DropboxWriter,
             "a retained connection with a credential opens Dropbox inventory and writer (no HTTP request)");
+    }
+
+    // The process keeps one ProductionEndpoints for its whole lifetime, so a later run must never adopt the Dropbox
+    // classification an earlier run left behind. The apply's reopen within one run still adopts its preview's read.
+    private static async Task ClassificationAdoptionAsync(string root, string scenario)
+    {
+        var product = Path.Combine(root, "product");
+        var local = Path.Combine(root, "local");
+        var recovery = Path.Combine(root, "Recovery");
+        Directory.CreateDirectory(product);
+        Directory.CreateDirectory(local);
+        using var instance = PilotInstanceLock.Acquire(Path.Combine(product, "state", "instance.lock"));
+        var binding = Binding();
+        await new DropboxConnectionStore(instance.StateAuthority).SaveNewAsync(binding);
+        await new SyncPairStore(instance.StateAuthority).GetOrCreateInstallationIdAsync();
+        await new SyncTransferSettingsStore(instance.StateAuthority).SaveAsync(
+            new SyncTransferSettings(LocalRecoveryRoot: recovery));
+        using var wire = new DropboxWire();
+        wire.SeedFile("keep.txt", "kept");
+        wire.SeedDeletedEntry("gone.txt");
+        using var http = new HttpClient(wire);
+        using var composition = EngineComposition.Open(
+            new EngineHostInputs(product, instance.StateAuthority, http, new Credentials { Token = "fixture-refresh" }),
+            V2Settings.Default, TimeProvider.System);
+        var localId = await composition.Roots.ObjectIdAsync(SyncProviders.Local, null, local, default);
+        var pair = new PairDef("pk", "pk", new RootDef("ka", SyncProviders.Local, null, local, localId),
+            DropboxRoot("kb", binding.ConnectionId, "/Pilot", DropboxWire.RootId), [], [], true);
+
+        composition.Store.SavePair(pair);
+        var progress = new Progress<RunProgress>();
+        var run = composition.Run;
+        var preview = await run.PreviewFirstSyncApplyResolvedAsync(pair.PairId, null, null, [], null, progress, default);
+        Require(preview.Plan.RunUnavailable is null && preview.Continuation is not null,
+            scenario + ": real run produces a usable preview and continuation");
+        var classified = (DropboxInventory)composition.Endpoints.Inventory(pair.B);
+        await classified.PrepareDeletionEvidenceAsync(["gone.txt"], default);
+        Require(classified.IsAtOrUnderExactTombstone("gone.txt"), "preview classifies tombstones");
+
+        if (scenario == "same-pair")
+        {
+            var next = await run.PreviewFirstSyncApplyResolvedAsync(pair.PairId, null, null, [], null, progress, default);
+            Require(next.Plan.RunUnavailable is null && next.Continuation != preview.Continuation,
+                "successive runs own distinct previews");
+        }
+        if (scenario == "other-pair")
+        {
+            var left = Path.Combine(root, "other-left");
+            var right = Path.Combine(root, "other-right");
+            Directory.CreateDirectory(left);
+            Directory.CreateDirectory(right);
+            var leftId = await composition.Roots.ObjectIdAsync(SyncProviders.Local, null, left, default);
+            var rightId = await composition.Roots.ObjectIdAsync(SyncProviders.Local, null, right, default);
+            var other = new PairDef("other", "other", new RootDef("oa", SyncProviders.Local, null, left, leftId),
+                new RootDef("ob", SyncProviders.Local, null, right, rightId), [], [], true);
+            composition.Store.SavePair(other);
+            var otherPlan = await run.PreviewFirstSyncAsync(other.PairId, progress, default);
+            Require(otherPlan.RunUnavailable is null, "another pair runs between preview and apply");
+        }
+
+        // No transfer is needed to exercise the real apply's reopen. Ask that opened inventory for evidence
+        // afterwards, measuring the provider requests instead of inspecting a private cache implementation.
+        var empty = preview.Plan with { Actions = [] };
+        var beforeApply = Listings();
+        var report = scenario == "standalone"
+            ? await run.ApplyAsync(pair.PairId, empty, progress, default)
+            : await run.ApplyAsync(pair.PairId, empty, progress, default, null, preview.Rebuildables, preview.Continuation);
+        Require(report.Outcome != RunOutcomes.Failed, scenario + ": apply runs successfully");
+        var applied = (DropboxInventory)composition.Endpoints.Inventory(pair.B);
+        Require(!ReferenceEquals(applied, classified), "apply exercises the production endpoint reopen");
+        await applied.PrepareDeletionEvidenceAsync(["gone.txt"], default);
+        var reuse = scenario is "immediate" or "other-pair";
+        Require(reuse ? Listings() == beforeApply : Listings() > beforeApply,
+            scenario + (reuse ? ": evidence reuses its own preview" : ": evidence refreshes without its own preview"));
+        Require(applied.IsAtOrUnderExactTombstone("gone.txt"), scenario + ": refreshed or reused evidence stays correct");
+
+        int Listings() => wire.Calls.Count(path => path == "/2/files/list_folder");
     }
 
     // Recovery location and retention (decision 55): the product settings store, no code default; missing or
@@ -354,7 +432,27 @@ internal static class EngineCompositionChecks
         var again = await composition.Run.PreviewFirstSyncAsync(pair.PairId, progress, default);
         Require(Text(plan) == Text(again) && plan.Actions.Count(action => action.Kind == ActionKind.CopyNew) == 2 &&
                 plan.Actions.All(action => action.Kind != ActionKind.CopyNew || action.Source?.Hash is not null),
-            "the preview plans both one-sided copies with their hashes, the same plan each time: " + Text(plan));
+            "the preview plans both one-sided copies with their hashes, the same plan each time: " + Text(plan) + " | again: " + Text(again));
+        Require(composition.Store.Cursor(a.RootId) is null && composition.Store.Cursor(b.RootId) is null &&
+                !composition.Store.FirstSyncDone(pair.PairId),
+            "repeated previews retain observations without committing effect cursors or completing first sync");
+        Require(!((ILocalGapStore)composition.Store).HasGapProtection(a.RootId) &&
+                !((ILocalGapStore)composition.Store).HasGapProtection(b.RootId),
+            "preview-only hashed inventory does not invent a local journal gap");
+        if (NtfsUsnCheckpoint.TryParseCursor(plan.ScanCursorA, out _, out _))
+        {
+            // Same metadata does not mean unchanged content: replay must observe the journal write.
+            var sourcePath = Path.Combine(recovery, "x.txt");
+            var mtime = File.GetLastWriteTimeUtc(sourcePath);
+            File.WriteAllText(sourcePath, "kept me");
+            File.SetLastWriteTimeUtc(sourcePath, mtime);
+            var changed = await composition.Run.PreviewFirstSyncAsync(pair.PairId, progress, default);
+            Require(changed.Actions.Count(action => action.Kind == ActionKind.CopyNew) == 2 &&
+                    changed.Actions.Single(action => action.Path == "x.txt").Source?.Hash !=
+                    plan.Actions.Single(action => action.Path == "x.txt").Source?.Hash,
+                "a later preview replays same-size same-time writes without dropping pending one-sided copies");
+            plan = changed;
+        }
         var applied = await composition.Run.ApplyAsync(pair.PairId, plan, progress, default);
         Require(applied.Failed == 0 && File.Exists(Path.Combine(other, "x.txt")) &&
                 File.Exists(Path.Combine(recovery, "y.txt")),

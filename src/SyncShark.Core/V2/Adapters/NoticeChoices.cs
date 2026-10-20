@@ -109,7 +109,9 @@ public static class NoticeChoices
     public const string RebindPending = "pending: rebind arrives with the central registry (B-191)";
 
     public static IReadOnlyList<SyncNoticeOption> Options(Notice notice) =>
-        JournalSizing.IsNotice(notice)
+        notice.Storage is not null
+            ? [new(RetryNow, "Retry verification / settlement"), new(Ignore, "Ignore (leave unchanged)")]
+            : JournalSizing.IsNotice(notice)
             ? [new(JournalSizing.Enlarge, "Enlarge (UAC)"), new(JournalSizing.NotNow, "Not now"), new(JournalSizing.Never, "Never")]
             : notice.DefenderHistory is { Cause: DefenderReview.SharedReleaseCause, SharedRelease: { } shared }
             ? [new(DefenderReleaseAllPairs, "Release in all pairs (also held by: " + (shared.OtherPairNames.Length == 0 ? "no other pairs" : shared.OtherPairNames) + ")"),

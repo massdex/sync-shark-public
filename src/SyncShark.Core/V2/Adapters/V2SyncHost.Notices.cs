@@ -108,6 +108,13 @@ public sealed partial class V2SyncHost
             cancellationToken.ThrowIfCancellationRequested();
             // Apply first, acknowledge second. A failed operation keeps the notice retryable.
             // Pause is idempotent if interrupted between these two durable writes.
+            if (notice.Storage is not null && _store is SqliteStateStore storage)
+            {
+                ReconnectCloudFiles(cancellationToken);
+                if (_cloudFiles is null) throw new IOException("Storage provider is unavailable; Retry later.");
+                await StorageNotices.ApplyAsync(storage, _cloudFiles, notice, choice, cancellationToken);
+                continue;
+            }
             if (JournalSizing.IsNotice(notice))
             {
                 await JournalSizing.ApplyAsync(_store, notice, choice, new AttendedElevatedAction(), cancellationToken);

@@ -64,6 +64,15 @@ public static class PlanNotices
         StringComparer.Ordinal);
 
     /// <summary>
+    /// Whether a notice names an item/scope, rather than a pair-wide display summary.
+    /// Empty-path notices of any kind (including informational and user-decision summaries)
+    /// never imply a root hold. A typed quarantine may explicitly hold the root itself.
+    /// Actual root scan failures remain protected by scan/retry evidence, not display text.
+    /// </summary>
+    public static bool HasPathScope(Notice notice) => notice.DefenderHistory is null &&
+        (notice.Path.Length > 0 || notice.Quarantine is not null);
+
+    /// <summary>
     /// True when Run must never close this notice on its own: a record of an automatic decision (the keyed reasons)
     /// or a pending user decision (any <see cref="NoticeKind.UserDecision"/> notice, e.g. a first-sync tie). The user
     /// closes a decision notice; Run closes it only through a checked resolution (SyncRun.ResolveDecisionAsync).

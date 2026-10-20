@@ -225,6 +225,7 @@ internal static partial class RunChecks
                 Require(store.DefenderDeferredPaths("ra", 512).Contains(item.Path), "deferred entity is queued without new watch events");
                 history.Fail = false;
                 history.Complete = true;
+                store.RequestSyncRetryNow("p1", item.Path); // Explicit Retry after access/history recovers, not the sleeping backoff.
                 await run.IncrementalAsync("p1", new RecordingProgress(), default);
                 Require(await fx.B.ObserveAsync(item.Path, default) is null && store.DefenderDeferredPaths("ra", 512).Count == 0,
                     "complete no-match recheck releases automatic deferral and propagates deletion");

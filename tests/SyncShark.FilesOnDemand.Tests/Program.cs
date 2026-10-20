@@ -1,4 +1,6 @@
-if (args is ["native", var nativeRoot])
+if (args is ["native", var cleanupRoot] && cleanupRoot.StartsWith("cleanup:", StringComparison.Ordinal))
+    await FilesOnDemandNativeChecks.CleanupAsync(cleanupRoot[8..]);
+else if (args is ["native", var nativeRoot])
     await FilesOnDemandNativeChecks.RunAsync(nativeRoot);
 else if (args is ["storage", var storageRoot])
 {
