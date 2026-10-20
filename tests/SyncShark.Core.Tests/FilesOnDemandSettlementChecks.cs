@@ -65,7 +65,7 @@ internal static class FilesOnDemandSettlementChecks
         Require(store.RetireStorageForResync(stale, pair, local.Path, "remote changed"), "stale receipt retired for targeted resync");
         var retry = store.SyncRetryAt(pair.PairId, local.Path)!;
         Require(retry.Kind == existingRetry.Kind && retry.Attempts == existingRetry.Attempts && retry.RetryAfter == existingRetry.RetryAfter &&
-            retry.ReadRoots!.Contains("other-root") && retry.ReadRoots.Contains(localRoot.RootId) && retry.ReadRoots.Contains(remoteRoot.RootId),
+            retry.ReadRoots!.Contains("other-root") && retry.ReadRoots!.Contains(localRoot.RootId) && retry.ReadRoots!.Contains(remoteRoot.RootId),
             "targeted resync merges roots without losing prior review state");
 
         var metadata = new StorageNotice(localRoot.RootId, local.ObjectId, remoteRoot.RootId,
