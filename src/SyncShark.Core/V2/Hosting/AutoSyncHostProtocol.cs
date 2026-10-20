@@ -62,9 +62,10 @@ public static class AutoSyncHostProtocol
         if (server)
         {
             var computer = new StringBuilder(256);
-            if (!GetNamedPipeClientComputerName(pipe.SafePipeHandle, computer, (uint)computer.Capacity) ||
-                !string.Equals(computer.ToString().TrimStart('\\'), Environment.MachineName, StringComparison.OrdinalIgnoreCase))
-                return false;
+            // ERROR_PIPE_LOCAL is the documented local-transport result. A successful lookup is
+            // an SMB client, including loopback SMB; reject it even when it names this machine.
+            if (GetNamedPipeClientComputerName(pipe.SafePipeHandle, computer, (uint)computer.Capacity) ||
+                Marshal.GetLastWin32Error() != 229) return false;
         }
         uint pid;
         var found = server

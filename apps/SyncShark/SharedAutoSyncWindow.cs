@@ -67,8 +67,13 @@ internal sealed class SharedAutoSyncWindow : Window
     private Task<AutoSyncHostReply?> Cli(params string[] args) => BackgroundHostEntry.Client().TrySendAsync(
         AutoSyncHostClient.Request("cli") with { CliArgs = new[] { "--cli" }.Concat(args).ToArray() }, TimeSpan.FromSeconds(2));
 
-    private Task<AutoSyncHostReply?> Resolve(string choice) => Cli("conflicts", "resolve", "--pair", _pair.Text,
-        "--path", _path.Text, "--key", _notice.Text, "--generation", "0", "--choice", choice, "--yes");
+    private Task<AutoSyncHostReply?> Resolve(string choice)
+    {
+        var args = new List<string> { "conflicts", "resolve", "--pair", _pair.Text,
+            "--key", _notice.Text, "--generation", "0", "--choice", choice, "--yes" };
+        if (_path.Text.Length > 0) args.AddRange(["--path", _path.Text]);
+        return Cli(args.ToArray());
+    }
 
     private void Add(Panel panel, string label, Func<Task<AutoSyncHostReply?>> operation)
     {

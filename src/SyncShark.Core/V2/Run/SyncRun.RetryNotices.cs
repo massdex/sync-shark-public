@@ -2,6 +2,44 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SyncRun
 {
+    private readonly object _noticeChoiceGate = new();
+
+    internal bool TryApplyImmediateNoticeChoice(string pairId, string noticeId, string choice, CancellationToken ct,
+        Action<PairDef, PairDef> saveNarrowerPair)
+    {
+        if (choice is not (NoticeChoices.RetryNow or NoticeChoices.Ignore)) return false;
+        lock (_noticeChoiceGate)
+        {
+            ct.ThrowIfCancellationRequested();
+            var saved = _store.NoticeById(pairId, noticeId);
+            if (saved is null || saved.Value.Closed || !NoticeChoices.IsRetryNotice(saved.Value.Notice) ||
+                !NoticeChoices.Options(saved.Value.Notice).Any(option => option.Choice == choice)) return false;
+            var notice = saved.Value.Notice;
+            if (NoticeChoices.IsPairRetryNotice(notice)) return ApplyPairNoticeChoice(pairId, noticeId, choice, ct);
+            if (choice == NoticeChoices.RetryNow) _store.RequestSyncRetryNow(pairId, notice.Path);
+            else
+            {
+                var pair = _store.Pair(pairId) ?? throw new SyncRunRefusedException("The pair no longer exists.");
+                var paths = CreateExclusions.Validate(pair.Excluded.Concat([notice.Path]).ToArray());
+                saveNarrowerPair(pair, pair with { Excluded = paths });
+                _store.ClearSyncRetry(pairId, notice.Path);
+                _store.CloseNotice(noticeId, choice);
+            }
+            return true; // scheduler will pick up retries; no synchronous run or effect here
+        }
+    }
+
+    internal bool ApplyPairNoticeChoice(string pairId, string noticeId, string choice, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var saved = _store.NoticeById(pairId, noticeId);
+        if (saved is null || saved.Value.Closed || !NoticeChoices.IsPairRetryNotice(saved.Value.Notice) ||
+            !NoticeChoices.Options(saved.Value.Notice).Any(option => option.Choice == choice))
+            throw new SyncRunRefusedException("That pair notice or option is no longer available. Refresh notices.");
+        if (choice == NoticeChoices.Ignore) _store.CloseNotice(noticeId, choice);
+        return true;
+    }
+
     // One shared authority for app and CLI. These choices change scheduling or exclusion policy,
     // never turn an uncertain effect into deletion permission or mark an effect successful.
     internal Task<bool> ApplyRetryNoticeChoiceAsync(string pairId, string noticeId, string choice, CancellationToken ct,

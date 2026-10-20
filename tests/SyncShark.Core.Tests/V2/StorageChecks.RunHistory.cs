@@ -10,6 +10,23 @@ internal static partial class StorageChecks
         RunHistoryPaging(Fresh(root, "run-history"));
         RunHistoryRetention(Fresh(root, "run-history-retention"));
         RunHistoryPresenceGuard(root);
+        PairOutageIgnoreResets(Fresh(root, "pair-outage-reset"));
+    }
+
+    private static void PairOutageIgnoreResets(string folder)
+    {
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock { UtcNow = T0 });
+        store.SavePair(Pair("p1"));
+        var outage = new Notice("p1", 0, NoticeKind.Info, "", "Network unavailable; retry", "autosync-failed-network");
+        store.AddNotices([outage]);
+        var id = store.OpenNotices("p1").Single().NoticeId!;
+        store.CloseNotice(id, NoticeChoices.Ignore);
+        store.AddNotices([outage]);
+        Require(store.OpenNotices("p1").Count == 0, "Ignore suppresses only the current outage episode");
+        store.CloseNoticeFamily("p1", "autosync-failed");
+        store.AddNotices([outage]);
+        Require(store.OpenNotices("p1").Single().NoticeId == id, "after recovery the next outage reopens the same deduplicated notice");
+        Console.WriteLine("PASS pair outage Ignore resets after recovery");
     }
 
     private static RunSummary Run(string runId, string pairId, DateTimeOffset started, int uploaded = 0,

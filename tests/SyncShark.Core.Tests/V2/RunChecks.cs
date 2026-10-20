@@ -170,6 +170,28 @@ internal static partial class RunChecks
         Console.WriteLine("PASS FirstSync_PreviewIsEffectFree");
     }
 
+    internal static async Task PairNoticeIgnoreDoesNotWaitForRunAsync()
+    {
+        var fx = Build();
+        fx.Store.MarkFirstSyncDone(fx.Pair.PairId);
+        fx.A.Seed("one.txt", "one"); fx.A.Seed("two.txt", "two");
+        fx.WriterB.ParkAfterFirstEffect = true;
+        var run = fx.Run();
+        var pending = run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        try
+        {
+            await fx.WriterB.FirstEffectCommitted.Task.WaitAsync(GateTimeout);
+            fx.Store.AddNotices([new Notice(fx.Pair.PairId, 0, NoticeKind.Info, "", "Reconnect and Retry", "autosync-failed-account-access")]);
+            var notice = fx.Store.OpenNotices(fx.Pair.PairId).Single(n => NoticeChoices.IsPairRetryNotice(n));
+            var runtime = new V2CliRuntime(null, fx.Store, run, new EndpointRootProbe(fx.Provider), Path.GetTempPath());
+            await runtime.ResolveConflictAsync(fx.Pair.PairId, "", NoticeChoices.Ignore, notice.NoticeId, 0, null, default).WaitAsync(TimeSpan.FromSeconds(2));
+            Require(!pending.IsCompleted && fx.Store.Pair(fx.Pair.PairId)!.Excluded.Count == 0,
+                "Ignore responds while the run remains active and never excludes the root");
+        }
+        finally { await run.StopAsync(); await pending; }
+        Console.WriteLine("PASS pair notice Ignore bypasses the active run gate");
+    }
+
     internal static async Task HistoryFailureDoesNotFailCompletedRunAsync()
     {
         using var store = new InMemoryStateStore { BeforeRecordSummary = _ => throw new IOException("history write unavailable") };

@@ -159,6 +159,10 @@ public interface IStateStore : IDisposable
     IEnumerable<SyncRetry> ReadSyncRetries(string pairId);
     void SaveSyncRetry(string pairId, SyncRetry retry);
     void ClearSyncRetry(string pairId, string path);
+    void RequestSyncRetryNow(string pairId, string path)
+    {
+        if (SyncRetryAt(pairId, path) is { } retry) SaveSyncRetry(pairId, retry with { RetryAfter = DateTimeOffset.MinValue });
+    }
     SyncRetry? SyncRetryAt(string pairId, string path);
     IReadOnlyList<SyncRetry> DueSyncRetries(string pairId, DateTimeOffset now, int limit);
     int CountSyncRetries(string pairId);
@@ -195,6 +199,14 @@ public interface IStateStore : IDisposable
 
     /// <summary>Closes a notice with the user's choice recorded on it.</summary>
     void CloseNotice(string noticeId, string? choice);
+
+    /// <summary>Closes/resets one pair's notice family, including ignored occurrences after recovery.
+    /// Production performs an indexed SQL update, not a load of the pair's item notices.</summary>
+    void CloseNoticeFamily(string pairId, string reasonPrefix, string? exceptReason = null)
+    {
+        foreach (var notice in OpenNotices(pairId).Where(n => n.ReasonKey?.StartsWith(reasonPrefix, StringComparison.Ordinal) == true && n.ReasonKey != exceptReason))
+            if (notice.NoticeId is { } id) CloseNotice(id, "resolved");
+    }
 
     /// <summary>Retains one finished run's bounded summary; a repeated run id is idempotent.</summary>
     void RecordRunSummary(RunSummary summary) { }

@@ -14,11 +14,27 @@ public sealed partial class V2CliRuntime
             throw new SyncCliUsageException("Use the exact --key and --generation 0 from conflicts list.");
         if (accountId is not null && !string.Equals(pair.B.AccountId, accountId, StringComparison.Ordinal))
             throw new SyncCliUsageException("The selected notice is not in this account.");
+        var selected = _store.NoticeById(pairId, conflictId);
+        if (selected is { Closed: false } &&
+            (NoticeChoices.IsPairRetryNotice(selected.Value.Notice) || PairPath.Same(selected.Value.Notice.Path, relativePath)) &&
+            _run.TryApplyImmediateNoticeChoice(pairId, conflictId, choice, cancellationToken,
+                (previous, updated) => SaveNarrowerPair(previous, updated)))
+        {
+            if (!_borrowed && choice == NoticeChoices.RetryNow && _store.FirstSyncDone(pairId))
+            {
+                var report = await _run.IncrementalAsync(pairId, new RunProgressForwarder(Console.Error.WriteLine), cancellationToken);
+                return new SyncCliRunData(pairId, pair.Name, report.Uploaded, report.Downloaded, 0,
+                    report.KeptBoth, report.Held, report.Outcome == RunOutcomes.Stopped)
+                { Failed = report.Failed, Deleted = report.Deleted, Moved = report.Moved, NeedsVerification = report.Uncertain, Diagnostics = report.Diagnostics };
+            }
+            return new SyncCliRunData(pairId, pair.Name, 0, 0, 0, 0, 0, false);
+        }
         await WaitForDataLockAsync(_runGate, Console.Error.WriteLine, cancellationToken);
         try
         {
-            var notice = _store.OpenNotices(pairId).FirstOrDefault(item => item.NoticeId == conflictId &&
-                PairPath.Same(item.Path, relativePath));
+            var current = _store.NoticeById(pairId, conflictId);
+            var notice = current is { Closed: false } && PairPath.Same(current.Value.Notice.Path, relativePath)
+                ? current.Value.Notice : null;
             if (notice is not null && NoticeChoices.IsRetryNotice(notice) && NoticeChoices.IsRetryChoice(choice))
             {
                 await _run.ApplyRetryNoticeChoiceAsync(pairId, conflictId, choice, cancellationToken,

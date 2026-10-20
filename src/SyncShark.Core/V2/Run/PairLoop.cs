@@ -215,8 +215,7 @@ internal sealed class PairLoop
             _consecutiveFailures = 0;
             try
             {
-                foreach (var notice in _in.Store.OpenNotices(_pairId).Where(NoticeChoices.IsAutoSyncFailure))
-                    if (notice.NoticeId is { } id) _in.Store.CloseNotice(id, "resolved");
+                _in.Store.CloseNoticeFamily(_pairId, "autosync-failed");
             }
             catch (Exception error) { RunOutput.Observe(error); }
         }
@@ -239,18 +238,25 @@ internal sealed class PairLoop
     {
         try
         {
-            if (++_consecutiveFailures < 3) return;
+            _consecutiveFailures++;
+            if (error is not (EndpointAccessException or StateDamagedException or SyncRunRefusedException) && _consecutiveFailures < 3) return;
             var cause = error is EndpointAccessException ? "account-access" :
                 error is StateDamagedException ? "store-damage" :
+                error is SyncRunRefusedException ? "blocked" :
+                error.HResult is unchecked((int)0x80070070) or unchecked((int)0x80070027) ? "disk-full" :
                 error is IOException ? "storage-or-network" :
                 error is HttpRequestException or OperationCanceledException ? "network" : "unexpected";
-            var resolution = error is EndpointAccessException
+            var why = error is SyncRunRefusedException refused ? refused.Reason?.Detail ?? refused.Message : error.Message;
+            var resolution = error is SyncRunRefusedException
+                ? "Address the stated pair or folder requirement, then choose Retry. This pair is held and automatically rechecked at the safety poll."
+                : error is EndpointAccessException
                 ? "Reconnect the account, then choose Retry."
                 : error is StateDamagedException
                     ? "Check state-store diagnostics and restore a verified backup if needed, then choose Retry."
                     : "Check connectivity and available disk space, then choose Retry. Automatic retries continue with bounded waits.";
+            _in.Store.CloseNoticeFamily(_pairId, "autosync-failed", "autosync-failed-" + cause);
             _in.Store.AddNotices([new Notice(_pairId, 0, NoticeKind.Info, string.Empty,
-                $"Automatic sync could not finish ({cause}): {error.Message}. {resolution} Ignore dismisses this notice without excluding files. Other pairs continue.",
+                $"Automatic sync could not finish ({cause}): {why}. {resolution} Ignore dismisses this notice without excluding files. Other pairs continue.",
                 "autosync-failed-" + cause)]);
         }
         catch (Exception) { /* A damaged/unavailable notice store cannot terminate another pair or the host. */ }

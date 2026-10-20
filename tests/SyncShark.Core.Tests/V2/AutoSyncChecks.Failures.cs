@@ -7,8 +7,9 @@ internal static partial class AutoSyncChecks
     private static async Task FailureChecksAsync()
     {
         await LoopExceptionAndNoticeRecoveryAsync();
+        await ImmediateAccessNoticeAsync();
         await ForeignCancellation_RetriesAsync();
-        await AccessFault_HeldWithoutRearmAsync();
+        await AccessFault_RetriesAtSafetyPollAsync();
         await DyingWatches_BoundedRebuildsAsync();
         await SlowCancelWatches_NeverOverlapAsync();
         await RealRunGate_PausedQueuedNeverScansAsync();
@@ -31,13 +32,13 @@ internal static partial class AutoSyncChecks
         rig.WatchA.Signal();
         await rig.ParkedAsync(AutoStatus.Waiting);
         rig.Clock.Advance(Settings.ChangeQuietWindow);
-        await Until(() => rig.State("p1").RetryAt is not null && rig.Clock.ActiveTimers == 1, "first failed run waits");
+        await Until(() => rig.Run.Runs("p1") == 3 && rig.State("p1").RetryAt > rig.Clock.GetUtcNow() && rig.Clock.ActiveTimers == 1, "first failed run waits");
         Require(rig._store.OpenNotices("p1").Count == 0, "one transient failure is silent");
         for (var i = 1; i < 4; i++)
         {
-            rig.Clock.Advance(SafetyPoll);
             var expected = 3 + i;
-            await Until(() => rig.Run.Runs("p1") == expected && rig.State("p1").RetryAt is not null && rig.Clock.ActiveTimers == 1, "failed run retries");
+            rig.Clock.Advance(rig.State("p1").RetryAt!.Value - rig.Clock.GetUtcNow());
+            await Until(() => rig.Run.Runs("p1") == expected && rig.State("p1").RetryAt > rig.Clock.GetUtcNow() && rig.Clock.ActiveTimers == 1, "failed run retries");
         }
         var notices = rig._store.OpenNotices("p1");
         Require(notices.Count == 1 && NoticeChoices.Options(notices[0]).Select(o => o.Choice).SequenceEqual(new[] { NoticeChoices.RetryNow, NoticeChoices.Ignore }),
@@ -46,6 +47,18 @@ internal static partial class AutoSyncChecks
         await rig.ParkedAsync(AutoStatus.Idle);
         Require(rig._store.OpenNotices("p1").Count == 0, "success automatically clears the outage notice");
         Pass("LoopExceptionAndNoticeRecovery");
+    }
+
+    internal static async Task ImmediateAccessNoticeAsync()
+    {
+        await using var rig = new Rig(["p1"]);
+        rig.Run.Then(new EndpointAccessException("account authorization was revoked"));
+        await rig.StartAsync();
+        await rig.ParkedAsync(AutoStatus.Held);
+        var notice = rig._store.OpenNotices("p1").Single();
+        Require(notice.ReasonKey == "autosync-failed-account-access" && notice.Detail.Contains("Reconnect", StringComparison.Ordinal),
+            "first auth failure immediately explains the reconnect fix");
+        Pass("ImmediateAccessNotice");
     }
 
     private static async Task ThrowingWatch_IsDeadWatchAsync()
@@ -116,7 +129,7 @@ internal static partial class AutoSyncChecks
         Pass("ForeignCancellation_Retries");
     }
 
-    private static async Task AccessFault_HeldWithoutRearmAsync()
+    private static async Task AccessFault_RetriesAtSafetyPollAsync()
     {
         await using var rig = await Rig.StartedAsync();
         rig.WatchA.Fail(new EndpointAccessException("revoked", new HttpRequestException("401")));
@@ -130,7 +143,7 @@ internal static partial class AutoSyncChecks
         rig.Clock.Advance(Settings.ChangeQuietWindow);
         await rig.ParkedAsync(AutoStatus.Idle);
         Require(rig.Run.Runs("p1") == 2, "auth hold automatically retries at the safety poll");
-        Pass("AccessFault_HeldWithoutRearm");
+        Pass("AccessFault_RetriesAtSafetyPoll");
     }
 
     private static async Task DyingWatches_BoundedRebuildsAsync()

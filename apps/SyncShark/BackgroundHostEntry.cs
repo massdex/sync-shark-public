@@ -46,7 +46,7 @@ internal static class BackgroundHostEntry
         if (await client.TrySendAsync(AutoSyncHostClient.Request("status"), TimeSpan.FromMilliseconds(300), ct) is { } existing)
             return existing;
         using var process = AutoSyncProcess.StartDetached(
-            Environment.ProcessPath ?? throw new IOException("Executable path unavailable."), supervisor: true);
+            Environment.ProcessPath ?? throw new IOException("Executable path unavailable."), supervisor: true, warning: Console.Error.WriteLine);
         // Only observations are retried. Mutations are sent exactly once by their caller.
         for (var attempt = 0; attempt < 30; attempt++)
         {
@@ -79,8 +79,13 @@ internal static class BackgroundHostEntry
             if (command == "stop") ProcessEntry.StopSupervisor();
             if (command is "install-startup" or "uninstall-startup")
             {
-                AutoSyncProcess.RegisterStartup(Environment.ProcessPath ?? throw new IOException("Executable path unavailable."), command == "install-startup");
-                output.WriteLine(command == "install-startup" ? "Per-user AutoSync startup installed; starts at next logon with crash supervision." : "Per-user AutoSync startup removed; running host unchanged.");
+                var executable = SyncSharkRuntimePaths.InstalledExecutablePath;
+                if (invocation.Flag("--this-build") || !File.Exists(executable))
+                {
+                    executable = Environment.ProcessPath ?? throw new IOException("Executable path unavailable.");
+                    if (command == "install-startup") error.WriteLine("Using this build because --this-build was selected or no installed stable launcher exists. Install the product and rerun install-startup to follow future updates.");
+                }
+                output.WriteLine(AutoSyncProcess.RegisterStartup(executable, command == "install-startup"));
                 return 0;
             }
             var options = invocation.Options ?? new Dictionary<string, string?>();

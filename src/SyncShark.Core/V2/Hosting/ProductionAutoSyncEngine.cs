@@ -49,6 +49,7 @@ public sealed class ProductionAutoSyncEngine : IAutoSyncHostEngine
                         states.TryGetValue(pair.PairId, out var state);
                         return new { pair.PairId, pair.Name, pair.Enabled, state = state?.Status.ToString() ?? "starting",
                             lastResult = _composition.Store.ReadRunHistory(pair.PairId, 1).FirstOrDefault(),
+                            lastChecked = state?.LastReport?.CompletedUtc,
                             retryDeadline = state?.RetryAt, nextRun = state?.NextRunUtc, reason = state?.Reason };
                     }).ToArray() };
             case "enable":
@@ -120,7 +121,10 @@ public sealed class ProductionAutoSyncEngine : IAutoSyncHostEngine
                 }
                 if (exitCode == 0 && invocation.Command == "pause" && invocation.AccountId is null)
                     await _composition.Run.StopAsync().ConfigureAwait(false);
-                return new HostCliOutput(exitCode, output.ToString(), errors.ToString() +
+                var text = output.Truncated && invocation.Json
+                    ? System.Text.Json.JsonSerializer.Serialize(new { truncated = true, exitCode, detail = "Output exceeded the bounded IPC limit. Inspect history or request a smaller page." })
+                    : output.ToString();
+                return new HostCliOutput(exitCode, text, errors.ToString() +
                     (output.Truncated || errors.Truncated ? "\nEarlier output was truncated; showing the bounded tail. Exit status is unchanged. Inspect history.\n" : ""));
             }
             default: throw new InvalidDataException("Unknown host operation.");

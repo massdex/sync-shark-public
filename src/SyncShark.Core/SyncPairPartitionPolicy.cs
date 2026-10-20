@@ -765,7 +765,9 @@ public static class SyncPairPartitionPolicy
     /// as ordinary data instead of excluding it. A private control/recovery row is never admitted by this path.
     /// </summary>
     public static bool AllowsCorrespondingIncludedPath(SyncPair candidate, SyncPair retained,
-        string existingPath, string candidatePath, string? rowPairId, string? rowSide)
+        string existingPath, string candidatePath, string? rowPairId, string? rowSide,
+        IReadOnlyList<SyncOpaqueCloudEndpointProof>? candidateProofs = null,
+        IReadOnlyList<SyncOpaqueCloudEndpointProof>? retainedProofs = null)
     {
         // Test-visible decision-tuple capture for the real admission transaction (D1). It records the exact
         // stage this row-scoped admission stopped at; production behaviour is unchanged and nothing consumes
@@ -789,18 +791,16 @@ public static class SyncPairPartitionPolicy
         if (string.IsNullOrWhiteSpace(rowPairId) || string.IsNullOrWhiteSpace(rowSide))
         { Report("empty-row-binding"); return false; }
         var controlRow = rowSide.EndsWith("_control", StringComparison.Ordinal);
-        if (DecideCorrespondingIncluded(candidate, retained) != SyncPairPartitionRelation.CorrespondingIncluded)
+        if (!TryCorrespondingIncluded(candidate, retained, out var enclosing, out var nested,
+                out _, out _, candidateProofs, retainedProofs))
         { Report("not-corresponding"); return false; }
         var candidateControl = IsRepresentedRow(candidate, candidatePath, "local_control") ||
             IsRepresentedRow(candidate, candidatePath, "dropbox_control");
         if (!candidateControl && !IsRepresentedRow(candidate, candidatePath, "local") &&
             !IsRepresentedRow(candidate, candidatePath, "dropbox"))
         { Report("candidate-row-unrepresented"); return false; }
-        SyncPair enclosing;
-        if (NestedSubtreeRelative(candidate, retained) is not null) enclosing = candidate;
-        else if (NestedSubtreeRelative(retained, candidate) is not null) enclosing = retained;
-        else { Report("no-nesting-direction"); return false; }
-        var nested = ReferenceEquals(enclosing, candidate) ? retained : candidate;
+        // Use the same proof-bound direction as the pair decision; display paths alone
+        // cannot establish ancestry for an opaque cloud endpoint.
         var rowPair = string.Equals(rowPairId, enclosing.Id, StringComparison.Ordinal) ? enclosing
             : string.Equals(rowPairId, nested.Id, StringComparison.Ordinal) ? nested : null;
         if (rowPair is null) { Report("row-pair-unrepresented"); return false; }

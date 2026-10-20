@@ -154,7 +154,8 @@ internal static class StoreSchema
     // Presence-guarded additive step, also run after the version chain on every compatible startup.
     // At final26 integration this composes AFTER v12..v17/removal_review without changing their stamps.
     private static void MigrateRunSummary(SqliteConnection connection, SqliteTransaction? transaction) =>
-        Execute(connection, transaction, RunSummaryDdl);
+        Execute(connection, transaction, RunSummaryDdl +
+            "CREATE INDEX IF NOT EXISTS nt_pair_reason ON notice(pair_no,reason_key);");
 
     private static void MigrateMappedDirectories(SqliteConnection connection)
     {
@@ -190,7 +191,7 @@ internal static class StoreSchema
         "notice", "local_rehash", "rehash_retry", "deletion_evidence", "dir_key", "dir_mapped_key", "fs_obj", "fs_flagged", "fs_refused", "sp_a_obj", "sp_b_obj", "sp_a_dir", "sp_b_dir",
         "run_summary", "run_summary_pair",
 
-        "pe_unresolved", "rc_pair", "nt_open", "prepare_header", "prepare_row", "prepare_lookup", "prepare_cursor",
+        "pe_unresolved", "rc_pair", "nt_open", "nt_pair_reason", "prepare_header", "prepare_row", "prepare_lookup", "prepare_cursor",
         "deletion_classification", "deletion_classification_path", "observation_checkpoint",
     ];
 

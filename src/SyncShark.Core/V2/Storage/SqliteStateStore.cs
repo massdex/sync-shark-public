@@ -422,6 +422,11 @@ public sealed partial class SqliteStateStore : IStateStore
 
     public void CloseNotice(string noticeId, string? choice) => InStore(() => _notices.Close(noticeId, choice));
 
+    public void CloseNoticeFamily(string pairId, string reasonPrefix, string? exceptReason = null) => InStore(() =>
+    {
+        if (PairNo(pairId) is { } pairNo) _notices.CloseFamily(pairNo, reasonPrefix, exceptReason);
+    });
+
     public void RecordRunSummary(RunSummary summary) => InStore(() =>
         _runHistory.Record(summary, NowMs(), _settings.HistoryRetention, _settings.RunSummaryMaximumRows));
 

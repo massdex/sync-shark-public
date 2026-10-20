@@ -131,12 +131,6 @@ public partial class App : System.Windows.Application
             _mainWindow.Show();
     }
 
-    private async void RunBackgroundHost()
-    {
-        try { Shutdown(await BackgroundHostEntry.RunAsync()); }
-        catch (Exception error) { Console.Error.WriteLine(SyncCli.DescribeException(error)); Shutdown(1); }
-    }
-
     internal static void WriteStartupProgress(string phase, string detail)
     {
         try { Console.Error.WriteLine($"Sync Shark startup: [{DateTimeOffset.UtcNow:O}] {phase}; {detail}"); }

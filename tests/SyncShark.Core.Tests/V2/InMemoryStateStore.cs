@@ -524,6 +524,7 @@ internal sealed class InMemoryStateStore : IStateStore
                     known.RetainedVersion?.ActionId == notice.RetainedVersion?.ActionId);
                 if (same is not null)
                 {
+                    if (NoticeChoices.IsRetryNotice(notice) && _closedNotices.GetValueOrDefault(same.NoticeId!) == "ignore") continue;
                     if (notice.RetainedVersion is null) _closedNotices.Remove(same.NoticeId!);
                     // These standing notices refresh their current details without changing problem identity.
                     if ((notice.Kind == NoticeKind.UserDecision && notice.Detail.Contains(ProviderNameRefusedException.Detail, StringComparison.Ordinal)) || notice.FreeSpace is not null ||
@@ -566,6 +567,13 @@ internal sealed class InMemoryStateStore : IStateStore
             var notice = _notices.FirstOrDefault(row => row.PairId == pairId && row.NoticeId == noticeId);
             return notice is null ? null : (notice, _closedNotices.ContainsKey(noticeId));
         }
+    }
+
+    public void CloseNoticeFamily(string pairId, string reasonPrefix, string? exceptReason = null)
+    {
+        lock (_gate)
+            foreach (var n in _notices.Where(n => n.PairId == pairId && n.ReasonKey?.StartsWith(reasonPrefix, StringComparison.Ordinal) == true && n.ReasonKey != exceptReason))
+                _closedNotices[n.NoticeId!] = "resolved";
     }
 
     public void CloseNotice(string noticeId, string? choice)

@@ -19,6 +19,8 @@ if (args is ["--autosync-host-child", var hostRoot, var hostAddress])
 if (args is ["--v2-autosync-phase3-checks"])
 {
     await Massdex.SyncShark.V2.AutoSyncChecks.LoopExceptionAndNoticeRecoveryAsync();
+    await Massdex.SyncShark.V2.AutoSyncChecks.ImmediateAccessNoticeAsync();
+    await Massdex.SyncShark.V2.RunChecks.PairNoticeIgnoreDoesNotWaitForRunAsync();
     await Massdex.SyncShark.V2.RunChecks.HistoryFailureDoesNotFailCompletedRunAsync();
     await Massdex.SyncShark.V2.AutoSyncHostChecks.RunAsync();
     return 0;

@@ -41,13 +41,14 @@ internal static class ProcessEntry
             {
                 try
                 {
-                    using var child = AutoSyncProcess.StartDetached(Environment.ProcessPath ?? throw new IOException("Executable unavailable."), supervisor: false);
+                    using var child = AutoSyncProcess.StartDetached(Environment.ProcessPath ?? throw new IOException("Executable unavailable."), supervisor: false, warning: Console.Error.WriteLine);
                     child.WaitForExit();
                     if (child.ExitCode == 0) return 0; // explicit safe stop/attach is not a crash
                 }
-                catch (Exception error) when (error is IOException or System.ComponentModel.Win32Exception)
+                catch (Exception error)
                 {
-                    // A temporarily unavailable executable or resource retries with the same bounded policy.
+                    try { Console.Error.WriteLine("AutoSync relaunch will retry: " + SyncCli.DescribeException(error)); }
+                    catch (Exception) { } // a detached diagnostic stream cannot terminate supervision
                 }
                 if (stop.WaitOne(delay)) return 0;
                 delay = TimeSpan.FromSeconds(Math.Min(delay.TotalSeconds * 2, 300));

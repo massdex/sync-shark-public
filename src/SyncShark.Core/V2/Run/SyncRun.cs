@@ -269,14 +269,24 @@ public sealed partial class SyncRun : ISyncRun
 
     private void RecordSummarySafely(RunReport report, DateTimeOffset startedAt)
     {
+        try
+        {
+            if (report.Outcome is RunOutcomes.Complete or RunOutcomes.Partial)
+                _store.CloseNoticeFamily(report.PairId, "autosync-failed");
+        }
+        catch (Exception error) { RunOutput.Observe(error); }
         // Empty successful safety polls do not evict meaningful history.
         if (report.Outcome == RunOutcomes.Complete && report.Done == 0 && report.FailureCount == 0 &&
-            report.Held == 0 && report.Deferred == 0 && report.Skipped == 0) return;
+            report.Held == 0 && report.Deferred == 0 && report.Skipped == 0)
+        {
+            try { _store.CloseNoticeFamily(report.PairId, "run-history-unavailable"); }
+            catch (Exception error) { RunOutput.Observe(error); }
+            return;
+        }
         try
         {
             _store.RecordRunSummary(RunSummary.Of(Guid.NewGuid().ToString("N"), report, startedAt, _time.GetUtcNow()));
-            foreach (var notice in _store.OpenNotices(report.PairId).Where(n => n.ReasonKey == "run-history-unavailable"))
-                if (notice.NoticeId is { } id) _store.CloseNotice(id, "resolved");
+            _store.CloseNoticeFamily(report.PairId, "run-history-unavailable");
         }
         catch (Exception error)
         {

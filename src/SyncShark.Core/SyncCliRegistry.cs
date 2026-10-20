@@ -48,7 +48,7 @@ public static class SyncCliRegistry
         new("capabilities", "capabilities", SyncCliRequestKind.Capabilities, "none",
             "prints the machine-readable capability inventory", "nothing", "state-free", None),
         new("autosync start", "autosync start", SyncCliRequestKind.State, "explicit", "start or attach to the shared background host", "installed executable", "background-host", None, Mutating: true),
-        new("autosync install-startup", "autosync install-startup", SyncCliRequestKind.State, "explicit", "register per-user logon startup with crash supervision", "installed executable", "background-host", None, Mutating: true),
+        new("autosync install-startup", "autosync install-startup [--this-build]", SyncCliRequestKind.State, "explicit", "register stable installed logon startup; replace stale or legacy entries with a warning", "installed executable", "background-host", "--this-build", Mutating: true),
         new("autosync uninstall-startup", "autosync uninstall-startup", SyncCliRequestKind.State, "explicit", "remove per-user logon startup; running host unchanged", "installed executable", "background-host", None, Mutating: true),
         new("autosync stop", "autosync stop", SyncCliRequestKind.State, "explicit", "stop at a durable safe point", "running host", "background-host", None, Mutating: true),
         new("autosync status", "autosync status", SyncCliRequestKind.State, "none", "host identity and pair scheduler state; never launches", "nothing", "background-host", None),
@@ -218,7 +218,7 @@ public static class SyncCliRegistry
             SyncCliRequestKind.State, "none", "one conflict's identities, sizes, hashes and retained-text flags",
             "the product state or the running application", "direct|running-application",
             "--pair,--path,--account", RequiresPair: true),
-        new("conflicts resolve", "conflicts resolve --pair <exact-id> --path <relative-path> --choice <decision> --key <conflict-id> --generation <n> --yes [--timeout-seconds <seconds>]",
+        new("conflicts resolve", "conflicts resolve --pair <exact-id> [--path <relative-path>] --choice <decision> --key <conflict-id> --generation <n> --yes [--timeout-seconds <seconds>]",
             SyncCliRequestKind.State, "yes", "applies exactly one explicit conflict decision with the stale-plan guard",
             "the product state or the running application", "direct|running-application",
             "--pair,--path,--choice,--key,--generation,--account,--yes,--timeout-seconds", Mutating: true, RequiresYes: true,
@@ -1118,7 +1118,7 @@ public static class SyncCliRegistry
                 return await operations.LoadConflictAsync(invocation.PairId!, RequirePath(invocation),
                     invocation.AccountId, cancellationToken);
             case "conflicts resolve":
-                return await operations.ResolveConflictAsync(invocation.PairId!, RequirePath(invocation),
+                return await operations.ResolveConflictAsync(invocation.PairId!, invocation.Path ?? string.Empty,
                     RequireChoice(invocation), invocation.Key, invocation.Generation, invocation.AccountId,
                     cancellationToken, Progress);
             case "recovery list":

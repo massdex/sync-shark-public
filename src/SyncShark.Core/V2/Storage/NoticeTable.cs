@@ -62,6 +62,13 @@ internal sealed class NoticeTable
         StoreSchema.Execute(_connection, null, "UPDATE notice SET state='closed', choice=$choice WHERE notice_id=$id;",
             ("$choice", choice), ("$id", noticeId));
 
+    public void CloseFamily(long pairNo, string prefix, string? exceptReason) =>
+        StoreSchema.Execute(_connection, null,
+            "UPDATE notice SET state='closed', choice='resolved' WHERE pair_no=$pair " +
+            "AND reason_key >= $prefix AND reason_key < $end " +
+            "AND ($except IS NULL OR reason_key <> $except) AND (state='open' OR choice='ignore');",
+            ("$pair", pairNo), ("$prefix", prefix), ("$end", prefix + "\uffff"), ("$except", exceptReason));
+
     internal static string RetainedId(string pairId, string actionId) => ShortId.Make("nv", pairId, actionId);
 
     public (Notice Notice, bool Closed)? ById(long pairNo, string noticeId, SqliteTransaction? transaction = null)

@@ -1,12 +1,12 @@
 using System.ComponentModel;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32;
+using Microsoft.Win32.SafeHandles;
 
 namespace Massdex.SyncShark.V2;
 
-/// <summary>Windows process/startup edge. Building commands is pure; registration is explicitly opt-in.</summary>
+/// <summary>Windows process/startup edge. Registration is explicitly opt-in.</summary>
 public static class AutoSyncProcess
 {
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -21,31 +21,63 @@ public static class AutoSyncProcess
         return $"\"{Path.GetFullPath(executable)}\" {SupervisorArguments}";
     }
 
-    public static void RegisterStartup(string executable, bool enabled)
+    public static string RegisterStartup(string executable, bool enabled)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
-        var command = StartupCommand(executable);
         using var key = Registry.CurrentUser.CreateSubKey(RunKey, writable: true)
             ?? throw new IOException("The per-user startup key could not be opened.");
-        if (key.GetValue(ValueName) is string current && !string.Equals(current, command, StringComparison.OrdinalIgnoreCase))
-            throw new IOException("The AutoSync startup entry points elsewhere. Inspect it before replacing it; nothing changed.");
-        if (enabled) key.SetValue(ValueName, command, RegistryValueKind.String);
-        else key.DeleteValue(ValueName, throwOnMissingValue: false);
+        // Uninstall is idempotent regardless of which version/build registered this product value.
+        if (!enabled)
+        {
+            key.DeleteValue(ValueName, throwOnMissingValue: false);
+            key.DeleteValue("Sync Shark", throwOnMissingValue: false);
+            return "Removed Sync Shark logon entries; running processes are unchanged.";
+        }
+        var command = StartupCommand(executable);
+        var warning = key.GetValue(ValueName) is string current && !string.Equals(current, command, StringComparison.OrdinalIgnoreCase)
+            ? "Replaced a stale AutoSync startup entry. " : string.Empty;
+        if (key.GetValue("Sync Shark") is not null)
+        {
+            key.DeleteValue("Sync Shark", throwOnMissingValue: false);
+            warning += "Replaced legacy GUI logon startup with shared AutoSync to avoid competing owners. ";
+        }
+        key.SetValue(ValueName, command, RegistryValueKind.String);
+        return warning + "Registered per-user AutoSync logon startup with crash supervision.";
     }
 
-    /// <summary>No inherited handles/console. Breakaway failure is explicit, never silently attached to a kill job.</summary>
-    public static Process StartDetached(string executable, bool supervisor)
+    /// <summary>Owns the original kernel handle even if the child exits before this method returns.</summary>
+    public static ChildProcess StartDetached(string executable, bool supervisor, Action<string>? warning = null)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
-        var command = new StringBuilder($"\"{Path.GetFullPath(executable)}\" {(supervisor ? SupervisorArguments : HostArguments)}");
+        var text = $"\"{Path.GetFullPath(executable)}\" {(supervisor ? SupervisorArguments : HostArguments)}";
         var startup = new StartupInfo { Size = Marshal.SizeOf<StartupInfo>() };
-        // CREATE_BREAKAWAY_FROM_JOB | DETACHED_PROCESS. No redirected pipes that could fill or die with the caller.
-        if (!CreateProcess(executable, command, IntPtr.Zero, IntPtr.Zero, false, 0x01000008,
+        if (!CreateProcess(executable, new StringBuilder(text), IntPtr.Zero, IntPtr.Zero, false, 0x01000008,
                 IntPtr.Zero, Path.GetDirectoryName(executable), ref startup, out var process))
-            throw new Win32Exception(Marshal.GetLastWin32Error(),
-                "Could not detach AutoSync from this launcher's job. Start it from Explorer or install per-user startup; no attached host was started.");
-        try { return Process.GetProcessById(process.ProcessId); }
-        finally { CloseHandle(process.Thread); CloseHandle(process.Process); }
+        {
+            var error = Marshal.GetLastWin32Error();
+            if (error != 5) throw new Win32Exception(error);
+            // Some launchers prohibit breakaway. Still start a console-independent host rather than refusing.
+            // Windows may retain the caller's job in this fallback; explain that limitation explicitly.
+            warning?.Invoke("This launcher prohibits job breakaway. Starting without a console; its job may still stop AutoSync when the launcher closes. Per-user logon startup avoids this launcher's job.");
+            if (!CreateProcess(executable, new StringBuilder(text), IntPtr.Zero, IntPtr.Zero, false, 0x00000008,
+                    IntPtr.Zero, Path.GetDirectoryName(executable), ref startup, out process))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        CloseHandle(process.Thread);
+        return new ChildProcess(new SafeProcessHandle(process.Process, ownsHandle: true));
+    }
+
+    public sealed class ChildProcess : IDisposable
+    {
+        private readonly SafeProcessHandle _handle;
+        internal ChildProcess(SafeProcessHandle handle) => _handle = handle;
+        public bool HasExited => WaitForSingleObject(_handle, 0) == 0;
+        public void WaitForExit()
+        {
+            if (WaitForSingleObject(_handle, uint.MaxValue) != 0) throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        public int ExitCode => GetExitCodeProcess(_handle, out var code) ? unchecked((int)code) : throw new Win32Exception(Marshal.GetLastWin32Error());
+        public void Dispose() => _handle.Dispose();
     }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -64,6 +96,11 @@ public static class AutoSyncProcess
     private static extern bool CreateProcess(string application, StringBuilder command, IntPtr processAttributes,
         IntPtr threadAttributes, [MarshalAs(UnmanagedType.Bool)] bool inheritHandles, uint flags,
         IntPtr environment, string? directory, ref StartupInfo startup, out ProcessInfo process);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(SafeProcessHandle handle, uint milliseconds);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetExitCodeProcess(SafeProcessHandle process, out uint exitCode);
     [DllImport("kernel32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CloseHandle(IntPtr handle);
