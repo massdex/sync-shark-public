@@ -7,7 +7,7 @@ public sealed partial class SyncRun
 
     private async Task<(IReadOnlyList<string> Touched, IReadOnlyList<string> Incomplete)> RetryScanScopesAsync(
         PairDef pair, RootDef root, Side side, IInventorySource inventory, string cursor, long gen,
-        Func<string, bool> include, ProgressThrottle throttle, CancellationToken ct)
+        Func<string, bool> include, ProgressThrottle throttle, CancellationToken ct, bool rootFeedComplete = false)
     {
         var touched = new List<string>();
         var incomplete = new List<string>();
@@ -18,7 +18,11 @@ public sealed partial class SyncRun
             .Chunk(64))
         {
             ct.ThrowIfCancellationRequested();
-            var scopes = batch.Where(retry => include(retry.Path)).Where(retry =>
+            // A completed Dropbox feed already replays every change since the UNADVANCED
+            // cursor. Root debt must not trigger an uncheckpointed recursive prefix listing,
+            // nor stay asleep after that replay has succeeded. Full bootstraps use FullAsync.
+            var scopes = batch.Where(retry => !(rootFeedComplete && inventory is DropboxInventory && retry.Path.Length == 0))
+                .Where(retry => include(retry.Path)).Where(retry =>
             {
                 if (remaining > 0 && retry.RetryAfter <= _time.GetUtcNow()) { remaining--; return true; }
                 incomplete.Add(retry.Path); // Sleeping work still protects both sides and its notice.
@@ -75,8 +79,9 @@ public sealed partial class SyncRun
         // A retry is retired only after its endpoints have observed the scope. A promoted
         // cursor excludes read debt through these durable targeted-reread rows.
         foreach (var retry in _store.ReadSyncRetries(pair.PairId))
-            if ((retry.Kind == "scan" || retry.ReadRoots is { Count: > 0 }) && !failed.Any(path => path.Length == 0 ||
-                PairPath.IsSelfOrUnder(retry.Path, path) || PairPath.IsSelfOrUnder(path, retry.Path)))
+            if ((retry.Kind == "scan" || retry.ReadRoots is { Count: > 0 }) &&
+                (retry.Path.Length == 0 ? !failed.Contains(string.Empty) : !failed.Any(path => path.Length == 0 ||
+                    PairPath.IsSelfOrUnder(retry.Path, path) || PairPath.IsSelfOrUnder(path, retry.Path))))
             {
                 if (retry.Kind != "scan")
                 {

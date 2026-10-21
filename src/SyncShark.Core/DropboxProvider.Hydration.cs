@@ -12,7 +12,8 @@ public sealed partial class DropboxPilotClient
         await VerifyRootIdentityAsync(ct);
         using var metadata = await PostJsonAllowingMissingPathAsync(
             "https://api.dropboxapi.com/2/files/get_metadata", new
-            { path = RequiredRootId() + "/" + prefix, include_deleted = true, include_media_info = false }, ct);
+            { path = prefix.Length == 0 ? RequiredRootId() : RequiredRootId() + "/" + prefix,
+                include_deleted = true, include_media_info = false }, ct);
         if (metadata is null) { await VerifyRootIdentityAsync(ct); return; }
         var first = Parse(metadata.RootElement);
         if (!string.Equals(first.Path, prefix, StringComparison.OrdinalIgnoreCase))

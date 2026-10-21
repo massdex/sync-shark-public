@@ -309,6 +309,8 @@ public sealed partial class SyncRun
                 finally { evidence.Writer.TryComplete(); }
             }
         }, token);
+        var resolutionTransportFailures = 0;
+        Exception? resolutionTransportError = null;
         var resolve = Task.Run(async () =>
         {
             var watch = Stopwatch.StartNew();
@@ -389,6 +391,14 @@ public sealed partial class SyncRun
 
             async Task ExecuteResolvedAsync(HeldDeletion rule, SyncRemoteDeletionEvidence? deletionEvidence)
             {
+                if (Volatile.Read(ref resolutionTransportFailures) >= 3)
+                {
+                    lock (sync) pending.Add(rule.Path);
+                    SaveFailedRetry(pair, rule.Path, "Evidence deferred after repeated transport failures: " +
+                        Volatile.Read(ref resolutionTransportError)!.Message, _store.SyncRetryAt(pair.PairId, rule.Path));
+                    return;
+                }
+                var transportFailed = false;
                 try
                 {
                     var heldRetry = _store.SyncRetryAt(pair.PairId, rule.Path);
@@ -620,9 +630,19 @@ public sealed partial class SyncRun
                 }
                 catch (Exception error) when (error is not PairPausedException && ScopeFailure(error, ct))
                 {
+                    if (ProviderTransientFailure.IsTransient(error, ct) || error is TimeoutException)
+                    {
+                        transportFailed = true;
+                        Volatile.Write(ref resolutionTransportError, error);
+                        Interlocked.Increment(ref resolutionTransportFailures);
+                    }
                     lock (sync) pending.Add(rule.Path);
                     SaveFailedRetry(pair, rule.Path, "Evidence: " + error.Message, _store.SyncRetryAt(pair.PairId, rule.Path));
                     Trace("held path pending: " + error.GetType().Name);
+                }
+                finally
+                {
+                    if (!transportFailed) Interlocked.Exchange(ref resolutionTransportFailures, 0);
                 }
             }
         }, token);

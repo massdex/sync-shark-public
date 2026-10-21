@@ -981,8 +981,9 @@ public sealed partial class DropboxPilotClient(
     internal Task<(IReadOnlyList<PilotRemoteEntry> Entries, IReadOnlySet<string> DeletedPaths,
         IReadOnlySet<string> DeletedAncestors, string BasisCursor)>
         ListEntriesWithDeletedPathsAsync(Func<SyncInventoryProgress, Task>? onProgress,
-            CancellationToken cancellationToken, Func<string, bool>? include = null, V2.ListingCheckpoint? checkpoint = null) =>
-        ListEntriesCoreAsync(onProgress, cancellationToken, include, checkpoint);
+            CancellationToken cancellationToken, Func<string, bool>? include = null, V2.ListingCheckpoint? checkpoint = null,
+            TimeSpan? readBudget = null) =>
+        ListEntriesCoreAsync(onProgress, cancellationToken, include, checkpoint, readBudget);
 
     public async Task<PilotRemoteEntry?> FindEntryAtPathAsync(string relativePath,
         CancellationToken cancellationToken = default)
@@ -1073,11 +1074,11 @@ public sealed partial class DropboxPilotClient(
     private async Task<(IReadOnlyList<PilotRemoteEntry> Entries, IReadOnlySet<string> DeletedPaths,
         IReadOnlySet<string> DeletedAncestors, string BasisCursor)>
         ListEntriesCoreAsync(Func<SyncInventoryProgress, Task>? onProgress, CancellationToken cancellationToken,
-            Func<string, bool>? include = null, V2.ListingCheckpoint? checkpoint = null)
+            Func<string, bool>? include = null, V2.ListingCheckpoint? checkpoint = null, TimeSpan? readBudget = null)
     {
         Task<JsonDocument> ReadListingPageAsync(string route, object body, CancellationToken token) =>
-            checkpoint is null ? PostJsonAsync(route, body, token) :
-            checkpoint.PageAsync(route, body, () => PostJsonAsync(route, body, token));
+            checkpoint is null ? PostJsonAsync(route, body, token, readBudget) :
+            checkpoint.PageAsync(route, body, () => PostJsonAsync(route, body, token, readBudget));
 
         async Task Report(string detail, int count)
         {
@@ -3182,8 +3183,9 @@ public sealed partial class DropboxPilotClient(
         }, (response, _) => Task.FromResult(response), expected.RelativePath, token, handOffResponse: true);
     }
 
-    private async Task<JsonDocument> PostJsonAsync(string uri, object? payload, CancellationToken cancellationToken) =>
-        await PostJsonCoreAsync(uri, payload, allowClassifiedMissingPath: false, cancellationToken) ??
+    private async Task<JsonDocument> PostJsonAsync(string uri, object? payload, CancellationToken cancellationToken,
+        TimeSpan? readBudget = null) =>
+        await PostJsonCoreAsync(uri, payload, allowClassifiedMissingPath: false, cancellationToken, readBudget: readBudget) ??
         throw new InvalidDataException(
             "Dropbox reported an absent path for a read that requires the exact item to be present.");
 
@@ -3198,7 +3200,7 @@ public sealed partial class DropboxPilotClient(
 
     private async Task<JsonDocument?> PostJsonCoreAsync(string uri, object? payload,
         bool allowClassifiedMissingPath, CancellationToken cancellationToken, string? exactAccessToken = null,
-        Func<JsonElement, bool>? allowedConflict = null)
+        Func<JsonElement, bool>? allowedConflict = null, TimeSpan? readBudget = null)
     {
         var body = JsonSerializer.Serialize(payload, JsonOptions);
         return await ReadWithRetryAsync<JsonDocument?>(async ct =>
@@ -3221,7 +3223,7 @@ public sealed partial class DropboxPilotClient(
                 return null;
             EnsureSuccess(response);
             return await ReadBoundedJsonAsync(response, ct);
-        }, _root, cancellationToken, operation: new Uri(uri).AbsolutePath);
+        }, _root, cancellationToken, budgetOverride: readBudget, operation: new Uri(uri).AbsolutePath);
     }
 
     private async Task<bool> ClassifiesAbsentExactPathAsync(HttpResponseMessage response,

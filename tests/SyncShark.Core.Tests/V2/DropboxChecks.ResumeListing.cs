@@ -15,6 +15,9 @@ internal static partial class DropboxChecks
         await ChangedSubtreeResumeAsync(Path.Combine(root, "changed-subtree"));
         await DeltaResumeAsync(Path.Combine(root, "delta"));
         await DeltaNetworkOutageAsync(Path.Combine(root, "delta-outage"));
+        await DeltaOutageRunRetiresDebtAsync(Path.Combine(root, "run-delta-outage"));
+        await AdversarialDeleteDuringDeltaOutageAsync(Path.Combine(root, "run-delta-delete"));
+        await MembershipFailureKeepsItemRetryAsync(Path.Combine(root, "run-membership"));
         await MillionRowCheckpointAsync(Path.Combine(root, "million"));
         Console.WriteLine("resumelist: full resume, expired cursor, delta resume, partial isolation, pause persistence and double reopen passed");
     }

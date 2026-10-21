@@ -132,10 +132,6 @@ public sealed partial class LocalInventory : IInventorySource
         PairPause.Check();
         var (checkpoint, journalDeleted) = ReadWalkCheckpointState();
         var sql = _known as SqliteStateStore;
-        // A temporarily unavailable journal is not proof that its saved walk is invalid.
-        // Keep the durable directories until the journal is readable again (RQ-031/034).
-        if (checkpoint is null && !journalDeleted && sql?.HasLocalWalk(rootId) == true)
-            return WholeIncomplete(gen, rootId);
         if (checkpoint is null) { sql?.ForgetLocalWalk(rootId); sql = null; }
         var options = JsonSerializer.Serialize(new { _settings.ReplaceOnlineOnlyStubs,
             ProductOwned = _productOwnedPaths.OrderBy(path => path, StringComparer.Ordinal).ToArray() });

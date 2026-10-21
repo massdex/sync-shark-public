@@ -258,6 +258,15 @@ internal sealed class ScriptedInventory : IInventorySource
     /// <summary>The largest single HashAsync request, i.e. the largest hash checkpoint.</summary>
     public int MaxHashChunk { get; private set; }
     public int HashCalls { get; private set; }
+
+    /// <summary>Per-path HashAsync calls issued by the bulk-failure isolation fallback.</summary>
+    public int SinglePathHashCalls { get; private set; }
+
+    /// <summary>
+    /// When set, every HashAsync call fails with <see cref="HashError"/>, so a transport outage is not
+    /// limited to one path (the sustained-outage circuit-breaker check).
+    /// </summary>
+    public bool HashErrorAlways { get; set; }
     public int? CrashOnHashCall { get; set; }
     public string? ThrowHashPath { get; set; }
     public Exception? HashError { get; set; }
@@ -295,6 +304,8 @@ internal sealed class ScriptedInventory : IInventorySource
     public Task<IReadOnlyDictionary<string, string>> HashAsync(IReadOnlyList<string> paths, CancellationToken ct)
     {
         HashCalls++;
+        if (paths.Count == 1) SinglePathHashCalls++;
+        if (HashErrorAlways) throw HashError ?? new UnknownHashFailure();
         if (ThrowHashPath is not null && paths.Contains(ThrowHashPath)) throw HashError ?? new UnknownHashFailure();
         OnHash?.Invoke();
         if (HashCalls == CrashOnHashCall) throw new SimulatedCrash();

@@ -98,6 +98,13 @@ internal sealed partial class DropboxWire : HttpMessageHandler
     /// <summary>Runs after a continuation response is captured, before the caller receives it.</summary>
     public Action<string>? AfterContinueResponse { get; set; }
 
+    /// <summary>
+    /// When set, a non-null result for an endpoint path is thrown before the request is handled. The
+    /// resilience checks use this to simulate the DNS/transport failure (HttpRequestException carrying a
+    /// SocketException) that a status-only script cannot express.
+    /// </summary>
+    public Func<string, Exception?>? RequestException { get; set; }
+
     /// <summary>Returns change-feed metadata for the current live file, preserving its downloadable id/revision.</summary>
     public object ChangeExistingFile(string relative) => FileMetadata(_items[relative]);
 
@@ -168,6 +175,7 @@ internal sealed partial class DropboxWire : HttpMessageHandler
             using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
             lock (ContinueCursors) ContinueCursors.Add(body.RootElement.GetProperty("cursor").GetString()!);
         }
+        if (RequestException?.Invoke(path) is { } interruption) throw interruption;
         if (_scripted.TryGetValue(path, out var script) && script.Count > 0) return Error(script.Dequeue());
         return await HandleAsync(request, path, token);
     }

@@ -40,12 +40,13 @@ public sealed partial class DropboxPilotClient
     /// One parsed change-feed page that carries each changed item's full metadata (size, hash, revision), so a
     /// proportional delta needs no per-item follow-up read. A folder that is this exact root is skipped.
     /// </summary>
-    internal async Task<DropboxChangePage> ReadChangePageAsync(string cursor, CancellationToken ct, V2.ListingCheckpoint? checkpoint = null)
+    internal async Task<DropboxChangePage> ReadChangePageAsync(string cursor, CancellationToken ct,
+        V2.ListingCheckpoint? checkpoint = null, TimeSpan? readBudget = null)
     {
         cursor = RequireOpaqueCursor(cursor);
         const string route = "https://api.dropboxapi.com/2/files/list_folder/continue";
-        using var document = checkpoint is null ? await PostJsonAsync(route, new { cursor }, ct) :
-            await checkpoint.PageAsync(route, new { cursor }, () => PostJsonAsync(route, new { cursor }, ct));
+        using var document = checkpoint is null ? await PostJsonAsync(route, new { cursor }, ct, readBudget) :
+            await checkpoint.PageAsync(route, new { cursor }, () => PostJsonAsync(route, new { cursor }, ct, readBudget));
         var root = document.RootElement;
         var next = RequireCursor(root, "Dropbox returned no continuation cursor.");
         var hasMore = root.GetProperty("has_more").GetBoolean();
@@ -96,17 +97,34 @@ public sealed partial class DropboxPilotClient
         var places = new System.Collections.Concurrent.ConcurrentDictionary<string, string?>(StringComparer.Ordinal);
         if (ids.Length == 0) return places;
         await VerifyRootIdentityAsync(ct);
+        var consecutiveTransportFailures = 0;
+        Exception? transportFailure = null;
         await Parallel.ForEachAsync(ids, new ParallelOptions
         {
             MaxDegreeOfParallelism = MembershipReadParallelism, CancellationToken = ct,
         }, async (id, token) =>
         {
-            try { places[id] = await CurrentRelativePathAsync(id, token); }
+            if (unreadable is not null && Volatile.Read(ref consecutiveTransportFailures) >= 3)
+            {
+                unreadable(id, Volatile.Read(ref transportFailure)!);
+                return;
+            }
+            try
+            {
+                places[id] = await CurrentRelativePathAsync(id, token);
+                Interlocked.Exchange(ref consecutiveTransportFailures, 0);
+            }
             catch (Exception error) when (unreadable is not null && !token.IsCancellationRequested &&
                 error is not V2.PairPausedException && !IsAccessRefusal(error) &&
                 (error is IOException or HttpRequestException or TimeoutException || ProviderTransientFailure.IsTransient(error, token)))
             {
                 // Missing dictionary key means unknown, not absent (null). The inventory protects that path.
+                if (ProviderTransientFailure.IsTransient(error, token) || error is TimeoutException)
+                {
+                    Volatile.Write(ref transportFailure, error);
+                    Interlocked.Increment(ref consecutiveTransportFailures);
+                }
+                else Interlocked.Exchange(ref consecutiveTransportFailures, 0);
                 unreadable(id, error);
             }
         });

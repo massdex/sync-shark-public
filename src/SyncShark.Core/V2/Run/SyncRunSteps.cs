@@ -546,7 +546,6 @@ public sealed partial class SyncRun
         try
         {
             var scan = await ScanSideCoreAsync(pair, side, throttle, ct, inventoryCursors, firstSync);
-            CloseWaitNotice();
             return scan;
         }
         catch (Exception error) when (ScopeFailure(error, ct) &&
@@ -562,14 +561,17 @@ public sealed partial class SyncRun
                 " Progress is saved; restore connectivity or access and Retry to resume.";
             _store.WriteSnapshot(new Snapshot(root.RootId, side, gen, cursor, [], [""]));
             throttle.Report(RunPhases.Reading(root), reason, 0, 0);
-            CloseWaitNotice(); // RecordScanRetries replaces waiting with actionable durable debt.
             return new SideScan(gen, cursor, false, true, [], [], NoDeletions, [])
             {
                 IncompleteSubtrees = [""],
                 IncompleteReasons = new Dictionary<string, string> { [""] = reason }
             };
         }
-        finally { DropboxPilotClient.ReadWaiting.Value = previousWait; }
+        finally
+        {
+            DropboxPilotClient.ReadWaiting.Value = previousWait;
+            CloseWaitNotice(); // Including cancellation, cooperative pause and shutdown.
+        }
 
         void CloseWaitNotice()
         {
@@ -717,7 +719,8 @@ public sealed partial class SyncRun
             if (before is not null && !string.Equals(before, change.Path, StringComparison.Ordinal)) previous.Add(before);
         }
         _store.WriteDelta(delta with { IncludesPath = include });
-        var retryReads = await RetryScanScopesAsync(pair, root, side, inventory, delta.CursorAfter, deltaGen, include, throttle, ct);
+        var retryReads = await RetryScanScopesAsync(pair, root, side, inventory, delta.CursorAfter, deltaGen, include, throttle, ct,
+            rootFeedComplete: !delta.IncompleteSubtrees.Contains(string.Empty));
         paths.AddRange(retryReads.Touched);
         delta = delta with { IncompleteSubtrees = delta.IncompleteSubtrees.Concat(retryReads.Incomplete).Distinct(StringComparer.OrdinalIgnoreCase).ToArray() };
         await inventory.VerifyPendingAsync(include, paths.Add, ct);
@@ -897,15 +900,32 @@ public sealed partial class SyncRun
                     // A bulk provider API need not identify the failed member. Isolate that
                     // bounded chunk once, not the whole inventory and not a retry loop.
                     var recovered = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    var consecutiveTransportFailures = 0;
+                    Exception? transportFailure = null;
                     foreach (var path in chunk)
                     {
+                        ct.ThrowIfCancellationRequested();
+                        PairPause.Check();
+                        if (consecutiveTransportFailures >= 3)
+                        {
+                            SaveFailedRetry(pair, path, "Hash deferred after repeated transport failures: " + transportFailure!.Message,
+                                _store.SyncRetryAt(pair.PairId, path));
+                            continue;
+                        }
                         try
                         {
                             foreach (var entry in await _endpoints.Inventory(root).HashAsync([path], ct))
                                 recovered[entry.Key] = entry.Value;
+                            consecutiveTransportFailures = 0;
                         }
                         catch (Exception itemError) when (ScopeFailure(itemError, ct))
                         {
+                            if (ProviderTransientFailure.IsTransient(itemError, ct) || itemError is TimeoutException)
+                            {
+                                consecutiveTransportFailures++;
+                                transportFailure = itemError;
+                            }
+                            else consecutiveTransportFailures = 0;
                             SaveFailedRetry(pair, path, "Hash: " + itemError.Message, _store.SyncRetryAt(pair.PairId, path));
                         }
                     }

@@ -42,7 +42,7 @@ public sealed partial class DropboxPilotClient
     internal Func<TimeSpan, CancellationToken, Task>? ReadRetryDelay { get; set; }
 
     private static bool IsReadInterruption(Exception error, CancellationToken token) =>
-        !token.IsCancellationRequested && error is not DropboxEffectUncertainException &&
+        !token.IsCancellationRequested && error is not (DropboxEffectUncertainException or V2.PairPausedException) &&
         (error is HttpRequestException { StatusCode: null } or SocketException or OperationCanceledException or TimeoutException ||
          error is IOException);
 
@@ -59,8 +59,7 @@ public sealed partial class DropboxPilotClient
         TimeSpan? budgetOverride = null, TimeSpan? maxBackoff = null, bool handOffResponse = false, string? operation = null,
         DropboxRetryLimits? retryPolicy = null)
     {
-        var listing = (operation ?? path).Contains("/files/list_folder", StringComparison.Ordinal);
-        var budget = budgetOverride ?? (listing ? ListingTransientBudget : null) ?? ReadTransientBudget;
+        var budget = budgetOverride ?? ReadTransientBudget;
         if (budget <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(ReadTransientBudget));
         var started = ReadRetryTime.GetTimestamp();
         var limits = new DropboxRetryLimits(
@@ -74,6 +73,7 @@ public sealed partial class DropboxPilotClient
         for (var attempt = 0; ; attempt++)
         {
             token.ThrowIfCancellationRequested();
+            V2.PairPause.Check();
             var remaining = budget - ReadRetryTime.GetElapsedTime(started);
             if (remaining <= TimeSpan.Zero) throw Exhausted(null, lastRefusal);
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -138,13 +138,22 @@ public sealed partial class DropboxPilotClient
                 request = null;
                 if (delay >= remaining || delay > limits.MaxBackoff) throw Exhausted(interruption, lastRefusal);
                 if (attempt == 0) ReadWaiting.Value?.Invoke(
-                    "Waiting for network or Dropbox service (" + reason + "). Listing progress is saved. " +
-                    "Sync will retry automatically; restore connectivity, Retry, or Ignore the affected scope.");
+                    "Waiting for network or Dropbox service (" + reason + "). " +
+                    "Sync will retry automatically when connectivity is restored.");
                 await SyncByteProgressStream.ReportProcessAsync("Waiting for network; retry Dropbox read", path,
                     $"Retrying {operation ?? path} in {delay.TotalSeconds:N0}s (attempt {attempt + 1}, {reason}) — " +
                     $"{remaining.TotalSeconds:N0}s remain in the transient budget; no write is being replayed.", ProcessMessageKind.Notice);
-                if (ReadRetryDelay is { } delayAsync) await delayAsync(delay, token);
-                else await Task.Delay(delay, ReadRetryTime, token);
+                // Pause is cooperative rather than token-based. Short slices bound pause latency
+                // without shortening the provider's Retry-After or losing cancellation.
+                while (delay > TimeSpan.Zero)
+                {
+                    token.ThrowIfCancellationRequested();
+                    V2.PairPause.Check();
+                    var slice = delay < TimeSpan.FromSeconds(1) ? delay : TimeSpan.FromSeconds(1);
+                    if (ReadRetryDelay is { } delayAsync) await delayAsync(slice, token);
+                    else await Task.Delay(slice, ReadRetryTime, token);
+                    delay -= slice;
+                }
             }
             finally { response?.Dispose(); request?.Dispose(); }
         }

@@ -12,6 +12,7 @@ internal static partial class RunChecks
         await FirstSyncOutageRetainsReadDebtAsync();
         await ReadOutageCompletesSafelyAsync();
         await ItemReadTimeoutBecomesRetryAsync();
+        await HashFallbackBreakerAsync();
         await PairSummaryDoesNotHoldSiblingsAsync();
         await HeldRetriesSurviveAsync();
         await ReleasedSurvivor_FlaggedAsync();

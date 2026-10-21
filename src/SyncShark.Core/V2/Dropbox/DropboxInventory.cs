@@ -37,10 +37,21 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
             return accept(rows.Where(r => r.Entry is not null).Select(r => DropboxItems.ToItem(r.Entry!)).ToArray());
         }, ct);
 
-    internal Task HydratePrefixesAsync(IReadOnlyList<string> prefixes,
-        Func<IReadOnlyList<DropboxChange>, Task> accept, CancellationToken ct) =>
-        Parallel.ForEachAsync(prefixes, new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = ct },
+    internal async Task HydratePrefixesAsync(IReadOnlyList<string> prefixes,
+        Func<IReadOnlyList<DropboxChange>, Task> accept, CancellationToken ct)
+    {
+        if (prefixes.Contains(string.Empty))
+        {
+            // Root scope is "", never "id:/". A required full re-list uses the durable
+            // inventory page journal; it is not an uncheckpointed prefix hydration.
+            var listing = await ListCheckpointedAsync(null, ct);
+            foreach (var batch in listing.Entries.Select(entry => new DropboxChange(entry.RelativePath, entry)).Chunk(256))
+                await accept(batch);
+            return;
+        }
+        await Parallel.ForEachAsync(prefixes, new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = ct },
             async (prefix, token) => await _client.HydratePrefixAsync(prefix, accept, token));
+    }
 
     /// <summary>A complete listing; a moved or unreachable root yields a whole-root-incomplete snapshot, never a delete.</summary>
     public async Task<Snapshot> FullAsync(long gen, Func<string, bool> include, IProgress<string> p,
@@ -54,7 +65,7 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
         _validatedThisRun = null;
         try
         {
-            var listing = await ListCheckpointedAsync(p, ct, include);
+            var listing = await ListCheckpointedAsync(p, ct, include, _client.ListingTransientBudget);
             entries = listing.Entries;
             _deletedExactFromFull = listing.DeletedPaths;
             _deletedAncestorsFromFull = listing.DeletedAncestors;
@@ -178,7 +189,7 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
 
     private async Task<(IReadOnlyList<PilotRemoteEntry> Entries, IReadOnlySet<string> DeletedPaths,
         IReadOnlySet<string> DeletedAncestors, string BasisCursor)> ListCheckpointedAsync(
-        IProgress<string>? p, CancellationToken ct, Func<string, bool>? include = null)
+        IProgress<string>? p, CancellationToken ct, Func<string, bool>? include = null, TimeSpan? readBudget = null)
     {
         var checkpoint = OpenListing("full");
         async Task<(IReadOnlyList<PilotRemoteEntry> Entries, IReadOnlySet<string> DeletedPaths,
@@ -187,7 +198,7 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
             {
                 ProgressGuard.Report(p, $"{progress.ObservedCount:N0} items: {progress.Detail}", ct);
                 return Task.CompletedTask;
-            }, ct, include, checkpoint);
+            }, ct, include, checkpoint, readBudget);
         (IReadOnlyList<PilotRemoteEntry> Entries, IReadOnlySet<string> DeletedPaths,
             IReadOnlySet<string> DeletedAncestors, string BasisCursor) listing;
         try
@@ -235,7 +246,7 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
             {
                 if (++pages > maximumPages)
                     throw new InvalidDataException($"Dropbox exceeded the bounded change-feed limit of {maximumPages:N0} pages.");
-                var page = await _client.ReadChangePageAsync(current, ct, checkpoint);
+                var page = await _client.ReadChangePageAsync(current, ct, checkpoint, _client.ListingTransientBudget);
                 feed.AddRange(page.Changes);
                 current = page.Cursor;
                 hasMore = page.HasMore;
@@ -275,7 +286,8 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
         var deleted = await DeletedRowsAsync(collapsed.Where(change => change.Entry is null)
             .Select(change => change.Path).Distinct(StringComparer.Ordinal).ToArray(), ct, incomplete);
         // Unknown membership is per-item read debt, not a deletion and not a root failure (RQ-032/034).
-        collapsed.RemoveAll(change => incomplete.Keys.Any(path => PairPath.IsSelfOrUnder(change.Path, path)));
+        var unreadable = incomplete.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        collapsed.RemoveAll(change => unreadable.Contains(change.Path) || PairPath.Ancestors(change.Path).Any(unreadable.Contains));
         foreach (var path in incomplete.Keys) deleted.Remove(path);
         // DeletedMetadata has neither kind nor server time. Known folders use the ordinary delta deletion
         // and descendant rules, not file revision history (decision 68). A replay after ingestion can have

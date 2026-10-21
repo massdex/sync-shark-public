@@ -23,6 +23,8 @@ internal static partial class DropboxChecks
         await ExcludedNestedListingAndReplayAsync();
         await FullRootChecksAsync();
         await MembershipTimeoutIsPerItemAsync();
+        await ReadBudgetScopeAsync();
+        await RetryWaitPauseAndCancelAsync();
         await DeltaChecksAsync();
         await DeltaDeletionTimeAsync();
         await PrepareCursorChecksAsync();
