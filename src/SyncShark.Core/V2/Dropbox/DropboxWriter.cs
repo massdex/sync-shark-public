@@ -117,7 +117,7 @@ public sealed partial class DropboxWriter : IEndpointWriter, ISyncTransferResour
     }
 
     /// <inheritdoc/>
-    public Task<IReadOnlyList<bool?>> IsAbsentBatchAsync(
+    public Task<IReadOnlyList<AbsenceObservation>> IsAbsentBatchAsync(
         IReadOnlyList<(ItemState Historical, string Path)> requests, CancellationToken ct)
     {
         if (requests.Count > 128) throw new ArgumentOutOfRangeException(nameof(requests));
@@ -129,7 +129,7 @@ public sealed partial class DropboxWriter : IEndpointWriter, ISyncTransferResour
     public async Task<bool?> IsSourceAbsentAsync(ItemState? historical, string path, CancellationToken ct)
     {
         if (historical is not null)
-            return (await IsAbsentBatchAsync([(historical, path)], ct).ConfigureAwait(false))[0];
+            return (await IsAbsentBatchAsync([(historical, path)], ct).ConfigureAwait(false))[0].Absent;
         // Bound aggregate metadata reads across ordinary workers and whole-folder victim checks.
         await _absenceReads.WaitAsync(ct).ConfigureAwait(false);
         try

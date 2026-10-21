@@ -31,6 +31,7 @@ internal static partial class ExecutorChecks
         }
         await AdmissionAbsenceBatchChecksAsync();
         await AdmissionAbsenceBatchFailureChecksAsync();
+        await AdmissionAbsenceIsolatedMemberChecksAsync();
         await DeleteSourceFailureIsPerItemAsync();
         {
             var (_, a, b, executor) = Rig();
@@ -112,6 +113,35 @@ internal static partial class ExecutorChecks
             Require(store.Baselines("p1").Count == 64 && actions.All(action =>
                 store.SyncRetryAt("p1", action.Path) is not null), "every blocked batch member retains durable retry and baseline");
         }
+    }
+
+    private static async Task AdmissionAbsenceIsolatedMemberChecksAsync()
+    {
+        var (store, a, b, executor) = Rig(Settings(64));
+        var source = new RecordingWriter(a) { UnknownAbsencePath = "ten-3", UnknownAbsenceReason = "rate limited" };
+        var target = new RecordingWriter(b);
+        var actions = new List<SyncAction>();
+        for (var i = 0; i < 10; i++)
+        {
+            var path = "ten-" + i;
+            var original = a.Seed(path, "same");
+            var victim = b.Seed(path, "same");
+            SeedBaseline(store, "ten-" + i, original, victim);
+            await RemoveSourceAsync(a, path);
+            actions.Add(Act(ActionKind.Delete, Side.B, path, expected: victim, rf: true, key: "ten-" + i));
+        }
+        var results = await Apply(executor, Plan(actions.ToArray()), source, target);
+        Require(results.Count(r => r.Outcome == Outcome.Done) == 9 && target.Deletes == 9 && target.Preserves == 9,
+            "one inconclusive member leaves the other nine deletion checks evaluated normally");
+        Require(results.Count(r => r.DeleteSourceUnconfirmed) == 1 &&
+            results.Single(r => r.DeleteSourceUnconfirmed).Outcome == Outcome.Skipped &&
+            store.SyncRetryAt("p1", "ten-3") is not null,
+            "the inconclusive member is blocked with a retry while its healthy siblings proceed");
+        var blocked = store.ReadBlockedDeletes("p1").Items.Single(item => item.Path == "ten-3");
+        Require(blocked.Detail.Contains("absence could not be verified: rate limited", StringComparison.Ordinal),
+            "the blocked item keeps the real cause of its failed absence check");
+        Require(store.OpenNotices("p1").Count(n => n.ReasonKey == SqliteStateStore.BlockedDeleteSummary) == 1,
+            "one aggregated notice per pair, not one per failed member");
     }
 
     private static async Task DeleteSourceFailureIsPerItemAsync()

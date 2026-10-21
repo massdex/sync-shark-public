@@ -1,22 +1,37 @@
 namespace Massdex.SyncShark.V2;
 
+/// <summary>One bounded absence observation. A null observation never authorizes deletion; Reason is diagnostic only.</summary>
+public readonly record struct AbsenceObservation(bool? Absent, string? Reason)
+{
+    /// <summary>A short, non-sensitive explanation for an inconclusive observation.</summary>
+    internal static string Cause(Exception error) => error switch
+    {
+        HttpRequestException { StatusCode: System.Net.HttpStatusCode.TooManyRequests } => "rate limited",
+        HttpRequestException => "network error",
+        TimeoutException => "timeout",
+        OperationCanceledException => "timeout",
+        InvalidDataException or ArgumentException => "the source identity or path is malformed",
+        _ => error.Message,
+    };
+}
+
 /// <summary>Fresh identity AND path absence evidence; null means absence could not be proved.</summary>
 public interface ISourceAbsenceProbe
 {
     /// <summary>True only when the historical identity (if supplied) and exact path are both absent.</summary>
     Task<bool?> IsSourceAbsentAsync(ItemState? historical, string path, CancellationToken ct);
 
-    /// <summary>Bounded fresh evidence in request order; null never authorizes deletion.</summary>
-    async Task<IReadOnlyList<bool?>> IsAbsentBatchAsync(IReadOnlyList<(ItemState Historical, string Path)> requests,
-        CancellationToken ct)
+    /// <summary>Bounded fresh evidence in request order; a null observation never authorizes deletion.</summary>
+    async Task<IReadOnlyList<AbsenceObservation>> IsAbsentBatchAsync(
+        IReadOnlyList<(ItemState Historical, string Path)> requests, CancellationToken ct)
     {
-        var results = new bool?[requests.Count];
+        var results = new AbsenceObservation[requests.Count];
         await Parallel.ForEachAsync(Enumerable.Range(0, requests.Count), new ParallelOptions
         { MaxDegreeOfParallelism = 8, CancellationToken = ct }, async (index, token) =>
         {
-            try { results[index] = await IsSourceAbsentAsync(requests[index].Historical, requests[index].Path, token).ConfigureAwait(false); }
+            try { results[index] = new(await IsSourceAbsentAsync(requests[index].Historical, requests[index].Path, token).ConfigureAwait(false), null); }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-            catch (Exception error) when (error is not OutOfMemoryException) { results[index] = null; }
+            catch (Exception error) when (error is not OutOfMemoryException) { results[index] = new(null, AbsenceObservation.Cause(error)); }
         }).ConfigureAwait(false);
         return results;
     }
@@ -65,7 +80,7 @@ internal static class DeleteSourceGuard
     internal static async Task<ActionResult?> CheckAsync(SyncAction action, IEndpointWriter source,
         StoreCommitter committer, string pairId, CancellationToken ct, ItemState? replacement = null,
         bool pairedAdmitted = false, bool preprobed = false, bool? absence = null,
-        AdmissionAbsenceBatch? admissionBatch = null)
+        AdmissionAbsenceBatch? admissionBatch = null, string? absenceReason = null)
     {
         if (!Applies(action)) return null;
         string? detail;
@@ -96,19 +111,28 @@ internal static class DeleteSourceGuard
                 identityMissing = historical is null || string.IsNullOrWhiteSpace(historical.ObjectId);
                 // A missing path alone cannot exclude an original that moved elsewhere. This also
                 // holds expanded children without a baseline until trusted per-child identity arrives.
-                var absent = historical is not null && !string.IsNullOrWhiteSpace(historical.ObjectId) &&
-                    source is ISourceAbsenceProbe probe
-                    ? preprobed ? absence : admissionBatch is not null
-                        ? await admissionBatch.ProbeAsync(probe, historical, action.Path, ct).ConfigureAwait(false)
-                        : await probe.IsSourceAbsentAsync(historical, action.Path, ct).ConfigureAwait(false)
-                    : null;
+                bool? absent = null;
+                if (historical is not null && !string.IsNullOrWhiteSpace(historical.ObjectId) &&
+                    source is ISourceAbsenceProbe probe)
+                {
+                    if (preprobed) absent = absence;
+                    else if (admissionBatch is not null)
+                    {
+                        var observation = await admissionBatch.ProbeAsync(probe, historical, action.Path, ct).ConfigureAwait(false);
+                        absent = observation.Absent;
+                        absenceReason = observation.Reason;
+                    }
+                    else absent = await probe.IsSourceAbsentAsync(historical, action.Path, ct).ConfigureAwait(false);
+                }
                 if (absent == true) return null;
                 retryLater |= absent is null;
                 detail = identityMissing
                     ? "The original source identity is unavailable, so absence cannot authorize deletion. Nothing was deleted; review this item to keep, restore, ignore, or explicitly remove its frozen survivor."
                     : absent == false
                         ? "Deletion was expected, but the source item still exists. Nothing was deleted; the item will be checked and replanned next run."
-                        : "Deletion was expected, but the source item's absence could not be verified. Nothing was deleted; Retry checks it again next run.";
+                        : "Deletion was expected, but the source item's absence could not be verified" +
+                          (string.IsNullOrWhiteSpace(absenceReason) ? "" : ": " + absenceReason) +
+                          ". Nothing was deleted; Retry checks it again next run.";
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }

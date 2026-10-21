@@ -6,9 +6,9 @@ internal sealed class AdmissionAbsenceBatch
 {
     private readonly object _gate = new();
     private readonly Dictionary<ISourceAbsenceProbe, List<Request>> _pending = new();
-    private sealed record Request(ItemState Historical, string Path, TaskCompletionSource<bool?> Result);
+    private sealed record Request(ItemState Historical, string Path, TaskCompletionSource<AbsenceObservation> Result);
 
-    internal Task<bool?> ProbeAsync(ISourceAbsenceProbe probe, ItemState historical, string path, CancellationToken ct)
+    internal Task<AbsenceObservation> ProbeAsync(ISourceAbsenceProbe probe, ItemState historical, string path, CancellationToken ct)
     {
         var request = new Request(historical, path, new(TaskCreationOptions.RunContinuationsAsynchronously));
         List<Request>? ready = null;
@@ -49,8 +49,11 @@ internal sealed class AdmissionAbsenceBatch
             var results = await probe.IsAbsentBatchAsync(page.Select(x => (x.Historical, x.Path)).ToArray(), ct)
                 .ConfigureAwait(false);
             // Malformed evidence is inconclusive for the entire page, never inferred absence.
+            // Keep a reason so the blocked item's notice can say why it could not be verified.
             for (var i = 0; i < page.Count; i++)
-                page[i].Result.TrySetResult(results.Count == page.Count ? results[i] : null);
+                page[i].Result.TrySetResult(results.Count == page.Count
+                    ? results[i]
+                    : new(null, "the provider returned an incomplete absence result"));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {

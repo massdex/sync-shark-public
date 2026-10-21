@@ -79,7 +79,7 @@ public sealed partial class Executor
                         indices[action.ActionId] = requests.Count;
                         requests.Add((historical, action.Path));
                     }
-                    IReadOnlyList<bool?> observations = new bool?[requests.Count];
+                    IReadOnlyList<AbsenceObservation> observations = new AbsenceObservation[requests.Count];
                     if (requests.Count > 0 && source is ISourceAbsenceProbe probe)
                     {
                         try { observations = await probe.IsAbsentBatchAsync(requests, ct).ConfigureAwait(false); }
@@ -91,7 +91,9 @@ public sealed partial class Executor
                         var indexed = indices.TryGetValue(action.ActionId, out var index);
                         var result = await DeleteSourceGuard.CheckAsync(action, source, committer, plan.PairId, ct,
                             DeleteSourceGuard.Replacement(action, replacements), preprobed: true,
-                            absence: indexed && index < observations.Count ? observations[index] : null).ConfigureAwait(false);
+                            absence: indexed && index < observations.Count ? observations[index].Absent : null,
+                            absenceReason: indexed && index < observations.Count ? observations[index].Reason : null)
+                            .ConfigureAwait(false);
                         if (result is not null) blocked = 1;
                     }
                 }

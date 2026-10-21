@@ -508,12 +508,13 @@ public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResource
     }
 
     /// <inheritdoc/>
-    public async Task<IReadOnlyList<bool?>> IsAbsentBatchAsync(
+    public async Task<IReadOnlyList<AbsenceObservation>> IsAbsentBatchAsync(
         IReadOnlyList<(ItemState Historical, string Path)> requests, CancellationToken ct)
     {
         if (requests.Count > 128) throw new ArgumentOutOfRangeException(nameof(requests));
         var identities = new FileAbsence[requests.Count];
-        var results = new bool?[requests.Count];
+        var reasons = new string?[requests.Count];
+        var results = new AbsenceObservation[requests.Count];
         // One root identity lease and native path buffer per admitted page, rather than one
         // 64-KiB buffer and root handle per file. Check uses that buffer, so do not share it in parallel.
         using var absence = new LocalFileAbsence(_rootPath, _rootIdentity);
@@ -522,23 +523,25 @@ public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResource
             ct.ThrowIfCancellationRequested();
             try { identities[i] = absence.Check(requests[i].Historical); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-            catch (Exception error) when (error is not OutOfMemoryException) { identities[i] = FileAbsence.Unknown; }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            { identities[i] = FileAbsence.Unknown; reasons[i] = AbsenceObservation.Cause(error); }
         }
         await Parallel.ForEachAsync(Enumerable.Range(0, requests.Count), new ParallelOptions
             { MaxDegreeOfParallelism = 8, CancellationToken = ct }, async (index, token) =>
         {
-            if (identities[index] == FileAbsence.Present) { results[index] = false; return; }
+            if (identities[index] == FileAbsence.Present) { results[index] = new(false, null); return; }
             var request = requests[index];
             try
             {
                 if (await ObserveSourceMetadataAsync(request.Path, token).ConfigureAwait(false) is not null ||
                     !PairPath.Same(request.Historical.Path, request.Path) &&
                     await ObserveSourceMetadataAsync(request.Historical.Path, token).ConfigureAwait(false) is not null)
-                    results[index] = false;
-                else results[index] = identities[index] == FileAbsence.Gone ? true : null;
+                    results[index] = new(false, null);
+                else results[index] = new(identities[index] == FileAbsence.Gone ? true : null, reasons[index]);
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-            catch (Exception error) when (error is not OutOfMemoryException) { results[index] = null; }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            { results[index] = new(null, AbsenceObservation.Cause(error)); }
         }).ConfigureAwait(false);
         return results;
     }

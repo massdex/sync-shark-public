@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Massdex.SyncShark.V2;
 
 namespace Massdex.SyncShark;
 
@@ -9,22 +10,35 @@ public sealed partial class DropboxPilotClient
     private readonly HashSet<string> _absenceListedParents = new(StringComparer.Ordinal);
     private const int AbsenceParentHintLimit = 256;
 
-    internal async Task<IReadOnlyList<bool?>> ProbeSourceAbsenceAsync(
+    internal async Task<IReadOnlyList<AbsenceObservation>> ProbeSourceAbsenceAsync(
         IReadOnlyList<(string ObjectId, string HistoricalPath, string Path)> requests,
         SemaphoreSlim reads, CancellationToken ct)
     {
         if (requests.Count > 128) throw new ArgumentOutOfRangeException(nameof(requests));
-        if (requests.Count == 0) return Array.Empty<bool?>();
+        if (requests.Count == 0) return Array.Empty<AbsenceObservation>();
         await using var verification = SyncProviderAccountVerificationScope.Begin(ct);
         await reads.WaitAsync(ct).ConfigureAwait(false);
         try { await VerifyRootIdentityAsync(ct).ConfigureAwait(false); }
         finally { reads.Release(); }
 
         var present = new System.Collections.Concurrent.ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
-        var wantedIds = requests.Select(x => x.ObjectId).ToHashSet(StringComparer.Ordinal);
-        var parents = requests.SelectMany(x => new[] { Parent(x.Path), Parent(x.HistoricalPath) })
-            .Distinct(StringComparer.Ordinal).Where(ClaimParent).ToArray();
-        await Parallel.ForEachAsync(parents, new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct },
+        var wantedIds = requests.Select(x => x.ObjectId)
+            .Where(id => !string.IsNullOrEmpty(id)).ToHashSet(StringComparer.Ordinal);
+        // Normalise per item: a malformed path is inconclusive for that item only, never the whole page.
+        var pathFailures = new string?[requests.Count];
+        var parents = new List<string>(requests.Count * 2);
+        for (var index = 0; index < requests.Count; index++)
+        {
+            try
+            {
+                parents.Add(Parent(requests[index].Path));
+                parents.Add(Parent(requests[index].HistoricalPath));
+            }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            { pathFailures[index] = AbsenceObservation.Cause(error); }
+        }
+        await Parallel.ForEachAsync(parents.Distinct(StringComparer.Ordinal).Where(ClaimParent).ToArray(),
+            new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct },
             async (parent, token) =>
             {
                 await reads.WaitAsync(token).ConfigureAwait(false);
@@ -35,29 +49,38 @@ public sealed partial class DropboxPilotClient
                 finally { reads.Release(); }
             }).ConfigureAwait(false);
 
-        var result = new bool?[requests.Count];
+        var result = new AbsenceObservation[requests.Count];
         await Parallel.ForEachAsync(Enumerable.Range(0, requests.Count),
             new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct }, async (index, token) =>
             {
                 var request = requests[index];
-                if (present.ContainsKey(request.ObjectId)) { result[index] = false; return; }
-                await reads.WaitAsync(token).ConfigureAwait(false);
                 try
                 {
-                    // A parent listing can prove presence, never global identity absence: the item
-                    // might have moved outside both the parent and the selected sync root.
-                    if (await ObjectExistsInVerifiedRootAsync(request.ObjectId, token).ConfigureAwait(false))
-                    { result[index] = false; return; }
-                    // Preserve the existing replacement-at-path safeguard, using fresh observations.
-                    var current = await FindEntryInVerifiedRootAsync(request.Path, token).ConfigureAwait(false);
-                    if (current is not null) { result[index] = false; return; }
-                    result[index] = string.Equals(PilotPath.DropboxComparisonKey(request.Path),
-                        PilotPath.DropboxComparisonKey(request.HistoricalPath), StringComparison.Ordinal) ||
-                        await FindEntryInVerifiedRootAsync(request.HistoricalPath, token).ConfigureAwait(false) is null;
+                    // Item-local validation, never batch-wide: a malformed path or empty identity
+                    // leaves only this member inconclusive (blocked plus retry) and never absent.
+                    if (pathFailures[index] is { } pathFailure) { result[index] = new(null, pathFailure); return; }
+                    if (string.IsNullOrEmpty(request.ObjectId))
+                    { result[index] = new(null, "the source identity is empty"); return; }
+                    if (present.ContainsKey(request.ObjectId)) { result[index] = new(false, null); return; }
+                    await reads.WaitAsync(token).ConfigureAwait(false);
+                    try
+                    {
+                        // A parent listing can prove presence, never global identity absence: the item
+                        // might have moved outside both the parent and the selected sync root.
+                        if (await ObjectExistsInVerifiedRootAsync(request.ObjectId, token).ConfigureAwait(false))
+                        { result[index] = new(false, null); return; }
+                        // Preserve the existing replacement-at-path safeguard, using fresh observations.
+                        var current = await FindEntryInVerifiedRootAsync(request.Path, token).ConfigureAwait(false);
+                        if (current is not null) { result[index] = new(false, null); return; }
+                        result[index] = new(string.Equals(PilotPath.DropboxComparisonKey(request.Path),
+                            PilotPath.DropboxComparisonKey(request.HistoricalPath), StringComparison.Ordinal) ||
+                            await FindEntryInVerifiedRootAsync(request.HistoricalPath, token).ConfigureAwait(false) is null, null);
+                    }
+                    finally { reads.Release(); }
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-                catch (Exception error) when (error is not OutOfMemoryException) { result[index] = null; }
-                finally { reads.Release(); }
+                catch (Exception error) when (error is not OutOfMemoryException)
+                { result[index] = new(null, AbsenceObservation.Cause(error)); }
             }).ConfigureAwait(false);
         // Only root verification fails the page; item failures stay inconclusive for that item.
         return result;

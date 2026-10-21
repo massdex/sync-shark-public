@@ -90,23 +90,26 @@ internal sealed class RecordingWriter
     internal bool ThrowAbsenceBatch { get; set; }
     internal bool ShortAbsenceBatch { get; set; }
     internal string? UnknownAbsencePath { get; set; }
-    public async Task<IReadOnlyList<bool?>> IsAbsentBatchAsync(
+    internal string? UnknownAbsenceReason { get; set; }
+    public async Task<IReadOnlyList<AbsenceObservation>> IsAbsentBatchAsync(
         IReadOnlyList<(ItemState Historical, string Path)> requests, CancellationToken ct)
     {
         Interlocked.Increment(ref AbsenceBatchCalls);
         Interlocked.Add(ref AbsenceBatchItems, requests.Count);
         if (ThrowAbsenceBatch) throw new IOException("Synthetic whole-page probe failure");
-        if (ShortAbsenceBatch) return Enumerable.Repeat<bool?>(true, requests.Count - 1).ToArray();
-        var results = new bool?[requests.Count];
+        if (ShortAbsenceBatch) return Enumerable.Repeat(new AbsenceObservation(true, null), requests.Count - 1).ToArray();
+        var results = new AbsenceObservation[requests.Count];
         for (var i = 0; i < requests.Count; i++)
         {
             try
             {
-                results[i] = requests[i].Path == UnknownAbsencePath ? null :
-                    await IsSourceAbsentAsync(requests[i].Historical, requests[i].Path, ct);
+                results[i] = requests[i].Path == UnknownAbsencePath
+                    ? new(null, UnknownAbsenceReason)
+                    : new(await IsSourceAbsentAsync(requests[i].Historical, requests[i].Path, ct), null);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-            catch (Exception error) when (error is not OutOfMemoryException) { results[i] = null; }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            { results[i] = new(null, AbsenceObservation.Cause(error)); }
         }
         return results;
     }

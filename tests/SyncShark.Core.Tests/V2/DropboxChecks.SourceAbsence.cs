@@ -14,7 +14,7 @@ internal static partial class DropboxChecks
         fixture.Wire.LivePageSize = 1;
         fixture.Wire.MetadataPaths.Clear();
         var first = await writer.IsAbsentBatchAsync([(a, a.Path), (b, b.Path), (missing, missing.Path)], CancellationToken.None);
-        LocalChecks.Require(first.SequenceEqual(new bool?[] { false, false, true }),
+        LocalChecks.Require(first.Select(x => x.Absent).SequenceEqual(new bool?[] { false, false, true }),
             "paged parent presence and exact identity absence preserve request order");
         LocalChecks.Require(fixture.Wire.ListRequests.Count == 1 && !fixture.Wire.ListRequests[0].Recursive &&
             fixture.Wire.ContinueCursors.Count == 1, "one nonrecursive parent listing follows all its pages");
@@ -26,7 +26,7 @@ internal static partial class DropboxChecks
         fixture.Wire.MoveOutsideRoot("a.txt", "Elsewhere/a.txt");
         fixture.Wire.SeedFile("missing.txt", "replacement");
         var second = await writer.IsAbsentBatchAsync([(a, a.Path), (missing, missing.Path)], CancellationToken.None);
-        LocalChecks.Require(second.All(x => x == false), "relocated original and replacement at path both prevent false absence");
+        LocalChecks.Require(second.All(x => x.Absent == false), "relocated original and replacement at path both prevent false absence");
         LocalChecks.Require(fixture.Wire.ListRequests.Count == 1, "later batches never rescan the same parent");
 
         var clock = new ResilienceChecks.Clock();
@@ -38,13 +38,29 @@ internal static partial class DropboxChecks
         var absentSibling = missing with { ObjectId = "id:missing-sibling", Path = "absent-sibling.txt" };
         var isolated = await writer.IsAbsentBatchAsync([(missing, missing.Path),
             (absentSibling, absentSibling.Path)], CancellationToken.None);
-        LocalChecks.Require(isolated[0] is null && isolated[1] == true,
+        LocalChecks.Require(isolated[0].Absent is null && isolated[1].Absent == true &&
+            isolated[0].Reason is not null,
             "one item's provider failure stays inconclusive without blocking its proven-absent sibling");
         fixture.Wire.MetadataFailurePath = null;
+
+        // N1: a malformed path or an empty identity is inconclusive for its own item only, never
+        // the whole page. The nine healthy members must still be evaluated normally.
+        var healthy = Enumerable.Range(0, 9)
+            .Select(i => missing with { ObjectId = "id:gone-" + i, Path = "gone-" + i + ".txt" }).ToArray();
+        var malformedPath = missing with { ObjectId = "id:malformed-path", Path = "../escape.txt" };
+        var isolatedPath = await writer.IsAbsentBatchAsync(
+            healthy.Select(x => (x, x.Path)).Append((malformedPath, malformedPath.Path)).ToArray(), CancellationToken.None);
+        LocalChecks.Require(isolatedPath.Take(9).All(x => x.Absent == true) && isolatedPath[9].Absent is null &&
+            isolatedPath[9].Reason is not null, "a malformed path blocks only its own member of a ten-item batch");
+        var emptyIdentity = missing with { ObjectId = "", Path = "empty-identity.txt" };
+        var isolatedId = await writer.IsAbsentBatchAsync(
+            healthy.Select(x => (x, x.Path)).Append((emptyIdentity, emptyIdentity.Path)).ToArray(), CancellationToken.None);
+        LocalChecks.Require(isolatedId.Take(9).All(x => x.Absent == true) && isolatedId[9].Absent is null &&
+            isolatedId[9].Reason is not null, "an empty identity blocks only its own member of a ten-item batch");
         fixture.Wire.Script("/2/files/list_folder", System.Net.HttpStatusCode.Forbidden, 1);
         var listingUnavailable = absentSibling with { Path = "fresh-parent/absent.txt" };
         LocalChecks.Require((await writer.IsAbsentBatchAsync([(listingUnavailable, listingUnavailable.Path)],
-            CancellationToken.None))[0] == true, "failed optional parent listing falls back to exact absence probes");
+            CancellationToken.None))[0].Absent == true, "failed optional parent listing falls back to exact absence probes");
         fixture.Wire.Script("/2/files/get_metadata", System.Net.HttpStatusCode.TooManyRequests, 64);
         var throttled = false;
         try { await writer.IsAbsentBatchAsync([(missing, missing.Path)], CancellationToken.None); }
