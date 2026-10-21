@@ -8,6 +8,7 @@ internal static class LocalWriterChecks
     public static async Task RunAsync()
     {
         await PutCreateAndParentsAsync().ConfigureAwait(false);
+        await OnlineOnlyRecoveryRestoreAdmitsItsBytesAsync().ConfigureAwait(false);
         await RecoveryUnavailableCreateOnlyAsync().ConfigureAwait(false);
         await PutCreateOccupiedMismatchAsync().ConfigureAwait(false);
         await PutUpdateMatchesAsync().ConfigureAwait(false);
@@ -50,6 +51,45 @@ internal static class LocalWriterChecks
         await ExpectAsync<IOException>(() => writer.DeleteAsync(new SyncAction("blocked-delete", 6, ActionKind.Delete,
             Side.A, "new.txt", null, null, victim, true, null), default));
         LocalChecks.Require(File.Exists(Path.Combine(root, "new.txt")), "degraded writer independently refuses destructive effects");
+    }
+
+    // Review F2: on a pair with an online-only policy a recovery restore arrives on the stream route, because
+    // RetainedBytesWriter is no ISyncDirectDownloadSource. New-file admission reserved metadata only, so PutAsync
+    // must re-admit the written bytes exactly as PutDownloadedAsync does.
+    private static async Task OnlineOnlyRecoveryRestoreAdmitsItsBytesAsync()
+    {
+        const long MiB = 1L << 20;
+        var root = LocalChecks.FreshRoot("put-online-only-restore");
+        var recovery = Path.Combine(Path.GetDirectoryName(root)!, "recovery-online-only");
+        var probe = new FreeSpaceAdmissionChecks.FakeProbe();
+        // Room above the 4 MiB floor for the metadata-only reservation, not for the file's own bytes.
+        probe.Free[root] = 5 * MiB;
+        var writer = await LocalWriter.OpenAsync(LocalChecks.RootOf(root, "root-online-only"), Side.A,
+            LocalChecks.PairId, LocalChecks.InstallationId, recovery, CancellationToken.None,
+            V2Settings.Default with { FreeSpaceFloorBytes = 4 * MiB }, probe);
+        writer.NewPointers = new NewPointerDownload(_ => true, null,
+            _ => throw new InvalidOperationException("the stream route never acquires a provider"),
+            (_, _, _, _) => throw new InvalidOperationException("the stream route never creates a pointer"));
+        var content = new byte[8 * MiB];
+        Array.Fill(content, (byte)'r');
+        // The exact shape SyncRun.RecoveryRestore builds for a create-only restore into Side A.
+        var restore = new SyncAction("rrs-online-only", 0, ActionKind.CopyNew, Side.A, "restored.txt", null,
+            Source(content), null, false, null) { SuppressReconciledBaseline = true };
+        var metadataOnly = await writer.AdmitFreeSpaceAsync(restore, CancellationToken.None);
+        using (metadataOnly.Reservation)
+            LocalChecks.Require(metadataOnly.Refusal is null,
+                "an online-only new file reserves metadata only, so its pre-admission grants a low-space volume");
+        await ExpectAsync<IOException>(() =>
+            writer.PutAsync(restore, new MemoryStream(content), CancellationToken.None));
+        LocalChecks.Require(!File.Exists(Path.Combine(root, "restored.txt")),
+            "a restore into low free space is refused by byte admission before any write");
+        probe.Free[root] = 64 * MiB;
+        var admitted = await writer.AdmitFreeSpaceAsync(restore, CancellationToken.None);
+        using var reservation = admitted.Reservation;
+        LocalChecks.Require(admitted.Refusal is null, "the same restore is admitted once the volume has room");
+        await writer.PutAsync(restore, new MemoryStream(content), CancellationToken.None);
+        LocalChecks.Require(File.ReadAllBytes(Path.Combine(root, "restored.txt")).SequenceEqual(content),
+            "a normal-space restore through the online-only stream route writes the retained bytes");
     }
 
     private static async Task PutCreateAndParentsAsync()

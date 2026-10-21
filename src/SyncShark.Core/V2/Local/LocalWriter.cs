@@ -126,6 +126,15 @@ public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResource
             ArgumentNullException.ThrowIfNull(content);
             if (a.ExpectedTarget?.Flags.HasFlag(ItemFlags.OwnedPointer) == true)
                 throw new IOException("The online-only target needs a metadata-only refresh. Retry storage settlement or rescan; no local bytes were opened.");
+            // New-file admission reserved metadata only because the pair has an online-only policy. This stream route
+            // cannot create a pointer (the source is no ISyncDirectDownloadSource), so it writes the full bytes: reserve
+            // them now, exactly as the direct download does, instead of relying on the metadata-only reservation. This
+            // covers a recovery restore whose retained bytes arrive as a stream.
+            var byteAdmission = NewPointers is not null && NewPointerDownload.IsNewFile(a)
+                ? await _freeSpace.AdmitAsync(a, _rootPath, _recoveryRoot, ct).ConfigureAwait(false)
+                : FreeSpaceAdmission.Granted;
+            using var byteReservation = byteAdmission.Reservation;
+            if (byteAdmission.Refusal is { } refusal) throw new IOException(refusal.Detail);
             using var operation = RunOperations.Begin(RunOperationKind.LocalWrite, RunOperations.Short(a.Path));
             using var tracked = RunOperationStream.Touching(content, operation.Touch);
             content = tracked;
