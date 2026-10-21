@@ -20,7 +20,10 @@ internal static partial class StorageChecks
         store.CompleteGeneration(gen, "1", true);
         SeedBaseline(store, "p1", "kd", a.Seed("d", "", ItemKind.Folder, versionId: "v1"), folder);
         SeedBaseline(store, "p1", "kx", a.Seed("d/x", "one", versionId: "v1"), tracked);
-        var delete = new SyncAction("del-d", 23, ActionKind.Delete, Side.B, "d", null, null, folder, true, "kd");
+        // This sequence exercises an explicitly chosen whole-folder removal, including untracked children,
+        // not absence propagation (the source copies above deliberately still exist).
+        var delete = new SyncAction("del-d", 23, ActionKind.Delete, Side.B, "d", null, null, folder, true, "kd")
+            { ChoiceRemove = true };
 
         var results = await ApplyReal(store, a, b, delete);
         Require(results.Count == 4 && results.All(r => r.Outcome == Outcome.Done),

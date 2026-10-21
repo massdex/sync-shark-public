@@ -31,6 +31,29 @@ internal sealed class InMemoryStateStore : IStateStore
     public void ClearSyncRetry(string pairId, string path)
     { lock (_gate) _retries.Remove((pairId, path.ToUpperInvariant())); }
 
+    public void RefreshBlockedDeleteNotice(string pairId)
+    {
+        lock (_gate)
+        {
+            var rows = ReadSyncRetries(pairId).Where(row => row.DeleteBlockedDetail is not null).ToArray();
+            foreach (var notice in OpenNotices(pairId).Where(n => n.ReasonKey is DeleteSourceGuard.ReasonKey or SqliteStateStore.BlockedDeleteSummary))
+                CloseNotice(notice.NoticeId!, "refreshed");
+            if (rows.Length > 20 || rows.Any(row => row.DeleteBlockedDeferred))
+                AddNotices([new Notice(pairId, 0, NoticeKind.Info, "", $"{rows.Length} deletions remain blocked; Show remaining for details.", SqliteStateStore.BlockedDeleteSummary)]);
+            else foreach (var row in rows)
+                AddNotices([new Notice(pairId, 0, NoticeKind.Info, row.Path, row.DeleteBlockedDetail!, DeleteSourceGuard.ReasonKey,
+                    DeleteSourceGuard.NoticeId(pairId, row.Path))]);
+        }
+    }
+
+    public BlockedDeletePage ReadBlockedDeletes(string pairId, string? after = null, int limit = 50)
+    {
+        var rows = ReadSyncRetries(pairId).Where(row => row.DeleteBlockedDetail is not null &&
+            string.CompareOrdinal(PathKey.Of(row.Path), after ?? "") > 0).OrderBy(row => PathKey.Of(row.Path), StringComparer.Ordinal).Take(limit + 1).ToArray();
+        return new(rows.Take(limit).Select(row => new BlockedDeleteItem(row.Path, row.DeleteBlockedDetail!)).ToArray(),
+            rows.Length > limit ? PathKey.Of(rows[limit - 1].Path) : null);
+    }
+
     public void SuspendHeldRetry(string pairId, SyncRetry retry)
     {
         lock (_gate)
@@ -491,12 +514,23 @@ internal sealed class InMemoryStateStore : IStateStore
             if (SyncDirectDownloadCheckpoint.NoticeFor(pairId, a, r) is { } notice) AddNotices([notice]);
             if (r.Outcome == Outcome.Skipped && r.ForgetAbsentDownloadBaseline && a.ObjectKey is not null)
                 BaselinesFor(pairId).Remove(a.ObjectKey);
-            if (r.Outcome == Outcome.Skipped && r.DeleteSourceUnconfirmed)
+            if (r.Outcome == Outcome.Skipped && r.DeleteSourceIdentityMissing)
+            {
+                var review = MissingDeleteIdentityReview.Create(pairId, a);
+                SaveSyncRetry(pairId, review);
+                AddNotices([review.PendingNotice!]);
+            }
+            else if (r.Outcome == Outcome.Skipped && r.DeleteSourceUnconfirmed)
             {
                 var retry = SyncRetryAt(pairId, a.Path);
-                SaveSyncRetry(pairId, retry is null
-                    ? new SyncRetry(a.Path, "sync", 0, r.Reason ?? DeleteSourceGuard.ReasonKey, DateTimeOffset.MinValue)
-                    : retry with { RetryAfter = DateTimeOffset.MinValue });
+                var detail = r.Reason ?? DeleteSourceGuard.ReasonKey;
+                SaveSyncRetry(pairId, (retry ?? new SyncRetry(a.Path, "sync", 0, detail, DateTimeOffset.MinValue)) with
+                {
+                    DeleteBlockedDetail = detail,
+                    DeleteBlockedDeferred = r.RetryAfterSeconds is > 0,
+                    RetryAfter = r.RetryAfterSeconds is > 0 ? DateTimeOffset.UtcNow.AddSeconds(r.RetryAfterSeconds.Value) : DateTimeOffset.MinValue
+                });
+                RefreshBlockedDeleteNotice(pairId);
             }
             if (r.Outcome != Outcome.Done) return;
             if (a.Kind is ActionKind.CopyNew or ActionKind.Update or ActionKind.Move or ActionKind.MkDir or ActionKind.KeepBoth &&

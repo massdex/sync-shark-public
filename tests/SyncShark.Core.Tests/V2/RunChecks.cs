@@ -37,6 +37,7 @@ internal static partial class RunChecks
         await FirstSync_PreviewHashesBeforeDecidingAsync();
         await FirstSync_IncompleteScanRefusedAsync();
         await FirstSync_DeletionWinsRepeatablyAsync();
+        await MissingDeleteIdentityChoicesAsync();
         await FirstSync_DeletionLookupIgnoresCaseAsync();
         await Incremental_UnconfirmedContentReplannedAsync();
         await Incremental_DeleteSourceNoticeSettlesWithoutActionAsync();
@@ -393,6 +394,9 @@ internal static partial class RunChecks
                 first.HeldDeletions.SequenceEqual([new HeldDeletion("x.txt", Side.A)]) &&
                 second.HeldDeletions.SequenceEqual(first.HeldDeletions),
                 "both previews hold the same cached rule-19 victim for hash-aware resolution");
+            // This no-baseline victim has explicit per-item review, not a trusted historical source id.
+            // Its approval must survive into the action even when an absence probe cannot grant authority.
+            fx.WriterB.AbsenceUnknown = true;
             var applied = await run.ApplyAsync(fx.Pair.PairId, second, new RecordingProgress(), CancellationToken.None,
                 ReviewedHeld(second));
             Require(applied.Deleted == 1 && applied.Outcome == RunOutcomes.Complete && fx.WriterA.Preserves == 0, "the apply carries out the same delete");
@@ -1166,11 +1170,19 @@ internal static partial class RunChecks
         var plan = new Plan(fx.Pair.PairId, preview.Gen,
         [
             new SyncAction("copy-new", 1, ActionKind.CopyNew, Side.B, "new.txt", null, newFile, null, false, null),
-            new SyncAction("delete-f", 6, ActionKind.Delete, Side.B, "f", null, null, folder, false, null)
+            new SyncAction("delete-f", 6, ActionKind.Delete, Side.B, "f", null, null, folder, true, null)
+            {
+                FrozenVictimSignature = FolderDelete.Signature(FolderDelete.LiveDescendants(fx.Store, fx.Pair.B.RootId, "f"))
+            }
         ], []);
+        // This progress fixture requests an explicit removal, not propagation from an unidentified absent source.
+        // Review the exact folder and both children; the ordinary apply entry point stamps durable approval.
+        var reviewed = new[] { "f", "f/a.txt", "f/b.txt" }
+            .Select(path => FolderDelete.VictimKey(Side.B, path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         var sink = new RecordingProgress();
-        await run.ApplyAsync(fx.Pair.PairId, plan, sink, CancellationToken.None);
+        await run.ApplyAsync(fx.Pair.PairId, plan, sink, CancellationToken.None, reviewed);
+        Require(fx.WriterB.Deletes == 3, "the reviewed progress fixture actually removes the folder and both children");
 
         var applying = sink.Reports.Where(report => report.Phase == RunPhases.Applying).ToArray();
         Require(applying.Length > 0, "the apply reports progress");

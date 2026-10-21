@@ -235,6 +235,12 @@ public interface IStateStore : IDisposable
     void SaveSyncRetry(string pairId, SyncRetry retry);
     void ClearSyncRetry(string pairId, string path);
     void RefreshInterruptedDeleteNotice(string pairId) { }
+    void RefreshBlockedDeleteNotice(string pairId) { }
+    BlockedDeletePage ReadBlockedDeletes(string pairId, string? after = null, int limit = 50) => new([], null);
+    DeleteNoticePage ReadDeleteNoticeItems(string pairId, bool review, string? after = null, int limit = 50) => new([], null);
+    IReadOnlyList<SyncRetry> InterruptedDeleteRepairsAt(string pairId, IReadOnlyCollection<string> paths) =>
+        paths.Select(path => SyncRetryAt(pairId, path)).OfType<SyncRetry>()
+            .Where(retry => retry.Kind == SqliteStateStore.InterruptedDeleteRestoreKind).ToArray();
     void RequestSyncRetryNow(string pairId, string path)
     {
         if (SyncRetryAt(pairId, path) is { } retry) SaveSyncRetry(pairId, retry with { RetryAfter = DateTimeOffset.MinValue });

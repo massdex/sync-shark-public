@@ -467,8 +467,7 @@ public sealed partial class SyncRun : ISyncRun
         // so a cache miss can neither hold nor block their post-prepare propagation.
         // Keep the prepared lookup lazy: a database-backed dictionary must not enumerate all matches.
         RunScope.Scope? inventory = scanner.LoadFull(pair);
-        var interruptedRepairs = _store.DueSyncRetries(pairId, _time.GetUtcNow(), 256);
-        var repairPaths = InterruptedDeleteRepair.SourcePaths(inventory, interruptedRepairs);
+        var repairPaths = InterruptedDeleteRepair.SourcePaths(inventory, _store, pairId);
         matchedAtPrepare = InterruptedDeleteRepair.WithoutMatches(matchedAtPrepare, repairPaths);
         var evidence = await PrepareDeferredEvidenceAsync(pair, inventory, rebuildablePaths, matchedAtPrepare,
             scan, ct, repairPaths);
@@ -487,7 +486,7 @@ public sealed partial class SyncRun : ISyncRun
         var deciding = DecideWithHashedCopiesAsync(pair, scan, rows,
             () => JoinRows(inventory!, scan, true),
             pass => ApplySafetyFilter(pair, ActionPredicates(pair, links, selection), Planner.Decide(pairId,
-                Math.Max(scan.A.Gen, scan.B.Gen), InterruptedDeleteRepair.Protect(pass, interruptedRepairs),
+                Math.Max(scan.A.Gen, scan.B.Gen), InterruptedDeleteRepair.Protect(pass, _store, pairId),
                 Options(pair, true, winners, oneSided, selection, matchedAtPrepare, heldPaths))
                 with { NarrowedIgnoreRules = narrowedIgnoreRules ?? [] }),
             throttle, ct, refresh);
@@ -884,7 +883,7 @@ public sealed partial class SyncRun : ISyncRun
     private Plan Decide(PairDef pair, BothScan scan, IReadOnlyList<PlanRow> rows,
         IReadOnlyDictionary<string, Side?>? winners, RunScope.Scope scope, LinkExclusions links) =>
         Planner.Decide(pair.PairId, Math.Max(scan.A.Gen, scan.B.Gen),
-            InterruptedDeleteRepair.Protect(rows, _store.DueSyncRetries(pair.PairId, _time.GetUtcNow(), 256)),
+            InterruptedDeleteRepair.Protect(rows, _store, pair.PairId),
             // Hidden held children must prevent collapse before the action guard drops their parent delete.
             // Otherwise independent matched child deletes disappear with that collapsed parent.
             Options(pair, false, winners, null, matchedAtPrepare: new RetryMatches(_store, pair.PairId))

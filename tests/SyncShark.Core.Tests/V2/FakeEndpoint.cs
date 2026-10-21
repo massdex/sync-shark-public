@@ -52,6 +52,9 @@ internal sealed class FakeEndpoint : IInventorySource, IEndpointWriter, ISourceA
     /// <summary>Use the real Dropbox hash when paired with the scripted Dropbox wire.</summary>
     public bool DropboxHashes { get; set; }
 
+    /// <summary>Model local files: identity and hash are available, but no provider revision exists.</summary>
+    public bool OmitVersionIds { get; set; }
+
     /// <summary>Paths HashAsync cannot hash (unreadable, or changed while hashed).</summary>
     public HashSet<string> Unhashable { get; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -378,7 +381,7 @@ internal sealed class FakeEndpoint : IInventorySource, IEndpointWriter, ISourceA
         var objectId = _items.TryGetValue(path, out var existing)
             ? existing.State.ObjectId
             : "id:" + (++_idCounter).ToString(CultureInfo.InvariantCulture);
-        var state = new ItemState(path, kind, objectId, versionId ?? "v" + (++_version), hash, bytes.Length,
+        var state = new ItemState(path, kind, objectId, OmitVersionIds ? null : versionId ?? "v" + (++_version), hash, bytes.Length,
             mtime ?? DateTimeOffset.UnixEpoch, ItemFlags.None, identityJson);
         _items[path] = new Entry(state, bytes);
         return state;

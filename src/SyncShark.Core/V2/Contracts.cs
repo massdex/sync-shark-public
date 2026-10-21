@@ -203,7 +203,13 @@ public sealed record SyncRetry(string Path, string Kind, int Attempts, string La
     DateTimeOffset RetryAfter, PrepareMatch? Match = null, HeldDeletion? Held = null,
     IReadOnlyList<SyncAction>? ReviewedActions = null, bool HeldReviewed = false,
     IReadOnlyList<SyncAction>? ProposedActions = null, ItemState? HeldExpected = null,
-    IReadOnlyList<string>? ReadRoots = null, Notice? PendingNotice = null, bool ReprobeEvidence = false, bool EvidenceReleased = false);
+    IReadOnlyList<string>? ReadRoots = null, Notice? PendingNotice = null, bool ReprobeEvidence = false, bool EvidenceReleased = false)
+{
+    /// <summary>Display-only deletion hold; never supplies deletion authority or changes retry ownership.</summary>
+    public string? DeleteBlockedDetail { get; init; }
+    public bool DeleteBlockedDeferred { get; init; }
+    public bool MissingDeleteIdentityReview { get; init; }
+}
 
 /// <summary>The kind of notice raised to the user.</summary>
 public enum NoticeKind { Info, KeepBoth, EditBeatsDelete, AutoConflict, UserDecision }
@@ -413,6 +419,7 @@ public sealed record ActionResult(string ActionId, Outcome Outcome, ItemState? N
 
     /// <summary>No delete attempted because its source evidence was unverified; retain baseline and queue replan.</summary>
     public bool DeleteSourceUnconfirmed { get; init; }
+    public bool DeleteSourceIdentityMissing { get; init; }
 
     /// <summary>Handled by ignoring the refused name, not by completing an endpoint effect.</summary>
     public bool ProviderNameRefused { get; init; }

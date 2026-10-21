@@ -183,8 +183,14 @@ internal static partial class RunChecks
         Console.WriteLine("PASS NoticeRestoreLinkedExclusions");
     }
 
-    private sealed class NoticeArchiveWriter(IEndpointWriter inner, string directory) : IEndpointWriter, ILocalRetainedNoticeReader
+    private sealed class NoticeArchiveWriter(IEndpointWriter inner, string directory) : IEndpointWriter, ILocalRetainedNoticeReader, ISourceAbsenceProbe
     {
+        public Task<bool?> IsSourceAbsentAsync(ItemState? historical, string path, CancellationToken ct) =>
+            ((ISourceAbsenceProbe)inner).IsSourceAbsentAsync(historical, path, ct);
+        public Task<bool?> IsHistoricalSourcePresentAsync(ItemState historical, CancellationToken ct) =>
+            ((ISourceAbsenceProbe)inner).IsHistoricalSourcePresentAsync(historical, ct);
+        public Task<ItemState?> ObserveSourceMetadataAsync(string path, CancellationToken ct) =>
+            ((ISourceAbsenceProbe)inner).ObserveSourceMetadataAsync(path, ct);
         public int RecoveryReads { get; private set; }
         public Task<Stream> OpenRecoveryAsync(RecoveryRecord recovery, ItemState retained, CancellationToken ct)
         {

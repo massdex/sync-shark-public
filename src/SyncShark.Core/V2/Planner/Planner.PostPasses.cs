@@ -52,8 +52,11 @@ public static partial class Planner
                 // victim; mixed ones stay separate (deepest first) and the folder's own delete removes only the
                 // emptied folder, so every victim is deleted exactly once. A folder with a held path under it is never
                 // collapsed over either: its ordinary child deletes stay, and BlockHeldFolderDeletes holds the folder.
+                // Prepared children carry their own historical source IDs without baseline rows. Preserve those
+                // actions: executor expansion cannot reconstruct their IDs from the parent folder's identity.
                 var under = deletesUnder.GetValueOrDefault(key);
-                if (MixedProvenance(draft, delete, under) || HeldUnder(ctx, delete))
+                if (MixedProvenance(draft, delete, under) || HeldUnder(ctx, delete) ||
+                    (under ?? []).Any(j => draft[j].Action.DeletionSourceObjectId is not null))
                     draft[index] = (folderRow, delete with { DescendantsPlanned = true, RecoveryFirst = false });
                 else
                     CollapseFolderDelete(draft, index, under, removed);

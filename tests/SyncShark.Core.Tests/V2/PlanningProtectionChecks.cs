@@ -6,9 +6,11 @@ internal static class PlanningProtectionChecks
 {
     internal static void Run(string folder)
     {
-        foreach (var scenario in new[] { "gap-release", "gap-retained", "moved-release", "retry-release", "flag-release" })
+        foreach (var scenario in new[] { "gap-release", "gap-retained", "moved-release", "retry-release", "flag-release", "flag-moved-a", "flag-moved-b" })
             Check(Path.Combine(folder, scenario), scenario);
         CheckIncompleteCoverage();
+        BlockedDeleteNoticeChecks.Run(Path.Combine(folder, "blocked-delete-notices"));
+        DeleteReviewNoticeChecks.Run(Path.Combine(folder, "delete-review-notices"));
         Console.WriteLine("PASS immutable scope protection and real scan completeness: no false Delete/Forget");
     }
 
@@ -49,17 +51,19 @@ internal static class PlanningProtectionChecks
         var a = new ItemState("Parent/File", ItemKind.File, "local-object", null, new string('a', 64),
             1, DateTimeOffset.UnixEpoch, ItemFlags.None);
         var b = a with { ObjectId = "cloud-object" };
-        var currentA = scenario == "moved-release" ? a with { Path = "Moved/File" } : a;
+        var currentA = scenario is "moved-release" or "flag-moved-a" ? a with { Path = "Moved/File" } : a;
+        var currentB = scenario == "flag-moved-b" ? b with { Path = "Moved/File" } : b;
         Snapshot(pair.A, Side.A, currentA);
-        Snapshot(pair.B, Side.B, b);
+        Snapshot(pair.B, Side.B, currentB);
         var adopt = new SyncAction("adopt", 3, ActionKind.Adopt, Side.B, b.Path, null, a, b, false, "linked");
         store.RecordIntent(pair.PairId, adopt);
         store.CommitResult(pair.PairId, 1, adopt, new(adopt.ActionId, Outcome.Done, a, b, null, null));
         var active = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (scenario == "retry-release")
             store.SaveSyncRetry(pair.PairId, new SyncRetry(a.Path, "retry", 0, "synthetic hold", DateTimeOffset.MaxValue));
-        else if (scenario == "flag-release")
-            store.RequireRehash(pair.A.RootId, currentA, "synthetic hold");
+        else if (scenario is "flag-release" or "flag-moved-a" or "flag-moved-b")
+            store.RequireRehash(scenario == "flag-moved-b" ? pair.B.RootId : pair.A.RootId,
+                scenario == "flag-moved-b" ? currentB : currentA, "synthetic hold");
         else
             ((ILocalGapStore)store).BeginGap(pair.A.RootId, "cursor", 1, false, "synthetic gap");
         var links = LinkExclusions.Of(store, pair, false);

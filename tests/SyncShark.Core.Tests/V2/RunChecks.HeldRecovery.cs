@@ -80,7 +80,11 @@ internal static partial class RunChecks
         Require(report.Deferred == 0 && store.FirstSyncDone(fx.Pair.PairId),
             "held descendant refresh succeeds after both SQLite preview generations close");
         Require(await fx.A.ObserveAsync("folder", CancellationToken.None) is null,
-            "empty exact-tombstoned folder is deleted after its child");
+            "explicitly reviewed empty exact-tombstoned folder is deleted after its child");
+        // The child equals the retained deleted revision, so the existing identical-history
+        // exemption supplies recovery. Empty folders have no bytes; LocalWriter rejects Preserve(folder).
+        Require(fx.WriterA.Preserves == 0,
+            "identical-history child needs no duplicate archive and the emptied folder has no bytes to preserve");
         Console.WriteLine("PASS HeldRecovery_RefreshClosedGenerations");
     }
 
@@ -116,6 +120,8 @@ internal static partial class RunChecks
             Require(await fx.A.ObserveAsync("folder", default) is not null,
                 "unreviewed folder remains until an explicit notice choice after restart");
             var decision = reopened.OpenNotices(fx.Pair.PairId).Single(notice => notice.Path == "folder" && notice.ReasonKey == "deletion-review");
+            Require(reopened.SyncRetryAt(fx.Pair.PairId, "folder") is { MissingDeleteIdentityReview: true, Kind: "decision" },
+                "no-baseline tombstone without a source identity becomes review, not indefinite retry");
             await restarted.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, decision.NoticeId!, NoticeChoices.DeleteReviewed, default);
             result = await restarted.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
         }

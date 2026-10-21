@@ -84,18 +84,21 @@ internal static partial class ExecutorChecks
 
     private static async Task Order_PhasesAndLevels()
     {
-        var (_, a, b, executor) = Rig();
+        var (store, a, b, executor) = Rig();
         var moved = a.Seed("d/x", "x-content", versionId: "v1");
         var copy = a.Seed("d/e/f", "f-content", versionId: "v1");
         var xFolder = b.Seed("x", "x-content", versionId: "v1");
         var old = b.Seed("old", "old-content", versionId: "v1");
+        var original = a.Seed("old", "old-content", versionId: "v1");
+        SeedBaseline(store, "old-key", original, old);
+        await a.DeleteAsync(Act(ActionKind.Delete, Side.A, "old", expected: original), default);
         var record = new RecordingWriter(b);
         var plan = Plan(
             Act(ActionKind.MkDir, Side.B, "d"),
             Act(ActionKind.MkDir, Side.B, "d/e"),
             Act(ActionKind.Move, Side.B, "d/x", from: "x", source: moved, expected: xFolder),
             Act(ActionKind.CopyNew, Side.B, "d/e/f", source: copy),
-            Act(ActionKind.Delete, Side.B, "old", expected: old));
+            Act(ActionKind.Delete, Side.B, "old", expected: old, key: "old-key", rule: 6));
 
         var results = await Apply(executor, plan, a, record);
         var calls = record.Calls;
@@ -126,8 +129,18 @@ internal static partial class ExecutorChecks
             var oldPath = "old-" + side;
             var folder = target.Seed(oldPath, "", ItemKind.Folder);
             var child = target.Seed(oldPath + "/child", "old");
-            actions.Add(Act(ActionKind.Delete, side, oldPath, expected: folder) with { DescendantsPlanned = true });
-            actions.Add(Act(ActionKind.Delete, side, oldPath + "/child", expected: child));
+            var source = side == Side.A ? b : a;
+            var originalFolder = source.Seed(oldPath, "", ItemKind.Folder);
+            var originalChild = source.Seed(oldPath + "/child", "old");
+            SeedBaseline(store, oldPath, side == Side.A ? folder : originalFolder,
+                side == Side.A ? originalFolder : folder);
+            SeedBaseline(store, oldPath + "/child", side == Side.A ? child : originalChild,
+                side == Side.A ? originalChild : child);
+            var sourceSide = side == Side.A ? Side.B : Side.A;
+            await source.DeleteAsync(Act(ActionKind.Delete, sourceSide, originalChild.Path, expected: originalChild), default);
+            await source.DeleteAsync(Act(ActionKind.Delete, sourceSide, originalFolder.Path, expected: originalFolder), default);
+            actions.Add(Act(ActionKind.Delete, side, oldPath, expected: folder, key: oldPath, rule: 6) with { DescendantsPlanned = true });
+            actions.Add(Act(ActionKind.Delete, side, oldPath + "/child", expected: child, key: oldPath + "/child", rule: 6));
         }
         var results = await Apply(executor, Plan(actions.ToArray()), a, b);
         Require(results.All(r => r.Outcome == Outcome.Done), "mixed directions retain folder readiness and descendant-delete barriers");
@@ -150,10 +163,11 @@ internal static partial class ExecutorChecks
     {
         var (_, a, b, executor) = Rig();
         var file = b.Seed("p", "file-content", versionId: "v1");
+        var replacement = a.Seed("p", "", ItemKind.Folder, versionId: "v1");
         var record = new RecordingWriter(b);
         var plan = Plan(
-            Act(ActionKind.Delete, Side.B, "p", expected: file, key: "k1"),
-            Act(ActionKind.MkDir, Side.B, "p"));
+            Act(ActionKind.Delete, Side.B, "p", expected: file, key: "k1", rule: 26),
+            Act(ActionKind.MkDir, Side.B, "p", source: replacement, rule: 26));
 
         var results = await Apply(executor, plan, a, record);
         Require(results.All(r => r.Outcome == Outcome.Done), "the vacating delete and the create both succeed");
@@ -204,7 +218,7 @@ internal static partial class ExecutorChecks
         var (store, a, b, executor) = Rig();
         var stale = a.Seed("x", "before", versionId: "v1");
         var action = new SyncAction("held-delete", 19, ActionKind.Delete, Side.A, "x", null, null,
-            stale, false, null) { NeedsReview = true };
+            stale, false, null) { NeedsReview = true, RemovalReviewChoice = true };
         var edited = a.Seed("x", "edited", versionId: "v2");
         var results = await Apply(executor, Plan(action), a, b);
         Require(results.Single().Outcome == Outcome.Skipped, "an edited held-delete target is skipped");
@@ -326,8 +340,10 @@ internal static partial class ExecutorChecks
 
     private static async Task RecoveryFirst_PreserveFails_NoEffect()
     {
-        var (_, a, b, executor) = Rig();
+        var (store, a, b, executor) = Rig();
         var victim = b.Seed("x", "content", versionId: "v1");
+        SeedBaseline(store, "k1", a.Seed("x", "content", versionId: "v1"), victim);
+        await RemoveSourceAsync(a, "x");
         b.FailNextWrites = 1;
         var record = new RecordingWriter(b);
         var action = Act(ActionKind.Delete, Side.B, "x", expected: victim, rf: true, key: "k1");
@@ -345,6 +361,8 @@ internal static partial class ExecutorChecks
     {
         var (store, a, b, executor) = Rig();
         var victim = b.Seed("x", "content", versionId: "v1");
+        SeedBaseline(store, "k1", a.Seed("x", "content", versionId: "v1"), victim);
+        await RemoveSourceAsync(a, "x");
         var record = new RecordingWriter(b) { PreserveFailsMismatch = true };
         var action = Act(ActionKind.Delete, Side.B, "x", expected: victim, rf: true, key: "k1");
 
@@ -795,6 +813,8 @@ internal static partial class ExecutorChecks
     {
         var (store, a, b, executor) = Rig();
         var victim = b.Seed("x", "content", versionId: "v1");
+        SeedBaseline(store, "k1", a.Seed("x", "content", versionId: "v1"), victim);
+        await RemoveSourceAsync(a, "x");
         await b.DeleteAsync(Act(ActionKind.Delete, Side.B, "x", expected: victim), CancellationToken.None);
         var presentSource = a.Seed("present", "present-content", versionId: "v1");
         b.Seed("present", "present-content", versionId: "v1");
@@ -827,6 +847,10 @@ internal static partial class ExecutorChecks
         SeedBaseline(store, "ky", a.Seed("d/e/y", "two", versionId: "v1"), fileTwo);
         await RemoveSourceAsync(a, "d/x");
         await RemoveSourceAsync(a, "d/e/y");
+        SeedBaseline(store, "ke", a.Seed("d/e", "", ItemKind.Folder), folderE);
+        SeedBaseline(store, "kd", a.Seed("d", "", ItemKind.Folder), folderState);
+        await RemoveSourceAsync(a, "d/e");
+        await RemoveSourceAsync(a, "d");
         var record = new RecordingWriter(b);
         var folder = Act(ActionKind.Delete, Side.B, "d", expected: folderState, rf: true, key: "kd")
             with { FrozenVictimSignature = FolderDelete.Signature(FolderDelete.LiveDescendants(store, "rb", "d")) };
@@ -888,6 +912,8 @@ internal static partial class ExecutorChecks
         SeedBaseline(store, "ky", a.Seed("d/y", "two", versionId: "v1"), fileY);
         await RemoveSourceAsync(a, "d/x");
         await RemoveSourceAsync(a, "d/y");
+        SeedBaseline(store, "kd", a.Seed("d", "", ItemKind.Folder), folderState);
+        await RemoveSourceAsync(a, "d");
         var record = new RecordingWriter(b) { FailDeleteAt = "d/x" };
         var folder = Act(ActionKind.Delete, Side.B, "d", expected: folderState, rf: true, key: "kd");
 

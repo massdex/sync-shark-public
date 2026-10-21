@@ -88,7 +88,7 @@ internal sealed class GatedObserveProvider : IEndpointProvider, IEndpointWriter
 }
 
 /// <summary>Counts writer calls while delegating to a fake endpoint.</summary>
-internal sealed class CountingWriter : IEndpointWriter, IRecoveryAvailability
+internal sealed class CountingWriter : IEndpointWriter, IRecoveryAvailability, ISourceAbsenceProbe
 {
     public string? RecoveryUnavailable { get; set; }
     private readonly FakeEndpoint _inner;
@@ -203,6 +203,26 @@ internal sealed class CountingWriter : IEndpointWriter, IRecoveryAvailability
         {
             Interlocked.Decrement(ref _observing);
         }
+    }
+
+    /// <summary>Simulates unavailable historical identity evidence without changing the endpoint's actual state.</summary>
+    public bool AbsenceUnknown { get; set; }
+
+    public Task<ItemState?> ObserveSourceMetadataAsync(string path, CancellationToken ct) => ObserveAsync(path, ct);
+
+    public async Task<bool?> IsSourceAbsentAsync(ItemState? historical, string path, CancellationToken ct)
+    {
+        // Keep scripted access failures/latency and prove the fake's real identity, including moved objects.
+        if (await ObserveAsync(path, ct).ConfigureAwait(false) is not null) return false;
+        if (AbsenceUnknown) return null;
+        return await _inner.IsSourceAbsentAsync(historical, path, ct).ConfigureAwait(false);
+    }
+
+    public async Task<bool?> IsHistoricalSourcePresentAsync(ItemState historical, CancellationToken ct)
+    {
+        await ObserveAsync(historical.Path, ct).ConfigureAwait(false);
+        if (AbsenceUnknown) return null;
+        return await _inner.IsHistoricalSourcePresentAsync(historical, ct).ConfigureAwait(false);
     }
 
     public Task<Stream> OpenReadAsync(ItemState s, CancellationToken ct)

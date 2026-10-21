@@ -3,7 +3,7 @@ namespace Massdex.SyncShark.V2;
 /// <summary>Test-only writer modelling the batched-upload path (executor.md sections 4.3 and 8) over a fake.</summary>
 /// <remarks>Each create frees its admission lease once its bytes are "sent", then waits for its batch commit; a batch
 /// commits when it holds <c>capacity</c> creates or the last expected create arrives.</remarks>
-internal sealed class BatchingWriter : IEndpointWriter
+internal sealed class BatchingWriter : IEndpointWriter, ISourceAbsenceProbe
 {
     private readonly FakeEndpoint _inner;
     private readonly SyncTransferResourceController _admission;
@@ -46,6 +46,11 @@ internal sealed class BatchingWriter : IEndpointWriter
     public Task<RecoveryRef> PreserveAsync(ItemState victim, string actionId, CancellationToken ct) =>
         _inner.PreserveAsync(victim, actionId, ct);
     public Task<ItemState?> ObserveAsync(string path, CancellationToken ct) => _inner.ObserveAsync(path, ct);
+    public Task<ItemState?> ObserveSourceMetadataAsync(string path, CancellationToken ct) => _inner.ObserveAsync(path, ct);
+    public Task<bool?> IsSourceAbsentAsync(ItemState? historical, string path, CancellationToken ct) =>
+        _inner.IsSourceAbsentAsync(historical, path, ct);
+    public Task<bool?> IsHistoricalSourcePresentAsync(ItemState historical, CancellationToken ct) =>
+        _inner.IsHistoricalSourcePresentAsync(historical, ct);
     public Task<Stream> OpenReadAsync(ItemState s, CancellationToken ct) => _inner.OpenReadAsync(s, ct);
 
     // The bytes are sent: release the admission slot now, as the Dropbox batched path does, and join the open batch.

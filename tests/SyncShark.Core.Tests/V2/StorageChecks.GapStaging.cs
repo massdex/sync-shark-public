@@ -60,7 +60,7 @@ internal static partial class StorageChecks
             gaps.PromoteGapDiscovery(root);
             var held = store.ProtectionBatch(root, ItemFlags.NeedsRehash, [rows[0].Path, rows[1].Path, rows[^1].Path]);
             Require(held[0].Covered && !held[1].Covered && !held[2].Covered,
-                "one atomic next-run promotion drains more than 512 metadata rows but preserves changed observation");
+                "paged next-run promotion drains more than 512 metadata rows before returning and preserves changed observation");
             Require(gaps.GapHashPage(root, original, 128).Single().ObjectId == rows[0].ObjectId,
                 "invalid metadata proof returns to normal hash retry lane");
             Require(store.Live(root).All(item => item.Hash == rows[0].Hash) && store.RehashWatermark(root) == 0,
@@ -106,6 +106,44 @@ internal static partial class StorageChecks
                 "SELECT metadata_ready FROM local_gap_item WHERE object_id=$o;", ("$o", rows[2].ObjectId)) == 0,
                 "changed presence invalidates prior metadata retirement instead of deleting its obligation");
         }
-        Console.WriteLine("PASS store-only gap metadata staging and atomic next-run promotion");
+        GapPromotionPageFailureChecks(folder, rows);
+        Console.WriteLine("PASS store-only gap metadata staging and paged next-run promotion");
+    }
+
+    private static void GapPromotionPageFailureChecks(string folder, ItemState[] rows)
+    {
+        var product = Fresh(folder, "gap-promotion-pages");
+        const string root = "paged-root";
+        const string cursor = "0000000000000001:200";
+        using var store = SqliteStateStore.Open(product, Fast, new TestClock());
+        store.WriteSnapshot(new(root, Side.A, store.BeginGeneration(root, "full"), cursor, rows, []));
+        var gaps = (ILocalGapStore)store;
+        gaps.BeginGap(root, cursor, 100, true);
+        var epoch = gaps.GapEpoch(root)!;
+        foreach (var batch in rows.Chunk(128))
+            gaps.GapDiscoveredBatch(root, epoch, batch.Select(item => (item, false)).ToArray());
+        gaps.GapDiscoveryDone(root, epoch);
+        using var db = new SqliteConnection($"Data Source={DbPath(product)};Pooling=False");
+        db.Open();
+        StoreSchema.Execute(db, null,
+            "CREATE TRIGGER fail_second_promotion_page BEFORE DELETE ON local_gap_item " +
+            "WHEN OLD.object_id='object-0514' BEGIN SELECT RAISE(ABORT,'synthetic second page failure'); END;");
+        LocalGapWorker.PromoteDiscovery(gaps, new(root, SyncProviders.Local, null, product, "root-object"), default);
+        Require((long?)StoreSchema.Scalar(db, null, "SELECT COUNT(*) FROM local_gap_item;") == 88 &&
+            (string?)StoreSchema.Scalar(db, null, "SELECT after_object FROM local_gap;") == "" &&
+            (long?)StoreSchema.Scalar(db, null, "SELECT discovery_done FROM local_gap;") == 0,
+            "second-page failure preserves first-page commit, rolls back its own page and leaves frontier unpublished");
+        Require(store.ProtectionBatch(root, ItemFlags.NeedsRehash, [rows[0].Path, rows[^1].Path]).All(hit => hit.Covered),
+            "partial promotion retains conservative protection until a later complete promotion");
+        StoreSchema.Execute(db, null, "DROP TRIGGER fail_second_promotion_page;");
+        // Simulate an observation change between a committed page and the next attempt.
+        StoreSchema.Execute(db, null, "UPDATE file_state SET mtime=mtime+1 WHERE object_id=$o;", ("$o", rows[^1].ObjectId));
+        gaps.PromoteGapDiscovery(root);
+        Require((long?)StoreSchema.Scalar(db, null, "SELECT COUNT(*) FROM local_gap_item;") == 1 &&
+            (long?)StoreSchema.Scalar(db, null, "SELECT discovery_done FROM local_gap;") == 1,
+            "retry drains all remaining pages and publishes the captured frontier only after completion");
+        var held = store.ProtectionBatch(root, ItemFlags.NeedsRehash, [rows[0].Path, rows[^1].Path]);
+        Require(!held[0].Covered && held[1].Covered,
+            "observation changes between promotion attempts retain their entity protection");
     }
 }

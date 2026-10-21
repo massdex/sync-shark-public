@@ -52,6 +52,7 @@ internal static partial class ExecutorChecks
             Require(results.Single().DeleteSourceUnconfirmed && target.Deletes == 0 && store.SyncRetryAt("p1", "matched") is not null,
                 "retained prepared Match local-target delete probes relocated opposite identity and leaves durable replan debt");
         }
+        await DeleteTaxonomyChecksAsync();
         await DeleteMissingIdentityAndChoiceChecksAsync();
         await DeleteExpandedMissingIdentityChecksAsync();
         await DeleteReplacementSourceChecksAsync();
@@ -68,8 +69,9 @@ internal static partial class ExecutorChecks
             { DeletionSourceObjectId = "original-source" }, Act(ActionKind.MkDir, Side.B, "unrelated")), source, target);
         Require(results.Count(r => r.Outcome == Outcome.Skipped) == 1 && results.Count(r => r.Outcome == Outcome.Done) == 1,
             "source access failure holds only its delete, not the run");
-        Require(target.Deletes == 0 && store.OpenNotices("p1").Any(n => n.ReasonKey == DeleteSourceGuard.ReasonKey),
-            "source failure records a retryable notice without deleting");
+        Require(target.Deletes == 0 && store.OpenNotices("p1").Count(n => n.ReasonKey == SqliteStateStore.BlockedDeleteSummary) == 1 &&
+            !store.OpenNotices("p1").Any(n => n.ReasonKey == DeleteSourceGuard.ReasonKey),
+            "source failure records one deferred summary without per-item notice flooding or deletion");
     }
 
     private static async Task DeleteSourceMovedChildKeepsParentAsync()
@@ -104,18 +106,19 @@ internal static partial class ExecutorChecks
             if (evidence != "present") await RemoveSourceAsync(side == Side.A ? b : a, "x");
             var target = new RecordingWriter(side == Side.A ? a : b);
             var action = Act(ActionKind.Delete, side, "x", expected: victim, rf: true,
-                rule: choice ? 32 : 6) with { ChoiceRemove = choice };
+                key: evidence == "missing-id" ? null : "kx", rule: choice ? 32 : 6) with { ChoiceRemove = choice };
             var results = await Apply(executor, Plan(action), side == Side.A ? target : a, side == Side.B ? target : b);
-            var allowed = evidence == "absent";
+            var allowed = choice || evidence == "absent";
             Require(results.Single().Outcome == (allowed ? Outcome.Done : Outcome.Skipped),
-                "normal and explicit-choice deletes require trusted identity and fresh absence in both directions");
+                "only absence propagation requires absent source; explicit removal remains conditional on its victim");
             Require(target.Deletes == (allowed ? 1 : 0) && target.Preserves == (allowed ? 1 : 0),
                 "baseline-backed genuine deletion preserves then deletes; unproven deletion has no effects");
-            Require(store.Baselines("p1").Count == (evidence == "present" ? 1 : 0),
+            Require(store.Baselines("p1").Count == (!allowed && evidence == "present" ? 1 : 0),
                 "source-present baseline kept and genuinely deleted baseline removed");
             Require(allowed || (store.SyncRetryAt("p1", "x") is not null &&
-                store.OpenNotices("p1").Count(n => n.ReasonKey == DeleteSourceGuard.ReasonKey) == 1),
-                "missing identity and present source each retain durable retry and one notice");
+                store.OpenNotices("p1").Count(n => n.ReasonKey ==
+                    (evidence == "missing-id" ? "deletion-review" : DeleteSourceGuard.ReasonKey)) == 1),
+                "missing identity creates a review decision; present source retains retry and one notice");
         }
     }
 
@@ -136,12 +139,12 @@ internal static partial class ExecutorChecks
             store.CompleteGeneration(gen, "1", true);
             var target = new RecordingWriter(endpoint);
             var results = await Apply(executor, Plan(Act(ActionKind.Delete, side, "d", expected: folder,
-                rule: 32) with { ChoiceRemove = true }), side == Side.A ? target : a, side == Side.B ? target : b);
+                rule: 23)), side == Side.A ? target : a, side == Side.B ? target : b);
             Require(results.All(r => r.Outcome == Outcome.Skipped) && target.Deletes == 0 && target.Preserves == 0,
                 "expanded no-baseline child cannot use path-only absence and prevents ancestor removal");
-            Require(store.SyncRetryAt("p1", "d/x") is not null && store.SyncRetryAt("p1", "d") is not null &&
-                store.OpenNotices("p1").Count(n => n.ReasonKey == DeleteSourceGuard.ReasonKey) == 1,
-                "expanded unknown identity leaves child and ancestor retry debt with one child notice");
+            Require(store.SyncRetryAt("p1", "d/x") is { Kind: "decision" } && store.SyncRetryAt("p1", "d") is not null &&
+                store.OpenNotices("p1").Any(n => n.Path == "d/x" && n.ReasonKey == "deletion-review"),
+                "expanded unknown identity creates child review authority while ancestor remains blocked");
         }
     }
 

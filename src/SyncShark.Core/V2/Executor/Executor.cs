@@ -446,7 +446,14 @@ public sealed partial class Executor : IExecutor
         var children = descendants.Select(item => new SyncAction(folder.ActionId + ":" + item.Path.ToLowerInvariant(),
             folder.Rule, ActionKind.Delete, folder.Target, item.Path, null, null, item,
             RecoveryFirst: item.Kind == ItemKind.File, keys.GetValueOrDefault(item.ObjectId))
-            { ChoiceRemove = folder.ChoiceRemove }).ToList();
+            {
+                ChoiceRemove = folder.ChoiceRemove,
+                RebuildableRemove = folder.RebuildableRemove,
+                RemovalReviewChoice = folder.RemovalReviewChoice,
+                FrozenChoiceId = folder.FrozenChoiceId,
+                SuppressReconciledBaseline = folder.SuppressReconciledBaseline,
+                FirstSyncChoice = folder.FirstSyncChoice
+            }).ToList();
         children.Add(folder with { RecoveryFirst = false });
         if (whole(folder, descendants.Count)) trees.Add(new WholeFolder(children, descendants));
         else expanded.AddRange(children);

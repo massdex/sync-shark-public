@@ -117,18 +117,25 @@ public sealed partial class DropboxWriter : IEndpointWriter, ISyncTransferResour
     }
 
     /// <inheritdoc/>
+    public Task<IReadOnlyList<bool?>> IsAbsentBatchAsync(
+        IReadOnlyList<(ItemState Historical, string Path)> requests, CancellationToken ct)
+    {
+        if (requests.Count > 128) throw new ArgumentOutOfRangeException(nameof(requests));
+        return _client.ProbeSourceAbsenceAsync(requests.Select(x =>
+            (x.Historical.ObjectId, x.Historical.Path, x.Path)).ToArray(), _absenceReads, ct);
+    }
+
+    /// <inheritdoc/>
     public async Task<bool?> IsSourceAbsentAsync(ItemState? historical, string path, CancellationToken ct)
     {
+        if (historical is not null)
+            return (await IsAbsentBatchAsync([(historical, path)], ct).ConfigureAwait(false))[0];
         // Bound aggregate metadata reads across ordinary workers and whole-folder victim checks.
         await _absenceReads.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (historical is not null && await _client.ObjectExistsAsync(historical.ObjectId, ct).ConfigureAwait(false))
-                return false;
-            var paths = historical is not null && !PairPath.Same(historical.Path, path)
-                ? new[] { path, historical.Path } : new[] { path };
-            var page = await _client.ReadMetadataPageAsync(paths, ct).ConfigureAwait(false);
-            return paths.All(itemPath => page.TryGetValue(itemPath, out var item) && item is null);
+            var page = await _client.ReadMetadataPageAsync([path], ct).ConfigureAwait(false);
+            return page.TryGetValue(path, out var item) && item is null;
         }
         finally { _absenceReads.Release(); }
     }

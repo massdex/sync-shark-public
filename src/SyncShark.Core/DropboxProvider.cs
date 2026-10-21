@@ -1042,6 +1042,13 @@ public sealed partial class DropboxPilotClient(
         if (!IsExactDropboxObjectIdentity(providerObjectId))
             throw new InvalidDataException("An exact Dropbox object ID is required for an identity check.");
         await VerifyRootIdentityAsync(cancellationToken);
+        return await ObjectExistsInVerifiedRootAsync(providerObjectId, cancellationToken);
+    }
+
+    private async Task<bool> ObjectExistsInVerifiedRootAsync(string providerObjectId, CancellationToken cancellationToken)
+    {
+        if (!IsExactDropboxObjectIdentity(providerObjectId))
+            throw new InvalidDataException("An exact Dropbox object ID is required for an identity check.");
         await SyncByteProgressStream.ReportProcessAsync("Checking remote item", _root,
             "Reading the current Dropbox identity for this exact object; no recursive folder scan.");
         using var document = await PostJsonAllowingMissingPathAsync(

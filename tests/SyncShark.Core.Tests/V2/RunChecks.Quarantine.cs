@@ -156,8 +156,14 @@ internal static partial class RunChecks
         { Calls++; beforeFailure?.Invoke(); throw new Win32Exception(1223); }
     }
 
-    private class QuarantineWriter(IEndpointWriter inner, string mode, int code) : IEndpointWriter
+    private class QuarantineWriter(IEndpointWriter inner, string mode, int code) : IEndpointWriter, ISourceAbsenceProbe
     {
+        public Task<bool?> IsSourceAbsentAsync(ItemState? historical, string path, CancellationToken ct) =>
+            ((ISourceAbsenceProbe)inner).IsSourceAbsentAsync(historical, path, ct);
+        public Task<bool?> IsHistoricalSourcePresentAsync(ItemState historical, CancellationToken ct) =>
+            ((ISourceAbsenceProbe)inner).IsHistoricalSourcePresentAsync(historical, ct);
+        public Task<ItemState?> ObserveSourceMetadataAsync(string path, CancellationToken ct) =>
+            ((ISourceAbsenceProbe)inner).ObserveSourceMetadataAsync(path, ct);
         internal bool Enabled = true;
         internal bool Checkpoint;
         internal HashSet<string>? AllowedPaths;

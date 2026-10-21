@@ -97,6 +97,11 @@ public sealed partial class SyncRun
         ProgressThrottle throttle, IReadOnlySet<string>? reviewedDeletes, CancellationToken ct,
         bool allowUnreviewedEvidence = false)
     {
+        if (reviewedDeletes is not null)
+            approved = approved with { Actions = approved.Actions.Select(action =>
+                action.Kind == ActionKind.Delete && reviewedDeletes.Contains(FolderDelete.VictimKey(action.Target, action.Path))
+                    ? action with { RemovalReviewChoice = true } : action).ToArray() };
+        approved = ReviewMissingDeleteIdentities(pair, approved);
         if (approved.HeldDeletions.Count == 0)
         {
             approved = HoldUnavailableRecovery(pair, approved, reviewedDeletes);
@@ -495,6 +500,18 @@ public sealed partial class SyncRun
                     if (allowUnreviewedEvidence && resolved.Actions.Any(action => action.Kind == ActionKind.Delete) &&
                         (reviewedDeletes is null || !reviewedDeletes.Contains(FolderDelete.VictimKey(rule.Local, rule.Path))))
                     {
+                        var missingIdentity = ReviewMissingDeleteIdentities(pair, resolved);
+                        if (!ReferenceEquals(missingIdentity, resolved))
+                        {
+                            lock (sync)
+                            {
+                                actions.AddRange(missingIdentity.Actions);
+                                notices.AddRange(missingIdentity.Notices);
+                                pending.Remove(rule.Path);
+                            }
+                            tally.Plan(missingIdentity.Actions);
+                            return;
+                        }
                         // Evidence proves history, never consent. Preserve the proposed stamped actions separately
                         // from reviewed actions until the user explicitly chooses delete.
                         var retry = _store.SyncRetryAt(pair.PairId, rule.Path) ??
@@ -517,6 +534,27 @@ public sealed partial class SyncRun
                         return;
                     }
                     RefuseUnreviewedDeletes(pair, resolved, reviewedDeletes);
+                    // A reviewed held victim is explicit per-item authority, not inferred source absence.
+                    // Persist that authority in the intent; never grant it merely from a tombstone or
+                    // from approval of another path (ordinary post-prepare propagation stays guarded).
+                    resolved = resolved with
+                    {
+                        Actions = resolved.Actions.Select(action => action.Kind == ActionKind.Delete &&
+                            reviewedDeletes?.Contains(FolderDelete.VictimKey(action.Target, action.Path)) == true
+                            ? action with { RemovalReviewChoice = true } : action).ToArray()
+                    };
+                    var reviewedPlan = ReviewMissingDeleteIdentities(pair, resolved);
+                    if (!ReferenceEquals(reviewedPlan, resolved))
+                    {
+                        lock (sync)
+                        {
+                            actions.AddRange(reviewedPlan.Actions);
+                            notices.AddRange(reviewedPlan.Notices);
+                            pending.Remove(rule.Path);
+                        }
+                        tally.Plan(reviewedPlan.Actions);
+                        return; // User decision, not an endlessly retried evidence failure.
+                    }
                     int count, uploadsNow, deletesNow;
                     var report = false;
                     var filesLeft = 0;
@@ -719,7 +757,7 @@ public sealed partial class SyncRun
                 // An exact current tombstone authorizes an empty folder, discounting only the small
                 // FileName-rule files above. Ignored data needing Recovery keeps a held folder instead.
                 var action = new SyncAction(PlanIds.ActionId(pair.PairId, approved.Gen, 23, ActionKind.Delete,
-                    held.Local, held.Path), 23, ActionKind.Delete, held.Local, held.Path, null, null, current, false, null)
+                    held.Local, held.Path), 23, ActionKind.Delete, held.Local, held.Path, null, null, current, true, null)
                     { OppositeAbsent = true };
                 return new HeldPlanResult(FreezeFolderDeletes(pair, new Plan(pair.PairId, approved.Gen, [action], [])),
                     false);

@@ -262,33 +262,70 @@ public sealed partial class SqliteStateStore : ILocalGapStore
             ("$r", root.Value), ("$e", epoch.Epoch));
     });
 
-    void ILocalGapStore.PromoteGapDiscovery(string rootId) => InStore(() =>
+    void ILocalGapStore.PromoteGapDiscovery(string rootId)
     {
-        var root = RootNo(rootId);
-        var epoch = ReadGap(root);
-        if (root is null || epoch is null) return;
+        var start = InStore(() =>
+        {
+            var root = RootNo(rootId);
+            var capturedEpoch = ReadGap(root);
+            var horizon = root is null || capturedEpoch is null ? null : StoreSchema.Scalar(_connection, null,
+                "SELECT object_id FROM local_gap_item INDEXED BY gap_metadata WHERE root_no=$r AND epoch=$e " +
+                "AND metadata_ready=1 ORDER BY object_id DESC LIMIT 1;", ("$r", root.Value), ("$e", capturedEpoch.Epoch)) as string;
+            return (Root: root, Epoch: capturedEpoch, Through: horizon);
+        });
+        if (start.Root is not { } rootNo || start.Epoch is not { } epoch) return;
         var watch = System.Diagnostics.Stopwatch.StartNew();
-        using var tx = _connection.BeginTransaction();
-        // One indexed set-based discharge, no managed entity list and no per-run metadata
-        // budget. The stamp compares exact observation fields and presence, while epoch
-        // guards prevent a prior journal's proof from releasing a replacement gap.
-        StoreSchema.Execute(_connection, tx,
-            "DELETE FROM local_gap_item INDEXED BY gap_metadata WHERE root_no=$r AND epoch=$e AND metadata_ready=1 " +
-            "AND metadata_stamp IS " + GapObservationSql("local_gap_item.root_no", "local_gap_item.object_id") + ";",
-            ("$r", root.Value), ("$e", epoch.Epoch));
-        var promoted = Convert.ToInt64(StoreSchema.Scalar(_connection, tx, "SELECT changes();"));
-        // Remaining candidates changed since staging. Keep their entity holds and return
-        // them to the normal rotated hash/retry lane; that lane refreshes expected_json.
-        StoreSchema.Execute(_connection, tx,
-            "UPDATE local_gap_item INDEXED BY gap_metadata SET metadata_ready=0,metadata_stamp=NULL,retry_allowed=1,failure_count=0 " +
-            "WHERE root_no=$r AND epoch=$e AND metadata_ready=1;",
-            ("$r", root.Value), ("$e", epoch.Epoch));
-        StoreSchema.Execute(_connection, tx,
-            "UPDATE local_gap SET after_object=worker_after,discovery_done=worker_done WHERE root_no=$r AND epoch=$e;",
-            ("$r", root.Value), ("$e", epoch.Epoch));
-        tx.Commit();
-        RunLog.Trace($"local gap metadata promotion: root={rootId}; count={promoted}; elapsed-ms={watch.ElapsedMilliseconds}");
-    });
+        long promoted = 0;
+        var after = "";
+        try
+        {
+            while (start.Through is { } through)
+            {
+                // Release the store gate and WAL writer between bounded transactions. A
+                // captured horizon prevents a concurrent discovery lane extending this run.
+                var page = InStore(() =>
+                {
+                    using var tx = _connection.BeginTransaction();
+                    if (StoreSchema.Scalar(_connection, tx,
+                        "SELECT 1 FROM local_gap WHERE root_no=$r AND epoch=$e;",
+                        ("$r", rootNo), ("$e", epoch.Epoch)) is null) return (Last: (string?)null, Count: 0L);
+                    var last = StoreSchema.Scalar(_connection, tx,
+                        "SELECT MAX(object_id) FROM (SELECT object_id FROM local_gap_item INDEXED BY gap_metadata " +
+                        "WHERE root_no=$r AND epoch=$e AND metadata_ready=1 AND object_id>$after AND object_id<=$through " +
+                        "ORDER BY object_id LIMIT 512);", ("$r", rootNo), ("$e", epoch.Epoch),
+                        ("$after", after), ("$through", through)) as string;
+                    if (last is null) return (Last: (string?)null, Count: 0L);
+                    const string range = " WHERE root_no=$r AND epoch=$e AND metadata_ready=1 AND object_id>$after AND object_id<=$last";
+                    StoreSchema.Execute(_connection, tx,
+                        "DELETE FROM local_gap_item INDEXED BY gap_metadata" + range +
+                        " AND metadata_stamp IS " + GapObservationSql("local_gap_item.root_no", "local_gap_item.object_id") + ";",
+                        ("$r", rootNo), ("$e", epoch.Epoch), ("$after", after), ("$last", last));
+                    var count = Convert.ToInt64(StoreSchema.Scalar(_connection, tx, "SELECT changes();"));
+                    // Changed observations retain protection and rejoin the normal retry lane.
+                    StoreSchema.Execute(_connection, tx,
+                        "UPDATE local_gap_item INDEXED BY gap_metadata SET metadata_ready=0,metadata_stamp=NULL,retry_allowed=1,failure_count=0" + range + ";",
+                        ("$r", rootNo), ("$e", epoch.Epoch), ("$after", after), ("$last", last));
+                    tx.Commit();
+                    return (Last: (string?)last, Count: count);
+                });
+                if (page.Last is null) break;
+                promoted += page.Count;
+                after = page.Last;
+            }
+            InStore(() =>
+            {
+                // Publish only the captured worker frontier, after every page completes.
+                // New staged rows retain explicit holds; replacement epochs are untouched.
+                StoreSchema.Execute(_connection, null,
+                    "UPDATE local_gap SET after_object=MAX(after_object,$after),discovery_done=MAX(discovery_done,$done) WHERE root_no=$r AND epoch=$e;",
+                    ("$r", rootNo), ("$e", epoch.Epoch), ("$after", epoch.AfterObject), ("$done", epoch.DiscoveryDone ? 1 : 0));
+            });
+        }
+        finally
+        {
+            RunLog.Trace($"local gap metadata promotion: root={rootId}; count={promoted}; elapsed-ms={watch.ElapsedMilliseconds}");
+        }
+    }
 
     IReadOnlyList<ItemState> ILocalGapStore.GapHashPage(string rootId, LocalGapEpoch epoch, int limit) => InStore(() =>
     {

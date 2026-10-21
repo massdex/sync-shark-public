@@ -405,7 +405,9 @@ public sealed partial class SqliteStateStore : IStateStore
                 if (parkedKeys.Remove(RowCodec.Key(action.Path)))
                     DeleteParkedSyncRetry(transaction, pairNo, pairId, action.Path);
             }
-            if (action.Kind == ActionKind.Delete && result.Outcome == Outcome.Uncertain && result.RetryAfterSeconds is not null)
+            if (action.Kind == ActionKind.Delete && result.Outcome == Outcome.Uncertain && result.RetryAfterSeconds is not null &&
+                (long)StoreSchema.Scalar(_connection, transaction, "SELECT COUNT(*) FROM (SELECT 1 FROM pending_effect WHERE " +
+                    UncertainDeleteWhere + " LIMIT 21);", ("$p", pairNo))! <= 20)
                 _notices.Add(transaction, pairNo, new Notice(pairId, action.Rule, NoticeKind.Info, action.Path,
                     result.Reason ?? "Interrupted deletion could not be verified; Retry checks both endpoints again.",
                     "interrupted-delete-unverified"), now);
@@ -417,7 +419,13 @@ public sealed partial class SqliteStateStore : IStateStore
             if (SyncDirectDownloadCheckpoint.NoticeFor(pairId, action, result) is { } notice)
                 _notices.Add(transaction, pairNo, notice, now);
             if (result.Outcome == Outcome.Skipped && result.DeleteSourceUnconfirmed)
-                QueueUnconfirmedDeleteSource(transaction, pairNo, action, result);
+            {
+                QueueUnconfirmedDeleteSource(transaction, pairNo, pairId, action, result);
+                foreach (var (rule, reason) in new[] { ("40", "sync-retry"), ("30", "content-unconfirmed") })
+                    StoreSchema.Execute(_connection, transaction,
+                        "UPDATE notice SET state='closed',choice='aggregated' WHERE notice_id=$id AND state='open';",
+                        ("$id", ShortId.Make("n", pairId, rule, RowCodec.Key(action.Path), reason)));
+            }
             if (result.Outcome == Outcome.Skipped && result.ForgetUnsafeDeleteBaseline)
                 QueueInterruptedDeleteRestore(transaction, pairNo, pairId, rootNoA, rootNoB, action, result);
             if (result.Outcome == Outcome.Skipped && (result.ForgetAbsentDownloadBaseline || result.ForgetUnsafeDeleteBaseline))
@@ -484,6 +492,10 @@ public sealed partial class SqliteStateStore : IStateStore
         }
         if (results.Any(row => row.Result.Outcome == Outcome.Skipped && row.Result.ForgetUnsafeDeleteBaseline))
             RefreshInterruptedDeleteNotice(transaction, pairNo, pairId, now);
+        if (results.Any(row => row.Result.DeleteSourceUnconfirmed))
+            RefreshBlockedDeleteNotice(transaction, pairNo, pairId, now);
+        if (results.Any(row => row.Action.Kind == ActionKind.Delete))
+            RefreshDeleteReviewNotices(transaction, pairNo, pairId, now, exact: false);
         transaction.Commit();
     });
 
@@ -600,6 +612,8 @@ public sealed partial class SqliteStateStore : IStateStore
         var now = NowMs();
         foreach (var notice in captured)
             _notices.Add(transaction, RequirePair(notice.PairId), notice, now);
+        foreach (var pairId in captured.Where(notice => notice.ReasonKey == "deletion-review").Select(notice => notice.PairId).Distinct())
+            RefreshDeleteReviewNotices(transaction, RequirePair(pairId), pairId, now, exact: false);
         transaction.Commit();
     });
 

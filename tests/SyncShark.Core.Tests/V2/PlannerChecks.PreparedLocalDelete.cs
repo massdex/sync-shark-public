@@ -17,6 +17,7 @@ internal static partial class PlannerChecks
         PreparedLocalDelete_KnownDifferentCopiesBack();
         PreparedLocalDelete_EqualHashDifferentIdentityCopiesBack();
         PreparedLocalDelete_LocalFolderEmitsRecoveryFirstDelete();
+        PreparedLocalDelete_FolderPreservesChildIdentity();
         PreparedLocalDelete_RemoteTargetKeepsOrdinaryDelete();
         PreparedLocalDelete_MalformedOppositeStampHoldsWithoutDelete();
     }
@@ -125,6 +126,31 @@ internal static partial class PlannerChecks
         Require(plan.Actions.Single().DeletionSourceObjectId == "dbx-gone",
             "the local folder Delete carries the missing side's prepare stamp identity");
         Console.WriteLine("PASS PreparedLocalDelete_LocalFolderEmitsRecoveryFirstDelete");
+    }
+
+    private static void PreparedLocalDelete_FolderPreservesChildIdentity()
+    {
+        var folder = D("d", "loc:d");
+        var child = F("d/x", "loc:x", "hx");
+        var options = PreparedOptions(folder.Path, Content.SideStamp(folder), "dbx-folder-gone|d") with
+        {
+            MatchedAtPrepare = new Dictionary<string, PrepareMatch>(StringComparer.OrdinalIgnoreCase)
+            {
+                [folder.Path] = new(Content.SideStamp(folder), "dbx-folder-gone|d"),
+                [child.Path] = new(Content.SideStamp(child), "dbx-child-gone|v:1"),
+            },
+        };
+        var plan = Planner.Decide(PairId, Gen,
+            new[] { Row(null, folder, null, Ev(B: true)), Row(null, child, null, Ev(B: true)) }, options);
+        Require(plan.Actions.Count == 2 && plan.Actions.All(action => action.Kind == ActionKind.Delete),
+            "prepared descendant deletes are not discarded by folder collapse");
+        Require(plan.Actions.Single(action => action.Path == "d") is
+            { DescendantsPlanned: true, DeletionSourceObjectId: "dbx-folder-gone" },
+            "the folder retains its own source identity and cannot expand over children");
+        Require(plan.Actions.Single(action => action.Path == "d/x") is
+            { RecoveryFirst: true, DeletionSourceObjectId: "dbx-child-gone" },
+            "the child retains its distinct trusted source identity and Recovery-first protection");
+        Console.WriteLine("PASS PreparedLocalDelete_FolderPreservesChildIdentity");
     }
 
     // Remote-target semantics are unchanged: a local deletion propagates to Dropbox even when the prepare recorded

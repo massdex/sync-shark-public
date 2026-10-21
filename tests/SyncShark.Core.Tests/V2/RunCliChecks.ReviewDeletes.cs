@@ -17,7 +17,7 @@ internal static partial class RunCliChecks
         await Cli_ReviewDeletes_PrepareMatchedHeldLaneMissPropagatesAsync();
         await Cli_ReviewDeletes_PrepareMatchedHeldLaneMissChangedSurvivorAsync();
         await Cli_ReviewDeletes_PrepareMatchedHashPassNoCopyBackAsync();
-        await Cli_ReviewDeletes_PrepareMatchedMetadataStampNoCopyBackAsync();
+        await Cli_ReviewDeletes_PrepareMatchedUnknownHashStaysProtectedAsync();
         await Cli_ReviewDeletes_HeldChildBlocksFolderDeleteAsync(false);
         await Cli_ReviewDeletes_HeldChildBlocksFolderDeleteAsync(true);
         await Cli_ReviewDeletes_ResolvedHeldChildKeepsFolderPendingAsync();
@@ -183,7 +183,8 @@ internal static partial class RunCliChecks
     private static async Task Cli_ReviewDeletes_PrepareMatchedHeldLaneMissPropagatesAsync()
     {
         var fx = Build();
-        fx.A.Seed("d/x.txt", "same");
+        fx.A.OmitVersionIds = true;
+        var aState = fx.A.Seed("d/x.txt", "same");
         var bState = fx.B.Seed("d/x.txt", "same");
         var root = TempRoot();
         try
@@ -199,9 +200,18 @@ internal static partial class RunCliChecks
                 "a prepare-matched path is planned instead of held on an evidence cache miss");
             Require(await fx.A.ObserveAsync("d/x.txt", default) is not null && fx.WriterA.Deletes == 0,
                 "post-preview local survivor waits for ordinary sync");
-            await fx.Run().IncrementalAsync(fx.Pair.PairId, new Progress<RunProgress>(), default);
+            var deferred = fx.Store.SyncRetryAt(fx.Pair.PairId, "d/x.txt");
+            Require(aState.Hash is not null && deferred?.Match is { } savedMatch &&
+                savedMatch.A == aState.ObjectId + "|h:" + aState.Hash &&
+                savedMatch.B.StartsWith(bState.ObjectId + "|", StringComparison.Ordinal),
+                "the deferred prepared match retains the local identity/hash and real deleted source identity; retry=" +
+                System.Text.Json.JsonSerializer.Serialize(deferred));
+            var ordinary = await fx.Run().IncrementalAsync(fx.Pair.PairId, new Progress<RunProgress>(), default);
             Require(await fx.A.ObserveAsync("d/x.txt", CancellationToken.None) is null,
-                "the unchanged local survivor is deleted as ordinary propagation");
+                "the unchanged local survivor is deleted as ordinary propagation; retry=" +
+                System.Text.Json.JsonSerializer.Serialize(fx.Store.SyncRetryAt(fx.Pair.PairId, "d/x.txt")) +
+                "; notices=" + System.Text.Json.JsonSerializer.Serialize(fx.Store.OpenNotices(fx.Pair.PairId)) +
+                "; report=" + System.Text.Json.JsonSerializer.Serialize(ordinary));
             Require(fx.Store.Recoveries(fx.Pair.PairId).Count == 1, "the local delete is Recovery-first");
         }
         finally
@@ -215,6 +225,7 @@ internal static partial class RunCliChecks
     private static async Task Cli_ReviewDeletes_PrepareMatchedHeldLaneMissChangedSurvivorAsync()
     {
         var fx = Build();
+        fx.A.OmitVersionIds = true;
         fx.A.Seed("d/x.txt", "same");
         var bState = fx.B.Seed("d/x.txt", "same");
         var root = TempRoot();
@@ -249,10 +260,11 @@ internal static partial class RunCliChecks
     private static async Task Cli_ReviewDeletes_PrepareMatchedHashPassNoCopyBackAsync()
     {
         var fx = Build();
+        fx.A.OmitVersionIds = true;
         fx.A.InventoryWithoutHashes = true;
         fx.B.InventoryWithoutHashes = true;
         var at = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
-        fx.A.Seed("d/x.txt", "older", mtime: at);
+        var aState = fx.A.Seed("d/x.txt", "older", mtime: at);
         var bState = fx.B.Seed("d/x.txt", "newer longer content", mtime: at.AddMinutes(5));
         var root = TempRoot();
         try
@@ -266,6 +278,9 @@ internal static partial class RunCliChecks
                 null, bState, false, null), CancellationToken.None);
             var result = await runtime.ApplyFirstSyncAsync(fx.Pair.PairId, EmptyChoices, false, null, _ => { },
                 CancellationToken.None);
+            Require(fx.Store.SyncRetryAt(fx.Pair.PairId, "d/x.txt")?.Match is { } hashedMatch &&
+                aState.Hash is not null && hashedMatch.A == aState.ObjectId + "|h:" + aState.Hash,
+                "the final prepare hash, not a synthetic provider revision, is retained for the local survivor");
             Require(result.Failed == 0 && result.FirstSyncComplete,
                 "the hashed-at-prepare survivor matches its final-row stamp and applies");
             Require(await fx.A.ObserveAsync("d/x.txt", default) is not null && fx.WriterA.Deletes == 0,
@@ -281,16 +296,16 @@ internal static partial class RunCliChecks
         Console.WriteLine("PASS Cli_ReviewDeletes_PrepareMatchedHashPassNoCopyBack");
     }
 
-    // third-review finding 2: the comparison follows the stamp KIND saved at prepare. A metadata
-    // stamp recorded while the pair was unhashable must still match after the apply's scan gains a hash; otherwise the
-    // survivor is falsely copied back.
-    private static async Task Cli_ReviewDeletes_PrepareMatchedMetadataStampNoCopyBackAsync()
+    // A local metadata-only prepare stamp contains no historical content proof. Gaining a hash later
+    // cannot invent historical equality: retain the survivor with a notice, without deleting or copying back.
+    private static async Task Cli_ReviewDeletes_PrepareMatchedUnknownHashStaysProtectedAsync()
     {
         var fx = Build();
+        fx.A.OmitVersionIds = true;
         fx.A.InventoryWithoutHashes = true;
         fx.B.InventoryWithoutHashes = true;
         var at = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
-        fx.A.Seed("d/x.txt", "older", mtime: at);
+        var aState = fx.A.Seed("d/x.txt", "older", mtime: at);
         var bState = fx.B.Seed("d/x.txt", "newer longer content", mtime: at.AddMinutes(5));
         fx.A.Unhashable.Add("d/x.txt");
         fx.B.Unhashable.Add("d/x.txt");
@@ -313,19 +328,26 @@ internal static partial class RunCliChecks
             var result = await runtime.ApplyFirstSyncAsync(fx.Pair.PairId, EmptyChoices, false, null, _ => { },
                 CancellationToken.None);
             Require(fx.A.DeltaCalls > deltaCalls, "metadata-stamped apply resumed A from the prepare checkpoint");
+            Require(fx.Store.SyncRetryAt(fx.Pair.PairId, "d/x.txt")?.Match is { } unknownMatch &&
+                unknownMatch.A.StartsWith(aState.ObjectId + "|m:", StringComparison.Ordinal),
+                "the fixture preserves genuinely unknown historical content as a local metadata stamp");
             Require(result.Failed == 0 && result.FirstSyncComplete,
-                "a metadata-stamped survivor matches after the apply gains a hash");
+                "an unconfirmed metadata-stamped survivor remains safe after apply gains a hash");
             Require(await fx.A.ObserveAsync("d/x.txt", default) is not null && fx.WriterA.Deletes == 0,
-                "post-preview survivor remains until ordinary sync");
+                "unknown historical content never authorizes deletion during apply");
             await fx.Run().IncrementalAsync(fx.Pair.PairId, new Progress<RunProgress>(), default);
-            Require(await fx.A.ObserveAsync("d/x.txt", CancellationToken.None) is null,
-                "the deletion propagates; the survivor is not falsely copied back");
+            Require(await fx.A.ObserveAsync("d/x.txt", CancellationToken.None) is not null &&
+                await fx.B.ObserveAsync("d/x.txt", CancellationToken.None) is null && fx.WriterA.Deletes == 0,
+                "unknown prepared hash retains the survivor without false copyback or automatic deletion");
+            Require(fx.Store.OpenNotices(fx.Pair.PairId).Count(notice =>
+                notice.Path == "d/x.txt" && notice.ReasonKey == "content-unconfirmed") == 1,
+                "unknown prepared content has one deduplicated unconfirmed notice");
         }
         finally
         {
             Cleanup(root);
         }
-        Console.WriteLine("PASS Cli_ReviewDeletes_PrepareMatchedMetadataStampNoCopyBack");
+        Console.WriteLine("PASS Cli_ReviewDeletes_PrepareMatchedUnknownHashStaysProtected");
     }
 
     // third-review finding 1: a held child is hidden from planner rows, so an ordinary folder
@@ -334,6 +356,7 @@ internal static partial class RunCliChecks
     private static async Task Cli_ReviewDeletes_HeldChildBlocksFolderDeleteAsync(bool sleeping)
     {
         var fx = Build();
+        fx.A.OmitVersionIds = true;
         var folder = fx.A.Seed("d", "", ItemKind.Folder);
         fx.A.Seed("d/keep.txt", "keep");
         var bFolder = fx.B.Seed("d", "", ItemKind.Folder);
@@ -383,12 +406,12 @@ internal static partial class RunCliChecks
         Console.WriteLine("PASS Cli_ReviewDeletes_HeldChildBlocksFolderDelete sleeping=" + sleeping);
     }
 
-    // Fourth review finding 1: the reviewed held child resolves and finishes in the same apply, but the folder delete
-    // was already held. The first sync must stay incomplete (an incremental run has no prepare record and would
-    // recreate the folder on Dropbox); the next apply replans the folder as ordinary propagation and completes.
+    // The reviewed held child resolves in apply, but its ancestor stays blocked for that apply. Durable
+    // prepared matches let the next ordinary run delete the now-unblocked folder and matched child safely.
     private static async Task Cli_ReviewDeletes_ResolvedHeldChildKeepsFolderPendingAsync()
     {
         var fx = Build();
+        fx.A.OmitVersionIds = true;
         fx.A.Seed("d", "", ItemKind.Folder);
         fx.A.Seed("d/keep.txt", "keep");
         var bFolder = fx.B.Seed("d", "", ItemKind.Folder);
@@ -415,12 +438,21 @@ internal static partial class RunCliChecks
                 "the evidence-blocked folder is not deleted in the same apply");
             Require(first.FirstSyncComplete,
                 "an evidence-blocked folder is retained as ordinary retry work after completion");
+            var handoff = System.Text.Json.JsonSerializer.Serialize(fx.Store.ReadSyncRetries(fx.Pair.PairId));
             var second = await fx.Run().IncrementalAsync(fx.Pair.PairId, new Progress<RunProgress>(), default);
             Require(second.Failed == 0 && fx.Store.FirstSyncDone(fx.Pair.PairId),
                 "ordinary sync replans the folder once nothing is held under it");
-            Require(await fx.A.ObserveAsync("d", CancellationToken.None) is null &&
-                await fx.B.ObserveAsync("d", CancellationToken.None) is null,
-                "the folder deletion propagates instead of the folder being recreated on Dropbox");
+            var aFolderAfter = await fx.A.ObserveAsync("d", default);
+            var bFolderAfter = await fx.B.ObserveAsync("d", default);
+            Require(aFolderAfter is null && bFolderAfter is null,
+                "the folder deletion propagates instead of the folder being recreated on Dropbox; before=" + handoff +
+                "; after=" + System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    AFolder = aFolderAfter, BFolder = bFolderAfter,
+                    AChild = await fx.A.ObserveAsync("d/keep.txt", default),
+                    Retry = fx.Store.ReadSyncRetries(fx.Pair.PairId),
+                    Notices = fx.Store.OpenNotices(fx.Pair.PairId), Report = second
+                }));
         }
         finally
         {

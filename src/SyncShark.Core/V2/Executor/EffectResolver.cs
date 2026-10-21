@@ -24,6 +24,7 @@ internal static class EffectResolver
         var providerReportsInProgress = false;
         var providerTemporarilyUnavailable = false;
         var deleteJobTerminal = false;
+        var deleteJobUnavailable = false;
         if (x.ProviderEffect is { Kind: "delete-job" or "mkdir-job" } checkpoint &&
             target is IProviderEffectReconciler reconciler)
         {
@@ -46,6 +47,8 @@ internal static class EffectResolver
                 // A transient lookup failure is not proof that the job expired. Positive
                 // observation may still prove completion, but do not expire a live job on an outage.
                 providerTemporarilyUnavailable = ProviderTransientFailure.IsTransient(e, ct);
+                deleteJobUnavailable = checkpoint.Kind == "delete-job" &&
+                    e is DropboxEffectUncertainException { JobIdUnavailable: true };
             }
         }
         // A direct download records one narrow durable checkpoint after verifying its stage and before archiving
@@ -98,6 +101,14 @@ internal static class EffectResolver
             { RetryAfterSeconds = x.Kind == ActionKind.Delete || ProviderTransientFailure.IsTransient(failure, ct)
                 ? ProviderTransientFailure.VerificationRetrySeconds : null };
         var obs = path.State;
+        // Unknown/expired job ids become finished-unknown after grace, never a proof of deletion.
+        // Both endpoints (including trusted source identity) still decide the outcome below. An active
+        // job or a transient lookup outage cannot expire, nor can a submission lacking a job id.
+        if (x.Kind == ActionKind.Delete && x.ProviderEffect is { Kind: "delete-job" } deleteJob &&
+            deleteJobUnavailable && !providerReportsInProgress && !providerTemporarilyUnavailable &&
+            deleteJob.RecordedAtUtc is { } submittedDelete &&
+            now - submittedDelete >= (unknownCommitGracePeriod ?? V2Settings.Default.UnknownCommitGracePeriod))
+            deleteJobTerminal = true;
         // Even an absent target must not be restored underneath a provider job still running.
         if (x.Kind == ActionKind.Delete && (providerReportsInProgress || providerTemporarilyUnavailable ||
             x.ProviderEffect?.Kind == "delete-submit" || x.ProviderEffect?.Kind == "delete-job" && !deleteJobTerminal))
@@ -136,6 +147,14 @@ internal static class EffectResolver
             case ActionKind.Move:
                 return await ResolveMoveAsync(x, obs, target, ct).ConfigureAwait(false);
             case ActionKind.Delete:
+                // Typed expired/invalid job + elapsed grace ends verify-only waiting, not deletion
+                // authority. Without a trusted original identity retain history and park a user review.
+                // This also covers an absent target: never infer the opposite user's deletion from it.
+                if (deleteJobUnavailable && deleteJobTerminal &&
+                    string.IsNullOrWhiteSpace(historicalDeleteSource?.ObjectId) &&
+                    !DeleteSourceGuard.ExplicitRemoval(x) && x.Rule is not (26 or 32))
+                    return Skipped(x, "The delete job expired without a trusted source identity. Review the item; nothing further was deleted.") with
+                    { DeleteSourceUnconfirmed = true, DeleteSourceIdentityMissing = true };
                 if (obs is not null) return Skipped(x, SameAsExpected(obs, x.ExpectedTarget) ? NotApplied : Superseded);
                 return await ResolveAbsentDeleteAsync(x, target, source, historicalDeleteSource, ct).ConfigureAwait(false);
             case ActionKind.MkDir:
@@ -152,8 +171,10 @@ internal static class EffectResolver
     private static async Task<ActionResult> ResolveAbsentDeleteAsync(SyncAction action, IEndpointWriter target,
         IEndpointWriter source, ItemState? historical, CancellationToken ct)
     {
-        // Type-replacement deletes are not absence propagation. Their following copy owns restoration.
-        if (action.Rule is 26 or 32) return await DoneAsync(action, null, target, ct).ConfigureAwait(false);
+        // Explicit victim choices and type replacement are not absence propagation. Their durable
+        // authority must not be reinterpreted as a mistaken missing-source delete after a crash.
+        if (DeleteSourceGuard.ExplicitRemoval(action) || action.Rule is 26 or 32)
+            return await DoneAsync(action, null, target, ct).ConfigureAwait(false);
         try
         {
             if (historical is not null && !string.IsNullOrWhiteSpace(historical.ObjectId) && source is ISourceAbsenceProbe probe)

@@ -19,7 +19,7 @@ internal static partial class ExecutorChecks
         var plan = Plan(
             Act(ActionKind.Delete, Side.B, "d/x", expected: child, rf: true, key: "kx", rule: 32),
             Act(ActionKind.Delete, Side.B, "d", expected: folder, key: "kd", rule: 32) with { DescendantsPlanned = true },
-            Act(ActionKind.CopyNew, Side.B, "d", source: replacement));
+            Act(ActionKind.CopyNew, Side.B, "d", source: replacement, rule: 32));
 
         var results = await Apply(executor, plan, a, record);
         Require(results.Count == 3 && results.All(r => r.Outcome == Outcome.Done),
@@ -35,9 +35,13 @@ internal static partial class ExecutorChecks
     private static async Task PlannedDescendants_FailedChild_FolderKept()
     {
         var (store, a, b, executor, folder, child) = PlannedDescendantsRig();
+        SeedBaseline(store, "kx", a.Seed("d/x", "child-content", versionId: "v1"), child);
+        SeedBaseline(store, "kd", a.Seed("d", "", ItemKind.Folder, versionId: "v1"), folder);
+        await RemoveSourceAsync(a, "d/x");
+        await RemoveSourceAsync(a, "d");
         var record = new RecordingWriter(b) { FailDeleteAt = "d/x" };
-        var childDelete = Act(ActionKind.Delete, Side.B, "d/x", expected: child, rf: true, key: "kx", rule: 32);
-        var folderDelete = Act(ActionKind.Delete, Side.B, "d", expected: folder, key: "kd", rule: 32) with
+        var childDelete = Act(ActionKind.Delete, Side.B, "d/x", expected: child, rf: true, key: "kx", rule: 6);
+        var folderDelete = Act(ActionKind.Delete, Side.B, "d", expected: folder, key: "kd", rule: 6) with
         {
             DescendantsPlanned = true
         };

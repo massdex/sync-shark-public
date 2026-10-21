@@ -23,6 +23,9 @@ internal sealed class ActionRunner
     private readonly IReadOnlyList<SyncAction> _dependencies;
     private readonly IReadOnlyDictionary<(Side, int, string), ItemState> _replacementActions;
     private readonly ConcurrentDictionary<string, Outcome> _outcomes;
+    private readonly ConcurrentDictionary<string, Outcome> _actionOutcomes = new(StringComparer.Ordinal);
+    private readonly IReadOnlyDictionary<(Side, string), List<SyncAction>> _pairedEffects;
+    private readonly HashSet<string> _pairedActionIds;
     private readonly ConcurrentDictionary<string, byte> _refusedParents = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> _grantHeldParents = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> _sourceBlockedDeletes = new(StringComparer.Ordinal);
@@ -41,7 +44,11 @@ internal sealed class ActionRunner
         _a = a;
         _b = b;
         _dependencies = dependencies;
-        _replacementActions = DeleteSourceGuard.Replacements(replacementActions ?? dependencies);
+        var planActions = replacementActions ?? dependencies;
+        _replacementActions = DeleteSourceGuard.Replacements(planActions);
+        _pairedEffects = IndexPairedEffects(planActions);
+        _pairedActionIds = _pairedEffects.Values.SelectMany(items => items).Select(item => item.ActionId)
+            .ToHashSet(StringComparer.Ordinal);
         _outcomes = outcomes;
     }
 
@@ -49,6 +56,7 @@ internal sealed class ActionRunner
     internal async Task<ActionResult?> RunAsync(SyncAction action, CancellationToken ct)
     {
         var result = await RunStepsAsync(action, ct).ConfigureAwait(false);
+        if (result is not null && _pairedActionIds.Contains(action.ActionId)) _actionOutcomes[action.ActionId] = result.Outcome;
         if (result is not null && action.Kind is ActionKind.MkDir or ActionKind.Move or ActionKind.Delete)
         {
             if ((result.ProviderNameRefused || result.ParentNameRefused) &&
@@ -122,7 +130,8 @@ internal sealed class ActionRunner
         {
             if (await GrantHoldAsync(action).ConfigureAwait(false) is { } held) return held;
             if (await DeleteSourceGuard.CheckAsync(action, source, _committer, _pairId, ct,
-                DeleteSourceGuard.Replacement(action, _replacementActions)).ConfigureAwait(false) is { } blocked)
+                DeleteSourceGuard.Replacement(action, _replacementActions),
+                pairedAdmitted: await PairedDeleteAdmittedAsync(action, ct).ConfigureAwait(false)).ConfigureAwait(false) is { } blocked)
                 return await CommitAsync(action, blocked).ConfigureAwait(false);
             freeSpace = target is ILocalFreeSpaceAdmission admission
                 ? await admission.AdmitFreeSpaceAsync(action, ct).ConfigureAwait(false)
@@ -165,6 +174,76 @@ internal sealed class ActionRunner
             lease.Complete(success);
             SyncTransferResourceController.Lease.Current.Value = null;
         }
+    }
+
+    private static IReadOnlyDictionary<(Side, string), List<SyncAction>> IndexPairedEffects(IReadOnlyList<SyncAction> actions)
+    {
+        var needed = actions.Where(action => action.Kind == ActionKind.Delete && action.Rule is 4 or 12 && action.Source is not null)
+            .Select(action => (action.Target == Side.A ? Side.B : Side.A, action.Source!.ObjectId)).ToHashSet();
+        var index = new Dictionary<(Side, string), List<SyncAction>>();
+        if (needed.Count == 0) return index;
+        foreach (var action in actions)
+        {
+            if (action.Kind is not (ActionKind.Move or ActionKind.Adopt or ActionKind.Update)) continue;
+            Add(action.Target == Side.A ? Side.B : Side.A, action.Source, action);
+            Add(action.Target, action.ExpectedTarget, action);
+        }
+        return index;
+
+        void Add(Side side, ItemState? item, SyncAction action)
+        {
+            if (item is null || !needed.Contains((side, item.ObjectId))) return;
+            if (!index.TryGetValue((side, item.ObjectId), out var matches))
+                index[(side, item.ObjectId)] = matches = new List<SyncAction>();
+            matches.Add(action);
+        }
+    }
+
+    // Collision deletes are authorized by a specific same-plan effect, never by a rule number alone.
+    // A vacating delete precedes its Move, so admit that Move read-only without writing a speculative intent.
+    private async Task<bool> PairedDeleteAdmittedAsync(SyncAction action, CancellationToken ct)
+    {
+        if (action.Kind != ActionKind.Delete || action.Rule is not (4 or 12) ||
+            action.Source is not { } incoming || !action.RecoveryFirst) return false;
+        var sourceSide = action.Target == Side.A ? Side.B : Side.A;
+        if (!_pairedEffects.TryGetValue((sourceSide, incoming.ObjectId), out var candidates)) return false;
+        foreach (var paired in candidates)
+        {
+            var matches = action.Rule == 12
+                ? paired.Kind == ActionKind.Adopt && PairPath.Same(paired.Path, incoming.Path) &&
+                    !PairPath.Same(action.Path, paired.Path)
+                : (paired.Kind == ActionKind.Move && paired.Target == action.Target &&
+                    PairPath.Same(paired.Path, action.Path) && paired.Source?.ObjectId == incoming.ObjectId) ||
+                  (paired.Kind == ActionKind.Update && paired.Target == sourceSide &&
+                    PairPath.Same(paired.Path, incoming.Path) && paired.ExpectedTarget?.ObjectId == incoming.ObjectId);
+            if (!matches) continue;
+            if (_actionOutcomes.TryGetValue(paired.ActionId, out var outcome))
+            {
+                if (outcome == Outcome.Done) return true;
+                continue;
+            }
+            // Adopt runs in the earlier commit-only phase and Update before removal. A still-pending
+            // one is not completion evidence. Only a Move may depend on this vacating Delete.
+            if (paired.Kind != ActionKind.Move || paired.FromPath is null || paired.Source is null ||
+                paired.ExpectedTarget is null || _quota.Blocks(paired) ||
+                _committer.DefenderGrantConflict(paired) is not null || BlockingParent(paired) is not null ||
+                (RecoverySafety.RequiresRecovery(paired) && RecoverySafety.Unavailable(_a, _b) is not null)) continue;
+            try
+            {
+                var source = paired.Target == Side.A ? _b : _a;
+                var target = paired.Target == Side.A ? _a : _b;
+                if (source is not ISourceAbsenceProbe sourceProbe || target is not ISourceAbsenceProbe targetProbe) continue;
+                var currentSource = await sourceProbe.ObserveSourceMetadataAsync(paired.Source.Path, ct).ConfigureAwait(false);
+                var currentTarget = await targetProbe.ObserveSourceMetadataAsync(paired.FromPath, ct).ConfigureAwait(false);
+                if (currentSource is not null && currentTarget is not null &&
+                    currentSource.ObjectId == paired.Source.ObjectId && currentSource.Kind == paired.Source.Kind &&
+                    currentTarget.ObjectId == paired.ExpectedTarget.ObjectId && currentTarget.Kind == paired.ExpectedTarget.Kind)
+                    return true;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception error) when (error is not OutOfMemoryException) { /* Unknown is not admission. */ }
+        }
+        return false;
     }
 
     private async Task<ActionResult?> GrantHoldAsync(SyncAction action)

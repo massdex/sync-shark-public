@@ -173,12 +173,14 @@ public sealed partial class SyncRun
             {
                 // The executor already committed the retry with its one explanatory notice. Keep it due
                 // next run; do not replace it with a second generic failure notice/backoff.
-                if (old is not null) _store.SaveSyncRetry(pair.PairId, old with { RetryAfter = DateTimeOffset.MinValue });
+                // Preserve provider Retry-After from the durable guard result.
+                if (old is not null) _store.SaveSyncRetry(pair.PairId, old);
                 continue;
             }
             SaveFailedRetry(pair, path, reasons.GetValueOrDefault(path), old);
         }
         _store.RefreshInterruptedDeleteNotice(pair.PairId);
+        _store.RefreshBlockedDeleteNotice(pair.PairId);
     }
 
     private void SaveFailedRetry(PairDef pair, string path, string? reason, SyncRetry? old)
@@ -194,7 +196,7 @@ public sealed partial class SyncRun
             RetryAfter = _time.GetUtcNow().AddSeconds(Math.Min(300, 10 * Math.Pow(2, Math.Min(attempts - 1, 5))))
         };
         _store.SaveSyncRetry(pair.PairId, retry);
-        if (!retry.ReprobeEvidence && retry.LastError != DropboxQuota.Detail && attempts >= 1 && retry.Kind is not ("planning" or "recovery"))
+        if (retry.DeleteBlockedDetail is null && !retry.ReprobeEvidence && retry.LastError != DropboxQuota.Detail && attempts >= 1 && retry.Kind is not ("planning" or "recovery"))
             WriteNotices([new Notice(pair.PairId, 40, NoticeKind.Info, path,
                 $"Sync will retry this item later ({attempts} attempts): {retry.LastError}. Options: retry now / exclude / ignore.", "sync-retry",
                 FolderInspection: _store.Live(pair.A.RootId, [path]).Concat(_store.Live(pair.B.RootId, [path]))

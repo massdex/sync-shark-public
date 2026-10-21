@@ -64,6 +64,14 @@ public sealed partial class SyncRun
             var pair = _store.Pair(pairId) ?? throw new SyncRunRefusedException("The pair is no longer available.");
             return ShowHeldIntentItems(pair, input);
         }
+        if (choice == NoticeChoices.ShowRemaining &&
+            _store.NoticeById(pairId, noticeId) is { Closed: false } savedBlocked &&
+            savedBlocked.Notice.ReasonKey is SqliteStateStore.BlockedDeleteSummary or SqliteStateStore.UncertainDeleteSummary or SqliteStateStore.DeleteReviewSummary)
+        {
+            ct.ThrowIfCancellationRequested();
+            return savedBlocked.Notice.ReasonKey == SqliteStateStore.BlockedDeleteSummary ? ShowBlockedDeletes(pairId, input) :
+                ShowDeleteNoticeItems(pairId, savedBlocked.Notice.ReasonKey == SqliteStateStore.DeleteReviewSummary, input);
+        }
         string? observationSession = null;
         PairDef? observedPair = null;
         try
@@ -255,7 +263,8 @@ public sealed partial class SyncRun
                 // Explicit notice deletion is Recovery-first, even if cached history would let
                 // automatic reviewed propagation skip Recovery for identical content.
                 var actions = choice == NoticeChoices.DeleteReviewed
-                    ? proposed.Select(action => action.Kind == ActionKind.Delete ? action with { RecoveryFirst = true } : action).ToArray()
+                    ? proposed.Select(action => action.Kind == ActionKind.Delete
+                        ? action with { RecoveryFirst = true, RemovalReviewChoice = true } : action).ToArray()
                     : proposed
                     .Where(action => action.Kind == ActionKind.Delete && action.ExpectedTarget is not null)
                     .Select(action => action with
@@ -268,9 +277,11 @@ public sealed partial class SyncRun
                 _store.SaveSyncRetry(pairId, retry with
                 {
                     Kind = "reviewed-choice", ReviewedActions = actions, ProposedActions = null,
-                    Held = null, HeldReviewed = false, RetryAfter = DateTimeOffset.MinValue
+                    Held = null, HeldReviewed = false, RetryAfter = DateTimeOffset.MinValue,
+                    MissingDeleteIdentityReview = false, PendingNotice = null
                 });
                 _store.CloseNotice(noticeId, choice);
+                _store.RefreshBlockedDeleteNotice(pairId);
                 return NoticeChoices.Result(choice, notice);
             }
             if (choice == NoticeChoices.RetryNow)
@@ -297,6 +308,7 @@ public sealed partial class SyncRun
                 // Retain pending effects for verify-only reconciliation under the normal exclusion policy.
             }
             _store.CloseNotice(noticeId, choice);
+            if (notice.ReasonKey == "deletion-review") _store.RefreshBlockedDeleteNotice(pairId);
             return NoticeChoices.Result(choice, notice);
         }, ct);
 }

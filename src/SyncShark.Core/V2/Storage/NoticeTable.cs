@@ -27,6 +27,10 @@ internal sealed partial class NoticeTable
         // Fold old rows lazily by exact primary key; no scan, migration or schema bump is required.
         if (notice.ReasonKey is "content-unconfirmed" or "sync-retry")
         {
+            // The deletion hold already owns this item's explanation (possibly behind a pair summary).
+            if (StoreSchema.Scalar(_connection, transaction,
+                "SELECT 1 FROM sync_retry WHERE pair_no=$p AND path_key=$key AND json_extract(json,'$.DeleteBlockedDetail') IS NOT NULL;",
+                ("$p", pairNo), ("$key", RowCodec.Key(notice.Path))) is not null) return;
             var canonicalId = ShortId.Make("n", notice.PairId, "40", RowCodec.Key(notice.Path), "sync-retry");
             var retryOpen = ById(pairNo, canonicalId, transaction) is { Closed: false };
             if (notice.ReasonKey == "sync-retry" || retryOpen)
@@ -246,7 +250,7 @@ internal sealed partial class NoticeTable
         if (!reader.Read()) return null;
         return (NoticeDetailCodec.Decode(new Notice(reader.GetString(1), (int)reader.GetInt64(2),
             Enum.Parse<NoticeKind>(reader.GetString(3)), reader.GetString(4), reader.GetString(5),
-            reader.GetString(6), reader.GetString(0))), reader.GetString(7) != "open");
+            reader.GetString(6), reader.GetString(0))), reader.GetString(7) is not ("open" or "aggregated"));
     }
 
     public void CommitWinner(SqliteTransaction transaction, long pairNo, string pairId, SyncAction action, ItemState? winner)

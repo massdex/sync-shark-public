@@ -167,6 +167,12 @@ public sealed partial class SqliteStateStore
         StoreSchema.Execute(_connection, transaction, "DELETE FROM sync_retry WHERE pair_no=$p AND path_key=$key;",
             ("$p", pairNo), ("$key", RowCodec.Key(path)));
         CloseRetryNotices(transaction, pairId, path);
+        StoreSchema.Execute(_connection, transaction,
+            "UPDATE notice SET state='closed',choice='resolved' WHERE notice_id=$id;",
+            ("$id", DeleteSourceGuard.NoticeId(pairId, path)));
+        StoreSchema.Execute(_connection, transaction,
+            "UPDATE notice SET state='closed',choice='resolved' WHERE notice_id=$id;",
+            ("$id", ShortId.Make("n", pairId, NoticeChoices.DeletionReviewRule.ToString(System.Globalization.CultureInfo.InvariantCulture), RowCodec.Key(path), "deletion-review")));
         transaction.Commit();
     });
 

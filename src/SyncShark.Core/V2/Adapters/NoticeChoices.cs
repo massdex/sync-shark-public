@@ -128,7 +128,7 @@ public static class NoticeChoices
 
     public static bool IsAutoSyncFailure(Notice notice) => notice.ReasonKey?.StartsWith("autosync-failed", StringComparison.Ordinal) == true;
 
-    public static bool IsRetryNotice(Notice notice) => notice.RetainedVersion is null && (notice.FreeSpace is not null || notice.Repair is not null || notice.RebuildableRule is not null || notice.ReasonKey is "held-intents" or "permanent-boundary" or "deletion-evidence-pending" or "links-excluded" or "link-item" or "stubs-left-alone" or "online-only-item" or "unreadable" or ItemBlocked or "dropbox-storage-full" or "export-required" or RehashProtection.Reason || IsPairRetryNotice(notice) || notice.ReasonKey is DeleteSourceGuard.ReasonKey or "sync-retry" or "deletion-review" or "planning-degraded" or "recovery-unavailable" || IsRemovalAttention(notice) || IsRemovalReview(notice));
+    public static bool IsRetryNotice(Notice notice) => notice.RetainedVersion is null && (notice.FreeSpace is not null || notice.Repair is not null || notice.RebuildableRule is not null || notice.ReasonKey is "held-intents" or "permanent-boundary" or "deletion-evidence-pending" or "links-excluded" or "link-item" or "stubs-left-alone" or "online-only-item" or "unreadable" or ItemBlocked or "dropbox-storage-full" or "export-required" or RehashProtection.Reason || IsPairRetryNotice(notice) || notice.ReasonKey is SqliteStateStore.DeleteReviewSummary or SqliteStateStore.UncertainDeleteSummary or SqliteStateStore.BlockedDeleteSummary or DeleteSourceGuard.ReasonKey or "sync-retry" or "deletion-review" or "planning-degraded" or "recovery-unavailable" || IsRemovalAttention(notice) || IsRemovalReview(notice));
 
     /// <summary>The combined background-verification summary (M3), including the legacy held-intents summary.</summary>
     internal static bool IsVerificationSummary(Notice notice) =>
@@ -184,7 +184,9 @@ public static class NoticeChoices
     public const string RebindPending = "pending: rebind arrives with the central registry (B-191)";
 
     public static IReadOnlyList<SyncNoticeOption> Options(Notice notice) =>
-        notice.ReasonKey == "held-intents"
+        (notice.ReasonKey is SqliteStateStore.BlockedDeleteSummary or SqliteStateStore.UncertainDeleteSummary or SqliteStateStore.DeleteReviewSummary)
+            ? [new(ShowRemaining, "Show remaining blocked deletions (50 per page)")]
+            : notice.ReasonKey == "held-intents"
             ? [new(ShowRemaining, "Show remaining changes (50 per page)")]
             : notice.ReasonKey == RehashProtection.Reason
             ? [new(ShowRemaining, "Show remaining changes (50 per page)")]

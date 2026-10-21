@@ -136,8 +136,15 @@ internal static partial class RunChecks
     }
 
     /// <summary>A local writer whose observation has no content hash, as an unhashed store row does.</summary>
-    private sealed class HashlessObserver(IEndpointWriter inner) : IEndpointWriter
+    private sealed class HashlessObserver(IEndpointWriter inner) : IEndpointWriter, ISourceAbsenceProbe
     {
+        public Task<bool?> IsSourceAbsentAsync(ItemState? historical, string path, CancellationToken ct) =>
+            ((ISourceAbsenceProbe)inner).IsSourceAbsentAsync(historical, path, ct);
+        public Task<bool?> IsHistoricalSourcePresentAsync(ItemState historical, CancellationToken ct) =>
+            ((ISourceAbsenceProbe)inner).IsHistoricalSourcePresentAsync(historical, ct);
+        public Task<ItemState?> ObserveSourceMetadataAsync(string path, CancellationToken ct) =>
+            ((ISourceAbsenceProbe)inner).ObserveSourceMetadataAsync(path, ct);
+
         public async Task<ItemState?> ObserveAsync(string path, CancellationToken ct)
         {
             var item = await inner.ObserveAsync(path, ct).ConfigureAwait(false);
@@ -160,8 +167,18 @@ internal static partial class RunChecks
     }
 
     /// <summary>Reports one path as flagged, in inventory and observation, as a protected local entry does.</summary>
-    private sealed class FlaggedWriter(IEndpointWriter inner, string path, ItemFlags flags) : IEndpointWriter
+    private sealed class FlaggedWriter(IEndpointWriter inner, string path, ItemFlags flags) : IEndpointWriter, ISourceAbsenceProbe
     {
+        public Task<bool?> IsSourceAbsentAsync(ItemState? historical, string observed, CancellationToken ct) =>
+            ((ISourceAbsenceProbe)inner).IsSourceAbsentAsync(historical, observed, ct);
+        public Task<bool?> IsHistoricalSourcePresentAsync(ItemState historical, CancellationToken ct) =>
+            ((ISourceAbsenceProbe)inner).IsHistoricalSourcePresentAsync(historical, ct);
+        public async Task<ItemState?> ObserveSourceMetadataAsync(string observed, CancellationToken ct)
+        {
+            var item = await ((ISourceAbsenceProbe)inner).ObserveSourceMetadataAsync(observed, ct).ConfigureAwait(false);
+            return item is null ? null : Flag(item);
+        }
+
         private ItemState Flag(ItemState item) => PairPath.Same(item.Path, path) ? item with { Flags = flags } : item;
 
         public async Task<ItemState?> ObserveAsync(string observed, CancellationToken ct)

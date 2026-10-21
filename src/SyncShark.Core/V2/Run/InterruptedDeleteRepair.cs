@@ -5,6 +5,63 @@ namespace Massdex.SyncShark.V2;
 /// <summary>Only our attributed interrupted delete is missing-copy evidence, never user-delete evidence.</summary>
 internal static class InterruptedDeleteRepair
 {
+    // Fetch only this page's attribution, including backed-off repairs beyond the due-work page.
+    internal static IReadOnlyList<PlanRow> Protect(IReadOnlyList<PlanRow> rows, IStateStore store, string pairId) =>
+        new BatchedRows(rows, store, pairId);
+
+    internal static IReadOnlySet<string> SourcePaths(RunScope.Scope scope, IStateStore store, string pairId)
+    {
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var target in new[] { Side.A, Side.B })
+        {
+            var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var batch in (target == Side.A ? scope.B : scope.A).Chunk(256))
+            {
+                var proposals = store.InterruptedDeleteRepairsAt(pairId, batch.Select(item => item.Path).ToArray())
+                    .SelectMany(retry => retry.ProposedActions ?? [])
+                    .Where(action => action.Target == target && action.Source is not null)
+                    .GroupBy(action => action.Path, StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+                foreach (var item in batch)
+                    if (proposals.TryGetValue(item.Path, out var proposal) && item.ObjectId == proposal.Source!.ObjectId)
+                        candidates.Add(item.Path);
+            }
+            // Retain only matching source path strings, not another inventory or all retry payloads.
+            foreach (var item in target == Side.A ? scope.A : scope.B) candidates.Remove(item.Path);
+            paths.UnionWith(candidates);
+        }
+        return paths;
+    }
+
+    private sealed class BatchedRows(IReadOnlyList<PlanRow> rows, IStateStore store, string pairId) : IReadOnlyList<PlanRow>
+    {
+        private int _start = -1;
+        private IReadOnlyList<PlanRow> _batch = [];
+        public int Count => rows.Count;
+        public PlanRow this[int index]
+        {
+            get
+            {
+                if ((uint)index >= (uint)Count) throw new ArgumentOutOfRangeException(nameof(index));
+                var start = index / 256 * 256;
+                if (_start != start)
+                {
+                    var page = Enumerable.Range(start, Math.Min(256, Count - start)).Select(i => rows[i]).ToArray();
+                    var paths = page.Where(row => row.Base is null && (row.A is null) != (row.B is null))
+                        .Select(row => (row.A ?? row.B)!.Path).ToArray();
+                    _batch = Protect(page, store.InterruptedDeleteRepairsAt(pairId, paths));
+                    _start = start;
+                }
+                return _batch[index - start];
+            }
+        }
+        public IEnumerator<PlanRow> GetEnumerator()
+        {
+            for (var i = 0; i < Count; i++) yield return this[i];
+        }
+        IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+    }
+
     internal static IReadOnlyList<PlanRow> Protect(IReadOnlyList<PlanRow> rows, IEnumerable<SyncRetry> retries)
     {
         var repairs = retries.Where(retry => retry.Kind == SqliteStateStore.InterruptedDeleteRestoreKind)
@@ -12,25 +69,6 @@ internal static class InterruptedDeleteRepair
             .GroupBy(action => action.Path, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
         return repairs.Count == 0 ? rows : new ProtectedRows(rows, repairs);
-    }
-
-    internal static IReadOnlySet<string> SourcePaths(RunScope.Scope scope, IReadOnlyList<SyncRetry> retries)
-    {
-        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var target in new[] { Side.A, Side.B })
-        {
-            var proposals = retries.Where(retry => retry.Kind == SqliteStateStore.InterruptedDeleteRestoreKind)
-                .SelectMany(retry => retry.ProposedActions ?? []).Where(action => action.Target == target && action.Source is not null)
-                .GroupBy(action => action.Path, StringComparer.OrdinalIgnoreCase)
-                .ToDictionary(group => group.Key, group => group.First().Source!, StringComparer.OrdinalIgnoreCase);
-            if (proposals.Count == 0) continue;
-            var occupied = (target == Side.A ? scope.A : scope.B).Where(item => proposals.ContainsKey(item.Path))
-                .Select(item => item.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            foreach (var source in target == Side.A ? scope.B : scope.A)
-                if (!occupied.Contains(source.Path) && proposals.TryGetValue(source.Path, out var expected) &&
-                    source.ObjectId == expected.ObjectId) paths.Add(source.Path);
-        }
-        return paths;
     }
 
     internal static IReadOnlyDictionary<string, PrepareMatch>? WithoutMatches(

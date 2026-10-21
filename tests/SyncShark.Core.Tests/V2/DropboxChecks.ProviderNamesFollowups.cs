@@ -332,7 +332,7 @@ internal static partial class DropboxChecks
 
     // Refusal is injected at the provider boundary, not in Executor/SyncRun/store. Like Dropbox Put,
     // this writer attempts implicit parent creation; logging before refusal catches those attempts too.
-    private sealed class ProviderFollowupWriter(FakeEndpoint inner) : IEndpointWriter
+    private sealed class ProviderFollowupWriter(FakeEndpoint inner) : IEndpointWriter, ISourceAbsenceProbe
     {
         public HashSet<string> Refused { get; } = new(StringComparer.OrdinalIgnoreCase);
         public System.Collections.Concurrent.ConcurrentQueue<(string Kind, string Path)> Effects { get; } = new();
@@ -361,6 +361,12 @@ internal static partial class DropboxChecks
         public Task<RecoveryRef> PreserveAsync(ItemState victim, string actionId, CancellationToken ct)
         { Effects.Enqueue(("preserve", victim.Path)); return inner.PreserveAsync(victim, actionId, ct); }
         public Task<ItemState?> ObserveAsync(string path, CancellationToken ct) => inner.ObserveAsync(path, ct);
+        public Task<ItemState?> ObserveSourceMetadataAsync(string path, CancellationToken ct) =>
+            inner.ObserveSourceMetadataAsync(path, ct);
+        public Task<bool?> IsHistoricalSourcePresentAsync(ItemState historical, CancellationToken ct) =>
+            inner.IsHistoricalSourcePresentAsync(historical, ct);
+        public Task<bool?> IsSourceAbsentAsync(ItemState? historical, string path, CancellationToken ct) =>
+            inner.IsSourceAbsentAsync(historical, path, ct);
         public Task<Stream> OpenReadAsync(ItemState item, CancellationToken ct) => inner.OpenReadAsync(item, ct);
     }
 }

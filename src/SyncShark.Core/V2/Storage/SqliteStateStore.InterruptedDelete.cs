@@ -34,6 +34,25 @@ public sealed partial class SqliteStateStore
             ("$p", pairNo), ("$a", rootNoA), ("$b", rootNoB), ("$key", RowCodec.Key(action.Path)));
     }
 
+    // Lookup attribution for this planner batch, independent of retry due time or queue position.
+    // The kind/path index bounds both this lookup and the summary count; at most one page is decoded.
+    public IReadOnlyList<SyncRetry> InterruptedDeleteRepairsAt(string pairId, IReadOnlyCollection<string> paths) => InStore(() =>
+    {
+        var rows = new List<SyncRetry>();
+        foreach (var batch in paths.Chunk(256))
+        {
+            using var command = StoreSchema.Command(_connection, null,
+                "SELECT json FROM sync_retry INDEXED BY sync_retry_kind WHERE pair_no=$p " +
+                "AND json_extract(json,'$.Kind')=$kind AND path_key IN (SELECT value FROM json_each($paths));");
+            command.Parameters.AddWithValue("$p", RequirePair(pairId));
+            command.Parameters.AddWithValue("$kind", InterruptedDeleteRestoreKind);
+            command.Parameters.AddWithValue("$paths", JsonSerializer.Serialize(batch.Select(RowCodec.Key)));
+            using var reader = command.ExecuteReader();
+            while (reader.Read()) rows.Add(JsonSerializer.Deserialize<SyncRetry>(reader.GetString(0), RowCodec.Json)!);
+        }
+        return (IReadOnlyList<SyncRetry>)rows;
+    });
+
     public void RefreshInterruptedDeleteNotice(string pairId) => InStore(() =>
     {
         using var transaction = _connection.BeginTransaction();
@@ -43,9 +62,9 @@ public sealed partial class SqliteStateStore
 
     private void RefreshInterruptedDeleteNotice(SqliteTransaction transaction, long pairNo, string pairId, long now)
     {
-        // The pair primary-key prefix bounds this count to its durable retry work, not file inventory.
+        // Expression index counts matching keys without reading/parsing unrelated retry JSON.
         var count = (long)StoreSchema.Scalar(_connection, transaction,
-            "SELECT COUNT(*) FROM sync_retry WHERE pair_no=$p AND json_extract(json,'$.Kind')=$kind;",
+            "SELECT COUNT(*) FROM sync_retry INDEXED BY sync_retry_kind WHERE pair_no=$p AND json_extract(json,'$.Kind')=$kind;",
             ("$p", pairNo), ("$kind", InterruptedDeleteRestoreKind))!;
         if (count > 0)
             _notices.Add(transaction, pairNo, new Notice(pairId, 40, NoticeKind.Info, string.Empty,

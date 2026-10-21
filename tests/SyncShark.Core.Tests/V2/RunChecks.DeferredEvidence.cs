@@ -606,8 +606,25 @@ internal static partial class RunChecks
             CancellationToken ct) => throw new InvalidOperationException("Deferred evidence must not use the eager probe");
     }
 
-    private sealed class SignalingWriter(IEndpointWriter inner) : IEndpointWriter
+    private sealed class SignalingWriter(IEndpointWriter inner) : IEndpointWriter, ISourceAbsenceProbe
     {
+        public async Task<bool?> IsSourceAbsentAsync(ItemState? historical, string path, CancellationToken ct)
+        {
+            if (await ObserveSourceMetadataAsync(path, ct) is not null) return false;
+            return await ((ISourceAbsenceProbe)inner).IsSourceAbsentAsync(historical, path, ct);
+        }
+        public async Task<bool?> IsHistoricalSourcePresentAsync(ItemState historical, CancellationToken ct)
+        {
+            await ObserveSourceMetadataAsync(historical.Path, ct);
+            return await ((ISourceAbsenceProbe)inner).IsHistoricalSourcePresentAsync(historical, ct);
+        }
+        public async Task<ItemState?> ObserveSourceMetadataAsync(string path, CancellationToken ct)
+        {
+            ObservedPaths.Add(path);
+            if (BeforeObserve is not null) await BeforeObserve(path, ct);
+            var observed = await ((ISourceAbsenceProbe)inner).ObserveSourceMetadataAsync(path, ct);
+            return AfterObserve is null ? observed : AfterObserve(observed);
+        }
         public TaskCompletionSource PutCompleted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public async Task<ItemState> PutAsync(SyncAction action, Stream content, CancellationToken ct)
         {

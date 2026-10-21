@@ -70,6 +70,7 @@ internal sealed partial class DropboxWire : HttpMessageHandler
 
     /// <summary>When positive, the deleted-item listing is split into pages of this many entries.</summary>
     public int DeletedPageSize { get; set; }
+    public int LivePageSize { get; set; }
 
     /// <summary>The limit sent with the most recent include_deleted list_folder request.</summary>
     public int? LastDeletedListingLimit { get; private set; }
@@ -263,14 +264,15 @@ internal sealed partial class DropboxWire : HttpMessageHandler
             entries.AddRange(DeletedInScope(prefix, recursive));
         }
         AfterListingCaptured?.Invoke();
-        if (includeDeleted && DeletedPageSize > 0 && entries.Count > DeletedPageSize)
+        var pageSize = includeDeleted ? DeletedPageSize : LivePageSize;
+        if (pageSize > 0 && entries.Count > pageSize)
         {
             _deletedPages.Clear();
-            var pageCount = (entries.Count + DeletedPageSize - 1) / DeletedPageSize;
+            var pageCount = (entries.Count + pageSize - 1) / pageSize;
             for (var index = 1; index < pageCount; index++)
                 _deletedPages["deleted-page-" + index] =
-                    entries.Skip(index * DeletedPageSize).Take(DeletedPageSize).ToArray();
-            return Json(new { entries = entries.Take(DeletedPageSize).ToArray(), cursor = "deleted-page-1", has_more = true });
+                    entries.Skip(index * pageSize).Take(pageSize).ToArray();
+            return Json(new { entries = entries.Take(pageSize).ToArray(), cursor = "deleted-page-1", has_more = true });
         }
         return Json(Paged(entries.ToArray(), "listing-done"));
     }
