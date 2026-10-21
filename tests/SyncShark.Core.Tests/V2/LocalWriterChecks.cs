@@ -79,7 +79,7 @@ internal static class LocalWriterChecks
         using (metadataOnly.Reservation)
             LocalChecks.Require(metadataOnly.Refusal is null,
                 "an online-only new file reserves metadata only, so its pre-admission grants a low-space volume");
-        await ExpectAsync<IOException>(() =>
+        await ExpectFreeSpaceRefusalAsync(() =>
             writer.PutAsync(restore, new MemoryStream(content), CancellationToken.None));
         LocalChecks.Require(!File.Exists(Path.Combine(root, "restored.txt")),
             "a restore into low free space is refused by byte admission before any write");
@@ -504,6 +504,25 @@ internal static class LocalWriterChecks
         new("source", ItemKind.File, "id:local:00000001:0000000000000001", null, LocalChecks.BlockHash(content),
             content.Length, new DateTimeOffset(2020, 2, 3, 4, 5, 6, TimeSpan.FromHours(-4)).AddTicks(1234567),
             ItemFlags.None);
+
+    // The refusal carries the same cause the up-front admission produces, so the executor raises the pending
+    // free-space notice, never a generic failure: a bare IOException here would prove nothing.
+    private static async Task ExpectFreeSpaceRefusalAsync(Func<Task> operation)
+    {
+        try
+        {
+            await operation().ConfigureAwait(false);
+        }
+        catch (FreeSpaceRefusedException refused)
+        {
+            LocalChecks.Require(refused.Refusal.ReasonKey == FreeSpaceRefusal.InsufficientReasonKey &&
+                refused.Refusal.Detail.StartsWith("Not enough free space", StringComparison.Ordinal) &&
+                refused.Refusal.VolumeRoot is not null,
+                "the low-space stream refusal carries the free-space reason key, notice text and volume");
+            return;
+        }
+        throw new InvalidOperationException("Expected the free-space refusal, not another failure.");
+    }
 
     internal static async Task ExpectAsync<TException>(Func<Task> operation) where TException : Exception
     {

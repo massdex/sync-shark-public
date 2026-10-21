@@ -160,6 +160,50 @@ internal static partial class ExecutorChecks
             "cancelling the async free-space wait releases its transfer lease");
     }
 
+    // A refusal raised inside the effect (PutAsync re-admitting its bytes after a metadata-only pre-reservation)
+    // must be the same pending free-space notice as an up-front refusal: the reason key and volume facts, Retry and
+    // Ignore, one aggregated view per volume, and the item left unsynced rather than failed.
+    private static async Task FreeSpace_InEffectRefusalUsesThePendingNotice()
+    {
+        var journal = new List<string>();
+        var store = new JournalStore(new InMemoryStateStore(), journal);
+        store.SavePair(Pair());
+        var a = new FakeEndpoint(Side.A, "ra");
+        var b = new FakeEndpoint(Side.B, "rb");
+        var first = a.Seed("one.txt", "one-bytes", versionId: "v1");
+        var second = a.Seed("two.txt", "two-bytes", versionId: "v1");
+        var refusal = new FreeSpaceRefusal(
+            "Not enough free space on C:: needs 2.0 MiB, free 1.0 MiB, reserve 512.0 MiB. " +
+            "Options: free space and retry; exclude this folder",
+            FreeSpaceRefusal.InsufficientReasonKey, @"C:\", 2L << 20, 1L << 20, 512L << 20);
+        var record = new RecordingWriter(b) { RefusePut = refusal };
+        var executor = new Executor(store, Settings(4), Admission());
+        var one = Act(ActionKind.CopyNew, Side.B, "one.txt", source: first, key: "k1");
+        var two = Act(ActionKind.CopyNew, Side.B, "two.txt", source: second, key: "k2");
+
+        var results = await Apply(executor, Plan(one, two), a, record);
+        Require(results.Count == 2 && results.All(result => result.Outcome == Outcome.Skipped &&
+                result.Reason == refusal.Detail),
+            "an in-effect free-space refusal is pending (Skipped) with the free-space cause, not a generic failure");
+        Require(store.UnresolvedIntents("p1").Count == 0,
+            "the recorded intent is resolved, so a refused item is never replayed");
+        Require(await b.ObserveAsync("one.txt", CancellationToken.None) is null &&
+            await b.ObserveAsync("two.txt", CancellationToken.None) is null,
+            "a refused item writes nothing and stays unsynced");
+        var notices = store.OpenNotices("p1");
+        Require(notices.Count == 2 && notices.All(notice =>
+                notice.ReasonKey == FreeSpaceRefusal.InsufficientReasonKey &&
+                notice.FreeSpace is { VolumeRoot: @"C:\" } facts && facts.RequiredBytes == 2L << 20),
+            "each refused item stores the free-space reason key and volume facts");
+        var options = NoticeChoices.Options(notices[0]);
+        Require(options.Any(option => option.Choice == NoticeChoices.RetryNow) &&
+            options.Any(option => option.Choice == NoticeChoices.Ignore),
+            "a free-space notice offers Retry and Ignore");
+        var summary = FreeSpacePresentation.Group(notices).Single();
+        Require(summary.Count == 2 && summary.VolumeRoot == "C:",
+            "two refused items on one volume aggregate into one open free-space notice");
+    }
+
     private sealed class TrackingReservation : IDisposable
     {
         private int _disposed;

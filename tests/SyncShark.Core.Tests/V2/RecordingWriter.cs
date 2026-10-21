@@ -51,6 +51,11 @@ internal sealed class RecordingWriter
     /// <summary>When set, DeleteAsync at this path fails without applying.</summary>
     internal string? FailDeleteAt { get; set; }
 
+    /// <summary>
+    /// When set, PutAsync refuses like LocalWriter's own byte admission after a metadata-only up-front reservation.
+    /// </summary>
+    internal FreeSpaceRefusal? RefusePut { get; set; }
+
     /// <summary>Completes when the first held Put is waiting.</summary>
     internal Task PutHeld => _putHeld.Task;
 
@@ -92,6 +97,7 @@ internal sealed class RecordingWriter
         Interlocked.Increment(ref _puts);
         try
         {
+            if (RefusePut is { } refusal) throw new FreeSpaceRefusedException(refusal);
             if (HoldPutsExcept is { } free && !string.Equals(a.Path, free, StringComparison.OrdinalIgnoreCase))
                 await HoldAsync(ct);
             return await _inner.PutAsync(a, content, ct);

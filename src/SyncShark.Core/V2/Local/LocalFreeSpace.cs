@@ -66,6 +66,15 @@ public sealed record FreeSpaceRefusal(string Detail, string ReasonKey, string? V
             : bytes.ToString(CultureInfo.InvariantCulture) + " B";
 }
 
+/// <summary>
+/// The writer's own byte admission refused after the durable intent was recorded (the up-front admission could
+/// reserve metadata only). The executor maps it to the same pending free-space notice as an up-front refusal.
+/// </summary>
+public sealed class FreeSpaceRefusedException(FreeSpaceRefusal refusal) : IOException(refusal.Detail)
+{
+    public FreeSpaceRefusal Refusal { get; } = refusal;
+}
+
 /// <summary>The production probe over DriveInfo.</summary>
 internal sealed class DriveVolumeSpaceProbe : IVolumeSpaceProbe
 {

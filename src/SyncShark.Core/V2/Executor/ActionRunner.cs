@@ -300,6 +300,14 @@ internal sealed class ActionRunner
                 await _committer.AddNoticeAsync(DropboxQuota.Notice(_pairId, action.Target, action.Source?.Size));
             return await CommitAsync(action, Failed(action, DropboxQuota.Detail) with { UploadQuotaBlocked = true });
         }
+        catch (FreeSpaceRefusedException refused)
+        {
+            // The up-front admission reserved metadata only (an online-only new file), so the writer re-admitted its
+            // real bytes and refused. Report the same pending free-space notice as an up-front refusal: the reason
+            // key and volume facts aggregate per volume, and the Skipped result leaves the item unsynced and retryable.
+            // This refusal precedes any effect, so no provider checkpoint can exist on this route.
+            return await PendingForFreeSpaceAsync(action, refused.Refusal).ConfigureAwait(false);
+        }
         catch (OwnedPointerDeferredException deferred) when (OwnedPointerUpdates.IsMetadataUpdate(action))
         {
             await _committer.DeferPointerUpdateAsync(action, deferred.Cause).ConfigureAwait(false);

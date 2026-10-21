@@ -134,7 +134,7 @@ public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResource
                 ? await _freeSpace.AdmitAsync(a, _rootPath, _recoveryRoot, ct).ConfigureAwait(false)
                 : FreeSpaceAdmission.Granted;
             using var byteReservation = byteAdmission.Reservation;
-            if (byteAdmission.Refusal is { } refusal) throw new IOException(refusal.Detail);
+            if (byteAdmission.Refusal is { } refusal) throw new FreeSpaceRefusedException(refusal);
             using var operation = RunOperations.Begin(RunOperationKind.LocalWrite, RunOperations.Short(a.Path));
             using var tracked = RunOperationStream.Touching(content, operation.Touch);
             content = tracked;
@@ -190,7 +190,7 @@ public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResource
                 ? await _freeSpace.AdmitAsync(a, _rootPath, _recoveryRoot, ct).ConfigureAwait(false)
                 : FreeSpaceAdmission.Granted;
             using var byteReservation = byteAdmission.Reservation;
-            if (byteAdmission.Refusal is { } refusal) throw new IOException(refusal.Detail);
+            if (byteAdmission.Refusal is { } refusal) throw new FreeSpaceRefusedException(refusal);
             var planned = a.Source;
             var hash = planned?.Hash;
             if (planned is null || planned.Kind != ItemKind.File || hash is null)

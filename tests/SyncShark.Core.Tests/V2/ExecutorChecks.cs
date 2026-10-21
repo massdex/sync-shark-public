@@ -33,6 +33,7 @@ internal static partial class ExecutorChecks
         await OneFailureDoesNotStopOthers();
         await FreeSpace_RefusalIsPendingAndOthersContinue();
         await FreeSpace_ReservationIsReleasedOnEveryExit();
+        await FreeSpace_InEffectRefusalUsesThePendingNotice();
         await ParentFailed_ChildSkipped();
         await Admission_ProviderBackoff_Failed();
         await Hold_NeverExecuted();
