@@ -39,11 +39,15 @@ public sealed partial class SqliteStateStore
             else
             {
                 var action = JsonSerializer.Deserialize<SyncAction>(reader.GetString(1), RowCodec.Json)!;
-                rows.Add(new(action.Path, "Interrupted deletion is not yet verified; sync retries both endpoints without approving a new deletion.", null));
+                rows.Add(new(action.Path, UncertainDeleteDetail(action), null));
             }
         }
         return new DeleteNoticePage(rows, null);
     });
+
+    private static string UncertainDeleteDetail(SyncAction action) => action.ProviderEffect?.Kind == "delete-submit"
+        ? "Deletion outcome unknown; waiting for confirmation from Dropbox. Surviving copies stay protected; no new deletion is approved."
+        : "Interrupted deletion could not be verified; sync retries both endpoints. No new deletion is approved.";
 
     private void RefreshDeleteReviewNotices(SqliteTransaction transaction, long pairNo, string pairId, long now, bool exact)
     {
@@ -66,7 +70,7 @@ public sealed partial class SqliteStateStore
                 _notices.Add(transaction, pairNo, new Notice(pairId, 0, NoticeKind.Info, "",
                     $"{(exact ? count.ToString(System.Globalization.CultureInfo.InvariantCulture) : "More than 20")} " +
                     (review ? "deletions need your review because the original source identity is unavailable. Show remaining offers Delete with Recovery, Keep and sync back, or Ignore for each item." :
-                        "interrupted deletions remain unverified. Sync retries automatically; surviving copies stay protected. Show remaining lists the pending items.") , summary), now);
+                        "deletion outcomes remain unknown, waiting for endpoint confirmation (from Dropbox for pending cloud submissions). Surviving copies stay protected. Show remaining lists the pending items.") , summary), now);
             }
             else
             {
@@ -89,7 +93,7 @@ public sealed partial class SqliteStateStore
                         while (reader.Read()) actions.Add(JsonSerializer.Deserialize<SyncAction>(reader.GetString(0), RowCodec.Json)!);
                     foreach (var action in actions)
                         _notices.Add(transaction, pairNo, new Notice(pairId, action.Rule, NoticeKind.Info, action.Path,
-                            "Interrupted deletion could not be verified; sync retries both endpoints. No new deletion is approved.", reason), now);
+                            UncertainDeleteDetail(action), reason), now);
                 }
             }
         }

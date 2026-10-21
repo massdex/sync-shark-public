@@ -76,6 +76,12 @@ if (args is ["--first-sync-completion-checks"])
     return 0;
 }
 
+if (args is ["--quarantine-folder-fullscan-checks", var quarantineFolderRoot])
+{
+    await Massdex.SyncShark.V2.RunChecks.QuarantineFolderFullScanChecksAsync(quarantineFolderRoot);
+    return 0;
+}
+
 if (args is ["--quarantine-checks", var quarantineRoot])
 {
     await Massdex.SyncShark.V2.RunChecks.QuarantineAsync(quarantineRoot);

@@ -192,6 +192,8 @@ public sealed partial class SyncRun
         var retry = (old ?? new SyncRetry(path, "sync", 0, "", DateTimeOffset.MinValue)) with
         {
             Attempts = attempts,
+            // This is a new non-guard failure; the guard-owned branch above retains its own fields.
+            DeleteBlockedDetail = null, DeleteBlockedDeferred = false,
             LastError = reason ?? (old?.LastError is { Length: > 0 } previous ? previous : "The item could not be confirmed or applied."),
             RetryAfter = _time.GetUtcNow().AddSeconds(Math.Min(300, 10 * Math.Pow(2, Math.Min(attempts - 1, 5))))
         };

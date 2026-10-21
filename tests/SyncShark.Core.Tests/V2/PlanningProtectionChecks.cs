@@ -36,6 +36,34 @@ internal static class PlanningProtectionChecks
                 $"complete {(full ? "full" : "delta")} retains ordinary absence behavior");
         }
 
+        foreach (var missingSide in new[] { Side.A, Side.B })
+        {
+            var heldA = a with { Path = "Held/File", ObjectId = "held-local" };
+            var heldB = b with { Path = "Held/File", ObjectId = "held-cloud" };
+            var scope = new RunScope.Scope(missingSide == Side.A ? [] : [a, heldA],
+                missingSide == Side.B ? [] : [b, heldB],
+                [basis, new Baseline("pair", "held-linked", heldA, heldB, 1)]);
+            foreach (var scenario in new[] { "scoped-full", "root-gap", "unexplained", "incomplete-delta", "hydrated-delta" })
+            {
+                var missing = Scan(false, scenario != "incomplete-delta") with
+                {
+                    ScopedFullCoverage = scenario == "scoped-full",
+                    IncompleteSubtrees = scenario == "root-gap" ? [""] :
+                        scenario == "unexplained" ? [] : ["Held"]
+                };
+                var scan = missingSide == Side.A ? new SyncRun.BothScan(missing, Scan(true, false)) :
+                    new SyncRun.BothScan(Scan(true, false), missing);
+                var plan = Decide(SyncRun.JoinRows(scope, scan, false));
+                LocalChecks.Require(!plan.Actions.Any(action => action.Path == "Held/File" &&
+                    action.Kind is ActionKind.Delete or ActionKind.Forget),
+                    scenario + ": the incomplete subtree never gains absence authority on " + missingSide);
+                LocalChecks.Require(scenario == "scoped-full"
+                    ? plan.Actions.Any(action => action.Path == a.Path && action.Kind == ActionKind.Delete)
+                    : !plan.Actions.Any(action => action.Kind is ActionKind.Delete or ActionKind.Forget),
+                    scenario + ": only a real scoped full observation authorizes sibling absence on " + missingSide);
+            }
+        }
+
         static SyncRun.SideScan Scan(bool complete, bool full) =>
             new(1, "cursor", complete, full, [], [], new Dictionary<string, DateTimeOffset?>(), []);
         static Plan Decide(IReadOnlyList<PlanRow> rows) => Planner.Decide("pair", 1, rows,

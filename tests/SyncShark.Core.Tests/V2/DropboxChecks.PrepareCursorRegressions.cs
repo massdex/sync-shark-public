@@ -88,7 +88,8 @@ internal static partial class DropboxChecks
         var scenario = released ? "released-delete" : "pending-delete";
         var productRoot = Path.Combine(_root, "prepare-cursor-" + scenario);
         var stateRoot = Path.Combine(productRoot, "state");
-        var local = new FakeEndpoint(Side.A, "ra") { DropboxHashes = true };
+        // Local files have no provider revision; prepare must retain their content hash, not a fake v-stamp.
+        var local = new FakeEndpoint(Side.A, "ra") { DropboxHashes = true, OmitVersionIds = true };
         local.Seed("matched.txt", "same");
         h.Wire.SeedFile("matched.txt", "same");
         h.Wire.SeedFile("remote-only.txt", "chosen download disappears");
@@ -127,6 +128,10 @@ internal static partial class DropboxChecks
             var prepared = FirstSyncChoicesState.Load(productRoot, pair.PairId, store)!;
             var matches = prepared.Matched.ToDictionary(entry => entry.Path,
                 entry => new PrepareMatch(entry.A, entry.B), StringComparer.OrdinalIgnoreCase);
+            var survivor = (await local.ObserveAsync("matched.txt", CancellationToken.None))!;
+            Require(survivor.VersionId is null && survivor.Hash is not null &&
+                matches["matched.txt"].A == survivor.ObjectId + "|h:" + survivor.Hash,
+                scenario + ": prepared local survivor carries real identity and hash evidence");
             var lists = h.Wire.ListRequests.Count;
             var calls = h.Wire.Calls.Count;
             var delta = await run.PreviewFirstSyncApplyResolvedAsync(pair.PairId, null, null, [], matches,
@@ -170,19 +175,22 @@ internal static partial class DropboxChecks
                     store.DeletionEvidenceRows(pair.PairId, RootId).Any(row => row.Failure is { Released: true }),
                     "released-evidence fixture retains a refreshed checkpoint after an unrelated failed download");
                 h.Wire.SeedChangePage(checkpoint, [], false, "released-next-delta");
-                var listsBeforeRetry = h.Wire.ListRequests.Count;
+                // The deletion guard may list a parent nonrecursively for fresh positive identity evidence.
+                // Only recursive requests represent the full inventory relisting this regression forbids.
+                var listsBeforeRetry = h.Wire.ListRequests.Count(request => request.Recursive);
                 var feedsBeforeRetry = h.Wire.ContinueCursors.Count;
                 // Rebuild inventory/runtime: the historical released rows survive, but their phantom live rows do not.
                 var (_, retryRun) = PrepareCursorRuntime(h, local, pair, store, productRoot);
                 var retried = await retryRun.IncrementalAsync(pair.PairId, new Progress<RunProgress>(), CancellationToken.None);
-                Require(retried.Failed == 0 && store.FirstSyncDone(pair.PairId) &&
-                    h.Wire.ListRequests.Count == listsBeforeRetry &&
+                Require(h.Wire.ListRequests.Count(request => request.Recursive) == listsBeforeRetry &&
                     h.Wire.ContinueCursors.Skip(feedsBeforeRetry).FirstOrDefault() == checkpoint &&
-                    store.Cursor(RootId) == "released-next-delta" &&
+                    store.Cursor(RootId) == "released-next-delta",
+                    "a historical released row never forces another full inventory listing on a clean resumed delta");
+                Require(retried.Failed == 0 && store.FirstSyncDone(pair.PairId) &&
                     await local.ObserveAsync("ordinary.txt", CancellationToken.None) is not null &&
                     await local.ObserveAsync("matched.txt", CancellationToken.None) is null &&
                     await local.ObserveAsync("remote-only.txt", CancellationToken.None) is null,
-                    "a historical released row never forces another full listing on a clean resumed delta");
+                    "the resumed delta retries the unrelated download and propagates only the proven source deletion");
                 return;
             }
             var applied = await runtime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { },

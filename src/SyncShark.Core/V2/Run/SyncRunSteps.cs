@@ -63,6 +63,8 @@ public sealed partial class SyncRun
         IReadOnlyList<string> ChangePaths, IReadOnlyList<string> ChangeObjectIds,
         IReadOnlyDictionary<string, DateTimeOffset?> Deleted, IReadOnlyList<string> PreviousPaths)
     {
+        // Full also selects stored scope for hydrated deltas; only a returned full snapshot can establish this.
+        public bool ScopedFullCoverage { get; init; }
         public IReadOnlyList<string> IncompleteSubtrees { get; init; } = [];
         public IReadOnlyDictionary<string, string> IncompleteReasons { get; init; } = new Dictionary<string, string>();
         public InventoryCoverage? ObservedCoverage { get; init; }
@@ -593,7 +595,7 @@ public sealed partial class SyncRun
                 observationStore?.SaveInventoryObservation(coverage, observedCursor);
             Trace($"scan {side}: snapshot stored ({watch.ElapsedMilliseconds} ms)");
             return new SideScan(gen, snapshot.CursorAfter, snapshot.IncompleteSubtrees.Count == 0, true, [], [],
-                NoDeletions, []) { PendingDeletionEvidence = snapshot.PendingDeletionEvidence, IncompleteSubtrees = snapshot.IncompleteSubtrees, IncompleteReasons = snapshot.IncompleteReasons, ObservedCoverage = observationStore is null ? null : coverage, RehashThrough = _store.RehashWatermark(root.RootId) };
+                NoDeletions, []) { ScopedFullCoverage = snapshot.IncompleteSubtrees.Count > 0 && !snapshot.IncompleteSubtrees.Contains(string.Empty), PendingDeletionEvidence = snapshot.PendingDeletionEvidence, IncompleteSubtrees = snapshot.IncompleteSubtrees, IncompleteReasons = snapshot.IncompleteReasons, ObservedCoverage = observationStore is null ? null : coverage, RehashThrough = _store.RehashWatermark(root.RootId) };
         }
         Trace($"scan {side}: resuming {(inventoryCursors is null ? "committed" : "pending")} inventory cursor");
         var deltaGen = _store.BeginGeneration(root.RootId, "delta");
@@ -650,7 +652,7 @@ public sealed partial class SyncRun
                 observationStore?.SaveInventoryObservation(coverage, rescanCursor);
             Trace($"scan {side}: rescan snapshot stored ({watch.ElapsedMilliseconds} ms)");
             return new SideScan(fullGen, rescan.CursorAfter, rescan.IncompleteSubtrees.Count == 0, true, [], [],
-                NoDeletions, []) { PendingDeletionEvidence = rescan.PendingDeletionEvidence, IncompleteSubtrees = rescan.IncompleteSubtrees, IncompleteReasons = rescan.IncompleteReasons, ObservedCoverage = observationStore is null ? null : coverage, RehashThrough = _store.RehashWatermark(root.RootId) };
+                NoDeletions, []) { ScopedFullCoverage = rescan.IncompleteSubtrees.Count > 0 && !rescan.IncompleteSubtrees.Contains(string.Empty), PendingDeletionEvidence = rescan.PendingDeletionEvidence, IncompleteSubtrees = rescan.IncompleteSubtrees, IncompleteReasons = rescan.IncompleteReasons, ObservedCoverage = observationStore is null ? null : coverage, RehashThrough = _store.RehashWatermark(root.RootId) };
         }
         var paths = new List<string>();
         var ids = new List<string>();
@@ -814,9 +816,11 @@ public sealed partial class SyncRun
 
     internal static IReadOnlyList<PlanRow> JoinRows(RunScope.Scope scope, BothScan scan, bool firstSync)
     {
-        // Full controls scope loading, not absence authority. A complete delta updates
-        // the trusted stored inventory; an incomplete scan cannot prove missing rows.
-        var completeness = new Completeness(scan.A.Complete, scan.B.Complete,
+        // Full controls scope loading, not absence authority (hydrated deltas also set it).
+        // A real full snapshot with explicitly scoped gaps covers only its unaffected paths.
+        // Incomplete deltas, root gaps and unexplained incomplete scans remain non-authoritative.
+        var completeness = new Completeness(scan.A.Complete || scan.A.ScopedFullCoverage,
+            scan.B.Complete || scan.B.ScopedFullCoverage,
             scan.A.IncompleteSubtrees.ToHashSet(StringComparer.OrdinalIgnoreCase),
             scan.B.IncompleteSubtrees.ToHashSet(StringComparer.OrdinalIgnoreCase));
         return Planner.Join(scope.Baselines, scope.A, scope.B, scan.A.Deleted, scan.B.Deleted, completeness, firstSync, scope.ContextA, scope.ContextB, scope.ProtectedAliases);

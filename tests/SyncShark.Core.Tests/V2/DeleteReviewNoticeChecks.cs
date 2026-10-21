@@ -11,7 +11,12 @@ internal static class DeleteReviewNoticeChecks
         var actions = Enumerable.Range(0, 53).Select(n => new SyncAction("uncertain-" + n.ToString("D3"), 6,
             ActionKind.Delete, Side.B, "Parent/" + n.ToString("D3"), null, null,
             new ItemState("Parent/" + n.ToString("D3"), ItemKind.File, "object-" + n, null, null, 0,
-                DateTimeOffset.UnixEpoch, ItemFlags.None), false, null)).ToArray();
+                DateTimeOffset.UnixEpoch, ItemFlags.None), false, null)
+            { ProviderEffect = new("delete-submit", "pending", DateTimeOffset.UnixEpoch) }).ToArray();
+        store.CommitResult(pair.PairId, 1, actions[0], new(actions[0].ActionId, Outcome.Uncertain,
+            null, null, null, "outcome unknown") { RetryAfterSeconds = 30 });
+        LocalChecks.Require(store.OpenNotices(pair.PairId).Single().Detail.Contains("waiting for confirmation from Dropbox", StringComparison.Ordinal),
+            "no-job-id submission notice describes waiting, not an automatic retry");
         foreach (var action in actions)
             store.CommitResult(pair.PairId, 1, action, new(action.ActionId, Outcome.Uncertain, null, null, null, "probe unavailable") { RetryAfterSeconds = 30 });
         store.RefreshBlockedDeleteNotice(pair.PairId);
@@ -19,6 +24,9 @@ internal static class DeleteReviewNoticeChecks
         var first = store.ReadDeleteNoticeItems(pair.PairId, false);
         var second = store.ReadDeleteNoticeItems(pair.PairId, false, first.NextToken);
         LocalChecks.Require(first.Items.Count == 50 && second.Items.Count == 3, "uncertain keyset pages cover backlog");
+        LocalChecks.Require(first.Items.All(item => item.Detail.Contains("waiting for confirmation from Dropbox", StringComparison.Ordinal)) &&
+            !store.OpenNotices(pair.PairId).Single().Detail.Contains("retries automatically", StringComparison.OrdinalIgnoreCase),
+            "pending submission pages and summary do not promise automatic retry");
         foreach (var action in actions)
             store.CommitResult(pair.PairId, 1, action, new(action.ActionId, Outcome.Skipped, null, null, null, "resolved"));
         store.RefreshBlockedDeleteNotice(pair.PairId);

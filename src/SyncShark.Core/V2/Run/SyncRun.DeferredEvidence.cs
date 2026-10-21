@@ -98,9 +98,20 @@ public sealed partial class SyncRun
         bool allowUnreviewedEvidence = false)
     {
         if (reviewedDeletes is not null)
+        {
+            var heldVictims = approved.HeldDeletions
+                .Where(item => item.Rule == HeldDeletion.NewerDeletionRule)
+                .Select(item => FolderDelete.VictimKey(item.Local, item.Path))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            // A reviewed list is not blanket removal authority: ordinary propagation must still prove absence.
+            // Never transfer per-item approval to children through executor folder expansion.
             approved = approved with { Actions = approved.Actions.Select(action =>
-                action.Kind == ActionKind.Delete && reviewedDeletes.Contains(FolderDelete.VictimKey(action.Target, action.Path))
+                action.Kind == ActionKind.Delete && !FolderDelete.Expands(action) &&
+                reviewedDeletes.Contains(FolderDelete.VictimKey(action.Target, action.Path)) &&
+                (action.Rule == 19 && action.NeedsReview || action.Rule == 40 &&
+                    heldVictims.Contains(FolderDelete.VictimKey(action.Target, action.Path)))
                     ? action with { RemovalReviewChoice = true } : action).ToArray() };
+        }
         approved = ReviewMissingDeleteIdentities(pair, approved);
         if (approved.HeldDeletions.Count == 0)
         {

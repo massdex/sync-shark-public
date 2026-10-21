@@ -65,6 +65,9 @@ internal static partial class RunCliChecks
         {
             using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
             var fx = Build(store: store);
+            // Production local items have no revision ID; prepare must retain the historical content hash.
+            // A synthetic v: stamp cannot authorize a later local deletion (nor prove edit-vs-delete).
+            fx.A.OmitVersionIds = true;
             fx.A.Seed("d/x.txt", "same");
             fx.B.Seed("d/x.txt", "same");
             var runtime = Runtime(fx, root);
@@ -72,6 +75,8 @@ internal static partial class RunCliChecks
             var prepared = FirstSyncChoicesState.Load(root, fx.Pair.PairId, store)!;
             Require(prepared.Database?.MatchLookup.ContainsKey("D/X.TXT") == true,
                 "actual CLI prepare persists SQL matched stamps before any apply");
+            Require(prepared.Database!.MatchLookup["D/X.TXT"].A.Contains("|h:", StringComparison.Ordinal),
+                "SQLite prepare retains a real local historical hash rather than a fake revision stamp");
             var removed = deletedSide == Side.A ? fx.A : fx.B;
             var survivor = deletedSide == Side.A ? fx.B : fx.A;
             var old = await removed.ObserveAsync("d/x.txt", CancellationToken.None);

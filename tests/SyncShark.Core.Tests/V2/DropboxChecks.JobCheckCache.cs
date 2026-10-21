@@ -64,20 +64,38 @@ internal static partial class DropboxChecks
             h.Wire.SeedFile(path, "content");
             items.Add((await writer.ObserveAsync(path, CancellationToken.None))!);
         }
+        var source = new FakeEndpoint(Side.A, "ra") { DropboxHashes = true };
+        h.Known.SavePair(new PairDef("p1", "delete job cache",
+            new RootDef("ra", SyncProviders.Local, null, "C:\\offline-job-cache", "id:ra"), Root(), [], [], true));
+        var intents = new List<SyncAction>(count);
+        foreach (var (item, index) in items.Select((item, index) => (item, index)))
+        {
+            var original = source.Seed(item.Path, "content");
+            var key = "delete-key-" + index;
+            var adopt = new SyncAction("seed-" + index, 1, ActionKind.Adopt, Side.B,
+                item.Path, null, original, item, false, key);
+            h.Known.RecordIntent("p1", adopt);
+            h.Known.CommitResult("p1", 1, adopt,
+                new ActionResult(adopt.ActionId, Outcome.Done, original, item, null, null));
+            await source.DeleteAsync(DeleteAction(original.Path, original) with { Target = Side.A }, CancellationToken.None);
+            var intent = DeleteJobIntent(item, "delete-job-1", index, count) with { ObjectKey = key };
+            h.Known.RecordIntent("p1", intent);
+            intents.Add(intent);
+        }
         await Task.WhenAll(items
                 .Select(item => writer.DeleteAsync(DeleteAction(item.Path, item), CancellationToken.None)))
             .WaitAsync(TimeSpan.FromSeconds(30));
         Require(h.Wire.Calls.Count(call => call == DeleteJobCheck) == 0,
             "a completed synchronous delete batch needs no job check");
-
         var before = h.Wire.Calls.Count;
-        var results = await ReconcileCheckedAsync(h, writer, items
-            .Select((item, index) => DeleteJobIntent(item, "delete-job-1", index, count)).ToArray());
+        var results = await ReconcileCheckedAsync(h, writer, intents, source);
         Require(h.Wire.Calls.Skip(before).Count(call => call == DeleteJobCheck) == 1,
             "a delete job shared by six intents is checked once per reconcile pass, not once per intent: " +
             string.Join(",", h.Wire.Calls.Skip(before)));
-        Require(results.All(result => result.Outcome == Outcome.Done),
+        Require(results.Count == count && results.All(result => result.Outcome == Outcome.Done),
             "every delete intent still proves its own entry Done");
+        Require(h.Known.Baselines("p1").Count == 0 && h.Known.UnresolvedIntents("p1").Count == 0,
+            "proven delete entries retire their original baselines and intents");
     }
 
     // A failed job read is dropped from the pass cache, so the next entry of that job reads it again rather than
@@ -124,10 +142,10 @@ internal static partial class DropboxChecks
     }
 
     private static async Task<IReadOnlyList<ActionResult>> ReconcileCheckedAsync(Harness h, DropboxWriter writer,
-        IReadOnlyList<SyncAction> intents)
+        IReadOnlyList<SyncAction> intents, IEndpointWriter? source = null)
     {
         var executor = new Executor(h.Known, V2Settings.Default, ExecutorChecks.Admission());
-        return await executor.ReconcileAsync(intents, 1, writer, writer, CancellationToken.None)
+        return await executor.ReconcileAsync(intents, 1, source ?? writer, writer, CancellationToken.None)
             .WaitAsync(TimeSpan.FromSeconds(60));
     }
 

@@ -112,6 +112,7 @@ public sealed partial class SyncRun
             _store.SaveSyncRetry(pair.PairId, (previous ?? new SyncRetry(path, "scan", 0, "", DateTimeOffset.MinValue)) with
             {
                 Attempts = attempts, LastError = reason, ReadRoots = roots,
+                DeleteBlockedDetail = null, DeleteBlockedDeferred = false,
                 RetryAfter = _time.GetUtcNow().AddSeconds(Math.Min(300, 10 * Math.Pow(2, Math.Min(attempts - 1, 5))))
             });
             WriteNotices([new Notice(pair.PairId, 40, NoticeKind.Info, path, reason +

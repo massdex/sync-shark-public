@@ -46,6 +46,23 @@ internal static class BlockedDeleteNoticeChecks
             "deferred source check preserves evidence ownership and provider delay");
         LocalChecks.Require(store.OpenNotices(pair.PairId).Single().ReasonKey == SqliteStateStore.BlockedDeleteSummary,
             "provider-deferred checks never emit per-item notices, even below threshold");
+        // A later, unrelated write failure must replace the guard's explanation, not inherit suppression.
+        store.ClearSyncRetry(pair.PairId, "Parent/000");
+        Block(0, deferred: true);
+        var blocked = store.SyncRetryAt(pair.PairId, "Parent/000")!;
+        var saveFailure = typeof(SyncRun).GetMethod("SaveFailedRetry",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        saveFailure.Invoke(run, [pair, "Parent/000", "Upload permission denied", blocked]);
+        store.RefreshBlockedDeleteNotice(pair.PairId);
+        var failed = store.SyncRetryAt(pair.PairId, "Parent/000")!;
+        LocalChecks.Require(failed.DeleteBlockedDetail is null && !failed.DeleteBlockedDeferred &&
+            failed.LastError == "Upload permission denied", "new upload failure clears stale deletion-block fields");
+        LocalChecks.Require(store.OpenNotices(pair.PairId).Any(notice => notice.ReasonKey == "sync-retry" &&
+            notice.Detail.Contains("Upload permission denied", StringComparison.Ordinal)),
+            "new upload failure publishes its own accurate retry notice");
+        LocalChecks.Require(!store.OpenNotices(pair.PairId).Any(notice =>
+            notice.ReasonKey is DeleteSourceGuard.ReasonKey or SqliteStateStore.BlockedDeleteSummary),
+            "new non-guard failure leaves no stale blocked-delete notice or summary");
         Console.WriteLine("PASS blocked deletion threshold, deduplication, paging and settlement");
 
         void Block(int n, bool deferred = false)
