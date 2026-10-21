@@ -1,0 +1,1536 @@
+{
+    "source":  "github.com/dropbox/dropbox-api-spec",
+    "specCommit":  "3c363a594dafbe0f4646e73352b62a4767540d25",
+    "hosts":  {
+                  "api":  "https://api.dropboxapi.com/2/",
+                  "content":  "https://content.dropboxapi.com/2/",
+                  "notify":  "https://notify.dropboxapi.com/2/"
+              },
+    "excluded":  "routes whose auth is team or app only (need a team or app credential, not the user token)",
+    "routes":  [
+                   {
+                       "name":  "account/delete_profile_photo",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "account_info.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "account/get_photo",
+                       "host":  "content",
+                       "style":  "download",
+                       "auth":  "user",
+                       "scope":  "account_info.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "account/set_profile_photo",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "account_info.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "auth/token/revoke",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "",
+                       "policy":  "denied",
+                       "voidArg":  true
+                   },
+                   {
+                       "name":  "check/user",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "account_info.read",
+                       "policy":  "read",
+                       "preview":  true
+                   },
+                   {
+                       "name":  "contacts/delete_manual_contacts",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "contacts.write",
+                       "policy":  "write",
+                       "voidArg":  true
+                   },
+                   {
+                       "name":  "contacts/delete_manual_contacts_batch",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "contacts.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "file_properties/properties/add",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "file_properties/properties/overwrite",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "file_properties/properties/remove",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "file_properties/properties/search",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "file_properties/properties/search/continue",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.read",
+                       "policy":  "read",
+                       "special":  "continue"
+                   },
+                   {
+                       "name":  "file_properties/properties/update",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "file_properties/templates/add_for_user",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "file_properties/templates/get_for_user",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "file_properties/templates/list_for_user",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.read",
+                       "policy":  "read",
+                       "voidArg":  true
+                   },
+                   {
+                       "name":  "file_properties/templates/remove_for_user",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "file_properties/templates/update_for_user",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "file_requests/count",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "file_requests.read",
+                       "policy":  "read",
+                       "voidArg":  true
+                   },
+                   {
+                       "name":  "file_requests/create",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "file_requests.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "file_requests/delete",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "file_requests.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "file_requests/delete_all_closed",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "file_requests.write",
+                       "policy":  "write",
+                       "voidArg":  true
+                   },
+                   {
+                       "name":  "file_requests/get",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "file_requests.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "file_requests/list",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "file_requests.read",
+                       "policy":  "read",
+                       "voidArg":  true
+                   },
+                   {
+                       "name":  "file_requests/list/continue",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "file_requests.read",
+                       "policy":  "read",
+                       "special":  "continue"
+                   },
+                   {
+                       "name":  "file_requests/list_v2",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "file_requests.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "file_requests/update",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "file_requests.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "files/alpha/get_metadata",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.read",
+                       "policy":  "read",
+                       "deprecated":  true,
+                       "preview":  true
+                   },
+                   {
+                       "name":  "files/alpha/upload",
+                       "host":  "content",
+                       "style":  "upload",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write",
+                       "deprecated":  true,
+                       "preview":  true
+                   },
+                   {
+                       "name":  "files/copy",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "files/copy_batch",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "files/copy_batch/check",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "read",
+                       "special":  "async-check",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "files/copy_batch/check_v2",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "read",
+                       "special":  "async-check"
+                   },
+                   {
+                       "name":  "files/copy_batch_v2",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "files/copy_reference/get",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "files/copy_reference/save",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "files/copy_v2",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "files/create_folder",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "files/create_folder_batch",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "files/create_folder_batch/check",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "read",
+                       "special":  "async-check"
+                   },
+                   {
+                       "name":  "files/create_folder_v2",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "files/delete",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "files/delete_batch",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "files/delete_batch/check",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "read",
+                       "special":  "async-check"
+                   },
+                   {
+                       "name":  "files/delete_v2",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "files/download",
+                       "host":  "content",
+                       "style":  "download",
+                       "auth":  "user",
+                       "scope":  "files.content.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "files/download_zip",
+                       "host":  "content",
+                       "style":  "download",
+                       "auth":  "user",
+                       "scope":  "files.content.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "files/export",
+                       "host":  "content",
+                       "style":  "download",
+                       "auth":  "user",
+                       "scope":  "files.content.read",
+                       "policy":  "read",
+                       "preview":  true
+                   },
+                   {
+                       "name":  "files/get_file_lock_batch",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "files/get_metadata",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "files/get_preview",
+                       "host":  "content",
+                       "style":  "download",
+                       "auth":  "user",
+                       "scope":  "files.content.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "files/get_temporary_link",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.read",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "files/get_temporary_upload_link",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "files/get_thumbnail",
+                       "host":  "content",
+                       "style":  "download",
+                       "auth":  "user",
+                       "scope":  "files.content.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "files/get_thumbnail_batch",
+                       "host":  "content",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "files/get_thumbnail_v2",
+                       "host":  "content",
+                       "style":  "download",
+                       "auth":  "app,user",
+                       "scope":  "files.content.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "files/list_folder",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "app,user",
+                       "scope":  "files.metadata.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "files/list_folder/continue",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "app,user",
+                       "scope":  "files.metadata.read",
+                       "policy":  "read",
+                       "special":  "continue"
+                   },
+                   {
+                       "name":  "files/list_folder/get_latest_cursor",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "files/list_folder/longpoll",
+                       "host":  "notify",
+                       "style":  "rpc",
+                       "auth":  "noauth",
+                       "scope":  "files.metadata.read",
+                       "policy":  "read",
+                       "special":  "longpoll"
+                   },
+                   {
+                       "name":  "files/list_revisions",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "files/lock_file_batch",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "files/move",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "files/move_batch",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "files/move_batch/check",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "read",
+                       "special":  "async-check",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "files/move_batch/check_v2",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "read",
+                       "special":  "async-check"
+                   },
+                   {
+                       "name":  "files/move_batch_v2",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "files/move_v2",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "files/paper/create",
+                       "host":  "api",
+                       "style":  "upload",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write",
+                       "preview":  true
+                   },
+                   {
+                       "name":  "files/paper/update",
+                       "host":  "api",
+                       "style":  "upload",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write",
+                       "preview":  true
+                   },
+                   {
+                       "name":  "files/permanently_delete",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.permanent_delete",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "files/properties/add",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.write",
+                       "policy":  "write",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "files/properties/overwrite",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.write",
+                       "policy":  "write",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "files/properties/update",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.write",
+                       "policy":  "write",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "files/restore",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "files/save_url",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "files/save_url/check_job_status",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "read",
+                       "special":  "async-check"
+                   },
+                   {
+                       "name":  "files/search",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.read",
+                       "policy":  "read",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "files/search/continue_v2",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.read",
+                       "policy":  "read",
+                       "special":  "continue"
+                   },
+                   {
+                       "name":  "files/search_v2",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "files/tags/add",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.write",
+                       "policy":  "write",
+                       "preview":  true
+                   },
+                   {
+                       "name":  "files/tags/get",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.read",
+                       "policy":  "read",
+                       "preview":  true
+                   },
+                   {
+                       "name":  "files/tags/remove",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.write",
+                       "policy":  "write",
+                       "preview":  true
+                   },
+                   {
+                       "name":  "files/unlock_file_batch",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "files/upload",
+                       "host":  "content",
+                       "style":  "upload",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "files/upload_session/append",
+                       "host":  "content",
+                       "style":  "upload",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write",
+                       "special":  "upload-session",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "files/upload_session/append_batch",
+                       "host":  "content",
+                       "style":  "upload",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write",
+                       "special":  "upload-session"
+                   },
+                   {
+                       "name":  "files/upload_session/append_v2",
+                       "host":  "content",
+                       "style":  "upload",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write",
+                       "special":  "upload-session"
+                   },
+                   {
+                       "name":  "files/upload_session/finish",
+                       "host":  "content",
+                       "style":  "upload",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write",
+                       "special":  "upload-session"
+                   },
+                   {
+                       "name":  "files/upload_session/finish_batch",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write",
+                       "special":  "upload-session",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "files/upload_session/finish_batch/check",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "read",
+                       "special":  "async-check"
+                   },
+                   {
+                       "name":  "files/upload_session/finish_batch_v2",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write",
+                       "special":  "upload-session"
+                   },
+                   {
+                       "name":  "files/upload_session/start",
+                       "host":  "content",
+                       "style":  "upload",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write",
+                       "special":  "upload-session"
+                   },
+                   {
+                       "name":  "files/upload_session/start_batch",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write",
+                       "special":  "upload-session"
+                   },
+                   {
+                       "name":  "openid/userinfo",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "openid",
+                       "policy":  "write",
+                       "preview":  true
+                   },
+                   {
+                       "name":  "paper/docs/archive",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "paper/docs/create",
+                       "host":  "api",
+                       "style":  "upload",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "paper/docs/download",
+                       "host":  "api",
+                       "style":  "download",
+                       "auth":  "user",
+                       "scope":  "files.content.read",
+                       "policy":  "read",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "paper/docs/folder_users/list",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.read",
+                       "policy":  "read",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "paper/docs/folder_users/list/continue",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.read",
+                       "policy":  "read",
+                       "special":  "continue",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "paper/docs/get_folder_info",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.read",
+                       "policy":  "read",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "paper/docs/get_metadata",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "paper/docs/list",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.read",
+                       "policy":  "read",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "paper/docs/list/continue",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.metadata.read",
+                       "policy":  "read",
+                       "special":  "continue",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "paper/docs/permanently_delete",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.permanent_delete",
+                       "policy":  "write",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "paper/docs/sharing_policy/get",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.read",
+                       "policy":  "read",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "paper/docs/sharing_policy/set",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "write",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "paper/docs/update",
+                       "host":  "api",
+                       "style":  "upload",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "paper/docs/users/add",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "write",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "paper/docs/users/list",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.read",
+                       "policy":  "read",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "paper/docs/users/list/continue",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.read",
+                       "policy":  "read",
+                       "special":  "continue",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "paper/docs/users/remove",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "write",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "paper/folders/create",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "files.content.write",
+                       "policy":  "write",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "riviera/download_transform_output",
+                       "host":  "content",
+                       "style":  "download",
+                       "auth":  "app,user",
+                       "scope":  "files.content.read",
+                       "policy":  "read",
+                       "preview":  true
+                   },
+                   {
+                       "name":  "riviera/get_keyframes_async",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "app,user",
+                       "scope":  "files.content.read",
+                       "policy":  "read",
+                       "preview":  true
+                   },
+                   {
+                       "name":  "riviera/get_keyframes_async/check",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "app,user",
+                       "scope":  "files.content.read",
+                       "policy":  "read",
+                       "special":  "async-check",
+                       "preview":  true
+                   },
+                   {
+                       "name":  "riviera/get_markdown_async",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "app,user",
+                       "scope":  "files.content.read",
+                       "policy":  "read",
+                       "preview":  true
+                   },
+                   {
+                       "name":  "riviera/get_markdown_async/check",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "app,user",
+                       "scope":  "files.content.read",
+                       "policy":  "read",
+                       "special":  "async-check",
+                       "preview":  true
+                   },
+                   {
+                       "name":  "riviera/get_metadata_async",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "app,user",
+                       "scope":  "files.content.read",
+                       "policy":  "read",
+                       "preview":  true
+                   },
+                   {
+                       "name":  "riviera/get_metadata_async/check",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "app,user",
+                       "scope":  "files.content.read",
+                       "policy":  "read",
+                       "special":  "async-check",
+                       "preview":  true
+                   },
+                   {
+                       "name":  "riviera/get_ocr_async",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "app,user",
+                       "scope":  "files.content.read",
+                       "policy":  "read",
+                       "preview":  true
+                   },
+                   {
+                       "name":  "riviera/get_ocr_async/check",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "app,user",
+                       "scope":  "files.content.read",
+                       "policy":  "read",
+                       "special":  "async-check",
+                       "preview":  true
+                   },
+                   {
+                       "name":  "riviera/get_text_async",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "app,user",
+                       "scope":  "files.content.read",
+                       "policy":  "read",
+                       "preview":  true
+                   },
+                   {
+                       "name":  "riviera/get_text_async/check",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "app,user",
+                       "scope":  "files.content.read",
+                       "policy":  "read",
+                       "special":  "async-check",
+                       "preview":  true
+                   },
+                   {
+                       "name":  "riviera/get_transcript_async",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "app,user",
+                       "scope":  "files.content.read",
+                       "policy":  "read",
+                       "preview":  true
+                   },
+                   {
+                       "name":  "riviera/get_transcript_async/check",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "app,user",
+                       "scope":  "files.content.read",
+                       "policy":  "read",
+                       "special":  "async-check",
+                       "preview":  true
+                   },
+                   {
+                       "name":  "riviera/get_transform_async",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "app,user",
+                       "scope":  "files.content.read",
+                       "policy":  "read",
+                       "preview":  true
+                   },
+                   {
+                       "name":  "riviera/get_transform_async/check",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "app,user",
+                       "scope":  "files.content.read",
+                       "policy":  "read",
+                       "special":  "async-check",
+                       "preview":  true
+                   },
+                   {
+                       "name":  "sharing/add_file_member",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "sharing/add_folder_member",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "sharing/check_job_status",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "read",
+                       "special":  "async-check"
+                   },
+                   {
+                       "name":  "sharing/check_remove_member_job_status",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "read",
+                       "special":  "async-check"
+                   },
+                   {
+                       "name":  "sharing/check_share_job_status",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "read",
+                       "special":  "async-check"
+                   },
+                   {
+                       "name":  "sharing/create_shared_link",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "write",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "sharing/create_shared_link_with_settings",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "sharing/get_file_metadata",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "sharing/get_file_metadata/batch",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "sharing/get_folder_metadata",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "sharing/get_shared_link_file",
+                       "host":  "content",
+                       "style":  "download",
+                       "auth":  "app,user",
+                       "scope":  "sharing.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "sharing/get_shared_link_metadata",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "app,user",
+                       "scope":  "sharing.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "sharing/get_shared_links",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.read",
+                       "policy":  "read",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "sharing/list_file_members",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "sharing/list_file_members/batch",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "sharing/list_file_members/continue",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.read",
+                       "policy":  "read",
+                       "special":  "continue"
+                   },
+                   {
+                       "name":  "sharing/list_folder_members",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "sharing/list_folder_members/continue",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.read",
+                       "policy":  "read",
+                       "special":  "continue"
+                   },
+                   {
+                       "name":  "sharing/list_folders",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "sharing/list_folders/continue",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.read",
+                       "policy":  "read",
+                       "special":  "continue"
+                   },
+                   {
+                       "name":  "sharing/list_mountable_folders",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "sharing/list_mountable_folders/continue",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.read",
+                       "policy":  "read",
+                       "special":  "continue"
+                   },
+                   {
+                       "name":  "sharing/list_received_files",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "sharing/list_received_files/continue",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.read",
+                       "policy":  "read",
+                       "special":  "continue"
+                   },
+                   {
+                       "name":  "sharing/list_shared_links",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "sharing/modify_shared_link_settings",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "sharing/mount_folder",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "sharing/relinquish_access",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "private:sharing.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "sharing/relinquish_file_membership",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "sharing/relinquish_folder_membership",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "sharing/remove_file_member",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "write",
+                       "deprecated":  true
+                   },
+                   {
+                       "name":  "sharing/remove_file_member_2",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "sharing/remove_folder_member",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "sharing/revoke_shared_link",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "sharing/set_access_inheritance",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "sharing/share_folder",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "sharing/transfer_folder",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "sharing/unmount_folder",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "sharing/unshare_file",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "sharing/unshare_folder",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "sharing/update_file_member",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "sharing/update_file_policy",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "sharing/update_folder_member",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "sharing/update_folder_policy",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.write",
+                       "policy":  "write"
+                   },
+                   {
+                       "name":  "users/features/get_values",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "account_info.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "users/get_account",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "users/get_account_batch",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "sharing.read",
+                       "policy":  "read"
+                   },
+                   {
+                       "name":  "users/get_current_account",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "account_info.read",
+                       "policy":  "read",
+                       "voidArg":  true
+                   },
+                   {
+                       "name":  "users/get_space_usage",
+                       "host":  "api",
+                       "style":  "rpc",
+                       "auth":  "user",
+                       "scope":  "account_info.read",
+                       "policy":  "read",
+                       "voidArg":  true
+                   }
+               ]
+}

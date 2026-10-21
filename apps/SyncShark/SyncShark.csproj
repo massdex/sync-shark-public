@@ -1,0 +1,122 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <StartupObject>Massdex.SyncShark.ProcessEntry</StartupObject>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <!-- Shared GUI/CLI host: favor a smaller heap while retaining background GC. -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+    <AssemblyName>SyncShark</AssemblyName>
+    <RootNamespace>Massdex.SyncShark</RootNamespace>
+    <Company>Massdex</Company>
+    <Product>Sync Shark</Product>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\SyncShark.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="7" />
+    <ProjectReference Include="..\..\src\SyncShark.Core\SyncShark.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Resource Include="Assets\SyncShark.ico" />
+    <Resource Include="Assets\SyncShark-64.png" />
+    <Resource Include="Assets\sync-shark-mark.svg" />
+    <Resource Include="Assets\google-drive.png" />
+    <EmbeddedResource Include="..\..\tools\SyncShark.Release.psm1" LogicalName="SyncShark.Release.psm1" />
+    <EmbeddedResource Include="..\..\tools\SyncShark.Update.ps1" LogicalName="SyncShark.Update.ps1" />
+    <EmbeddedResource Include="..\..\tools\SyncShark.Uninstall.ps1" LogicalName="SyncShark.Uninstall.ps1" />
+    <Compile Include="..\..\tools\SyncShark.DiscoverySetupNative.cs" Link="DiscoverySetupNative.cs" />
+    <Compile Include="..\..\tools\SyncShark.SignerIdentity.cs" Link="SyncShark.SignerIdentity.cs" />
+  </ItemGroup>
+  <PropertyGroup>
+    <SyncSharkZigPath Condition="'$(SyncSharkZigPath)' == ''">$(LOCALAPPDATA)\Programs\Zig\0.16.0\zig.exe</SyncSharkZigPath>
+    <SyncSharkExplorerBinary>$(BaseIntermediateOutputPath)native\SyncShark.Explorer.dll</SyncSharkExplorerBinary>
+    <SyncSharkDiscoveryBinary>$(BaseIntermediateOutputPath)native\SyncSharkDiscovery.exe</SyncSharkDiscoveryBinary>
+    <SyncSharkUpdaterBinary>$(BaseIntermediateOutputPath)native\SyncSharkUpdater.exe</SyncSharkUpdaterBinary>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="$(SyncSharkExplorerBinary)" Link="SyncShark.Explorer.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="$(SyncSharkDiscoveryBinary)" Link="SyncSharkDiscovery.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+  <Target Name="GenerateSyncSharkSignerIdentityHeader"
+          Condition="'$(DesignTimeBuild)' != 'true' and !$([System.String]::Copy('$(MSBuildProjectName)').EndsWith('_wpftmp'))">
+    <MakeDir Directories="$(BaseIntermediateOutputPath)native" />
+    <Exec Command="powershell.exe -NoProfile -NonInteractive -File &quot;$(MSBuildProjectDirectory)\..\..\tools\New-SyncSharkSignerIdentity.ps1&quot; -JsonPath &quot;$(MSBuildProjectDirectory)\..\..\tools\SyncShark.SignerIdentity.json&quot; -HeaderOutput &quot;$(BaseIntermediateOutputPath)native\SyncSharkSignerIdentity.h&quot; -ModulePath &quot;$(MSBuildProjectDirectory)\..\..\tools\SyncShark.Release.psm1&quot; -DiscoverySetupPath &quot;$(MSBuildProjectDirectory)\..\..\tools\SyncShark.DiscoverySetup.ps1&quot; -ManagedOutput &quot;$(MSBuildProjectDirectory)\..\..\tools\SyncShark.SignerIdentity.cs&quot;" />
+    <ItemGroup><FileWrites Include="$(BaseIntermediateOutputPath)native\SyncSharkSignerIdentity.h" /></ItemGroup>
+  </Target>
+  <Target Name="BuildSyncSharkExplorerCommand" BeforeTargets="CoreCompile" DependsOnTargets="GenerateSyncSharkSignerIdentityHeader"
+          Inputs="$(MSBuildProjectDirectory)\ExplorerCommand.c;$(MSBuildProjectDirectory)\ExplorerCommand.def;$(MSBuildProjectDirectory)\DiscoveryClient.c;$(MSBuildProjectDirectory)\DiscoveryTrust.c;$(MSBuildProjectDirectory)\DiscoveryTrust.h;$(MSBuildProjectDirectory)\NativeLoadConfig.c;$(MSBuildProjectDirectory)\..\..\tools\Build-SyncSharkExplorerIcons.ps1;$(MSBuildProjectDirectory)\..\..\tools\SyncShark.SignerIdentity.json;$(BaseIntermediateOutputPath)native\SyncSharkSignerIdentity.h"
+          Outputs="$(SyncSharkExplorerBinary)"
+          Condition="'$(DesignTimeBuild)' != 'true' and !$([System.String]::Copy('$(MSBuildProjectName)').EndsWith('_wpftmp'))">
+    <Error Condition="!Exists('$(SyncSharkZigPath)')" Text="The registered Zig 0.16.0 toolchain is required for the native Explorer command." />
+    <MakeDir Directories="$(BaseIntermediateOutputPath)native" />
+    <Exec Command="powershell.exe -NoProfile -NonInteractive -File &quot;$(MSBuildProjectDirectory)\..\..\tools\Build-SyncSharkExplorerIcons.ps1&quot; -OutputDirectory &quot;$(BaseIntermediateOutputPath)native&quot;" />
+    <Exec Command="&quot;$(SyncSharkZigPath)&quot; rc /c 65001 /fo &quot;$(BaseIntermediateOutputPath)native\status-icons.obj&quot; &quot;$(BaseIntermediateOutputPath)native\status-icons.rc&quot;" />
+    <Exec Command="&quot;$(SyncSharkZigPath)&quot; cc -target x86_64-windows-gnu -shared -O2 -Wall -Wextra -Werror -Wno-misleading-indentation -I&quot;$(BaseIntermediateOutputPath)native&quot; -o &quot;$(SyncSharkExplorerBinary)&quot; &quot;$(MSBuildProjectDirectory)\ExplorerCommand.c&quot; &quot;$(MSBuildProjectDirectory)\DiscoveryClient.c&quot; &quot;$(MSBuildProjectDirectory)\DiscoveryTrust.c&quot; &quot;$(MSBuildProjectDirectory)\NativeLoadConfig.c&quot; &quot;$(MSBuildProjectDirectory)\ExplorerCommand.def&quot; &quot;$(BaseIntermediateOutputPath)native\status-icons.obj&quot; -lole32 -lshell32 -ladvapi32 -luuid -lbcrypt -lcrypt32 -lwintrust" />
+    <ItemGroup><FileWrites Include="$(SyncSharkExplorerBinary);$(BaseIntermediateOutputPath)native\status-icons.obj;$(BaseIntermediateOutputPath)native\status-icons.rc;$(BaseIntermediateOutputPath)native\status-*.ico" /></ItemGroup>
+  </Target>
+  <Target Name="PrepareSyncSharkDiscoveryVersion"
+          Condition="'$(DesignTimeBuild)' != 'true' and !$([System.String]::Copy('$(MSBuildProjectName)').EndsWith('_wpftmp'))">
+    <MakeDir Directories="$(BaseIntermediateOutputPath)native" />
+    <WriteLinesToFile File="$(BaseIntermediateOutputPath)native\DiscoveryVersion.txt"
+                      Lines="$(Version);$(InformationalVersion);$(SyncSharkExpectedPreviousVersion)" Overwrite="true" WriteOnlyWhenDifferent="true" />
+    <ItemGroup><FileWrites Include="$(BaseIntermediateOutputPath)native\DiscoveryVersion.txt" /></ItemGroup>
+  </Target>
+  <ItemGroup>
+    <SyncSharkUpdaterSetupSources Include="$(MSBuildProjectDirectory)\..\..\tools\SyncShark.Updater*.cs" />
+  </ItemGroup>
+  <Target Name="BuildSyncSharkDiscovery" BeforeTargets="CoreCompile" DependsOnTargets="PrepareSyncSharkDiscoveryVersion;GenerateSyncSharkSignerIdentityHeader"
+          Inputs="$(MSBuildProjectDirectory)\..\..\tools\SyncShark.JournalNative.cs;$(MSBuildProjectDirectory)\..\..\tools\SyncShark.JournalSetup.cs;@(SyncSharkUpdaterSetupSources);$(BaseIntermediateOutputPath)native\DiscoveryVersion.txt;$(MSBuildProjectDirectory)\DiscoveryWorker.c;$(MSBuildProjectDirectory)\NativeLoadConfig.c;$(MSBuildProjectDirectory)\DiscoverySetup.c;$(MSBuildProjectDirectory)\EmbeddedSetupHost.c;$(MSBuildProjectDirectory)\EmbeddedSetupHost.h;$(MSBuildProjectDirectory)\DiscoveryInventory.c;$(MSBuildProjectDirectory)\DiscoveryInventory.h;$(MSBuildProjectDirectory)\DiscoveryProtocol.c;$(MSBuildProjectDirectory)\DiscoveryProtocol.h;$(MSBuildProjectDirectory)\DiscoveryTrust.c;$(MSBuildProjectDirectory)\DiscoveryTrust.h;$(MSBuildProjectDirectory)\Assets\SyncShark.ico;$(MSBuildProjectDirectory)\..\..\Directory.Build.props;$(MSBuildProjectDirectory)\..\..\tools\Build-SyncSharkDiscoverySetup.ps1;$(MSBuildProjectDirectory)\..\..\tools\SyncShark.DiscoverySetupNative.cs;$(MSBuildProjectDirectory)\..\..\tools\SyncShark.DiscoverySetup.ps1;$(MSBuildProjectDirectory)\..\..\tools\SyncShark.DiscoveryTransaction.cs;$(MSBuildProjectDirectory)\..\..\tools\SyncShark.SignerIdentity.json;$(BaseIntermediateOutputPath)native\SyncSharkSignerIdentity.h"
+          Outputs="$(SyncSharkDiscoveryBinary)"
+          Condition="'$(DesignTimeBuild)' != 'true' and !$([System.String]::Copy('$(MSBuildProjectName)').EndsWith('_wpftmp'))">
+    <MakeDir Directories="$(BaseIntermediateOutputPath)native" />
+    <Exec Command="powershell.exe -NoProfile -NonInteractive -File &quot;$(MSBuildProjectDirectory)\..\..\tools\Build-SyncSharkDiscoverySetup.ps1&quot; -OutputDirectory &quot;$(BaseIntermediateOutputPath)native&quot; -Version &quot;$(Version)&quot; -ProductVersion &quot;$(InformationalVersion)&quot; -ExpectedPreviousVersion &quot;$(SyncSharkExpectedPreviousVersion)&quot; -Allocation &quot;$(SyncSharkBuildRoot)&quot;" />
+    <Exec Command="&quot;$(SyncSharkZigPath)&quot; rc /c 65001 /fo &quot;$(BaseIntermediateOutputPath)native\DiscoverySetup.obj&quot; &quot;$(BaseIntermediateOutputPath)native\DiscoverySetup.rc&quot;" />
+    <Exec Command="&quot;$(SyncSharkZigPath)&quot; cc -target x86_64-windows-gnu -municode -Wl,--subsystem,windows -O2 -Wall -Wextra -Werror -Wno-misleading-indentation -I&quot;$(BaseIntermediateOutputPath)native&quot; &quot;$(MSBuildProjectDirectory)\DiscoveryWorker.c&quot; &quot;$(MSBuildProjectDirectory)\DiscoverySetup.c&quot; &quot;$(MSBuildProjectDirectory)\EmbeddedSetupHost.c&quot; &quot;$(MSBuildProjectDirectory)\DiscoveryInventory.c&quot; &quot;$(MSBuildProjectDirectory)\DiscoveryProtocol.c&quot; &quot;$(MSBuildProjectDirectory)\DiscoveryTrust.c&quot; &quot;$(MSBuildProjectDirectory)\NativeLoadConfig.c&quot; &quot;$(BaseIntermediateOutputPath)native\DiscoverySetup.obj&quot; -ladvapi32 -lshell32 -lole32 -luuid -lbcrypt -lcrypt32 -lwintrust -o &quot;$(SyncSharkDiscoveryBinary)&quot;" />
+    <ItemGroup><FileWrites Include="$(SyncSharkDiscoveryBinary);$(BaseIntermediateOutputPath)native\DiscoverySetup.dll;$(BaseIntermediateOutputPath)native\DiscoverySetup.ps1;$(BaseIntermediateOutputPath)native\DiscoverySetup.obj;$(BaseIntermediateOutputPath)native\DiscoverySetup.rc;$(BaseIntermediateOutputPath)native\DiscoverySetup.manifest" /></ItemGroup>
+  </Target>
+  <!-- Explicit source/release target only: never add the privileged worker to
+       an ordinary product build or install without its separate release gate. -->
+  <Target Name="BuildSyncSharkUpdater" DependsOnTargets="PrepareSyncSharkDiscoveryVersion;GenerateSyncSharkSignerIdentityHeader"
+          Inputs="$(MSBuildProjectDirectory)\..\..\tools\SyncShark.JournalNative.cs;$(MSBuildProjectDirectory)\..\..\tools\SyncShark.JournalSetup.cs;@(SyncSharkUpdaterSetupSources);$(BaseIntermediateOutputPath)native\DiscoveryVersion.txt;$(MSBuildProjectDirectory)\UpdaterWorker.c;$(MSBuildProjectDirectory)\EmbeddedSetupHost.c;$(MSBuildProjectDirectory)\EmbeddedSetupHost.h;$(MSBuildProjectDirectory)\DiscoveryTrust.c;$(MSBuildProjectDirectory)\DiscoveryTrust.h;$(MSBuildProjectDirectory)\NativeLoadConfig.c;$(MSBuildProjectDirectory)\Assets\SyncShark.ico;$(MSBuildProjectDirectory)\..\..\tools\Build-SyncSharkDiscoverySetup.ps1;$(MSBuildProjectDirectory)\..\..\tools\SyncShark.DiscoverySetupNative.cs;$(MSBuildProjectDirectory)\..\..\tools\SyncShark.DiscoveryTransaction.cs;$(MSBuildProjectDirectory)\..\..\tools\SyncShark.DiscoverySetup.ps1;$(MSBuildProjectDirectory)\..\..\tools\SyncShark.Updater.ps1;$(MSBuildProjectDirectory)\..\..\tools\SyncShark.SignerIdentity.json;$(BaseIntermediateOutputPath)native\SyncSharkSignerIdentity.h"
+          Outputs="$(SyncSharkUpdaterBinary)">
+    <Error Condition="!Exists('$(SyncSharkZigPath)')" Text="The registered Zig 0.16.0 toolchain is required for the protected updater." />
+    <Exec Command="powershell.exe -NoProfile -NonInteractive -File &quot;$(MSBuildProjectDirectory)\..\..\tools\Build-SyncSharkDiscoverySetup.ps1&quot; -OutputDirectory &quot;$(BaseIntermediateOutputPath)native&quot; -Version &quot;$(Version)&quot; -ProductVersion &quot;$(InformationalVersion)&quot; -ExpectedPreviousVersion &quot;$(SyncSharkExpectedPreviousVersion)&quot; -Allocation &quot;$(SyncSharkBuildRoot)&quot; -Kind Updater" />
+    <Exec Command="&quot;$(SyncSharkZigPath)&quot; rc /c 65001 /fo &quot;$(BaseIntermediateOutputPath)native\UpdaterSetup.obj&quot; &quot;$(BaseIntermediateOutputPath)native\UpdaterSetup.rc&quot;" />
+    <Exec Command="&quot;$(SyncSharkZigPath)&quot; cc -target x86_64-windows-gnu -municode -Wl,--subsystem,windows -O2 -Wall -Wextra -Werror -Wno-misleading-indentation -I&quot;$(BaseIntermediateOutputPath)native&quot; &quot;$(MSBuildProjectDirectory)\UpdaterWorker.c&quot; &quot;$(MSBuildProjectDirectory)\EmbeddedSetupHost.c&quot; &quot;$(MSBuildProjectDirectory)\DiscoveryTrust.c&quot; &quot;$(MSBuildProjectDirectory)\NativeLoadConfig.c&quot; &quot;$(BaseIntermediateOutputPath)native\UpdaterSetup.obj&quot; -ladvapi32 -lshell32 -lole32 -luuid -lbcrypt -lcrypt32 -lwintrust -o &quot;$(SyncSharkUpdaterBinary)&quot;" />
+    <ItemGroup><FileWrites Include="$(SyncSharkUpdaterBinary);$(BaseIntermediateOutputPath)native\UpdaterSetup.dll;$(BaseIntermediateOutputPath)native\UpdaterSetup.ps1;$(BaseIntermediateOutputPath)native\UpdaterSetup.obj;$(BaseIntermediateOutputPath)native\UpdaterSetup.rc;$(BaseIntermediateOutputPath)native\UpdaterSetup.manifest" /></ItemGroup>
+  </Target>
+  <Target Name="CleanSyncSharkExplorerCommand" AfterTargets="Clean">
+    <ItemGroup><ExplorerGenerated Include="$(SyncSharkExplorerBinary);$(BaseIntermediateOutputPath)native\status-icons.obj;$(BaseIntermediateOutputPath)native\status-icons.rc;$(BaseIntermediateOutputPath)native\status-*.ico" /></ItemGroup>
+    <ItemGroup><ExplorerGenerated Include="$(BaseIntermediateOutputPath)native\DiscoveryInventory.obj;$(BaseIntermediateOutputPath)native\DiscoveryProtocol.obj;$(BaseIntermediateOutputPath)native\DiscoveryInventoryChecks.exe" /></ItemGroup>
+    <ItemGroup><ExplorerGenerated Include="$(BaseIntermediateOutputPath)native\DiscoveryDiagnosticChecks.exe;$(BaseIntermediateOutputPath)native\DiscoveryDiagnosticChecks.pdb" /></ItemGroup>
+    <ItemGroup><ExplorerGenerated Include="$(BaseIntermediateOutputPath)native\DiscoveryWorkerLifecycleChecks.exe;$(BaseIntermediateOutputPath)native\DiscoveryWorkerLifecycleChecks.pdb" /></ItemGroup>
+    <ItemGroup><ExplorerGenerated Include="$(BaseIntermediateOutputPath)native\DiscoverySetupAdmissionChecks.exe;$(BaseIntermediateOutputPath)native\DiscoverySetupAdmissionChecks.pdb" /></ItemGroup>
+    <ItemGroup><ExplorerGenerated Include="$(SyncSharkDiscoveryBinary);$(BaseIntermediateOutputPath)native\DiscoveryTrust.obj;$(BaseIntermediateOutputPath)native\SyncSharkSignerIdentity.h;$(BaseIntermediateOutputPath)native\DiscoveryTrustChecks.exe" /></ItemGroup>
+    <ItemGroup><ExplorerGenerated Include="$(BaseIntermediateOutputPath)native\DiscoverySetup.dll;$(BaseIntermediateOutputPath)native\DiscoverySetup.ps1;$(BaseIntermediateOutputPath)native\DiscoverySetup.obj;$(BaseIntermediateOutputPath)native\DiscoverySetup.rc;$(BaseIntermediateOutputPath)native\DiscoverySetup.manifest;$(BaseIntermediateOutputPath)native\DiscoveryVersion.txt" /></ItemGroup>
+    <ItemGroup><ExplorerGenerated Include="$(SyncSharkUpdaterBinary);$(BaseIntermediateOutputPath)native\UpdaterSetup.dll;$(BaseIntermediateOutputPath)native\UpdaterSetup.ps1;$(BaseIntermediateOutputPath)native\UpdaterSetup.obj;$(BaseIntermediateOutputPath)native\UpdaterSetup.rc;$(BaseIntermediateOutputPath)native\UpdaterSetup.manifest" /></ItemGroup>
+    <ItemGroup><ExplorerGenerated Include="$(BaseIntermediateOutputPath)native\SyncShark.Explorer.pdb;$(BaseIntermediateOutputPath)native\SyncSharkDiscovery.pdb" /></ItemGroup>
+    <ItemGroup><ExplorerGenerated Include="$(BaseIntermediateOutputPath)native\ExplorerCommandChecks.exe;$(BaseIntermediateOutputPath)native\ExplorerCommandChecks.pdb;$(BaseIntermediateOutputPath)native\ExplorerCommand.lib" /></ItemGroup>
+    <Delete Files="@(ExplorerGenerated)" />
+  </Target>
+  <!-- Debug only: sign the bin\ copies (never obj\) after every output copy, so the
+       installed read-only Discovery helper accepts this dev build. Other machines skip. -->
+  <PropertyGroup>
+    <SyncSharkNoUacSigner>$(ProgramW6432)\Massdex\NoUacSigner\Invoke-NoUacSign.ps1</SyncSharkNoUacSigner>
+  </PropertyGroup>
+  <Target Name="SignSyncSharkDebugOutput" AfterTargets="CopyFilesToOutputDirectory"
+          Condition="'$(Configuration)' == 'Debug' and Exists('$(SyncSharkNoUacSigner)') and '$(DesignTimeBuild)' != 'true' and !$([System.String]::Copy('$(MSBuildProjectName)').EndsWith('_wpftmp'))">
+    <ItemGroup>
+      <SyncSharkDebugSigned Include="$(OutDir)SyncShark.exe;$(OutDir)SyncShark.dll;$(OutDir)SyncShark.Core.dll;$(OutDir)SyncSharkDiscovery.exe" />
+      <SyncSharkDebugSigned Include="$(OutDir)SyncShark.Explorer.dll" Condition="Exists('$(OutDir)SyncShark.Explorer.dll')" />
+    </ItemGroup>
+    <Exec Command="powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command &quot;&amp; '$(SyncSharkNoUacSigner)' -Path @(SyncSharkDebugSigned->'%27%(FullPath)%27', ',') -Role publisher&quot;" />
+  </Target>
+</Project>
