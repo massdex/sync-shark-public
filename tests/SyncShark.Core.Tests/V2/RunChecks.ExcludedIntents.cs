@@ -73,15 +73,41 @@ internal static partial class RunChecks
         }
     }
 
-    private sealed class ExcludedDeleteJobWriter(IEndpointWriter inner) : IEndpointWriter, IProviderEffectReconciler
+    private sealed class ExcludedDeleteJobWriter(IEndpointWriter inner) : IEndpointWriter, IProviderEffectReconciler, IFolderTreeDeleter
     {
         public Exception? Failure { get; set; }
         public bool? Completed { get; set; }
         public int Checks;
-        public Task<bool?> ResolveProviderEffectAsync(SyncAction action, ProviderJobCheckCache? jobChecks, CancellationToken ct)
+        public string? PendingJobId { get; set; }
+        public int PendingChecks;
+        public int TreeChecks;
+        public async Task<bool?> ResolveProviderEffectAsync(SyncAction action, ProviderJobCheckCache? jobChecks, CancellationToken ct)
         {
             Interlocked.Increment(ref Checks);
-            return Failure is { } failure ? Task.FromException<bool?>(failure) : Task.FromResult(Completed);
+            if (Failure is { } failure) throw failure;
+            if (PendingJobId is null) return Completed;
+            var pending = action.ProviderEffect!.Id == PendingJobId;
+            Task<System.Text.Json.JsonElement> Read(CancellationToken token)
+            {
+                token.ThrowIfCancellationRequested();
+                if (pending) Interlocked.Increment(ref PendingChecks);
+                using var json = System.Text.Json.JsonDocument.Parse(pending
+                    ? "{\".tag\":\"in_progress\"}" : "{\".tag\":\"complete\"}");
+                return Task.FromResult(json.RootElement.Clone());
+            }
+            var result = jobChecks is null ? await Read(ct) :
+                await jobChecks.ReadAsync(this, "delete", action.ProviderEffect.Id, Read, ct);
+            return result.GetProperty(".tag").GetString() == "in_progress" ? null : true;
+        }
+        public Task<IReadOnlyList<FolderTreeOutcome>> DeleteFolderTreesAsync(string scanCursor,
+            IReadOnlyList<FolderTree> trees, Func<IReadOnlyList<FolderTree>, string, Task> beforeSubmit, CancellationToken ct) =>
+            throw new InvalidOperationException("Reconciliation must not replay folder deletes.");
+        public Task<IReadOnlyList<FolderTreeOutcome>> ReconcileFolderTreesAsync(string scanCursor,
+            IReadOnlyList<FolderTree> trees, string recoveryState, Func<string, Task> checkpoint, CancellationToken ct)
+        {
+            TreeChecks++;
+            return Task.FromResult<IReadOnlyList<FolderTreeOutcome>>(trees.Select(tree => FolderTreeOutcome.Of(tree,
+                Completed == true ? FolderTreeStatus.Completed : FolderTreeStatus.Uncertain, "Synthetic folder job")).ToArray());
         }
         public Task<ItemState?> ObserveAsync(string path, CancellationToken ct) => inner.ObserveAsync(path, ct);
         public Task<RecoveryRef> PreserveAsync(ItemState victim, string id, CancellationToken ct) => throw new InvalidOperationException("Excluded effect must not preserve.");

@@ -87,12 +87,16 @@ internal sealed class RecordingWriter
 
     internal int AbsenceBatchCalls;
     internal int AbsenceBatchItems;
+    internal bool ThrowAbsenceBatch { get; set; }
+    internal bool ShortAbsenceBatch { get; set; }
     internal string? UnknownAbsencePath { get; set; }
     public async Task<IReadOnlyList<bool?>> IsAbsentBatchAsync(
         IReadOnlyList<(ItemState Historical, string Path)> requests, CancellationToken ct)
     {
         Interlocked.Increment(ref AbsenceBatchCalls);
         Interlocked.Add(ref AbsenceBatchItems, requests.Count);
+        if (ThrowAbsenceBatch) throw new IOException("Synthetic whole-page probe failure");
+        if (ShortAbsenceBatch) return Enumerable.Repeat<bool?>(true, requests.Count - 1).ToArray();
         var results = new bool?[requests.Count];
         for (var i = 0; i < requests.Count; i++)
         {

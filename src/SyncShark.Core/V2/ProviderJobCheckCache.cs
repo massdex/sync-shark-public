@@ -14,6 +14,7 @@ public sealed class ProviderJobCheckCache
 {
     private readonly ConcurrentDictionary<(object Owner, string Kind, string JobId), Lazy<Task<JsonElement>>> _checks = new();
     private readonly ConcurrentDictionary<(object Owner, string Kind, string JobId), int> _failures = new();
+    private readonly ReconcileRunScope? _run = ReconcileRunScope.Current;
 
     /// <summary>
     /// The job status read for <paramref name="jobId"/>, performed by the first caller and shared by the rest.
@@ -24,6 +25,8 @@ public sealed class ProviderJobCheckCache
         Func<CancellationToken, Task<JsonElement>> read, CancellationToken ct)
     {
         var key = (owner, kind, jobId);
+        ct.ThrowIfCancellationRequested();
+        if (_run?.PendingJobs.TryGetValue(key, out var pending) == true) return Task.FromResult(pending);
         while (true)
         {
             if (_checks.TryGetValue(key, out var known)) return known.Value;
@@ -40,7 +43,15 @@ public sealed class ProviderJobCheckCache
     {
         try
         {
-            return await read(ct).ConfigureAwait(false);
+            var result = await read(ct).ConfigureAwait(false);
+            if (_run is not null && result.ValueKind == JsonValueKind.Object &&
+                result.TryGetProperty(".tag", out var tag) && tag.GetString() == "in_progress")
+            {
+                // Do not retain an arbitrary provider body for the whole run.
+                using var compact = JsonDocument.Parse("{\".tag\":\"in_progress\"}");
+                _run.PendingJobs.TryAdd(key, compact.RootElement.Clone());
+            }
+            return result;
         }
         catch
         {

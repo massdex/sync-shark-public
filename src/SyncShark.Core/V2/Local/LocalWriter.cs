@@ -520,7 +520,9 @@ public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResource
         for (var i = 0; i < requests.Count; i++)
         {
             ct.ThrowIfCancellationRequested();
-            identities[i] = absence.Check(requests[i].Historical);
+            try { identities[i] = absence.Check(requests[i].Historical); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception error) when (error is not OutOfMemoryException) { identities[i] = FileAbsence.Unknown; }
         }
         await Parallel.ForEachAsync(Enumerable.Range(0, requests.Count), new ParallelOptions
             { MaxDegreeOfParallelism = 8, CancellationToken = ct }, async (index, token) =>

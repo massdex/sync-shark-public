@@ -15,10 +15,6 @@ public sealed partial class DropboxPilotClient
     {
         if (requests.Count > 128) throw new ArgumentOutOfRangeException(nameof(requests));
         if (requests.Count == 0) return Array.Empty<bool?>();
-        foreach (var request in requests)
-            if (!IsExactDropboxObjectIdentity(request.ObjectId))
-                throw new InvalidDataException("An exact Dropbox object ID is required for an absence check.");
-
         await using var verification = SyncProviderAccountVerificationScope.Begin(ct);
         await reads.WaitAsync(ct).ConfigureAwait(false);
         try { await VerifyRootIdentityAsync(ct).ConfigureAwait(false); }
@@ -33,6 +29,9 @@ public sealed partial class DropboxPilotClient
             {
                 await reads.WaitAsync(token).ConfigureAwait(false);
                 try { await ReadPresentIdsAsync(parent, wantedIds, present, token).ConfigureAwait(false); }
+                catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+                catch (Exception error) when (error is not OutOfMemoryException)
+                { /* Optional presence shortcut only; exact identity/path probes remain authoritative. */ }
                 finally { reads.Release(); }
             }).ConfigureAwait(false);
 
@@ -56,9 +55,11 @@ public sealed partial class DropboxPilotClient
                         PilotPath.DropboxComparisonKey(request.HistoricalPath), StringComparison.Ordinal) ||
                         await FindEntryInVerifiedRootAsync(request.HistoricalPath, token).ConfigureAwait(false) is null;
                 }
+                catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+                catch (Exception error) when (error is not OutOfMemoryException) { result[index] = null; }
                 finally { reads.Release(); }
             }).ConfigureAwait(false);
-        // Failures (including exhausted 429 retries) propagate: never turn them into absent evidence.
+        // Only root verification fails the page; item failures stay inconclusive for that item.
         return result;
 
         bool ClaimParent(string parent)

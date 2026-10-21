@@ -35,11 +35,16 @@ internal static partial class DropboxChecks
         fixture.Client.ReadRetryDelay = (delay, token) =>
         { token.ThrowIfCancellationRequested(); clock.Advance(delay); return Task.CompletedTask; };
         fixture.Wire.MetadataFailurePath = "id:absent";
-        var failed = false;
-        try { await writer.IsAbsentBatchAsync([(missing, missing.Path)], CancellationToken.None); }
-        catch (HttpRequestException) { failed = true; }
-        LocalChecks.Require(failed, "provider failure propagates for retry, never becomes absence");
+        var absentSibling = missing with { ObjectId = "id:missing-sibling", Path = "absent-sibling.txt" };
+        var isolated = await writer.IsAbsentBatchAsync([(missing, missing.Path),
+            (absentSibling, absentSibling.Path)], CancellationToken.None);
+        LocalChecks.Require(isolated[0] is null && isolated[1] == true,
+            "one item's provider failure stays inconclusive without blocking its proven-absent sibling");
         fixture.Wire.MetadataFailurePath = null;
+        fixture.Wire.Script("/2/files/list_folder", System.Net.HttpStatusCode.Forbidden, 1);
+        var listingUnavailable = absentSibling with { Path = "fresh-parent/absent.txt" };
+        LocalChecks.Require((await writer.IsAbsentBatchAsync([(listingUnavailable, listingUnavailable.Path)],
+            CancellationToken.None))[0] == true, "failed optional parent listing falls back to exact absence probes");
         fixture.Wire.Script("/2/files/get_metadata", System.Net.HttpStatusCode.TooManyRequests, 64);
         var throttled = false;
         try { await writer.IsAbsentBatchAsync([(missing, missing.Path)], CancellationToken.None); }

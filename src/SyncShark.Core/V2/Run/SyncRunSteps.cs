@@ -270,6 +270,7 @@ public sealed partial class SyncRun
             !(recoveryUnavailable && RecoverySafety.RequiresRecovery(action)) &&
             (action.ProviderEffect?.Kind is "whole-folder-group" or "whole-folder-member" ||
             ReconcileAllowed(prepared, action) && !CarriesNewlyIgnored(pair, action, rules));
+        using var reconcileScope = new ReconcileRunScope();
         var outstanding = _store.StreamUnresolvedIntentRows(pair.PairId);
         var exclusions = ExclusionPredicates(pair);
         var pairs = _store.Pairs();
@@ -286,6 +287,9 @@ public sealed partial class SyncRun
         long reconciled = 0;
         var reconcileTotal = _store.CountUnresolvedIntents(pair.PairId);
         throttle.Report(RunPhases.Reconcile, null, 0, reconcileTotal);
+        if (reconcileTotal > 0)
+            await SyncByteProgressStream.ReportCurrentProcessAsync("Unconfirmed effects",
+                $"{reconcileTotal} effect(s) unconfirmed; re-checking at {_time.GetUtcNow():HH:mm:ss}.", ProcessMessageKind.Notice);
         long? generation = null;
         // Keyset-streamed pages release the store reader before observation/commit. Every due intent
         // is visited once, including unresolved ones; never restart from the first still-pending row.
@@ -303,9 +307,19 @@ public sealed partial class SyncRun
             {
                 ct.ThrowIfCancellationRequested();
                 var action = entry.Action;
-                // A preceding page can settle a whole-folder anchor and all its frozen members.
-                if (action.ProviderEffect?.Kind is "whole-folder-group" or "whole-folder-member" &&
-                    _store.IntentById(pair.PairId, action.ActionId) is null) continue;
+                // An anchor pass committed all members, even when still uncertain. Do not repeat
+                // its provider work/notices on later pages; still count each unresolved row.
+                if (action.ProviderEffect is { Kind: "whole-folder-group" or "whole-folder-member" } group)
+                {
+                    if (_store.IntentById(pair.PairId, action.ActionId) is null) continue;
+                    var anchorId = group.Kind == "whole-folder-group" ? action.ActionId : group.Id;
+                    if (reconcileScope.Anchors.Contains(anchorId) || reconcileScope.MissingAnchors.Contains(anchorId))
+                    {
+                        RememberUncertain(new(action.ActionId, Outcome.Uncertain, null, null, null,
+                            "Whole-folder recovery remains unresolved after this run's anchor check."));
+                        continue;
+                    }
+                }
                 if (PermanentIntentBoundary(pair, action, pairs, owned) is { } boundary)
                 {
                     retirementGeneration ??= _store.BeginGeneration(pair.A.RootId, RunKind);
@@ -388,12 +402,17 @@ public sealed partial class SyncRun
             foreach (var retry in parkedRetries) _store.SaveSyncRetry(pair.PairId, retry);
             _store.SetIntentsHeld(pair.PairId, releasedIds, false);
             foreach (var result in await SettleExcludedIntentsAsync(pair, excludedIntents, ct)) RememberUncertain(result);
-            if (intents.Count == 0) continue;
+            if (intents.Count == 0)
+            {
+                reconciled += batch.Length;
+                throttle.Report(RunPhases.Reconcile, null, reconciled, reconcileTotal);
+                continue;
+            }
             generation ??= _store.BeginGeneration(pair.A.RootId, RunKind);
             var results = await _executor.ReconcileAsync(intents, generation.Value,
                 _endpoints.Writer(pair.A), _endpoints.Writer(pair.B), ct,
                 new ReconcileProgress(throttle, reconcileTotal, reconciled));
-            reconciled += results.Count;
+            reconciled += batch.Length;
             throttle.Report(RunPhases.Reconcile, null, reconciled, reconcileTotal);
             var byId = intents.ToDictionary(intent => intent.ActionId, StringComparer.Ordinal);
             foreach (var result in results)
@@ -414,6 +433,8 @@ public sealed partial class SyncRun
             }
             foreach (var result in results.Where(result => result.Outcome == Outcome.Uncertain)) RememberUncertain(result);
         }
+        // Group settlement may remove rows ahead of the keyset cursor; those are processed too.
+        throttle.Report(RunPhases.Reconcile, null, reconcileTotal, reconcileTotal);
         return new ReconcileResult(sleeping, touched) { UncertainCount = uncertainCount, Protected = OutstandingFootprints(pair.PairId),
             PendingVerification = RefreshHeldIntentSummary(pair) };
     }

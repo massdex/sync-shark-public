@@ -206,6 +206,7 @@ public sealed partial class Executor
     private async Task<Dictionary<string, ActionResult>> ReconcileWholeFoldersAsync(
         IReadOnlyList<SyncAction> intents, long gen, IEndpointWriter a, IEndpointWriter b, CancellationToken ct)
     {
+        var scope = ReconcileRunScope.Current!;
         var resolved = new Dictionary<string, ActionResult>(StringComparer.Ordinal);
         var pending = intents.ToDictionary(action => action.ActionId, StringComparer.Ordinal);
         foreach (var action in intents.Where(action => action.ProviderEffect?.Kind is
@@ -218,17 +219,20 @@ public sealed partial class Executor
         foreach (var member in intents.Where(action => action.ProviderEffect?.Kind == WholeFolderMemberKind))
         {
             var anchorId = member.ProviderEffect!.Id;
-            if (anchors.ContainsKey(anchorId)) continue;
+            if (anchors.ContainsKey(anchorId) || scope.Anchors.Contains(anchorId) ||
+                scope.MissingAnchors.Contains(anchorId)) continue;
             await StoreAsync(() =>
             {
                 var pair = _store.PairForIntent(member.ActionId);
                 if (pair is not null && _store.IntentById(pair, anchorId) is { } anchor &&
                     anchor.ProviderEffect?.Kind == WholeFolderGroupKind) anchors.TryAdd(anchorId, anchor);
+                else scope.MissingAnchors.Add(anchorId);
             }, ct).ConfigureAwait(false);
         }
         foreach (var anchor in anchors.Values)
         {
             ct.ThrowIfCancellationRequested();
+            if (!scope.Anchors.Add(anchor.ActionId)) continue;
             WholeFolderRecovery recovery;
             try
             {

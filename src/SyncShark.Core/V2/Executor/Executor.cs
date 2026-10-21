@@ -94,6 +94,7 @@ public sealed partial class Executor : IExecutor
     public async Task<IReadOnlyList<ActionResult>> ReconcileAsync(IReadOnlyList<SyncAction> intents, long gen,
         IEndpointWriter a, IEndpointWriter b, CancellationToken ct, IProgress<int>? progress = null)
     {
+        using var standaloneScope = ReconcileRunScope.Current is null ? new ReconcileRunScope() : null;
         var results = new ActionResult[intents.Count];
         var completed = 0;
         // One batch job backs many intents (a 1,000-entry folder create is one job): check each job id once for

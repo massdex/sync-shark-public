@@ -30,6 +30,7 @@ internal static partial class ExecutorChecks
                 "successful retry closes source notice");
         }
         await AdmissionAbsenceBatchChecksAsync();
+        await AdmissionAbsenceBatchFailureChecksAsync();
         await DeleteSourceFailureIsPerItemAsync();
         {
             var (_, a, b, executor) = Rig();
@@ -85,6 +86,32 @@ internal static partial class ExecutorChecks
         Require(source.AbsenceBatchItems == count && source.AbsenceBatchCalls <= count / 10,
             "admission coalesces at least ten source probes per batch on average");
         Console.WriteLine($"Admission probe count: {count} items / {source.AbsenceBatchCalls} batches");
+    }
+
+    private static async Task AdmissionAbsenceBatchFailureChecksAsync()
+    {
+        foreach (var throws in new[] { true, false })
+        {
+            var (store, a, b, executor) = Rig(Settings(64));
+            var source = new RecordingWriter(a) { ThrowAbsenceBatch = throws, ShortAbsenceBatch = !throws };
+            var target = new RecordingWriter(b);
+            var actions = new List<SyncAction>();
+            for (var i = 0; i < 64; i++)
+            {
+                var path = "batch-failure-" + i;
+                var original = a.Seed(path, "same");
+                var victim = b.Seed(path, "same");
+                SeedBaseline(store, path, original, victim);
+                await RemoveSourceAsync(a, path);
+                actions.Add(Act(ActionKind.Delete, Side.B, path, expected: victim, rf: true, key: path));
+            }
+            var results = await Apply(executor, Plan(actions.ToArray()), source, target);
+            Require(results.Count == 64 && results.All(result => result.DeleteSourceUnconfirmed &&
+                result.Outcome == Outcome.Skipped) && target.Deletes == 0 && target.Preserves == 0,
+                "whole-batch failure or short result list never admits any member");
+            Require(store.Baselines("p1").Count == 64 && actions.All(action =>
+                store.SyncRetryAt("p1", action.Path) is not null), "every blocked batch member retains durable retry and baseline");
+        }
     }
 
     private static async Task DeleteSourceFailureIsPerItemAsync()
