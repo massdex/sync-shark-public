@@ -8,6 +8,7 @@ internal static partial class RunChecks
     {
         PlanOnlyPathChecks();
         await PlanOnlyRecoveryAsync();
+        await PlanOnlyUnapprovedCountAsync();
         var preview = Build();
         var ordinary = Build();
         foreach (var fx in new[] { preview, ordinary })
@@ -15,13 +16,19 @@ internal static partial class RunChecks
             fx.A.Seed("edit.txt", "old");
             fx.A.Seed("delete.txt", "delete");
             fx.A.Seed("held.txt", "hold");
+            fx.A.Seed("missing-id.txt", "identity");
             await FirstSyncAsync(fx.Run(), fx);
-            foreach (var path in new[] { "delete.txt", "held.txt" })
+            foreach (var path in new[] { "delete.txt", "held.txt", "missing-id.txt" })
             {
                 var deletedVictim = (await fx.B.ObserveAsync(path, default))!;
                 await fx.B.DeleteAsync(new SyncAction("seed-delete", 6, ActionKind.Delete, Side.B,
                     path, null, null, deletedVictim, false, null), default);
             }
+            var baseline = fx.Store.Baselines(fx.Pair.PairId).Single(row => row.A.Path == "missing-id.txt");
+            var seed = new SyncAction("clear-identity", 0, ActionKind.Adopt, Side.B, baseline.B.Path,
+                null, baseline.A, baseline.B with { ObjectId = "" }, false, baseline.ObjectKey);
+            fx.Store.CommitResult(fx.Pair.PairId, baseline.Gen, seed,
+                new ActionResult(seed.ActionId, Outcome.Done, baseline.A, baseline.B with { ObjectId = "" }, null, null));
             fx.Store.SaveSyncRetry(fx.Pair.PairId, new SyncRetry("held.txt", "deletion-evidence", 1,
                 "history pending", DateTimeOffset.MinValue, Held: new HeldDeletion("held.txt", Side.A, "retained-rule")));
             fx.Store.SaveSyncRetry(fx.Pair.PairId, new SyncRetry("upload.txt", "copy", 1,
@@ -35,7 +42,8 @@ internal static partial class RunChecks
         var run = new SyncRun(ordinary.Store, capture, ordinary.Provider, Settings, TimeProvider.System);
         var previewCapture = new PlanCaptureExecutor(preview.Executor);
         var previewRun = new SyncRun(preview.Store, previewCapture, preview.Provider, Settings, TimeProvider.System);
-        var plan = await previewRun.PreviewIncrementalAsync(preview.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        var previewResult = await previewRun.PreviewIncrementalAsync(preview.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        var plan = previewResult.Plan;
         Require(previewCapture.First is null, "plan-only never enters executor Apply, including empty and metadata-only plans");
         await run.IncrementalAsync(ordinary.Pair.PairId, new RecordingProgress(), CancellationToken.None);
         Require(plan.RunUnavailable is null && plan.Actions.Count >= 3, "ordinary plan-only includes edits and both copy directions");
@@ -55,6 +63,12 @@ internal static partial class RunChecks
         Require(plan.Actions.Any(a => a.Kind == ActionKind.Delete && a.Path == "delete.txt") &&
             !plan.Actions.Any(a => a.Path == "held.txt" && a.Kind == ActionKind.Delete),
             "deletes propagate while retained held deletions stay protected");
+        Require(plan.Actions.Any(a => a.Path == "missing-id.txt" && a.Kind == ActionKind.Hold),
+            "missing historical identity becomes Hold before initial Apply");
+        Require(previewResult.Unapproved.SequenceEqual(["held.txt"]) &&
+            ordinary.Store.SyncRetryAt(ordinary.Pair.PairId, "held.txt") is { Held: not null },
+            "export-only authority hold corresponds to normal pending retry");
+        PlanOnlyCsvChecks(preview, previewResult);
         var denied = new PlanOnlyEndpoints(preview.Provider).Writer(preview.Pair.B);
         try { await denied.MkDirAsync("must-not-exist", CancellationToken.None); throw new Exception("write allowed"); }
         catch (InvalidOperationException) { }
@@ -77,6 +91,46 @@ internal static partial class RunChecks
         Console.WriteLine("PASS ordinary plan-only parity and zero endpoint writes");
     }
 
+    private static async Task PlanOnlyUnapprovedCountAsync()
+    {
+        var fx = Build();
+        fx.A.Seed("held.txt", "local");
+        var run = fx.Run();
+        var plan = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        plan = plan with { Actions = [], HeldDeletions = [new HeldDeletion("held.txt", Side.A, "retained-rule")] };
+        var report = await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), default);
+        Require(report.DeletionEvidencePending.SequenceEqual(["held.txt"]) && report.UnreviewedPending == 0,
+            "normal first-sync authority hold is counted once, not also as unreviewed");
+    }
+
+    private static void PlanOnlyCsvChecks(Fixture fx, SyncRun.IncrementalPlanPreview preview)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "preview-csv-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var path = Path.Combine(directory, "plan.csv");
+            var unsupported = preview.Plan.Actions.First() with { ActionId = "unsupported-export",
+                ProviderEffect = new ProviderEffectCheckpoint("whole-folder-group", "{}", DateTimeOffset.UtcNow) };
+            fx.Store.RecordIntent(fx.Pair.PairId, unsupported);
+            var plan = preview.Plan with { HeldDeletions = [new HeldDeletion("evidence.txt", Side.A)] };
+            var runtime = new V2CliRuntime(null, fx.Store, fx.Run(), new EndpointRootProbe(fx.Provider), directory);
+            var rows = runtime.WritePlanCsv(path, fx.Pair, plan, [unsupported], default, preview.Unapproved);
+            var csv = File.ReadAllLines(path);
+            Require(csv.Count(line => line.Contains("unsupported-export", StringComparison.Ordinal)) == 1 &&
+                !csv.Any(line => line.Contains("pending-intent", StringComparison.Ordinal)), "unsupported intent exported once");
+            Require(csv.Any(line => line.Contains("held-deletion,,held,HOLD,A,,evidence.txt", StringComparison.Ordinal)) &&
+                csv.Any(line => line.Contains("unreviewed-held,HOLD", StringComparison.Ordinal) && line.Contains("held.txt", StringComparison.Ordinal)),
+                "CSV contains evidence and export-only authority HOLD rows");
+            Require(rows == csv.Length - 1, "CSV row count matches actual writer output");
+            var result = new SyncCliPlanExportData(fx.Pair.PairId, fx.Pair.Name, path, plan.Gen,
+                plan.Actions.Count, 0, 0, plan.HeldDeletions.Count + preview.Unapproved.Count, 0, 0, 1, rows);
+            Require(!result.ExactInitialPlan && !(result with { HeldDeletions = 0, UnsupportedReconciles = 1 }).ExactInitialPlan,
+                "evidence holds and unsupported reconciliation explicitly make export non-exact");
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
     private static async Task PlanOnlyRecoveryAsync()
     {
         var preview = Build(); var ordinary = Build();
@@ -89,7 +143,7 @@ internal static partial class RunChecks
             fx.WriterA.RecoveryUnavailable = "Recovery volume unavailable";
         }
         var capture = new PlanCaptureExecutor(ordinary.Executor);
-        var plan = await preview.Run().PreviewIncrementalAsync(preview.Pair.PairId, new RecordingProgress(), default);
+        var plan = (await preview.Run().PreviewIncrementalAsync(preview.Pair.PairId, new RecordingProgress(), default)).Plan;
         await new SyncRun(ordinary.Store, capture, ordinary.Provider, Settings, TimeProvider.System)
             .IncrementalAsync(ordinary.Pair.PairId, new RecordingProgress(), default);
         Require(plan.RecoveryPending.Contains("replace.txt") &&
@@ -123,51 +177,60 @@ internal static partial class RunChecks
         var live = Folder("live");
         var isolated = Folder("isolated");
         var output = Folder("output");
-        using var paths = SyncSharkRuntimePaths.OverrideProductRootForTest(live);
-        void Refuses(Action check)
-        {
-            try { check(); } catch (SyncCliUsageException) { return; }
-            throw new Exception("Unsafe preview path accepted");
-        }
-        Refuses(() => V2CliRuntime.ValidateIsolatedDataRoot(live));
-        Refuses(() => V2CliRuntime.ValidateIsolatedDataRoot(Folder("live/child")));
-        Refuses(() => V2CliRuntime.ValidateIsolatedDataRoot(root));
-        Require(V2CliRuntime.ValidateIsolatedDataRoot(isolated) == isolated, "independent folder accepted");
-        void Link(string args)
-        {
-            using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", "/c " + args)
-                { UseShellExecute = false, CreateNoWindow = true })!;
-            process.WaitForExit();
-            Require(process.ExitCode == 0, "create test link");
-        }
         var alias = Path.Combine(root, "alias");
-        Link($"mklink /J \"{alias}\" \"{live}\"");
-        Refuses(() => V2CliRuntime.ValidateIsolatedDataRoot(alias));
-        Refuses(() => V2CliRuntime.ValidateIsolatedDataRoot(Path.Combine(alias, "child")));
-        Folder("live/v2"); Folder("isolated/v2");
-        var database = Path.Combine(live, "v2", "state.db");
-        File.WriteAllText(database, "test state");
-        Link($"mklink /H \"{Path.Combine(isolated, "v2", "state.db")}\" \"{database}\"");
-        Refuses(() => V2CliRuntime.ValidateIsolatedDataRoot(isolated));
-        var pair = Build().Pair;
-        var paired = Folder("other-pair");
-        var other = pair with { PairId = "other", A = pair.A with { RootPath = paired } };
-        foreach (var forbidden in new[] { live, isolated, paired, Folder("Dropbox") })
-            Refuses(() => V2CliRuntime.ValidatePlanExportPath(Path.Combine(forbidden, "plan.csv"), [pair, other], isolated));
-        var existing = Path.Combine(output, "existing.csv"); File.WriteAllText(existing, "keep");
-        Refuses(() => V2CliRuntime.ValidatePlanExportPath(existing, [], isolated));
-        Require(V2CliRuntime.ValidatePlanExportPath(Path.Combine(output, "new.csv"), [], isolated).EndsWith("new.csv"), "safe export accepted");
-        foreach (var value in new[] { "=1+1", "+cmd", "-1", "@sum" })
-            Require(V2CliRuntime.CsvField(value) == "'" + value, "formula neutralized");
-        var recovery = Path.Combine(output, "missing-recovery");
-        Require(LocalWriter.ProbeRecoveryReadOnly(recovery) is null && !Directory.Exists(recovery), "recovery probe creates nothing");
-        Require(LocalWriter.ProbeRecoveryReadOnly(existing) is not null, "occupied Recovery unavailable");
-        var invocation = SyncCliRegistry.Parse(["--cli", "run", "--pair", "p1", "--plan-only", "--data-root", isolated,
-            "--export", Path.Combine(output, "new.csv")]);
-        Require(!SyncCliRegistry.MutatesProductState(invocation), "preview is non-mutating without yes");
-        Refuses(() => SyncCliRegistry.Parse(["--cli", "run", "--pair", "p1"]));
-        Require(SyncCliRegistry.MutatesProductState(SyncCliRegistry.Parse(["--cli", "run", "--pair", "p1", "--yes"])),
-            "normal run still requires consent and is mutating");
+        try
+        {
+            void Refuses(Action check)
+            {
+                try { check(); } catch (SyncCliUsageException) { return; }
+                throw new Exception("Unsafe preview path accepted");
+            }
+            Refuses(() => V2CliRuntime.ValidateIsolatedDataRoot(live, live));
+            Refuses(() => V2CliRuntime.ValidateIsolatedDataRoot(Folder("live/child"), live));
+            Refuses(() => V2CliRuntime.ValidateIsolatedDataRoot(root, live));
+            Require(V2CliRuntime.ValidateIsolatedDataRoot(isolated, live) == isolated, "independent folder accepted");
+            void Link(string args)
+            {
+                using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", "/c " + args)
+                    { UseShellExecute = false, CreateNoWindow = true })!;
+                process.WaitForExit();
+                Require(process.ExitCode == 0, "create test link");
+            }
+            Link($"mklink /J \"{alias}\" \"{live}\"");
+            Refuses(() => V2CliRuntime.ValidateIsolatedDataRoot(alias, live));
+            Refuses(() => V2CliRuntime.ValidateIsolatedDataRoot(Path.Combine(alias, "child"), live));
+            Folder("live/v2"); Folder("isolated/v2");
+            var database = Path.Combine(live, "v2", "state.db");
+            File.WriteAllText(database, "test state");
+            Link($"mklink /H \"{Path.Combine(isolated, "v2", "state.db")}\" \"{database}\"");
+            Refuses(() => V2CliRuntime.ValidateIsolatedDataRoot(isolated, live));
+            var pair = Build().Pair;
+            var paired = Folder("other-pair");
+            var other = pair with { PairId = "other", A = pair.A with { RootPath = paired } };
+            foreach (var forbidden in new[] { live, isolated, paired, Folder("Dropbox") })
+                Refuses(() => V2CliRuntime.ValidatePlanExportPath(Path.Combine(forbidden, "plan.csv"), [pair, other], isolated, live));
+            var existing = Path.Combine(output, "existing.csv"); File.WriteAllText(existing, "keep");
+            Refuses(() => V2CliRuntime.ValidatePlanExportPath(existing, [], isolated, live));
+            Require(V2CliRuntime.ValidatePlanExportPath(Path.Combine(output, "new.csv"), [], isolated, live).EndsWith("new.csv"), "safe export accepted");
+            foreach (var value in new[] { "=1+1", "+cmd", "-1", "@sum", "\tformula" })
+                Require(V2CliRuntime.CsvField(value) == "'" + value, "formula neutralized");
+            Require(V2CliRuntime.CsvField("\rformula") == "\"'\rformula\"", "leading CR is neutralized and quoted");
+            var recovery = Path.Combine(output, "missing-recovery");
+            Require(LocalWriter.ProbeRecoveryReadOnly(recovery) is null && !Directory.Exists(recovery), "recovery probe creates nothing");
+            Require(LocalWriter.ProbeRecoveryReadOnly(existing) is not null, "occupied Recovery unavailable");
+            var invocation = SyncCliRegistry.Parse(["--cli", "run", "--pair", "p1", "--plan-only", "--data-root", isolated,
+                "--export", Path.Combine(output, "new.csv")]);
+            Require(!SyncCliRegistry.MutatesProductState(invocation), "preview is non-mutating without yes");
+            Refuses(() => SyncCliRegistry.Parse(["--cli", "run", "--pair", "p1"]));
+            Require(SyncCliRegistry.MutatesProductState(SyncCliRegistry.Parse(["--cli", "run", "--pair", "p1", "--yes"])),
+                "normal run still requires consent and is mutating");
+        }
+        finally
+        {
+            // Unlink the junction itself before recursively removing this fixture's own tree.
+            if (Directory.Exists(alias)) Directory.Delete(alias);
+            Directory.Delete(root, true);
+        }
     }
 
     private sealed class PlanCaptureExecutor(IExecutor inner) : IExecutor

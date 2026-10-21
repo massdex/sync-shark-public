@@ -81,7 +81,7 @@ public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResource
         using var lease = PilotDirectoryLease.Open(root.RootPath, identity);
         var plan = SyncControlNamespace.PlanLocalAllocation(lease, installationId, namespaceId);
         var local = readOnlyOpen
-            ? await SyncControlNamespace.InspectAuthorizedLocalAsync(lease, plan).ConfigureAwait(false)
+            ? await SyncControlNamespace.InspectAuthorizedLocalAsync(lease, plan, sharedRead: true).ConfigureAwait(false)
                 ?? throw new SyncRunRefusedException("Plan-only requires the existing local control namespace; no namespace was created.")
             : await SyncControlNamespace.BindAuthorizedLocalAsync(lease, plan, null, _ => Task.CompletedTask)
                 .ConfigureAwait(false);

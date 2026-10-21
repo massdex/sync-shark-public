@@ -60,10 +60,10 @@ public sealed partial class V2CliRuntime
         try
         {
             var unsupported = _store.UnresolvedIntents(pairId).Where(PlanOnlyEndpoints.UnsupportedReconcile).ToArray();
-            Plan plan;
+            SyncRun.IncrementalPlanPreview preview;
             try
             {
-                plan = await _run.PreviewIncrementalAsync(pairId, new RunProgressForwarder(progress),
+                preview = await _run.PreviewIncrementalAsync(pairId, new RunProgressForwarder(progress),
                     cancellationToken);
             }
             catch (SyncRunRefusedException error)
@@ -74,16 +74,17 @@ public sealed partial class V2CliRuntime
             {
                 throw new SyncCliReviewException(ReconnectText(error));
             }
+            var plan = preview.Plan;
             // A plan that could not be completed is never written as a complete export.
             if (plan.RunUnavailable is { } unavailable)
                 throw new SyncRunPendingVerificationException(unavailable, 30);
-            var rows = WritePlanCsv(export, pair, plan, unsupported, cancellationToken);
+            var rows = WritePlanCsv(export, pair, plan, unsupported, cancellationToken, preview.Unapproved);
             progress("Each preview consumes its isolated copy. Stop the app and make a fresh copy of the database together with its -wal and -shm files before every preview.");
             progress($"Unsupported read-only reconciliation: {unsupported.Length}." +
                 (unsupported.Length == 0 ? "" : " Export is not an exact execution plan; inspect UNSUPPORTED-RECONCILE rows."));
             return new SyncCliPlanExportData(pair.PairId, pair.Name, export, plan.Gen, plan.Actions.Count,
                 plan.DeferredPlanningActions.Count, plan.SkippedActions.Count,
-                plan.HeldDeletions.Count + plan.UnreviewedHeldDeletions.Count, plan.RecoveryPending.Count,
+                plan.HeldDeletions.Count + plan.UnreviewedHeldDeletions.Count + preview.Unapproved.Count, plan.RecoveryPending.Count,
                 plan.Notices.Count, _store.CountUnresolvedIntents(pairId), rows)
             { UnsupportedReconciles = unsupported.Length };
         }
@@ -137,7 +138,7 @@ public sealed partial class V2CliRuntime
     // An isolated data root is mandatory and must be its own canonical folder. The live product folder, any
     // alias (junction, symbolic link, 8.3 short name), either folder containing the other, and a state database
     // hardlinked to the live one are all refused before the runtime opens.
-    internal static string ValidateIsolatedDataRoot(string requested)
+    internal static string ValidateIsolatedDataRoot(string requested, string? liveProductRoot = null)
     {
         if (string.IsNullOrWhiteSpace(requested) || requested.Length > MaximumPlanPathCharacters ||
             !Path.IsPathFullyQualified(requested))
@@ -162,7 +163,7 @@ public sealed partial class V2CliRuntime
         if (!string.Equals(TrimSeparators(full), TrimSeparators(canonical), StringComparison.OrdinalIgnoreCase))
             throw new SyncCliUsageException("--data-root must be the canonical folder path; an alias such as a " +
                 "junction or an 8.3 short name is not accepted.");
-        var liveRoot = SafeCanonicalPath(SyncSharkRuntimePaths.ProductRoot);
+        var liveRoot = SafeCanonicalPath(liveProductRoot ?? SyncSharkRuntimePaths.ProductRoot);
         if (IsSameOrInside(canonical, liveRoot) || IsSameOrInside(liveRoot, canonical))
             throw new SyncCliUsageException("--data-root must be a folder separate from the live Sync Shark " +
                 "product folder. Copy the product folder to an isolated location first.");
@@ -280,7 +281,7 @@ public sealed partial class V2CliRuntime
 
     // The export file must be absolute, sit in an existing folder, and be outside the live and isolated
     // product folders and both paired trees. No folder is created, and no paired tree is ever written.
-    internal static string ValidatePlanExportPath(string exportPath, IReadOnlyList<PairDef> pairs, string isolatedRoot)
+    internal static string ValidatePlanExportPath(string exportPath, IReadOnlyList<PairDef> pairs, string isolatedRoot, string? liveProductRoot = null)
     {
         if (string.IsNullOrWhiteSpace(exportPath) || exportPath.Length > MaximumPlanPathCharacters ||
             !Path.IsPathFullyQualified(exportPath))
@@ -308,7 +309,7 @@ public sealed partial class V2CliRuntime
             throw new SyncCliUsageException("--export could not be verified: " + error.Message);
         }
         if (IsSameOrInside(canonical, SafeCanonicalPath(isolatedRoot)) ||
-            IsSameOrInside(canonical, SafeCanonicalPath(SyncSharkRuntimePaths.ProductRoot)))
+            IsSameOrInside(canonical, SafeCanonicalPath(liveProductRoot ?? SyncSharkRuntimePaths.ProductRoot)))
             throw new SyncCliUsageException(
                 "--export must be outside the live and isolated Sync Shark data folders.");
         foreach (var root in pairs.SelectMany(pair => new[] { pair.A, pair.B }))
@@ -337,11 +338,13 @@ public sealed partial class V2CliRuntime
             {
                 using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(info));
                 foreach (var account in document.RootElement.EnumerateObject())
-                    if (account.Value.TryGetProperty("path", out var root) && root.GetString() is { } desktop &&
+                    if (account.Value.ValueKind != System.Text.Json.JsonValueKind.Object)
+                        throw new SyncCliUsageException("Dropbox folder locations could not be verified: each account entry must be an object.");
+                    else if (account.Value.TryGetProperty("path", out var root) && root.GetString() is { } desktop &&
                         IsSameOrInside(path, SafeCanonicalPath(desktop)))
                         throw new SyncCliUsageException("--export must be outside Dropbox folders.");
             }
-            catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Text.Json.JsonException or InvalidOperationException)
             { throw new SyncCliUsageException("Dropbox folder locations could not be verified: " + error.Message); }
         }
     }
@@ -376,8 +379,8 @@ public sealed partial class V2CliRuntime
     // One flat CSV table: every planned action, then the plan's deferred, skipped, held and pending markers, so a
     // reader sees exactly what was planned and what was deliberately not planned. The write is all-or-nothing: a
     // uniquely named sibling partial is created new and moved into place only after every row was written.
-    private int WritePlanCsv(string path, PairDef pair, Plan plan, IReadOnlyList<SyncAction> unsupported,
-        CancellationToken cancellationToken)
+    internal int WritePlanCsv(string path, PairDef pair, Plan plan, IReadOnlyList<SyncAction> unsupported,
+        CancellationToken cancellationToken, IReadOnlyList<string>? unapproved = null)
     {
         var partial = path + "." + Guid.NewGuid().ToString("N") + ".partial";
         var rows = 0;
@@ -422,6 +425,13 @@ public sealed partial class V2CliRuntime
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     WriteMarkerRow(writer, "held-deletion", "unreviewed-held", held.Local, held.Path, held.Rule,
+                        "Deletion needs reviewed authority.", "HOLD");
+                    rows++;
+                }
+                foreach (var heldPath in unapproved ?? [])
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    WriteMarkerRow(writer, "held-deletion", "unreviewed-held", null, heldPath, null,
                         "Deletion needs reviewed authority.", "HOLD");
                     rows++;
                 }
@@ -528,7 +538,7 @@ public sealed partial class V2CliRuntime
     internal static string CsvField(string? value)
     {
         if (string.IsNullOrEmpty(value)) return string.Empty;
-        if (value[0] is '=' or '+' or '-' or '@') value = "'" + value;
+        if (value[0] is '=' or '+' or '-' or '@' or '\t' or '\r') value = "'" + value;
         if (value.IndexOfAny(new[] { ',', '"', '\r', '\n' }) < 0) return value;
         return "\"" + value.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
     }

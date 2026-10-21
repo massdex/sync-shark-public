@@ -71,9 +71,9 @@ public static class SyncControlNamespace
 
     [SupportedOSPlatform("windows")]
     internal static Task<SyncLocalControlNamespaceBinding?> InspectAuthorizedLocalAsync(
-        PilotDirectoryLease selectedRoot, SyncLocalControlNamespaceAllocationPlan plan) =>
+        PilotDirectoryLease selectedRoot, SyncLocalControlNamespaceAllocationPlan plan, bool sharedRead = false) =>
         BindLocalCoreAsync(selectedRoot, plan, createWhenMissing: false,
-            expectedExistingUnmarkedIdentity: null, _ => Task.CompletedTask);
+            expectedExistingUnmarkedIdentity: null, _ => Task.CompletedTask, sharedRead);
 
     [SupportedOSPlatform("windows")]
     internal static Task<SyncLocalControlNamespaceBinding?> ResumeCreatedLocalAsync(
@@ -98,7 +98,7 @@ public static class SyncControlNamespace
     private static async Task<SyncLocalControlNamespaceBinding?> BindLocalCoreAsync(
         PilotDirectoryLease selectedRoot, SyncLocalControlNamespaceAllocationPlan plan, bool createWhenMissing,
         PilotDirectoryIdentity? expectedExistingUnmarkedIdentity,
-        Func<PilotDirectoryIdentity, Task> onDirectoryCreated)
+        Func<PilotDirectoryIdentity, Task> onDirectoryCreated, bool sharedRead = false)
     {
         ValidateAllocationPlan(selectedRoot, plan);
         using var parent = OpenAllocationParent(plan.ParentPath, plan.ParentIdentity);
@@ -164,7 +164,7 @@ public static class SyncControlNamespace
                 {
                     if (expectedExistingUnmarkedIdentity is not null)
                         SyncLocalFileAuthority.RestoreInterruptedWritableObjectAccess(markerPath, markerPath);
-                    using var marker = !createWhenMissing && expectedExistingUnmarkedIdentity is null
+                    using var marker = sharedRead
                         ? SyncLocalFileAuthority.OpenExistingSharedRead(markerPath)
                         : SyncLocalFileAuthority.OpenExistingExclusive(markerPath);
                     markerIdentity = marker.VerifySingleLink();
