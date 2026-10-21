@@ -157,7 +157,7 @@ public sealed partial class SqliteStateStore
         if (!_storageEnabled) return;
         if (action.Kind == ActionKind.Move)
         {
-            QueuePointerMoveAcknowledgment(transaction, pair, action, result);
+            QueuePointerMoveAcknowledgment(transaction, pair, result);
             return;
         }
         if (action.Kind is not (ActionKind.CopyNew or ActionKind.Update or ActionKind.KeepBoth)) return;
@@ -182,7 +182,8 @@ public sealed partial class SqliteStateStore
         StoreSchema.Execute(_connection, transaction, """
             INSERT INTO storage_settlement(root_id,object_id,remote_binding,remote_json)
             VALUES($r,$o,$b,$j) ON CONFLICT(root_id,object_id,remote_binding)
-            DO UPDATE SET kind=NULL,job_id=excluded.job_id,remote_json=excluded.remote_json,state=CASE WHEN json_extract(storage_settlement.remote_json,'$.Revision') IS NOT json_extract(excluded.remote_json,'$.Revision') OR json_extract(storage_settlement.remote_json,'$.ContentHash') IS NOT json_extract(excluded.remote_json,'$.ContentHash') OR json_extract(storage_settlement.remote_json,'$.Id') IS NOT json_extract(excluded.remote_json,'$.Id') THEN 'pending' ELSE storage_settlement.state END;
+            DO UPDATE SET kind=NULL,job_id=excluded.job_id,remote_json=excluded.remote_json,state=CASE WHEN json_extract(storage_settlement.remote_json,'$.Revision') IS NOT json_extract(excluded.remote_json,'$.Revision') OR json_extract(storage_settlement.remote_json,'$.ContentHash') IS NOT json_extract(excluded.remote_json,'$.ContentHash') OR json_extract(storage_settlement.remote_json,'$.Id') IS NOT json_extract(excluded.remote_json,'$.Id') THEN 'pending' ELSE storage_settlement.state END
+            WHERE storage_settlement.kind IS NULL;
             """, ("$r", localRoot.RootId), ("$o", local.ObjectId), ("$b", remoteRoot.RootId),
             ("$j", JsonSerializer.Serialize(receipt)));
     }
@@ -196,7 +197,8 @@ public sealed partial class SqliteStateStore
         StoreSchema.Execute(_connection, null, """
             INSERT INTO storage_settlement(root_id,object_id,remote_binding,remote_json)
             VALUES($r,$o,$b,$j) ON CONFLICT(root_id,object_id,remote_binding)
-            DO UPDATE SET kind=NULL,job_id=excluded.job_id,remote_json=excluded.remote_json,state=CASE WHEN json_extract(storage_settlement.remote_json,'$.Revision') IS NOT json_extract(excluded.remote_json,'$.Revision') OR json_extract(storage_settlement.remote_json,'$.ContentHash') IS NOT json_extract(excluded.remote_json,'$.ContentHash') OR json_extract(storage_settlement.remote_json,'$.Id') IS NOT json_extract(excluded.remote_json,'$.Id') THEN 'pending' ELSE storage_settlement.state END;
+            DO UPDATE SET kind=NULL,job_id=excluded.job_id,remote_json=excluded.remote_json,state=CASE WHEN json_extract(storage_settlement.remote_json,'$.Revision') IS NOT json_extract(excluded.remote_json,'$.Revision') OR json_extract(storage_settlement.remote_json,'$.ContentHash') IS NOT json_extract(excluded.remote_json,'$.ContentHash') OR json_extract(storage_settlement.remote_json,'$.Id') IS NOT json_extract(excluded.remote_json,'$.Id') THEN 'pending' ELSE storage_settlement.state END
+            WHERE storage_settlement.kind IS NULL;
             """, ("$r", rootId), ("$o", objectId), ("$b", remoteBinding), ("$j", JsonSerializer.Serialize(remote)));
     });
 

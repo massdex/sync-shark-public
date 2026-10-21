@@ -2,7 +2,7 @@ namespace Massdex.SyncShark.V2;
 
 /// <summary>Test-only IEndpointWriter that records call order, counts, peak concurrency and effect order over a fake.</summary>
 internal sealed class RecordingWriter
-    : IEndpointWriter, ISyncTransferResourceEndpoint, ILocalFreeSpaceAdmission, IRecoveryAvailability
+    : IEndpointWriter, ISyncTransferResourceEndpoint, ILocalFreeSpaceAdmission, IRecoveryAvailability, ISourceAbsenceProbe
 {
     public string? RecoveryUnavailable { get; set; }
     private readonly FakeEndpoint _inner;
@@ -22,6 +22,7 @@ internal sealed class RecordingWriter
 
     /// <summary>When set, ObserveAsync throws as an unreachable endpoint would.</summary>
     internal bool ObserveFails { get; set; }
+    internal bool AbsenceUnknown { get; set; }
 
     /// <summary>When set, ObserveAsync throws a cancellation the caller did not request (an endpoint timeout).</summary>
     internal bool ObserveTimesOut { get; set; }
@@ -67,6 +68,22 @@ internal sealed class RecordingWriter
     internal int Preserves => Volatile.Read(ref _preserves);
     internal int Observes => Volatile.Read(ref _observes);
     internal int Peak { get { lock (_gate) return _peak; } }
+
+    public Task<ItemState?> ObserveSourceMetadataAsync(string path, CancellationToken ct) => ObserveAsync(path, ct);
+
+    public Task<bool?> IsHistoricalSourcePresentAsync(ItemState historical, CancellationToken ct)
+    {
+        if (ObserveFails) throw new EndpointAccessException("Source probe unavailable");
+        if (ObserveTimesOut) throw new OperationCanceledException("Source probe timeout");
+        return _inner.IsHistoricalSourcePresentAsync(historical, ct);
+    }
+
+    public Task<bool?> IsSourceAbsentAsync(ItemState? historical, string path, CancellationToken ct)
+    {
+        if (ObserveFails) throw new EndpointAccessException("Source probe unavailable");
+        if (ObserveTimesOut) throw new OperationCanceledException("Source probe timeout");
+        return AbsenceUnknown ? Task.FromResult<bool?>(null) : _inner.IsSourceAbsentAsync(historical, path, ct);
+    }
 
     public async Task<ItemState> PutAsync(SyncAction a, Stream content, CancellationToken ct)
     {

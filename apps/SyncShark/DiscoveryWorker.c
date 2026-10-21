@@ -252,6 +252,8 @@ static void close_worker(Worker *w) {
     SecureZeroMemory(w,sizeof(*w));HeapFree(GetProcessHeap(),0,w);
 }
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE previous,LPWSTR arguments,int show) {
+    /* FoD pairs are excluded from discovery and these records are only path hints that the exposed
+       ordinary scanner revalidates. TODO: call RtlSetProcessPlaceholderCompatibilityMode(PHCM_EXPOSE_PLACEHOLDERS) here before file I/O if that changes. */
     (void)instance;(void)previous;(void)arguments;(void)show;
     int argc=0;WCHAR **argv=CommandLineToArgvW(GetCommandLineW(),&argc);
     if(!argv)return ERROR_INVALID_PARAMETER;

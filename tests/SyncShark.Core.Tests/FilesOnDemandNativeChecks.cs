@@ -157,6 +157,26 @@ internal static class FilesOnDemandNativeChecks
                 !converted.State.IsInSync || converted.State.Availability != SyncCloudFileAvailability.OnlineOnly)
                 throw new IOException("Verified conversion did not dehydrate and mark in sync.");
             if (source.Reads != 0) throw new IOException("Conversion unexpectedly fetched bytes.");
+            // Only one Cloud Files connection may exist at a time for this disposable root. The
+            // metadata checks own a service-created provider, so close this one first and let the
+            // existing reconnect below own the next connection.
+            provider.Dispose();
+            // Round-5 metadata-only checks: a transient registration failure must not create debt, and a
+            // dirty in-sync-cleared pointer must self-heal through one entity acknowledgment.
+            using (var pointerStore = SqliteStateStore.Open(database, V2Settings.Default, TimeProvider.System))
+            {
+                var metadataReads = source.Reads;
+                await FilesOnDemandNativePointerChecks.VerifyTransientRegistrationAsync(uploaded.Path,
+                    uploaded.ObjectId, pair.PairId, pointerStore, pair, () => source.Reads, CancellationToken.None);
+                Console.WriteLine("PASS native transient registration-unreadable scan keeps the owned row without verification debt");
+                await FilesOnDemandNativePointerChecks.VerifyDirtyPointerSelfHealsAsync(root, uploaded.Path,
+                    uploaded.ObjectId, pair.PairId, pointerStore, pair, () => source.Reads,
+                    () => new WindowsCloudFilesProvider(binding, source, root, SyncDirectoryStorage.CloudOnly),
+                    source.Current, CancellationToken.None);
+                if (source.Reads != metadataReads)
+                    throw new IOException("Metadata-only pointer recovery downloaded bytes.");
+                Console.WriteLine("PASS native dirty in-sync-cleared pointer self-heals through the real acknowledgment service");
+            }
             // Simulate loss after native conversion but before durable settlement acknowledgement.
             provider.Dispose();
             provider = new WindowsCloudFilesProvider(binding, source, root, SyncDirectoryStorage.CloudOnly)
@@ -177,15 +197,24 @@ internal static class FilesOnDemandNativeChecks
             try
             {
                 using var renameStore = SqliteStateStore.Open(database, V2Settings.Default, TimeProvider.System);
+                // The acknowledgment service creates and owns the provider for this root; close the
+                // foreground provider first so the fixture never double-connects the same root.
+                provider.Dispose();
                 await FilesOnDemandNativePointerChecks.VerifyRenameAsync(root, path, binding.PairId, pointer,
-                    () => source.Reads, provider, remote, renameStore, pair, registrationId);
-                Console.WriteLine("PASS native dehydrated rename, acknowledgment replay and metadata-only edit");
+                    () => source.Reads, remote, entry => source.Replace(content, entry), renameStore, pair,
+                    registrationId,
+                    () => new WindowsCloudFilesProvider(binding, source, root, SyncDirectoryStorage.CloudOnly),
+                    content, CancellationToken.None);
+                Console.WriteLine("PASS native rename, remote Move, real acknowledgment service and hydration through the new path");
             }
             catch (Exception error)
             {
                 renameFailure = error;
                 Console.WriteLine("FAIL native rename: " + error.Message);
             }
+            provider = new WindowsCloudFilesProvider(binding, source, root, SyncDirectoryStorage.CloudOnly)
+                { ExpectedRegistrationId = registrationId };
+            provider.RegisterAndConnect();
             byte[] read;
             using (PairPause.Begin(null!, binding.PairId, () => true))
             {
@@ -201,11 +230,12 @@ internal static class FilesOnDemandNativeChecks
                 (hydrated.Hash is not null && hydrated.Hash != pointer.Hash) || hydrated.Size != pointer.Size || hydrated.Mtime != pointer.Mtime)
                 throw new IOException("Hydration-only transition changed the content fingerprint. Before: " + pointer + " After: " + hydrated);
             var readsBeforeCreate = source.Reads;
-            NewPointerNativeChecks.CheckCreateOnly(provider, local, remote, path, () =>
+            var directReceipt = NewPointerNativeChecks.CheckCreateOnly(provider, local, remote, path, () =>
             {
                 if (source.Reads != readsBeforeCreate)
                     throw new IOException("Creating a new pointer downloaded bytes.");
             });
+            source.AddExactObject(content, directReceipt);
             var nextBytes = System.Text.Encoding.UTF8.GetBytes("new remote revision with a different size");
             using var nextStream = new MemoryStream(nextBytes);
             var nextHash = await SyncContentIdentity.ComputeAsync(SyncProviders.Dropbox, nextStream, CancellationToken.None);
@@ -317,6 +347,16 @@ internal static class FilesOnDemandNativeChecks
                 () => source.Reads, binding.PairId);
             Console.WriteLine($"Native first 4KiB read: PARTIALLY_ON_DISK={edge.NativePartiallyOnDiskBit}; " +
                 $"resident={edge.NativeAfter.OnDiskBytes}; availability={edge.AvailabilityAfter}; partial={edge.PartiallyHydrated}");
+            // Demand a bounded native range and let the fake source serve only that first request.
+            // This must leave real partial residency in the Windows stub, never a simulated state.
+            var partial = await FilesOnDemandNativeEdgeChecks.CheckTruePartialRangeAsync(root, provider,
+                FilesOnDemandNativeEdgeChecks.LargeEdgeRemote(), () => source.Reads,
+                source.ServeOnly, source.RangeRequests, binding.PairId,
+                () => FilesOnDemandNativePartialChecks.VerifyAsync(root, pair, verifyStore, edge.PointerBefore,
+                    FilesOnDemandNativeEdgeChecks.LargeEdgeRemote(), () => source.Reads, CancellationToken.None),
+                CancellationToken.None);
+            Console.WriteLine($"PASS native true partial range: resident={partial.NativeAfter.OnDiskBytes} of " +
+                $"{FilesOnDemandNativeEdgeChecks.LargeEdgeRemote().Size}; availability={partial.Availability}");
             var recovery = Path.Combine(database, "edge-recovery");
             await FilesOnDemandNativeEdgeChecks.CheckHydratedPointerMutationRefusedAsync(root, local, binding.PairId,
                 edge.PointerBefore, () => source.Reads, recovery);
@@ -324,6 +364,12 @@ internal static class FilesOnDemandNativeChecks
             await FilesOnDemandNativeEdgeChecks.CheckFullyHydratedPointerReplacementAsync(root, local, binding.PairId,
                 () => source.Reads, recovery);
             Console.WriteLine("PASS native ordinary LocalWriter replacement of a fully hydrated pointer");
+            if (!provider.IsConnected)
+                throw new IOException("The provider disconnected before exact create-only object hydration.");
+            var directBytes = await File.ReadAllBytesAsync(Path.Combine(root, directReceipt.RelativePath));
+            if (!directBytes.SequenceEqual(content) || DropboxContentHash.Compute(directBytes) != directReceipt.ContentHash)
+                throw new IOException("The explicit create-only fixture object did not hydrate its exact original revision.");
+            Console.WriteLine("PASS native create-only object hydrates after the main source changes revision and path");
             await provider.UnregisterAsync(CancellationToken.None);
             if (WindowsCloudFilesProvider.ReadRegisteredSyncRootFileId(root) is not null)
                 throw new IOException("Disposable registration was retained after successful hydration.");
@@ -467,7 +513,21 @@ internal static class FilesOnDemandNativeChecks
         public int Uploads;
         public bool FailReads;
         public bool NetworkOutage;
+        private int _serveLimit = -1;
+        private int _serveBytesLimit = -1;
+        private int _served;
+        private int _servedBytes;
         public PilotRemoteEntry Current => entry;
+        // Range-subset fixture: -1 serves every requested range; a non-negative limit serves only
+        // the first N native range requests, and a positive byte budget bounds the transferred bytes.
+        // A FULL-policy root therefore cannot quietly complete the object during the partial check.
+        public void ServeOnly(int ranges, int bytes = 0)
+        {
+            _serveLimit = ranges;
+            _serveBytesLimit = bytes > 0 ? bytes : -1;
+            _served = 0;
+            _servedBytes = 0;
+        }
         public async Task<PilotRemoteEntry> UploadAsync(Stream source)
         {
             using var uploaded = new MemoryStream();
@@ -477,6 +537,16 @@ internal static class FilesOnDemandNativeChecks
             return entry;
         }
         private readonly Dictionary<string, (byte[] Bytes, PilotRemoteEntry Entry)> _previous = new();
+        private readonly System.Collections.Concurrent.ConcurrentQueue<FilesOnDemandNativeEdgeChecks.RangeRequest> _rangeRequests = new();
+        public FilesOnDemandNativeEdgeChecks.RangeRequest[] RangeRequests() => _rangeRequests.ToArray();
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (byte[] Bytes, PilotRemoteEntry Entry)> _extraObjects = new(StringComparer.Ordinal);
+        public void AddExactObject(byte[] content, PilotRemoteEntry remote)
+        {
+            if (remote.Size != content.Length || remote.ContentHash != DropboxContentHash.Compute(content))
+                throw new IOException("Additional fixture object does not match its exact receipt.");
+            if (!_extraObjects.TryAdd(remote.RelativePath, (content.ToArray(), remote)))
+                throw new IOException("Additional fixture path was already registered.");
+        }
         public void Replace(byte[] content, PilotRemoteEntry remote)
         {
             _previous[entry.Revision!] = (bytes, entry);
@@ -488,12 +558,41 @@ internal static class FilesOnDemandNativeChecks
         {
             if (NetworkOutage) throw new System.Net.Http.HttpRequestException("Synthetic offline provider.");
             if (FailReads) throw new IOException("Synthetic unavailable remote revision; retry when available.");
-            var selected = expected.Revision == entry.Revision ? (Bytes: bytes, Entry: entry) :
+            var additional = _extraObjects.TryGetValue(expected.RelativePath, out var extra);
+            var selected = additional ? extra : expected.Revision == entry.Revision ? (Bytes: bytes, Entry: entry) :
                 _previous.GetValueOrDefault(expected.Revision!);
-            if (selected.Entry is null || expected.Id != selected.Entry.Id || expected.ContentHash != selected.Entry.ContentHash)
+            if (selected.Entry is null || expected.Id != selected.Entry.Id ||
+                expected.Revision != selected.Entry.Revision || expected.ContentHash != selected.Entry.ContentHash ||
+                expected.Size != selected.Entry.Size)
                 throw new IOException("Unexpected fixture revision.");
+            // A renamed pointer must request the path of the current moved object. The old native
+            // identity keeps the pre-Move path (and may keep the old revision), so a stale request
+            // fails hydration instead of being served from the previous-revision entry.
+            if (!string.Equals(expected.RelativePath, additional ? selected.Entry.RelativePath : entry.RelativePath,
+                    StringComparison.Ordinal))
+                throw new IOException("Synthetic provider received a stale placeholder path: " + expected.RelativePath);
+            _rangeRequests.Enqueue(new(expected, offset, length));
+            if (_serveLimit >= 0 && Interlocked.Increment(ref _served) > _serveLimit)
+                throw new IOException("Synthetic provider served only the requested hydration range.");
+            var available = length;
+            if (_serveBytesLimit >= 0)
+            {
+                var remaining = _serveBytesLimit - _servedBytes;
+                if (remaining <= 0)
+                    throw new IOException("Synthetic provider hydration byte budget is exhausted.");
+                available = Math.Min(length, remaining);
+                _servedBytes += checked((int)available);
+            }
+            // Count the validated range request before transferring bytes. CfExecute inside
+            // WriteAsync can release the native reader before this callback returns, so counting
+            // afterwards races the read's assertion that the NEW path reached this source.
+            // Path/revision checks above still reject stale identities before they are counted.
             Interlocked.Increment(ref Reads);
-            await destination.WriteAsync(selected.Bytes.AsMemory(checked((int)offset), checked((int)length)), cancellationToken);
+            if (available > 0)
+                await destination.WriteAsync(selected.Bytes.AsMemory(checked((int)offset),
+                    checked((int)available)), cancellationToken);
+            if (available != length)
+                throw new IOException("Synthetic provider stopped after the requested partial range.");
             return new(selected.Entry.Id!, selected.Entry.Revision!, selected.Entry.Size, selected.Entry.ContentHash!, offset, length);
         }
     }

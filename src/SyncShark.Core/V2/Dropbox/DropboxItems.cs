@@ -12,8 +12,10 @@ internal static class DropboxItems
         var id = entry.Id ?? throw new InvalidDataException("The Dropbox item has no stable object identity.");
         return new ItemState(entry.RelativePath, kind, id, kind == ItemKind.File ? entry.Revision : null,
             entry.ContentHash, entry.Size, entry.ClientModifiedUtc ?? entry.ModifiedUtc ?? DateTimeOffset.UnixEpoch,
-            entry.TransferBlockedReason is null ? ItemFlags.None : ItemFlags.Unreadable,
-            DropboxNameMapping.Fact(entry.RelativePath));
+            (entry.TransferBlockedReason is null && !entry.RequiresExport ? ItemFlags.None : ItemFlags.Unreadable) |
+                (entry.RequiresExport ? ItemFlags.RequiresExport : ItemFlags.None),
+            DropboxExportFacts.Merge(DropboxNameMapping.Fact(entry.RelativePath),
+                entry.ExportAs, entry.ExportOptions, entry.RequiresExport));
     }
 
     /// <summary>Builds the provider entry a conditional write is conditioned on.</summary>
@@ -39,14 +41,44 @@ internal static class DropboxItems
     /// changed; an account-access refusal becomes <see cref="EndpointAccessException"/>; everything else is returned
     /// unchanged so the Executor records a failure.
     /// </summary>
-    internal static Exception MapWriteError(Exception exception) => exception switch
+    internal static Exception MapWriteError(Exception exception)
     {
+        if (exception is ProviderWriteBlockedException or ExpectedTargetMismatchException or ProviderNameRefusedException or
+            ProviderWriteThrottledException or UncertainEffectException or EndpointAccessException) return exception;
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            var mapped = MapKnownWriteError(current);
+            if (!ReferenceEquals(current, mapped)) return mapped;
+            // A definite quota refusal is useful even under the deliberate session-start wrapper.
+            // Do not unwrap that wrapper for conflict/not_found/throttle classification.
+            if (current is IOException { InnerException: DropboxApiException { WriteErrorTag: "insufficient_space" } quota })
+                return MapKnownWriteError(quota);
+            // Provider-authored IO wrappers deliberately prevent staging errors becoming target mismatches.
+            if (current is not (AggregateException or System.Reflection.TargetInvocationException)) break;
+        }
+        return exception;
+    }
+
+    private static Exception MapKnownWriteError(Exception exception) => exception switch
+    {
+        ProviderWriteBlockedException or ExpectedTargetMismatchException or ProviderNameRefusedException or
+            ProviderWriteThrottledException or UncertainEffectException => exception,
         DropboxEffectUncertainException => new UncertainEffectException(exception.Message, exception),
         DropboxApiException { WriteErrorTag: "too_many_write_operations" } =>
             new ProviderWriteThrottledException(exception.Message, exception),
         DropboxApiException { StatusCode: HttpStatusCode.Conflict, WriteErrorTag: "disallowed_name" } =>
             new ProviderNameRefusedException(exception),
-        DropboxApiException { StatusCode: HttpStatusCode.Conflict } =>
+        DropboxApiException { WriteErrorTag: "insufficient_space" } =>
+            new ProviderWriteBlockedException("insufficient_space", "Free Dropbox storage or increase its quota, then Retry.", exception),
+        DropboxApiException { WriteErrorTag: "no_write_permission" or "operation_suppressed" } denied =>
+            new ProviderWriteBlockedException(denied.WriteErrorTag!, "Check write permission for this Dropbox folder, then Retry.", exception),
+        DropboxApiException { WriteErrorTag: "restricted_content" } =>
+            new ProviderWriteBlockedException("restricted_content", "Dropbox restricted this content. Check its access restrictions, then Retry.", exception),
+        DropboxApiException { WriteErrorTag: "malformed_path" } =>
+            new ProviderWriteBlockedException("malformed_path", "Check the destination path and folder binding, then Retry.", exception),
+        DropboxApiException { WriteErrorTag: "team_folder" } =>
+            new ProviderWriteBlockedException("team_folder", "Check the selected team folder and account access, then Retry.", exception),
+        DropboxApiException { StatusCode: HttpStatusCode.Conflict, WriteErrorTag: "conflict" or "not_found" } =>
             new ExpectedTargetMismatchException(exception.Message, exception),
         _ => MapAccessError(exception)
     };

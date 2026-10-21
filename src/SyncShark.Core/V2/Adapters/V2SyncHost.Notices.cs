@@ -72,15 +72,16 @@ public sealed partial class V2SyncHost
         ArgumentNullException.ThrowIfNull(requests);
         cancellationToken.ThrowIfCancellationRequested();
         // Validate every target first and close nothing on failure: a stale selection must change nothing.
-        var targets = new List<(Notice Notice, string Choice, string? Item)>();
+        var targets = new List<(Notice Notice, string Choice, string? Item, NoticeActionInput? Input)>();
+        var messages = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var request in requests)
         {
-            // A held-notice item choice names the held item in the request path; others name the notice's own path.
             var itemChoice = request.NoticeChoice is { } named && NoticeChoices.IsHeldItemChoice(named);
-            var notice = _store.OpenNotices(request.Conflict.PairId).FirstOrDefault(item =>
-                string.Equals(item.NoticeId, request.Conflict.ConflictId, StringComparison.Ordinal) &&
-                (itemChoice && item.DefenderHistory?.Cause == DefenderReview.HeldCause ||
-                 string.Equals(item.Path, request.Conflict.RelativePath, StringComparison.Ordinal)));
+            var saved = _store.NoticeById(request.Conflict.PairId, request.Conflict.ConflictId);
+            var notice = saved is { Closed: false } &&
+                (itemChoice && saved.Value.Notice.DefenderHistory?.Cause == DefenderReview.HeldCause ||
+                 string.Equals(saved.Value.Notice.Path, request.Conflict.RelativePath, StringComparison.Ordinal))
+                ? saved.Value.Notice : null;
             if (notice is null)
                 throw new InvalidOperationException("A selected notice changed or was already closed. Nothing was changed.");
             var pair = _store.Pair(notice.PairId);
@@ -91,7 +92,7 @@ public sealed partial class V2SyncHost
             {
                 if (!options.Any(option => option.Choice == choice))
                     throw new InvalidOperationException("This option is no longer available. Refresh notices and choose again.");
-                targets.Add((notice, choice, itemChoice ? request.Conflict.RelativePath : null));
+                targets.Add((notice, choice, itemChoice ? request.Conflict.RelativePath : null, request.NoticeInput));
                 continue;
             }
             if (options.Count > 0)
@@ -101,9 +102,9 @@ public sealed partial class V2SyncHost
                 throw EdgeMessages.NotInV2("applyingChoice");
             if (notice.Kind == NoticeKind.UserDecision)
                 throw new InvalidOperationException(EdgeMessages.Text("decisionNeeded"));
-            targets.Add((notice, NoticeChoices.Accept, null));
+            targets.Add((notice, NoticeChoices.Accept, null, null));
         }
-        foreach (var (notice, choice, item) in targets)
+        foreach (var (notice, choice, item, input) in targets)
         {
             cancellationToken.ThrowIfCancellationRequested();
             // Apply first, acknowledge second. A failed operation keeps the notice retryable.
@@ -122,7 +123,7 @@ public sealed partial class V2SyncHost
             }
             if (NoticeChoices.IsRetryNotice(notice))
             {
-                await ApplyRetryNoticeChoiceAsync(notice, choice, cancellationToken, onProgress);
+                messages[notice.NoticeId!] = await ApplyRetryNoticeChoiceAsync(notice, choice, cancellationToken, onProgress, input);
                 continue;
             }
             if (NoticeChoices.IsQuarantineChoice(choice))
@@ -163,7 +164,7 @@ public sealed partial class V2SyncHost
         {
             var pairDef = _store.Pair(group.Key)
                 ?? throw new InvalidDataException("This folder pair is no longer available.");
-            var decisions = group.Select(target => new SyncDecision(target.Notice.Path, SyncDecisionKind.Recovered, NoticeChoices.Result(target.Choice)))
+            var decisions = group.Select(target => new SyncDecision(target.Notice.Path, SyncDecisionKind.Recovered, messages.GetValueOrDefault(target.Notice.NoticeId!) ?? NoticeChoices.Result(target.Choice, target.Notice)))
                 .ToArray();
             items.Add(new SyncAuthorityBatchItemResult(Mapped(pairDef), new SyncRunResult(group.Key, decisions), null, null));
         }

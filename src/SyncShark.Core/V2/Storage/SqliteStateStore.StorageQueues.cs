@@ -40,7 +40,7 @@ public sealed partial class SqliteStateStore
     });
 
     public bool HasOwnedPointers(string rootId) => InStore(() => _storageEnabled &&
-        StoreSchema.Scalar(_connection, null, "SELECT 1 FROM file_state INDEXED BY fs_owned WHERE root_no=$r AND (flags & 512)!=0 LIMIT 1;", ("$r", RootNo(rootId) ?? -1)) is not null);
+        StoreSchema.Scalar(_connection, null, "SELECT 1 FROM file_state INDEXED BY fs_owned WHERE root_no=$r AND (flags & 1024)!=0 LIMIT 1;", ("$r", RootNo(rootId) ?? -1)) is not null);
 
     public bool HasStorageRootWork(string rootId) => InStore(() => _storageEnabled && Convert.ToInt64(StoreSchema.Scalar(_connection, null,
         "SELECT EXISTS(SELECT 1 FROM storage_settlement WHERE root_id=$r AND state='pending') OR " +

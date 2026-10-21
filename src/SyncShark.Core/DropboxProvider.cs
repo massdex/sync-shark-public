@@ -1042,6 +1042,13 @@ public sealed partial class DropboxPilotClient(
         if (!IsExactDropboxObjectIdentity(providerObjectId))
             throw new InvalidDataException("An exact Dropbox object ID is required for an identity check.");
         await VerifyRootIdentityAsync(cancellationToken);
+        return await ObjectExistsInVerifiedRootAsync(providerObjectId, cancellationToken);
+    }
+
+    private async Task<bool> ObjectExistsInVerifiedRootAsync(string providerObjectId, CancellationToken cancellationToken)
+    {
+        if (!IsExactDropboxObjectIdentity(providerObjectId))
+            throw new InvalidDataException("An exact Dropbox object ID is required for an identity check.");
         await SyncByteProgressStream.ReportProcessAsync("Checking remote item", _root,
             "Reading the current Dropbox identity for this exact object; no recursive folder scan.");
         using var document = await PostJsonAllowingMissingPathAsync(
@@ -1398,7 +1405,11 @@ public sealed partial class DropboxPilotClient(
     }
 
     public async Task<PilotRemoteEntry> MoveAsync(PilotRemoteEntry expected, string destinationRelativePath,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        await MoveRevisionAsync(expected, destinationRelativePath, false, cancellationToken);
+
+    internal async Task<PilotRemoteEntry> MoveRevisionAsync(PilotRemoteEntry expected, string destinationRelativePath,
+        bool requireRevision, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(expected.Id))
             throw new InvalidDataException("The Dropbox move source has no stable identity.");
@@ -1409,7 +1420,7 @@ public sealed partial class DropboxPilotClient(
         await EnsureRemoteParentFoldersAsync(destination, cancellationToken);
         var occupant = await FindEntryAtPathAsync(destination, cancellationToken);
         if (occupant is not null && !string.Equals(occupant.Id, expected.Id, StringComparison.Ordinal))
-            throw new DropboxApiException(HttpStatusCode.Conflict, "Dropbox move destination is occupied.");
+            throw new DropboxApiException(HttpStatusCode.Conflict, "Dropbox move destination is occupied.") { WriteErrorTag = "conflict" };
         // This exact-identity metadata read is the final provider observation before the single move
         // request, and it is what remains between the last identity/location check and the effect. It
         // requires the retained stable ID, the exact intended source path and the kind while accepting
@@ -1418,7 +1429,10 @@ public sealed partial class DropboxPilotClient(
         // atomically condition both identity and location, so the narrow interval here is an accepted
         // provider limitation rather than something this client claims to close. No inventory traversal,
         // parent creation or unrelated provider work may be inserted between this read and the move.
-        _ = await RequireMoveSourceAsync(expected, cancellationToken);
+        var moveSource = await RequireMoveSourceAsync(expected, cancellationToken);
+        if (requireRevision && (moveSource.Revision != expected.Revision || moveSource.ContentHash != expected.ContentHash ||
+            moveSource.Size != expected.Size))
+            throw new V2.ExpectedTargetMismatchException("The rename source revision changed. Refresh the notice.");
         using var moved = await PostEffectJsonAsync("https://api.dropboxapi.com/2/files/move_v2", new
         {
             from_path = expected.Id,
@@ -1456,7 +1470,7 @@ public sealed partial class DropboxPilotClient(
         var expectedId = expected.Id;
         if (string.IsNullOrWhiteSpace(expectedId))
             throw new DropboxApiException(HttpStatusCode.Conflict,
-                "Dropbox move source changed after inventory.");
+                "Dropbox move source changed after inventory.") { WriteErrorTag = "conflict" };
         PilotRemoteEntry current;
         try
         {
@@ -1465,11 +1479,11 @@ public sealed partial class DropboxPilotClient(
         catch (Exception exception) when (exception is IOException or InvalidDataException)
         {
             throw new DropboxApiException(HttpStatusCode.Conflict,
-                "Dropbox move source changed after inventory.");
+                "Dropbox move source changed after inventory.") { WriteErrorTag = "conflict" };
         }
         if (current.Kind != expected.Kind)
             throw new DropboxApiException(HttpStatusCode.Conflict,
-                "Dropbox move source changed after inventory.");
+                "Dropbox move source changed after inventory.") { WriteErrorTag = "conflict" };
         return current;
     }
 
@@ -1594,7 +1608,8 @@ public sealed partial class DropboxPilotClient(
 
         request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
         using var document = await SendUploadEffectAsync(request,
-            "The upload response was interrupted after request transmission.", cancellationToken);
+            "The upload response was interrupted after request transmission.", cancellationToken,
+            () => SyncUploadSource.Current.Value?.BeforeUpload());
         return ParseUploadResult(document.RootElement, expectedContentHash, source.Length);
     }
 
@@ -1745,7 +1760,8 @@ public sealed partial class DropboxPilotClient(
         startRequest.Headers.Add("Dropbox-API-Arg", JsonSerializer.Serialize(new { close = false }, JsonOptions));
         startRequest.Content = SessionContent(source, firstCount);
         using var started = await SendUploadEffectAsync(startRequest,
-            "The upload-session start response was interrupted after request transmission.", cancellationToken);
+            "The upload-session start response was interrupted after request transmission.", cancellationToken,
+            () => SyncUploadSource.Current.Value?.BeforeUpload());
         string sessionId;
         try
         {
@@ -1889,14 +1905,14 @@ public sealed partial class DropboxPilotClient(
     }
 
     private async Task<JsonDocument> SendUploadEffectAsync(HttpRequestMessage request, string interruptionMessage,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, Action? onSending = null)
     {
         HttpResponseMessage response;
         Interlocked.Increment(ref _providerCallCount);
         try
         {
             response = await SendResourceRequestAsync(request, HttpCompletionOption.ResponseHeadersRead,
-                cancellationToken);
+                cancellationToken, onSending);
         }
         catch (Exception exception) when (exception is HttpRequestException or OperationCanceledException)
         {
@@ -2827,11 +2843,30 @@ public sealed partial class DropboxPilotClient(
             ? "This cloud name cannot be represented safely on Windows (invalid character, reserved name, or trailing dot/space). " +
               "Rename it in Dropbox to a Windows-compatible name, then scan again. No copy, overwrite or deletion is allowed for this item."
             : null;
-        if (tag == "file" && item.TryGetProperty("is_downloadable", out var downloadable) &&
-            downloadable.ValueKind == JsonValueKind.False)
+        var requiresExport = tag == "file" && item.TryGetProperty("is_downloadable", out var downloadable) &&
+            downloadable.ValueKind == JsonValueKind.False;
+        if (requiresExport)
             blocked ??= "Dropbox marks this cloud-native document as not directly downloadable. " +
                 "Export it to a standard file in Dropbox, then sync that exported file. " +
                 "The original cloud document and any existing local file remain unchanged.";
+        // export_info names exactly the formats this provider can produce for this item. The notice offers
+        // those formats, never a speculative list; export_as is the default when export_options is absent.
+        string? exportAs = null;
+        IReadOnlyList<string>? exportOptions = null;
+        if (item.TryGetProperty("export_info", out var exportInfo) && exportInfo.ValueKind == JsonValueKind.Object)
+        {
+            if (exportInfo.TryGetProperty("export_as", out var exportAsElement) &&
+                exportAsElement.ValueKind == JsonValueKind.String)
+                exportAs = exportAsElement.GetString();
+            if (exportInfo.TryGetProperty("export_options", out var exportOptionsElement) &&
+                exportOptionsElement.ValueKind == JsonValueKind.Array)
+                exportOptions = exportOptionsElement.EnumerateArray()
+                    .Where(option => option.ValueKind == JsonValueKind.String)
+                    .Select(option => option.GetString())
+                    .Where(format => !string.IsNullOrWhiteSpace(format))
+                    .Select(format => format!)
+                    .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        }
         // A missing identity is malformed metadata, never an invisible dictionary failure.
         var id = item.TryGetProperty("id", out var idElement) && idElement.ValueKind == JsonValueKind.String
             ? idElement.GetString() : null;
@@ -2849,6 +2884,9 @@ public sealed partial class DropboxPilotClient(
                 item.TryGetProperty("content_hash", out var hash) ? hash.GetString() : null,
                 DropboxModifiedUtc(item), TransferBlockedReason: blocked)
             {
+                RequiresExport = requiresExport,
+                ExportAs = exportAs,
+                ExportOptions = exportOptions,
                 ClientModifiedUtc = item.TryGetProperty("client_modified", out var client) &&
                     DateTimeOffset.TryParse(client.GetString(), CultureInfo.InvariantCulture,
                         DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var clientUtc)
@@ -3489,7 +3527,12 @@ public sealed partial class DropboxPilotClient(
         }
         throw new DropboxApiException(response.StatusCode,
             $"Dropbox download refused (HTTP {(int)response.StatusCode}; {code}). {detail} " +
-            "No download bytes were accepted from this response.");
+            "No download bytes were accepted from this response.")
+        {
+            // Preserve the structured missing-source proof for the adapter's narrow mismatch mapping.
+            // Unknown, restricted and malformed refusals must remain failures, never inferred from HTTP 409 alone.
+            WriteErrorTag = code == "path/not_found" ? "not_found" : null
+        };
     }
 
     private sealed class LeaveOpenReadStream(Stream inner) : Stream

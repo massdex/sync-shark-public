@@ -53,10 +53,54 @@ public sealed partial class Executor
         List<ActionResult> results, IReadOnlyList<SyncAction> actions, CancellationToken ct)
     {
         var remaining = new List<SyncAction>(actions);
+        var replacements = DeleteSourceGuard.Replacements(plan.Actions);
         foreach (var side in new[] { Side.A, Side.B })
         {
             PairPause.Check();
             var group = trees.Where(tree => tree.Folder.Target == side).ToArray();
+            if (group.Length == 0) continue;
+            var source = side == Side.A ? b : a;
+            var allowed = new List<WholeFolder>();
+            foreach (var whole in group)
+            {
+                var blocked = 0;
+                // Bounded metadata pages retain delete_batch for large safe trees. Never infer identity
+                // absence from a parent listing: the endpoint batch proves every historical ID globally.
+                foreach (var page in whole.Actions.Chunk(128))
+                {
+                    var requests = new List<(ItemState Historical, string Path)>();
+                    var indices = new Dictionary<string, int>(StringComparer.Ordinal);
+                    foreach (var action in page.Where(DeleteSourceGuard.RequiresAbsence))
+                    {
+                        ItemState? historical;
+                        try { historical = committer.DeleteSource(action); }
+                        catch (Exception error) when (error is not OutOfMemoryException) { continue; }
+                        if (historical is null || string.IsNullOrWhiteSpace(historical.ObjectId)) continue;
+                        indices[action.ActionId] = requests.Count;
+                        requests.Add((historical, action.Path));
+                    }
+                    IReadOnlyList<bool?> observations = new bool?[requests.Count];
+                    if (requests.Count > 0 && source is ISourceAbsenceProbe probe)
+                    {
+                        try { observations = await probe.IsAbsentBatchAsync(requests, ct).ConfigureAwait(false); }
+                        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                        catch (Exception error) when (error is not OutOfMemoryException) { /* Retry debt, never absence. */ }
+                    }
+                    foreach (var action in page)
+                    {
+                        var indexed = indices.TryGetValue(action.ActionId, out var index);
+                        var result = await DeleteSourceGuard.CheckAsync(action, source, committer, plan.PairId, ct,
+                            DeleteSourceGuard.Replacement(action, replacements), preprobed: true,
+                            absence: indexed && index < observations.Count ? observations[index] : null).ConfigureAwait(false);
+                        if (result is not null) blocked = 1;
+                    }
+                }
+                // A whole-folder call must not remove even one child whose source still exists or is unknown.
+                // Fall back to ordinary guarded actions; their failed dependencies keep the parent untouched.
+                if (blocked != 0) remaining.AddRange(whole.Actions);
+                else allowed.Add(whole);
+            }
+            group = allowed.ToArray();
             if (group.Length == 0) continue;
             var target = side == Side.A ? a : b;
             var byTree = new Dictionary<FolderTree, WholeFolder>(ReferenceEqualityComparer.Instance);

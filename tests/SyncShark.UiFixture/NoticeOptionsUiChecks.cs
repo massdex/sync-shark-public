@@ -99,6 +99,13 @@ internal static class NoticeOptionsUiChecks
                 "Docs/ordinary.txt", "Both versions are retained.", "auto-conflict");
             var regularOptions = NoticeChoices.Options(regularNotice);
             Check(regularOptions.Count == 0, "A regular notice maps to no choices");
+            var linkOptions = NoticeChoices.Options(new Notice("pair-link", 36, NoticeKind.Info,
+                "Link", "Link left untouched", "link-item"));
+            Check(linkOptions.Single(option => option.Choice == NoticeChoices.CopyLinkOutsideRoot).RequestsName &&
+                  linkOptions.Single(option => option.Choice == NoticeChoices.CopyLinkAgain).RequestsName,
+                "Link confirmation and Copy again request the exact target input through the shared UI vocabulary");
+            Check(linkOptions.Any(option => option.Choice == NoticeChoices.RemoveLinkStaging),
+                "Link repairs expose non-destructive staging cleanup guidance");
 
             var noticeRow = new DecisionRow("pair-notice", "Notice pair", "Reports/2026 Q3.pdf",
                 SyncDecisionKind.Conflict.ToString(), "Cloud Files binding needs review.",

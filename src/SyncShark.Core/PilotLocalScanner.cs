@@ -40,6 +40,7 @@ public sealed class PilotLocalScanner
     internal Func<string, WindowsCloudPlaceholderInfo?>? ReadOwnedPlaceholderForTest { get; init; }
     // V2 supplies durable entity/root ownership. No database or path-based cache lives in the scanner.
     internal Func<string, WindowsCloudPlaceholderInfo, long, V2.OwnedPointerObservation>? ClassifyOwnedPointer { get; init; }
+    internal Func<ulong, string?>? KnownOwnedPointerPath { get; init; }
 
     private bool TryReadOwnedPlaceholder(string path, out WindowsCloudPlaceholderInfo? info)
     {
@@ -391,8 +392,28 @@ public sealed class PilotLocalScanner
                 var probeOwned = expectedPairId is not null && PilotPath.IsUnsafeAttributes(attributes);
                 if (probeOwned) OwnedPlaceholderProbeForTest?.Invoke(relative);
                 // The repeated null test lets flow analysis see a non-null pair id across the chain.
-                var owned = probeOwned && expectedPairId is not null &&
-                    TryReadOwnedPlaceholder(exactPath, out ownedPlaceholder) &&
+                var nativeObserved = !probeOwned || TryReadOwnedPlaceholder(exactPath, out ownedPlaceholder);
+                if (probeOwned && !nativeObserved && KnownOwnedPointerPath is not null)
+                {
+                    try { metadata ??= ResolveFromParent(exactPath); }
+                    catch (Exception error) when (error is IOException or UnauthorizedAccessException or Win32Exception) { }
+                    if (metadata is null)
+                    {
+                        decisions.Add(new PilotDecision(relative, PilotDecisionKind.Blocked, V2.OwnedPointerProof.ObservationMessage));
+                        continue;
+                    }
+                }
+                if (probeOwned && !nativeObserved && metadata is { } unobserved &&
+                    KnownOwnedPointerPath?.Invoke((ulong)unobserved.FileId) is { } previousPath)
+                {
+                    // An exclusive settlement/hydration handle is not evidence of a local edit.
+                    // Hold both names when a rename races the probe; publish no replacement row.
+                    decisions.Add(new PilotDecision(relative, PilotDecisionKind.Blocked, V2.OwnedPointerProof.ObservationMessage));
+                    if (!string.Equals(previousPath, relative, StringComparison.OrdinalIgnoreCase))
+                        decisions.Add(new PilotDecision(previousPath, PilotDecisionKind.Blocked, V2.OwnedPointerProof.ObservationMessage));
+                    continue;
+                }
+                var owned = probeOwned && expectedPairId is not null && nativeObserved &&
                     ownedPlaceholder is not null && ownedPlaceholder.Identity.ObjectKind != "root" &&
                     ownedPlaceholder.Identity.IsBoundTo(expectedPairId, contentProvider) &&
                     ownedPlaceholder.SyncRootFileId == rootLease.Identity.FileId && ownedPlaceholder.FileId != 0;
@@ -444,7 +465,7 @@ public sealed class PilotLocalScanner
                                     listed.LastWriteTimeUtc, null, rootLease.Identity.VolumeSerialNumber,
                                     (ulong)listed.FileId,
                                     stub ? SyncCloudFileAvailability.OnlineOnly : null,
-                                    ContentUnreadable: !stub || ClassifyOwnedPointer is not null));
+                                    ContentUnreadable: !stub));
                         }
                         continue;
                     }
@@ -465,6 +486,14 @@ public sealed class PilotLocalScanner
                         var physicalSize = expectedDirectory ? 0 : new FileInfo(exactPath).Length;
                         var proof = !expectedDirectory
                             ? ClassifyOwnedPointer?.Invoke(relative, cloud, physicalSize) : null;
+                        if (proof == V2.OwnedPointerObservation.NotObserved)
+                        {
+                            decisions.Add(new PilotDecision(relative, PilotDecisionKind.Blocked, V2.OwnedPointerProof.ObservationMessage));
+                            if (KnownOwnedPointerPath?.Invoke(cloud.FileId) is { } oldPath &&
+                                !string.Equals(oldPath, relative, StringComparison.OrdinalIgnoreCase))
+                                decisions.Add(new PilotDecision(oldPath, PilotDecisionKind.Blocked, V2.OwnedPointerProof.ObservationMessage));
+                            continue;
+                        }
                         if (proof is V2.OwnedPointerObservation.Foreign or V2.OwnedPointerObservation.NeedsVerification)
                         {
                             // An explicit observation preserves the entity and its new path. A blocked

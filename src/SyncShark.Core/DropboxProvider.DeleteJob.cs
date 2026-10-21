@@ -100,7 +100,8 @@ public sealed partial class DropboxPilotClient
                     if (allowUnavailable && errorTag is "invalid_async_job_id" or "expired_async_job_id" or "internal_error")
                         return true;
                     throw new DropboxEffectUncertainException(
-                        "Dropbox delete_batch/check returned HTTP 409 (" + errorTag + "); the delete outcome is unverified.");
+                        "Dropbox delete_batch/check returned HTTP 409 (" + errorTag + "); the delete outcome is unverified.")
+                        { JobIdUnavailable = errorTag is "invalid_async_job_id" or "expired_async_job_id" };
                 }).ConfigureAwait(false);
         }
         finally

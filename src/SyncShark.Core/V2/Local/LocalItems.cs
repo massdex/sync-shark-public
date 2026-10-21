@@ -29,7 +29,7 @@ internal static class LocalItems
     // Link = a junction/symlink/mount point, never followed and excluded on both sides (decision 59).
     private static ItemFlags Flags(PilotLocalEntry entry) =>
         entry.Link ? ItemFlags.Link
-        : entry.NeedsRehash ? ItemFlags.NeedsRehash | ItemFlags.Unreadable | ItemFlags.Placeholder
+        : entry.NeedsRehash ? ItemFlags.NeedsRehash | ItemFlags.Unreadable | ItemFlags.OwnedPointer
         : entry.ContentUnreadable ? ItemFlags.Unreadable
         : entry.CloudRevision is not null && entry.CloudFileId is not null && entry.ContentHash is not null
             ? entry.CloudAvailability == SyncCloudFileAvailability.AvailableOffline ? ItemFlags.None : ItemFlags.OwnedPointer

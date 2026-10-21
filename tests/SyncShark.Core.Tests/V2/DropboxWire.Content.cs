@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Net;
+using System.Text;
 using System.Text.Json;
 using Massdex.SyncShark;
 
@@ -70,6 +71,7 @@ internal sealed partial class DropboxWire
 
     private async Task<HttpResponseMessage> StartSessionAsync(HttpRequestMessage request, CancellationToken token)
     {
+        UploadSessionStarted?.Invoke();
         var session = "session-" + (++_ids).ToString(CultureInfo.InvariantCulture);
         _sessions[session] = await request.Content!.ReadAsByteArrayAsync(token);
         return Json(new { session_id = session });
@@ -134,6 +136,11 @@ internal sealed partial class DropboxWire
 
     private HttpResponseMessage Download(HttpRequestMessage request)
     {
+        if (DownloadRefusalOverride is { } refusal)
+            return new HttpResponseMessage(refusal.Status)
+            {
+                Content = new StringContent(refusal.Body, Encoding.UTF8, "application/json")
+            };
         using var argument = JsonDocument.Parse(request.Headers.GetValues("Dropbox-API-Arg").Single());
         var target = argument.RootElement.GetProperty("path").GetString()!;
         var revision = target.StartsWith("rev:", StringComparison.Ordinal) ? target[4..] : target;

@@ -41,7 +41,7 @@ internal sealed class FileStateReader
     internal bool StorageEnabled { get; set; }
 
     private string FlaggedSql(string sql, ItemFlags flags) => StorageEnabled && flags == ItemFlags.OwnedPointer
-        ? sql.Replace("INDEXED BY fs_flagged", "INDEXED BY fs_owned").Replace("f.flags != 0", "(f.flags & 512) != 0")
+        ? sql.Replace("INDEXED BY fs_flagged", "INDEXED BY fs_owned").Replace("f.flags != 0", "(f.flags & 1024) != 0")
         : flags == ItemFlags.ProviderNameRefused
         ? sql.Replace("INDEXED BY fs_flagged", "INDEXED BY fs_refused")
             .Replace("f.flags != 0 AND (f.flags & $f) != 0", "(f.flags & 64) != 0 AND (f.flags & $f) != 0")
@@ -49,7 +49,7 @@ internal sealed class FileStateReader
             ? sql.Replace("INDEXED BY fs_flagged", "INDEXED BY fs_quarantine")
                 .Replace("f.flags != 0 AND (f.flags & $f) != 0", "(f.flags & 128) != 0 AND (f.flags & $f) != 0")
             : StorageEnabled && (flags & ItemFlags.OwnedPointer) == 0
-                ? sql.Replace("INDEXED BY fs_flagged", "INDEXED BY fs_nonpointer").Replace("f.flags != 0", "(f.flags & ~512) != 0")
+                ? sql.Replace("INDEXED BY fs_flagged", "INDEXED BY fs_nonpointer").Replace("f.flags != 0", "(f.flags & ~1024) != 0")
                 : sql;
 
     private static string BatchedPathsSql(string values) =>
@@ -179,6 +179,59 @@ internal sealed class FileStateReader
             "WHERE f.root_no=$r AND f.dir_no IN (SELECT dir_no FROM dir WHERE path_key=$pk);",
             [("$r", rootNo), ("$pk", RowCodec.Key(directory))]);
 
+    public IReadOnlyList<ItemState> LiveChildrenPage(long rootNo, string directory, int offset, int limit) =>
+        QueryItems($"SELECT {Columns} FROM file_state f JOIN dir d ON d.dir_no=f.dir_no " +
+            "WHERE f.root_no=$r AND f.dir_no IN (SELECT dir_no FROM dir WHERE path_key=$pk) " +
+            "ORDER BY f.dir_no,f.name_key,f.name LIMIT $limit OFFSET $offset;",
+            [("$r", rootNo), ("$pk", RowCodec.Key(directory)), ("$limit", limit), ("$offset", offset)]);
+
+    /// <summary>Bounded name-filtered folder paths under one prefix; the LIMIT is applied before any row is decoded.</summary>
+    public IReadOnlyList<string> RebuildableFoldersUnder(long rootNo, string prefix, IReadOnlyList<string> names,
+        int offset, int limit)
+    {
+        var prefixKey = RowCodec.Key(prefix);
+        var nameFilter = names.Count == 0 ? "1" :
+            "f.name_key IN (" + string.Join(",", names.Select((_, i) => "$n" + i)) + ")";
+        var parameters = new List<(string, object?)>
+        {
+            ("$r", rootNo), ("$kind", RowCodec.KindCode(ItemKind.Folder)),
+            ("$empty", prefix.Length == 0 ? 1 : 0), ("$prefix", prefixKey), ("$plen", prefixKey.Length),
+            ("$limit", limit), ("$offset", offset)
+        };
+        for (var i = 0; i < names.Count; i++) parameters.Add(("$n" + i, RowCodec.Key(names[i])));
+        var rows = new List<string>(limit);
+        using var command = StoreSchema.Command(_connection, null,
+            "SELECT d.path, f.name FROM file_state f JOIN dir d ON d.dir_no=f.dir_no " +
+            "WHERE f.root_no=$r AND f.kind=$kind AND " + nameFilter + " AND ($empty=1 " +
+            "OR d.path_key=$prefix " +
+            "OR (length(d.path_key)>$plen AND substr(d.path_key,1,$plen)=$prefix AND substr(d.path_key,$plen+1,1)='/') " +
+            "OR ((CASE WHEN d.path_key='' THEN '' ELSE d.path_key || '/' END) || f.name_key)=$prefix) " +
+            "ORDER BY d.path,f.name LIMIT $limit OFFSET $offset;");
+        foreach (var (name, value) in parameters) command.Parameters.AddWithValue(name, value ?? DBNull.Value);
+        using var reader = command.ExecuteReader();
+        while (reader.Read()) rows.Add(RowCodec.Join(reader.GetString(0), reader.GetString(1)));
+        return rows;
+    }
+
+    public IReadOnlyList<ItemState> LiveFlaggedPage(long rootNo, ItemFlags flags, ItemState? after, int limit,
+        long? afterDirNo = null, SqliteTransaction? transaction = null)
+    {
+        var (parent, name) = after is null ? ("", "") : RowCodec.Split(after.Path);
+        // The cursor carries its folder number, so a folder deleted since the previous page still seeks from its key
+        // instead of silently ending the side. An older cursor without it falls back to the path lookup.
+        var dir = after is null ? -1L : afterDirNo ?? (long?)StoreSchema.Scalar(_connection, transaction,
+            "SELECT dir_no FROM dir WHERE path=$path;", ("$path", parent)) ?? -1L;
+        if (after is not null && dir < 0) return Array.Empty<ItemState>();
+        // fs_refused is ordered by root, kind, then the WITHOUT ROWID primary key. Seek rather
+        // than OFFSET: enumerating a million refusals must not revisit every earlier page.
+        var sql = $"SELECT {Columns} FROM file_state f INDEXED BY fs_flagged JOIN dir d ON d.dir_no=f.dir_no " +
+            "WHERE " + FlaggedPredicate + " AND (f.kind,f.dir_no,f.name_key,f.name)>($kind,$dir,$key,$name) " +
+            "ORDER BY f.kind,f.dir_no,f.name_key,f.name LIMIT $limit;";
+        return QueryItems(FlaggedSql(sql, flags), [("$r", rootNo), ("$f", (long)flags), ("$limit", limit),
+            ("$kind", after is null ? -1L : RowCodec.KindCode(after.Kind)), ("$dir", dir),
+            ("$key", RowCodec.Key(name)), ("$name", name)], transaction: transaction);
+    }
+
     /// <summary>Live rows carrying any requested flags, scanning only the root's indexed nonzero-flag rows.</summary>
     public IReadOnlyList<ItemState> LiveFlagged(long rootNo, ItemFlags flags) =>
         QueryItems(FlaggedSql(LiveFlaggedSql, flags), [("$r", rootNo), ("$f", (long)flags)]);
@@ -299,9 +352,9 @@ internal sealed class FileStateReader
 
     // Live callers need only item states, not a second root-sized buffer of keys and states.
     private List<ItemState> QueryItems(string sql, (string Name, object? Value)[] arguments,
-        bool distinctPaths = false)
+        bool distinctPaths = false, SqliteTransaction? transaction = null)
     {
-        using var command = StoreSchema.Command(_connection, null, sql);
+        using var command = StoreSchema.Command(_connection, transaction, sql);
         foreach (var (name, value) in arguments) command.Parameters.AddWithValue(name, value ?? DBNull.Value);
         HashSet<string>? seen = distinctPaths ? new(StringComparer.Ordinal) : null;
         var rows = new List<ItemState>();

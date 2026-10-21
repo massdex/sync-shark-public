@@ -20,12 +20,25 @@ internal static class StorageNotices
     /// <summary>The durable offline hydration lane. Its pair-level causes share the one hydration-pair family with
     /// the callback lane, so a pair outage produces exactly one notice whichever lane observed it first.</summary>
     internal const string OfflineOperation = "offline";
+    /// <summary>Per-item online-only content verification debt. Its family stays item/entity keyed.</summary>
+    internal const string PointerVerificationOperation = "pointer-verify";
+    /// <summary>One pair-level summary replacing per-file verification notices above the limit.</summary>
+    internal const string PointerVerificationPairOperation = "pointer-verify-pair";
+
+    /// <summary>Above this many matching items a pair gets one summary instead of per-file notices. Durable
+    /// per-entity debts (rehash flags, sync-retry rows and hydration jobs) are unchanged.</summary>
+    internal const int NoticeAggregateLimit = 20;
 
     internal static string ReceiptScope(PilotRemoteEntry remote) =>
         "receipt" + ShortId.Hex16(remote.Id ?? "", remote.Revision ?? "", remote.ContentHash ?? "");
     private static string Family(StorageNotice item) => "storage:" + item.Operation + ":" +
         ShortId.Make("item", item.RootId, item.ObjectId, item.RemoteBinding) + ":";
     internal static string Prefix(StorageNotice item) => Family(item) + (item.Scope is null ? "" : item.Scope + ":");
+    /// <summary>Every item family of one operation in one pair, before the entity hash. Used by pair-wide
+    /// aggregation; the matching end is <see cref="OperationEnd"/> (a ':' sorts after the '-' that starts
+    /// the aggregate operation name, so the pair summary stays outside this range).</summary>
+    internal static string OperationPrefix(string operation) => "storage:" + operation + ":";
+    internal static string OperationEnd(string operation) => "storage:" + operation + ";";
 
     internal static void Report(SqliteStateStore store, PairDef pair, string path, StorageNotice item, Exception error)
     {
@@ -41,8 +54,7 @@ internal static class StorageNotices
             item = item with { ObjectId = "", Operation = operation, Scope = pairError.Cause };
             path = "";
         }
-        var reason = Prefix(item) + "cause" + ShortId.Hex16(error.GetType().Name,
-            error.HResult.ToString(System.Globalization.CultureInfo.InvariantCulture), error.Message);
+        var reason = Prefix(item) + Cause(error);
         var pairScoped = item.Operation == HydrationPairOperation;
         var label = item.Operation == HydrationPairOperation ? "hydration" : item.Operation;
         var detail = "Cloud storage " + label + " failed: " + error.Message +
@@ -53,9 +65,31 @@ internal static class StorageNotices
                     : " Correct the cause and Retry verification/settlement, or Ignore this cause. Local bytes are retained and no upload is repeated.");
         // One open notice per item+operation: the store updates the active family notice in place (keeping its
         // stable id) for a new cause, returns null for an ignored exact cause, and never reopens ignored history.
-        store.ReportStorageNotice(pair.PairId, new Notice(pair.PairId, 42, NoticeKind.Info, path, detail, reason,
-            Storage: item), Family(item));
+        var notice = new Notice(pair.PairId, 42, NoticeKind.Info, path, detail, reason, Storage: item);
+        if (item.Operation == PointerVerificationOperation)
+        {
+            // Above the limit one pair summary replaces every per-file notice. Below it the item notice is
+            // written as before, so Retry still applies to that exact entity.
+            var summary = PointerVerificationSummary(item);
+            store.RecordPointerVerificationNotice(pair.PairId, notice, Family(item),
+                new Notice(pair.PairId, 42, NoticeKind.Info, string.Empty, PointerVerificationSummaryDetail,
+                    Prefix(summary) + Cause(error), Storage: summary), Family(summary));
+            return;
+        }
+        store.ReportStorageNotice(pair.PairId, notice, Family(item));
     }
+
+    private static string Cause(Exception error) => "cause" + ShortId.Hex16(error.GetType().Name,
+        error.HResult.ToString(System.Globalization.CultureInfo.InvariantCulture), error.Message);
+
+    private static StorageNotice PointerVerificationSummary(StorageNotice item) =>
+        new(item.RootId, string.Empty, item.RemoteBinding, PointerVerificationPairOperation);
+
+    private static readonly string PointerVerificationSummaryDetail =
+        $"More than {NoticeAggregateLimit} online-only files changed locally and await verification. Retry requests " +
+        "verification for every affected file without discarding edits; each file keeps its durable retry debt. " +
+        "Ignore leaves the files protected and keeps retrying verification silently. The summary clears once every " +
+        "affected file is verified.";
 
     /// <summary>True for a storage notice: its choice is applied by <see cref="ApplyAsync"/>, never by the run planner.
     /// Shared by the host and CLI dispatch so the predicate cannot drift between them.</summary>
@@ -64,8 +98,14 @@ internal static class StorageNotices
         notice.Storage is not null && PairPath.Same(notice.Path, relativePath);
 
     // A successful current item observation closes obsolete revisions/causes as well.
-    internal static void Complete(SqliteStateStore store, string pairId, StorageNotice item) =>
+    internal static void Complete(SqliteStateStore store, string pairId, StorageNotice item)
+    {
         store.CloseNoticeFamily(pairId, Family(item));
+        // Verification debt falls per entity, so the pair summary retires only once every debt is settled; any
+        // still-failing entity keeps it standing rather than making unresolved failures disappear.
+        if (item.Operation == PointerVerificationOperation)
+            store.RetirePointerVerificationSummary(pairId, PointerVerificationSummary(item));
+    }
     /// <summary>Closes the pair cause family for the requested operation. Hydration and the durable offline lane
     /// keep their own families; settlement/remote-update failures share the status-only "availability" family.</summary>
     internal static void CompletePair(SqliteStateStore store, PairDef pair, string operation)
@@ -189,7 +229,7 @@ internal static class StorageNotices
             store.CloseNotice(notice.NoticeId!, choice);
             return;
         }
-        if (item.Operation == "pointer-verify")
+        if (item.Operation == PointerVerificationOperation)
         {
             ct.ThrowIfCancellationRequested();
             if (!store.QueuePointerVerificationHydration(item.RootId, item.ObjectId))
@@ -199,6 +239,21 @@ internal static class StorageNotices
             }
             // Reuse the durable offline queue and its request sentinel, not callback retry or a new lane.
             item = item with { Operation = "offline", Scope = "offline" };
+        }
+        if (item.Operation == PointerVerificationPairOperation)
+        {
+            // One explicit Retry applies the same durable request to every affected entity. Each entity keeps
+            // its own debt; the summary closes only after verification actually succeeds.
+            ct.ThrowIfCancellationRequested();
+            var queued = store.QueuePointerVerificationHydrationForPair(item.RootId, item.RemoteBinding);
+            if (queued == 0)
+            {
+                Complete(store, pair.PairId, item);
+                return;
+            }
+            progress?.Invoke($"Verification requested for {queued} online-only file(s); it clears when they verify. " +
+                "Each file keeps its durable retry debt and no local edit is discarded.");
+            return;
         }
         if (connections is null)
         {

@@ -88,7 +88,7 @@ internal sealed class GatedObserveProvider : IEndpointProvider, IEndpointWriter
 }
 
 /// <summary>Counts writer calls while delegating to a fake endpoint.</summary>
-internal sealed class CountingWriter : IEndpointWriter, IRecoveryAvailability
+internal sealed class CountingWriter : IEndpointWriter, IRecoveryAvailability, ISourceAbsenceProbe
 {
     public string? RecoveryUnavailable { get; set; }
     private readonly FakeEndpoint _inner;
@@ -205,6 +205,26 @@ internal sealed class CountingWriter : IEndpointWriter, IRecoveryAvailability
         }
     }
 
+    /// <summary>Simulates unavailable historical identity evidence without changing the endpoint's actual state.</summary>
+    public bool AbsenceUnknown { get; set; }
+
+    public Task<ItemState?> ObserveSourceMetadataAsync(string path, CancellationToken ct) => ObserveAsync(path, ct);
+
+    public async Task<bool?> IsSourceAbsentAsync(ItemState? historical, string path, CancellationToken ct)
+    {
+        // Keep scripted access failures/latency and prove the fake's real identity, including moved objects.
+        if (await ObserveAsync(path, ct).ConfigureAwait(false) is not null) return false;
+        if (AbsenceUnknown) return null;
+        return await _inner.IsSourceAbsentAsync(historical, path, ct).ConfigureAwait(false);
+    }
+
+    public async Task<bool?> IsHistoricalSourcePresentAsync(ItemState historical, CancellationToken ct)
+    {
+        await ObserveAsync(historical.Path, ct).ConfigureAwait(false);
+        if (AbsenceUnknown) return null;
+        return await _inner.IsHistoricalSourcePresentAsync(historical, ct).ConfigureAwait(false);
+    }
+
     public Task<Stream> OpenReadAsync(ItemState s, CancellationToken ct)
     {
         OnRead?.Invoke(s.Path);
@@ -311,13 +331,19 @@ internal sealed class RecordingStore : IStateStore
     public IReadOnlyList<SyncRetry> DueSyncRetries(string pairId, DateTimeOffset now, int limit) => _inner.DueSyncRetries(pairId, now, limit);
     public int CountSyncRetries(string pairId) => _inner.CountSyncRetries(pairId);
     public int RetryProtectionCalls { get; private set; }
-    public bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants)
+    public bool HasActiveRestoredRetries(string pairId) => _inner.HasActiveRestoredRetries(pairId);
+    public bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants, bool restoredOnly = false)
     {
         RetryProtectionCalls++;
-        return _inner.RetryProtected(pairId, path, active, descendants);
+        if (restoredOnly) Interlocked.Increment(ref _restoredProtectionReads);
+        return _inner.RetryProtected(pairId, path, active, descendants, restoredOnly);
     }
+    private int _restoredProtectionReads;
+    /// <summary>Per-item restored-hold protection lookups this run made; zero when no restored hold exists.</summary>
+    public int RestoredProtectionReads => Volatile.Read(ref _restoredProtectionReads);
     public void SaveSyncRetry(string pairId, SyncRetry retry) => _inner.SaveSyncRetry(pairId, retry);
     public void ClearSyncRetry(string pairId, string path) => _inner.ClearSyncRetry(pairId, path);
+    public void SuspendHeldRetry(string pairId, SyncRetry retry) => _inner.SuspendHeldRetry(pairId, retry);
     public void RequireRehash(string rootId, ItemState item, string reason) => _inner.RequireRehash(rootId, item, reason);
     public void RequireRehashBatch(string rootId, IEnumerable<ItemState> items, string reason) => _inner.RequireRehashBatch(rootId, items, reason);
     public bool CompleteRehash(string rootId, ItemState item, string hash) => _inner.CompleteRehash(rootId, item, hash);
@@ -447,14 +473,40 @@ internal sealed class RecordingStore : IStateStore
     }
 
     public IReadOnlyList<SyncAction> UnresolvedIntents(string pairId) => _inner.UnresolvedIntents(pairId);
+    public int CountUnresolvedIntents(string pairId) => _inner.CountUnresolvedIntents(pairId);
+    public void SetIntentHeld(string pairId, string actionId, bool held) => _inner.SetIntentHeld(pairId, actionId, held);
+    public void SetIntentsHeld(string pairId, IReadOnlyList<string> actionIds, bool held) =>
+        _inner.SetIntentsHeld(pairId, actionIds, held);
+    public int CountHeldIntents(string pairId) => _inner.CountHeldIntents(pairId);
+    public bool IsIntentHeld(string pairId, string actionId) => _inner.IsIntentHeld(pairId, actionId);
+    public IntentPage HeldIntentsPage(string pairId, string? cursor, int limit) =>
+        _inner.HeldIntentsPage(pairId, cursor, limit);
+    public IEnumerable<SyncAction> StreamUnresolvedIntents(string pairId) => _inner.StreamUnresolvedIntents(pairId);
+    public IEnumerable<IntentRow> StreamUnresolvedIntentRows(string pairId) =>
+        _inner.StreamUnresolvedIntentRows(pairId);
+    public string? PairForIntent(string actionId) => _inner.PairForIntent(actionId);
+
+    public Exception? RefusalRefreshError { get; set; }
+    public void RefreshProviderNameNotices(PairDef pair)
+    {
+        if (RefusalRefreshError is { } error) throw error;
+        var store = (IStateStore)this;
+        foreach (var notice in ProviderNameNotices.Read(pair,
+            (root, after) => store.LiveFlaggedSummary(root.RootId, ItemFlags.ProviderNameRefused, 0).Count == 0
+                ? Array.Empty<ItemState>() : store.LiveFlaggedPage(root.RootId, ItemFlags.ProviderNameRefused, after, 100)))
+            AddNotices([notice]);
+    }
 
     public string? FailNoticePath { get; set; }
+    public Action<IReadOnlyList<Notice>>? NoticesAdded { get; set; }
+    public (Notice Notice, bool Closed)? NoticeById(string pairId, string noticeId) => _inner.NoticeById(pairId, noticeId);
     public void AddNotices(IEnumerable<Notice> n)
     {
         var notices = n.ToArray();
         if (FailNoticePath is not null && notices.Any(notice => notice.Path == FailNoticePath))
             throw new InvalidOperationException("injected notice write failure");
         _inner.AddNotices(notices);
+        NoticesAdded?.Invoke(notices);
     }
 
     public IReadOnlyList<Notice> OpenNotices(string? pairId) => _inner.OpenNotices(pairId);

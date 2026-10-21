@@ -9,11 +9,12 @@ internal static partial class StorageChecks
         "quarantine_upgrade", "defender_deferral", "defender_grant", "defender_grant_path",
         "local_gap", "local_gap_item", "listing_checkpoint", "listing_page", "pair_pause",
         "local_walk", "local_walk_page", "choice_victim", "choice_restore_receipt", "choice_merge",
-        "removal_review", "journal_volume", "run_summary", "nt_pair_reason"
+        "removal_review", "journal_volume", "run_summary", "nt_pair_reason", "pe_intent_order"
     ];
 
     private static void IntegratedSchemaChecks(string root)
     {
+        GapStagingChecks(root);
         Require(StoreSchema.Version >= 18, "integrated schema never regresses to an isolated preview version");
         var fresh = Fresh(root, "integrated-fresh");
         using (var store = SqliteStateStore.Open(fresh, Fast, new TestClock())) { }
@@ -43,7 +44,7 @@ internal static partial class StorageChecks
                         "ALTER TABLE deletion_evidence ADD COLUMN content_hash TEXT;");
                 }
                 StoreSchema.Execute(db, null, """
-                    INSERT INTO root(root_no,root_id,cursor) VALUES(1,'root-a','retained-cursor');
+                    INSERT INTO root(root_no,root_id,cursor) VALUES(1,'root-a','0000000000000001:100');
                     INSERT INTO dir(dir_no,path,path_key) VALUES(1,'','');
                     INSERT INTO file_state(root_no,dir_no,name_key,name,kind,object_id,version_id,hash,size,mtime,flags)
                     VALUES(1,1,'KEPT.TXT','kept.txt',0,'entity-a','revision-a',X'AABB',4,0,0);
@@ -54,7 +55,43 @@ internal static partial class StorageChecks
             for (var reopen = 0; reopen < 2; reopen++)
             {
                 using (var store = SqliteStateStore.Open(folder, Fast, new TestClock()))
-                    Require(store.Cursor("root-a") == "retained-cursor", "upgrade preserves root cursor");
+                {
+                    Require(store.Cursor("root-a") == "0000000000000001:100", "upgrade preserves root cursor");
+                    var retained = store.ByObject("root-a", "entity-a")!;
+                    Require(retained.Hash == "aabb" && retained.Flags == ItemFlags.None &&
+                        store.RehashWatermark("root-a") == 0 && !((ILocalGapStore)store).HasGapProtection("root-a"),
+                        "upgrade preserves reusable content hash without inventing foreground or gap debt");
+                    // A metadata-only reconciliation after upgrade must reuse the retained hash,
+                    // not convert every unchanged file into a foreground content read.
+                    var generation = store.BeginGeneration("root-a", "full");
+                    store.WriteSnapshot(new("root-a", Side.A, generation, "0000000000000001:100",
+                        [retained with { Hash = null }], []));
+                    store.CompleteGeneration(generation, "0000000000000001:100", true);
+                    Require(store.ByObject("root-a", "entity-a")!.Hash == retained.Hash &&
+                        store.RehashWatermark("root-a") == 0,
+                        "post-upgrade metadata snapshot retains unchanged hash and no rehash debt");
+                    if (version == 12)
+                    {
+                        // Exact legacy shape: same journal, cursor older than retained history,
+                        // reusable hash, and no pre-existing foreground verification obligation.
+                        var through = new NtfsUsnCheckpoint(1, 150, 200, 150);
+                        Require(through.RequiresFullReconciliation(store.Cursor("root-a")),
+                            "migrated saved cursor is outside the retained journal range");
+                        var local = new RootDef("root-a", SyncProviders.Local, null, folder,
+                            SyncLocalEndpointStore.ObjectId(1, 1));
+                        var inventory = new LocalInventory(local, Side.A, store, new HashSet<string>(), Fast, new TestClock());
+                        inventory.BeginJournalGap(local.RootId, 1, 100, through);
+                        inventory.BeginFullGap(local.RootId, through.Cursor, journalDeleted: false);
+                        var gaps = (ILocalGapStore)store;
+                        Require(gaps.GapEpoch(local.RootId) is { TrustFileUsn: true, Boundary: 100 } &&
+                            store.RehashWatermark(local.RootId) == 0 && store.ByObject(local.RootId, "entity-a")!.Hash == retained.Hash,
+                            "v12 migration plus same-journal wrap starts trusted metadata proof, never foreground rehash");
+                        // Complete the synthetic proof so the second open tests a settled predecessor.
+                        gaps.GapDiscovered(local.RootId, gaps.GapEpoch(local.RootId)!, retained, false);
+                        gaps.GapDiscoveryDone(local.RootId, gaps.GapEpoch(local.RootId)!);
+                        gaps.PromoteGapDiscovery(local.RootId);
+                    }
+                }
                 Require(expected.SetEquals(Inspect(folder)), "upgraded and fresh objects, columns and index definitions match exactly");
                 using var db = new SqliteConnection($"Data Source={DbPath(folder)};Pooling=False");
                 db.Open();

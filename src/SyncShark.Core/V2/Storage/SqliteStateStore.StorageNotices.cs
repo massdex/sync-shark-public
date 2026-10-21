@@ -31,15 +31,22 @@ public sealed partial class SqliteStateStore
     /// <summary>Updates the one open item/operation notice in place; ignored causes remain immutable.</summary>
     internal string? ReportStorageNotice(string pairId, Notice notice, string familyPrefix) => InStore(() =>
     {
-        if (notice.Storage is null || notice.ReasonKey is null || !notice.ReasonKey.StartsWith(familyPrefix, StringComparison.Ordinal))
-            throw new ArgumentException("A storage notice must belong to its supplied family.", nameof(notice));
         var pair = RequirePair(pairId);
         using var tx = _connection.BeginTransaction();
+        var id = ReportStorageNotice(tx, pair, notice, familyPrefix);
+        tx.Commit();
+        return id;
+    });
+
+    /// <summary>The transaction-scoped form used by aggregate writers, so one decision cannot race its own family.</summary>
+    private string? ReportStorageNotice(Microsoft.Data.Sqlite.SqliteTransaction tx, long pair, Notice notice, string familyPrefix)
+    {
+        if (notice.Storage is null || notice.ReasonKey is null || !notice.ReasonKey.StartsWith(familyPrefix, StringComparison.Ordinal))
+            throw new ArgumentException("A storage notice must belong to its supplied family.", nameof(notice));
         var args = new (string, object?)[] { ("$p", pair), ("$reason", notice.ReasonKey), ("$lo", familyPrefix), ("$hi", familyPrefix + "￿") };
         if (StoreSchema.Scalar(_connection, tx, "SELECT 1 FROM notice WHERE pair_no=$p AND reason_key=$reason AND choice='ignore' LIMIT 1;", args) is not null)
         {
             StoreSchema.Execute(_connection, tx, "UPDATE notice SET state='closed',choice='resolved' WHERE pair_no=$p AND reason_key>=$lo AND reason_key<$hi AND state='open' AND COALESCE(choice,'')<>'ignore';", args);
-            tx.Commit();
             return null;
         }
         // Prefer the existing open identity even when a historical row has the incoming cause.
@@ -62,7 +69,6 @@ public sealed partial class SqliteStateStore
         StoreSchema.Execute(_connection, tx,
             "UPDATE notice SET state='closed',choice='resolved' WHERE pair_no=$p AND reason_key>=$lo AND reason_key<$hi AND state='open' AND notice_id<>$id AND COALESCE(choice,'')<>'ignore';",
             ("$p", pair), ("$lo", familyPrefix), ("$hi", familyPrefix + "￿"), ("$id", id));
-        tx.Commit();
         return id;
-    });
+    }
 }

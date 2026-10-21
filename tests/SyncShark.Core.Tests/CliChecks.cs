@@ -1182,6 +1182,58 @@ internal static partial class CliChecks
 
     private static async Task RouteAndStateFreeChecksAsync()
     {
+        var repair = SyncCliRegistry.Parse(["--cli", "conflicts", "resolve", "--pair", "pair-a",
+            "--path", "Folder/Item", "--choice", Massdex.SyncShark.V2.NoticeChoices.RepairHelp,
+            "--key", "notice-a", "--generation", "0", "--yes"]);
+        Require(repair.Command == "conflicts resolve", "repair help uses the shared conflicts action with exact notice identity");
+        var rename = SyncCliRegistry.Parse(["--cli", "conflicts", "resolve", "--pair", "pair-a",
+            "--path", "Folder/Item", "--choice", Massdex.SyncShark.V2.NoticeChoices.Rename,
+            "--name", "Safe.txt", "--key", "notice-a", "--generation", "0", "--yes"]);
+        Require(rename.Name == "Safe.txt", "rename carries the user supplied name through the registry");
+        var children = SyncCliRegistry.Parse(["--cli", "conflicts", "resolve", "--pair", "pair-a",
+            "--path", "Folder", "--choice", Massdex.SyncShark.V2.NoticeChoices.ShowRemaining,
+            "--offset", "50", "--key", "notice-a", "--generation", "0", "--yes"]);
+        Require(children.Offset == 50, "child inspection carries its bounded page offset");
+        var heldPage = SyncCliRegistry.Parse(["--cli", "conflicts", "resolve", "--pair", "pair-a",
+            "--choice", Massdex.SyncShark.V2.NoticeChoices.ShowRemaining, "--name", "123:50",
+            "--key", "held-summary", "--generation", "0", "--yes"]);
+        Require(heldPage.Name == "123:50", "pair summary remaining-items inspection carries its keyset cursor without an item path");
+        foreach (var choice in new[] { Massdex.SyncShark.V2.NoticeChoices.ShowTarget,
+            Massdex.SyncShark.V2.NoticeChoices.SyncTargetSeparately, Massdex.SyncShark.V2.NoticeChoices.CopyLink,
+            Massdex.SyncShark.V2.NoticeChoices.CopyLinkAgain, Massdex.SyncShark.V2.NoticeChoices.RemoveLinkStaging,
+            Massdex.SyncShark.V2.NoticeChoices.CopyLinkOutsideRoot, Massdex.SyncShark.V2.NoticeChoices.MakeAvailableOffline,
+            Massdex.SyncShark.V2.NoticeChoices.ExportDocx, Massdex.SyncShark.V2.NoticeChoices.ExportMarkdown,
+            Massdex.SyncShark.V2.NoticeChoices.ExportPdf, Massdex.SyncShark.V2.NoticeChoices.CheckHistoryAgain,
+            Massdex.SyncShark.V2.NoticeChoices.ReviewDeletion, Massdex.SyncShark.V2.NoticeChoices.OpenStorage,
+            Massdex.SyncShark.V2.NoticeChoices.ReviewReserve,
+            Massdex.SyncShark.V2.NoticeChoices.PreviewMatches, Massdex.SyncShark.V2.NoticeChoices.ChooseFolder,
+            Massdex.SyncShark.V2.NoticeChoices.RemoveRule, Massdex.SyncShark.V2.NoticeChoices.KeepRule })
+        {
+            var action = SyncCliRegistry.Parse(["--cli", "conflicts", "resolve", "--pair", "pair-a",
+                "--path", "Folder/Item", "--choice", choice, "--key", "notice-a", "--generation", "0", "--yes"]);
+            Require(action.Choice == choice && Massdex.SyncShark.V2.NoticeChoices.IsRetryChoice(choice),
+                "offline, export and rebuildable-rule actions share the exact-target CLI notice route");
+        }
+        var confirmation = SyncCliRegistry.Parse(["--cli", "conflicts", "resolve", "--pair", "pair-a",
+            "--path", "link", "--choice", Massdex.SyncShark.V2.NoticeChoices.CopyLinkOutsideRoot,
+            "--name", "D:/Target", "--key", "notice-a", "--generation", "0", "--yes"]);
+        Require(confirmation.Name == "D:/Target", "link confirmation carries the exact target path");
+        var chooseFolder = SyncCliRegistry.Parse(["--cli", "conflicts", "resolve", "--pair", "pair-a",
+            "--path", "typo", "--choice", Massdex.SyncShark.V2.NoticeChoices.ChooseFolder,
+            "--name", "Folder/Sub", "--key", "notice-a", "--generation", "0", "--yes"]);
+        Require(chooseFolder.Name == "Folder/Sub",
+            "choose folder carries the user supplied pair-relative folder path");
+        // F1: a key-only pair notice carries an empty path. Windows PowerShell 5.1 drops a "" argument
+        // to a native exe, so dispatch must not refuse before the v2 runtime's own item-notice check
+        // (which still demands --path for item notices) can see the exact notice.
+        var pairNotice = new PairNoticeDispatchRuntime();
+        var pairNoticeResult = await RunCliAsync(["--cli", "conflicts", "resolve", "--pair", "pair-a",
+            "--choice", Massdex.SyncShark.V2.NoticeChoices.RetryNow, "--key", "notice-a",
+            "--generation", "0", "--yes", "--json"], () => pairNotice);
+        Require(pairNoticeResult.ExitCode == 0 && pairNotice.NoticePath == string.Empty &&
+                pairNotice.NoticeChoice == Massdex.SyncShark.V2.NoticeChoices.RetryNow &&
+                pairNotice.DisposeCount == 1,
+            "a key-only pair notice resolves with --key and --generation and no --path");
         await LocalPathArgumentChecksAsync();
         foreach (var choice in new[] { "review-removal", "review-removal-a", "review-removal-b", "confirm-removal", "removal-next-page", "removal-previous-page" })
         {
@@ -2698,6 +2750,33 @@ internal static partial class CliChecks
                 return true;
         }
         return false;
+    }
+
+    // F1: records the exact arguments dispatch hands to the notice route. The v2 runtime keeps its own
+    // "--path is required for item notices" refusal; this fake only proves dispatch never refuses first.
+    private sealed class PairNoticeDispatchRuntime : SyncCliOperationsBase, ISyncCliRuntime, ISyncCliOperations
+    {
+        protected override SyncAuthorityRuntimeHost Host => throw new InvalidOperationException("No host needed.");
+        protected override PilotStateAuthority StateAuthority => throw new InvalidOperationException("No state needed.");
+        public override string Mode => "fixture";
+        internal string? NoticePath { get; private set; }
+        internal string? NoticeChoice { get; private set; }
+        internal int DisposeCount { get; private set; }
+
+        Task<SyncCliRunData> ISyncCliOperations.ResolveNoticeAsync(string pairId, string relativePath,
+            string choice, string? conflictId, long? generation, string? accountId,
+            CancellationToken cancellationToken, NoticeActionInput input)
+        {
+            NoticePath = relativePath;
+            NoticeChoice = choice;
+            return Task.FromResult(new SyncCliRunData(pairId, "Pair A", 0, 0, 0, 0, 0, false));
+        }
+
+        public override ValueTask DisposeAsync()
+        {
+            DisposeCount++;
+            return ValueTask.CompletedTask;
+        }
     }
 
     private static ISyncCliRuntime NeverOpensState() =>

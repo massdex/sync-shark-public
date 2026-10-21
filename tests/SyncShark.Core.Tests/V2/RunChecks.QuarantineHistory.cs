@@ -501,6 +501,13 @@ internal static partial class RunChecks
         Require((await next).Complete && count == 1, "first caller cancellation does not poison shared history query");
     }
 
+    // Isolate the synthetic inventory case from the broader suite's native scanning/journal checks.
+    public static async Task QuarantineFolderFullScanChecksAsync(string root)
+    {
+        await QuarantineFolderFullScanAsync(root);
+        await QuarantineDeleteChoiceAuthorityAsync(root);
+    }
+
     private static async Task QuarantineFolderFullScanAsync(string root)
     {
         using var store = SqliteStateStore.Open(Path.Combine(root, "folder-full-scan"), Settings, TimeProvider.System);
@@ -527,16 +534,31 @@ internal static partial class RunChecks
         var full = new FullScanHistoryInventory(inventory, fx.A);
         fx.Provider.AddInventory(fx.Pair.A, full);
         var cursorBefore = store.Cursor("ra");
-        await run.IncrementalAsync("p1", new RecordingProgress(), default);
+        Require(await fx.WriterA.IsSourceAbsentAsync(rows["clear"], "clear", default) == true &&
+            await fx.WriterA.IsSourceAbsentAsync(rows["clear/released.txt"], "clear/released.txt", default) == true,
+            "released subtree's real baseline source identities and paths are freshly absent");
+        var report = await run.IncrementalAsync("p1", new RecordingProgress(), default);
         Require(full.FullScans > 0 && await fx.B.ObserveAsync("dir/outside.txt", default) is not null &&
             await fx.B.ObserveAsync("dir/kept.txt", default) is not null && await fx.B.ObserveAsync("dir", default) is not null,
             "full-scan folder Proceed never deletes an out-of-batch or Keep-held child from Dropbox (actual planner and executor)");
-        Require(await fx.B.ObserveAsync("clear/released.txt", default) is null &&
-            store.Recoveries("p1").Any(r => r.Path == "clear/released.txt" && r.Side == Side.B) &&
-            await fx.B.ObserveAsync("held", default) is not null &&
-            await fx.B.ObserveAsync("held/child.txt", default) is not null &&
-            !store.Recoveries("p1").Any(r => PairPath.IsSelfOrUnder(r.Path, "held")) && store.Cursor("ra") == cursorBefore,
-            "complete sibling subtree propagates released deletion with Recovery; held subtree and its Proceed child stay untouched and incomplete cursor does not advance");
+        var released = await fx.B.ObserveAsync("clear/released.txt", default);
+        var heldFolder = await fx.B.ObserveAsync("held", default);
+        var heldChild = await fx.B.ObserveAsync("held/child.txt", default);
+        var recoveries = store.Recoveries("p1").ToArray();
+        var diagnostic = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            Released = released, HeldFolder = heldFolder, HeldChild = heldChild, Recoveries = recoveries,
+            CursorBefore = cursorBefore, CursorAfter = store.Cursor("ra"), Report = report,
+            Retry = store.ReadSyncRetries("p1"), Notices = store.OpenNotices("p1"),
+            SourceReleased = await fx.A.ObserveAsync("clear/released.txt", default)
+        });
+        Require(heldFolder is not null && heldChild is not null &&
+            !recoveries.Any(r => PairPath.IsSelfOrUnder(r.Path, "held")),
+            "held subtree and its Proceed child stay untouched; " + diagnostic);
+        Require(store.Cursor("ra") == cursorBefore,
+            "incomplete quarantine-history cursor does not advance; " + diagnostic);
+        Require(released is null && recoveries.Any(r => r.Path == "clear/released.txt" && r.Side == Side.B),
+            "complete sibling subtree propagates released deletion with Recovery; " + diagnostic);
     }
 
     private static async Task QuarantineParallelReviewsAsync(string root)

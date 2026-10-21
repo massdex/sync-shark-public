@@ -360,12 +360,22 @@ public static class SyncControlNamespace
         using var identity = WindowsIdentity.GetCurrent();
         var sid = identity.User ?? throw new IOException("The current Windows identity has no SID.");
         var security = new DirectorySecurity();
-        security.SetOwner(sid);
+        // The restrictive DACL is mandatory; setting the owner is not. Persist them separately
+        // so a filtered token's denied WRITE_OWNER cannot prevent private staging allocation.
         security.SetAccessRuleProtection(true, false);
         security.AddAccessRule(new FileSystemAccessRule(sid, FileSystemRights.FullControl,
             InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None,
             AccessControlType.Allow));
-        new DirectoryInfo(path).SetAccessControl(security);
+        var directory = new DirectoryInfo(path);
+        directory.SetAccessControl(security);
+        var ownership = new DirectorySecurity();
+        ownership.SetOwner(sid);
+        try { directory.SetAccessControl(ownership); }
+        catch (UnauthorizedAccessException)
+        {
+            System.Diagnostics.Trace.WriteLine(
+                "Private staging DACL applied; owner change was not permitted and the existing owner was retained.");
+        }
     }
 
     private sealed record OwnershipRecord(string Schema, string InstallationId, string NamespaceId);

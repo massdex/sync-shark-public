@@ -10,6 +10,21 @@ internal static partial class RunChecks
     public static async Task RunAsync()
     {
         await PairSummaryDoesNotHoldSiblingsAsync();
+        await HeldRetriesSurviveAsync();
+        await ReleasedSurvivor_FlaggedAsync();
+        await HeldIntentsDoNotStarveAsync();
+        await HeldIntentBoundariesAsync();
+        await HeldIntentSummaryAsync();
+        await HeldIntentRetryParksAsync();
+        await HeldIntentUnparkAfterOutsideCommitAsync();
+        await HeldIntentLinkAndStubRetireAsync();
+        await HeldIntentDestructiveLinkAndStubStayPendingAsync();
+        await HeldIntentPendingStaysUnsyncedAsync();
+        await HeldIntentPendingNoticeCountsAsync();
+        await HeldIntentQuarantineChoiceReconcilesAsync();
+        await HeldIntentApplySummaryUsesPostClassificationAsync();
+        await HeldRetryRotationAndReleaseAsync();
+        await HeldRetryExclusionAndContainersAsync();
         await ItemIgnoreWaitsForSettingsSaveAsync();
         await HistoryFailureDoesNotFailCompletedRunAsync();
         PairMissing_Refused();
@@ -22,8 +37,10 @@ internal static partial class RunChecks
         await FirstSync_PreviewHashesBeforeDecidingAsync();
         await FirstSync_IncompleteScanRefusedAsync();
         await FirstSync_DeletionWinsRepeatablyAsync();
+        await MissingDeleteIdentityChoicesAsync();
         await FirstSync_DeletionLookupIgnoresCaseAsync();
         await Incremental_UnconfirmedContentReplannedAsync();
+        await Incremental_DeleteSourceNoticeSettlesWithoutActionAsync();
         await Incremental_FreeSpacePendingRetriedAsync();
         await Incremental_ConvergesAfterApplyAsync();
         await NestedPair_OuterCannotMoveContainingFolderAsync();
@@ -65,6 +82,7 @@ internal static partial class RunChecks
         await Stop_KeepsFinishedWorkAsync();
         await Progress_ThrottledAsync();
         await Progress_CountsPlannedActionsOnlyAsync();
+        await ReviewedPropagationStillRequiresSourceAbsenceAsync();
         Tally_DuplicateTerminalResultCountsOnce();
         await Activity_ProcessMessagesReachSinkAsync();
         await Activity_HeartbeatWhileQuietAsync();
@@ -377,6 +395,9 @@ internal static partial class RunChecks
                 first.HeldDeletions.SequenceEqual([new HeldDeletion("x.txt", Side.A)]) &&
                 second.HeldDeletions.SequenceEqual(first.HeldDeletions),
                 "both previews hold the same cached rule-19 victim for hash-aware resolution");
+            // This no-baseline victim has explicit per-item review, not a trusted historical source id.
+            // Its approval must survive into the action even when an absence probe cannot grant authority.
+            fx.WriterB.AbsenceUnknown = true;
             var applied = await run.ApplyAsync(fx.Pair.PairId, second, new RecordingProgress(), CancellationToken.None,
                 ReviewedHeld(second));
             Require(applied.Deleted == 1 && applied.Outcome == RunOutcomes.Complete && fx.WriterA.Preserves == 0, "the apply carries out the same delete");
@@ -836,6 +857,25 @@ internal static partial class RunChecks
         Console.WriteLine("PASS Incremental_UnconfirmedContentReplanned");
     }
 
+    private static async Task Incremental_DeleteSourceNoticeSettlesWithoutActionAsync()
+    {
+        var fx = Build();
+        fx.A.Seed("x.txt", "same");
+        fx.B.Seed("x.txt", "same");
+        var run = fx.Run();
+        await FirstSyncAsync(run, fx);
+        var noticeId = DeleteSourceGuard.NoticeId(fx.Pair.PairId, "x.txt");
+        fx.Store.SaveSyncRetry(fx.Pair.PairId, new SyncRetry("x.txt", "sync", 0,
+            "Source still exists", DateTimeOffset.MinValue));
+        fx.Store.AddNotices([new Notice(fx.Pair.PairId, 0, NoticeKind.Info, "x.txt",
+            "Source still exists; nothing deleted", DeleteSourceGuard.ReasonKey, noticeId)]);
+        var report = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        Require(report.Done == 0 && fx.Store.SyncRetryAt(fx.Pair.PairId, "x.txt") is null,
+            "equal baseline replan settles source-guard debt without an effect");
+        Require(fx.Store.NoticeById(fx.Pair.PairId, noticeId) is { Closed: true },
+            "equal no-action replan closes the indexed source guard notice");
+    }
+
     private static int OpenUnconfirmed(Fixture fx) =>
         fx.Store.OpenNotices(fx.Pair.PairId).Count(notice => notice.ReasonKey == PlanNotices.ContentUnconfirmed.Key);
 
@@ -1120,22 +1160,38 @@ internal static partial class RunChecks
     private static async Task Progress_CountsPlannedActionsOnlyAsync()
     {
         var fx = Build();
-        var newFile = fx.A.Seed("new.txt", "1");
-        fx.B.Seed("f", "", ItemKind.Folder);
-        fx.B.Seed("f/a.txt", "a");
-        fx.B.Seed("f/b.txt", "b");
+        fx.A.Seed("f", "", ItemKind.Folder);
+        fx.A.Seed("f/a.txt", "a");
+        fx.A.Seed("f/b.txt", "b");
         var run = fx.Run();
+        await SeedPartialFirstSyncBaselinesAsync(run, fx);
+        // Real baselines retain each source identity; remove the actual source children then their folder.
+        foreach (var path in new[] { "f/a.txt", "f/b.txt", "f" })
+        {
+            var source = await fx.A.ObserveAsync(path, default);
+            await fx.A.DeleteAsync(new SyncAction("remove-source-" + path, 6, ActionKind.Delete,
+                Side.A, path, null, null, source, false, null), default);
+        }
+        var newFile = fx.A.Seed("new.txt", "1");
         // Fill the store's inventory, so the Executor expands the folder delete over its two live children.
         var preview = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
         var folder = await fx.B.ObserveAsync("f", CancellationToken.None);
         var plan = new Plan(fx.Pair.PairId, preview.Gen,
         [
             new SyncAction("copy-new", 1, ActionKind.CopyNew, Side.B, "new.txt", null, newFile, null, false, null),
-            new SyncAction("delete-f", 6, ActionKind.Delete, Side.B, "f", null, null, folder, false, null)
+            new SyncAction("delete-f", 6, ActionKind.Delete, Side.B, "f", null, null, folder, true, null)
+            {
+                FrozenVictimSignature = FolderDelete.Signature(FolderDelete.LiveDescendants(fx.Store, fx.Pair.B.RootId, "f"))
+            }
         ], []);
+        // Reviewed membership does not confer explicit authority. These ordinary deletes must use their
+        // actual baseline identities and verify the absent source, including each expanded child.
+        var reviewed = new[] { "f", "f/a.txt", "f/b.txt" }
+            .Select(path => FolderDelete.VictimKey(Side.B, path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         var sink = new RecordingProgress();
-        await run.ApplyAsync(fx.Pair.PairId, plan, sink, CancellationToken.None);
+        await run.ApplyAsync(fx.Pair.PairId, plan, sink, CancellationToken.None, reviewed);
+        Require(fx.WriterB.Deletes == 3, "the reviewed progress fixture actually removes the folder and both children");
 
         var applying = sink.Reports.Where(report => report.Phase == RunPhases.Applying).ToArray();
         Require(applying.Length > 0, "the apply reports progress");
@@ -1146,6 +1202,60 @@ internal static partial class RunChecks
         Require(applying.Any(report => report.Extra == 2),
             "the expanded folder's child results are reported beside the planned total");
         Console.WriteLine("PASS Progress_CountsPlannedActionsOnly");
+    }
+
+    // Model a first sync interrupted after committed effects but before run-level completion. Execute real
+    // conditional writes and baseline commits without calling the run's first-sync completion transition.
+    private static async Task SeedPartialFirstSyncBaselinesAsync(SyncRun run, Fixture fx)
+    {
+        var prepared = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        await foreach (var result in fx.Executor.ApplyAsync(prepared, fx.WriterA, fx.WriterB, default))
+            Require(result.Outcome == Outcome.Done, "partial first-sync setup commits its real effects");
+        Require(!fx.Store.FirstSyncDone(fx.Pair.PairId) && fx.Store.Baselines(fx.Pair.PairId).Count > 0,
+            "partial first-sync setup retains real baselines without marking first sync complete");
+    }
+
+    // First-sync reviewed membership is not explicit authority for ordinary rule-6 propagation.
+    private static async Task ReviewedPropagationStillRequiresSourceAbsenceAsync()
+    {
+        foreach (var hasBaseline in new[] { false, true })
+        {
+            var fx = Build();
+            var run = fx.Run();
+            if (hasBaseline)
+            {
+                fx.A.Seed("x.txt", "same");
+                await SeedPartialFirstSyncBaselinesAsync(run, fx);
+            }
+            else fx.B.Seed("x.txt", "same");
+            var preview = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            var victim = await fx.B.ObserveAsync("x.txt", default);
+            var baselinesBefore = fx.Store.Baselines(fx.Pair.PairId).ToArray();
+            var plan = new Plan(fx.Pair.PairId, preview.Gen,
+                [new SyncAction("reviewed-rule6", 6, ActionKind.Delete, Side.B, "x.txt", null, null,
+                    victim, true, null)], []);
+            var reviewed = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                { FolderDelete.VictimKey(Side.B, "x.txt") };
+            var report = await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), default, reviewed);
+            Require(fx.WriterB.Deletes == 0 && await fx.B.ObserveAsync("x.txt", default) is not null,
+                "reviewed rule-6 membership never bypasses source-present or missing-identity protection");
+            Require(fx.Store.Baselines(fx.Pair.PairId).SequenceEqual(baselinesBefore),
+                "a blocked reviewed propagation retains its baseline");
+            if (hasBaseline)
+            {
+                Require(await fx.A.ObserveAsync("x.txt", default) is not null && report.Skipped > 0,
+                    "the present historical source causes reviewed first-sync propagation to skip");
+                Require(fx.Store.OpenNotices(fx.Pair.PairId).Any(notice =>
+                    notice.Path == "x.txt" && notice.ReasonKey == DeleteSourceGuard.ReasonKey),
+                    "a reviewed propagation blocked by a present source has a blocked-delete notice");
+            }
+            else
+            {
+                Require(fx.Store.SyncRetryAt(fx.Pair.PairId, "x.txt") is { MissingDeleteIdentityReview: true },
+                    "a reviewed rule-6 victim without source identity still requires per-item review");
+            }
+        }
+        Console.WriteLine("PASS ReviewedPropagationStillRequiresSourceAbsence");
     }
 
     // A terminal result reported twice for the same action still advances the planned count once.
@@ -1850,7 +1960,7 @@ internal static partial class RunChecks
 
     private static Executor NewExecutor(IStateStore store) => new(store, Settings, ExecutorChecks.Admission());
 
-    private static Fixture Build(bool enabled = true, bool record = false, string pairId = "p1", IStateStore? suppliedStore = null, bool localLocal = false, string accountId = "acc")
+    private static Fixture Build(bool enabled = true, bool record = false, string pairId = "p1", IStateStore? suppliedStore = null, bool localLocal = false, string accountId = "acc", bool displayRoot = false)
     {
         var inner = suppliedStore ?? new InMemoryStateStore();
         var recorder = record ? new RecordingStore(inner) : null;
@@ -1860,7 +1970,7 @@ internal static partial class RunChecks
         var writerA = new CountingWriter(a);
         var writerB = new CountingWriter(b);
         var pair = new PairDef(pairId, pairId,
-            new RootDef("ra", SyncProviders.Local, null, "C:\\a", "id:ra"),
+            new RootDef("ra", SyncProviders.Local, null, "C:\\a", displayRoot ? "id:local:00000001:0000000000000001" : "id:ra"),
             new RootDef("rb", localLocal ? SyncProviders.Local : SyncProviders.Dropbox,
                 localLocal ? null : accountId, localLocal ? @"C:\b" : "/b", "id:rb"),
             [], [], enabled);

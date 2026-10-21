@@ -10,14 +10,21 @@ internal sealed class RunScope
     private readonly Func<string, bool> _includeA;
     private readonly Func<string, bool> _includeB;
     private readonly LinkExclusions _links;
+    private LinkExclusions? _scopeLinks;
+    private readonly IReadOnlySet<string>? _activeRetries;
+    private readonly bool _restoredRetriesOnly;
+    internal Action? AfterHideAForTest { get; set; }
     private readonly RebuildableSelection? _rebuildables;
     private ProviderRefusedPaths _refusedFoldersA = new([]);
     private ProviderRefusedPaths _refusedFoldersB = new([]);
 
     public RunScope(IStateStore store, Func<string, bool> includeA, Func<string, bool> includeB,
-        LinkExclusions? links = null, RebuildableSelection? rebuildables = null, IReadOnlyList<SyncIgnoreRule>? rules = null, IReadOnlyDictionary<string, Side>? decisions = null)
+        LinkExclusions? links = null, RebuildableSelection? rebuildables = null, IReadOnlyList<SyncIgnoreRule>? rules = null, IReadOnlyDictionary<string, Side>? decisions = null,
+        IReadOnlySet<string>? activeRetries = null, bool restoredRetriesOnly = false)
     {
         _store = store;
+        _activeRetries = activeRetries;
+        _restoredRetriesOnly = restoredRetriesOnly;
         _decisions = decisions;
         _rules = rules ?? [];
         _includeA = includeA;
@@ -180,10 +187,27 @@ internal sealed class RunScope
     private Scope Prepare(PairDef pair, IReadOnlyList<ItemState> a, IReadOnlyList<ItemState> b,
         IReadOnlyList<Baseline> baselines, IReadOnlyList<ItemState> contextA, IReadOnlyList<ItemState> contextB)
     {
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        using var snapshot = (_store as SqliteStateStore)?.OpenPlanningProtection(pair);
+        _scopeLinks = snapshot is null ? _links : _links.Freeze(snapshot);
+        if (snapshot is not null && _activeRetries is not null)
+        {
+            var active = _activeRetries.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            _scopeLinks = _scopeLinks.WithRetryProtection((path, descendants) =>
+                snapshot.RetryProtected(pair.PairId, path, descendants, active, _restoredRetriesOnly));
+        }
+        try
+        {
         LoadRefusedFolders(pair);
         baselines = NormalizeBaselines(pair, baselines);
-        a = Hide(Normalize(pair, Side.A, a), Side.A);
-        b = Hide(Normalize(pair, Side.B, b), Side.B);
+        var hiddenA = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var hiddenB = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        a = Hide(Normalize(pair, Side.A, a), Side.A, baselines.Count == 0 ? null : hiddenA);
+        AfterHideAForTest?.Invoke();
+        b = Hide(Normalize(pair, Side.B, b), Side.B, baselines.Count == 0 ? null : hiddenB);
+        // Hidden means unknown, never absent. Remove the whole established triple,
+        // including a counterpart at a different (moved/mapped) path.
+        (a, b, baselines) = HideProtectedTriples(a, b, baselines, hiddenA, hiddenB);
         if (WindowsPair(pair))
         {
             // Exclusions follow an established link, not an arbitrary same-spelled other entity.
@@ -204,7 +228,49 @@ internal sealed class RunScope
             ContextA = Hide(Normalize(pair, Side.A, contextA), Side.A).DistinctBy(i => i.ObjectId).ToArray(),
             ContextB = Hide(Normalize(pair, Side.B, contextB), Side.B).DistinctBy(i => i.ObjectId).ToArray()
         };
+        }
+        finally
+        {
+            _scopeLinks = null;
+            var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(started);
+            RunLog.Trace($"protection scope snapshot: {elapsed.TotalMilliseconds:F0} ms");
+            if (elapsed > TimeSpan.FromSeconds(60))
+                RunLog.Trace("WARNING: protection scope snapshot exceeded 60 seconds; retained consistent protection until scope completion");
+        }
     }
+
+    private (IReadOnlyList<ItemState> A, IReadOnlyList<ItemState> B, IReadOnlyList<Baseline> Baselines)
+        HideProtectedTriples(IReadOnlyList<ItemState> a, IReadOnlyList<ItemState> b, IReadOnlyList<Baseline> baselines,
+            HashSet<string> hiddenA, HashSet<string> hiddenB)
+    {
+        List<Baseline>? visible = null;
+        var links = _scopeLinks ?? _links;
+        for (var index = 0; index < baselines.Count; index++)
+        {
+            if (index % 128 == 0)
+                links = (_scopeLinks ?? _links).ForPaths(baselines.Skip(index).Take(128)
+                    .SelectMany(basis => new[] { basis.A.Path, DropboxNameMapping.MatchPath(basis.A),
+                        basis.B.Path, DropboxNameMapping.MatchPath(basis.B) }));
+            var basis = baselines[index];
+            var covered = hiddenA.Contains(basis.A.ObjectId) || hiddenB.Contains(basis.B.ObjectId) ||
+                Covered(basis.A, Side.A, links) || Covered(basis.B, Side.B, links);
+            if (covered)
+            {
+                visible ??= baselines.Take(index).ToList();
+                hiddenA.Add(basis.A.ObjectId);
+                hiddenB.Add(basis.B.ObjectId);
+            }
+            else visible?.Add(basis);
+        }
+        if (visible is null) return (a, b, baselines);
+        return (a.Where(item => !hiddenA.Contains(item.ObjectId)).ToArray(),
+            b.Where(item => !hiddenB.Contains(item.ObjectId)).ToArray(), visible);
+    }
+
+    private bool Covered(ItemState item, Side side, LinkExclusions links) =>
+        links.Count != 0 && (links.Covers(item.Path) || links.Covers(DropboxNameMapping.MatchPath(item))) &&
+        !(_rebuildables is { } chosen && chosen.Cloud == side &&
+          UnderRebuildable(chosen, item.Path) && !links.CoversExceptLocalLinks(item.Path));
 
     private static IReadOnlyList<ItemState> CarryIgnored(IReadOnlyList<ItemState> items,
         HashSet<string> ids)
@@ -223,20 +289,18 @@ internal sealed class RunScope
     }
 
     // Decision 59: links never reach either item rows or mapping context.
-    private IReadOnlyList<ItemState> Hide(IReadOnlyList<ItemState> items, Side side)
+    private IReadOnlyList<ItemState> Hide(IReadOnlyList<ItemState> items, Side side, HashSet<string>? hidden = null)
     {
         List<ItemState>? visible = null;
-        var links = _links;
+        var links = _scopeLinks ?? _links;
         for (var index = 0; index < items.Count; index++)
         {
             if (index % 256 == 0)
-                links = _links.ForPaths(items.Skip(index).Take(256)
+                links = (_scopeLinks ?? _links).ForPaths(items.Skip(index).Take(256)
                     .SelectMany(item => new[] { item.Path, DropboxNameMapping.MatchPath(item) }));
             var item = items[index];
-            var alias = DropboxNameMapping.MatchPath(item);
-            var covered = links.Count != 0 && (links.Covers(item.Path) || links.Covers(alias)) &&
-                !(_rebuildables is { } chosen && chosen.Cloud == side &&
-                  UnderRebuildable(chosen, item.Path) && !links.CoversExceptLocalLinks(item.Path));
+            var covered = Covered(item, side, links);
+            if (covered) hidden?.Add(item.ObjectId);
             var flags = item.Flags;
             var refused = side == Side.A ? _refusedFoldersA : _refusedFoldersB;
             var download = _downloadChoices.Contains(item.Path) && item.Kind == ItemKind.File;

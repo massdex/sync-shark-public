@@ -178,7 +178,37 @@ public static partial class Planner
             return;                                                                       // rule 35 (before choices)
         if (sA == RowState.Unreadable || sB == RowState.Unreadable)
         {
-            AddNotice(ctx, 30, NoticeKind.Info, PrimaryPath(row), PlanNotices.CannotRead); // rule 30
+            foreach (var item in new[] { row.A, row.B })
+            {
+                if (item is null) continue;
+                var path = DropboxNameMapping.MatchPath(item);
+                var parentEnd = path.LastIndexOf('/');
+                if (parentEnd >= 0 && !PilotPath.IsWindowsTransferPath(path[..parentEnd])) return;
+            }
+            var invalidName = new[] { (Item: row.A, Side: Side.A), (Item: row.B, Side: Side.B) }
+                .FirstOrDefault(entry => entry.Item is not null && !entry.Item.Flags.HasFlag(ItemFlags.RequiresExport) && !PilotPath.IsWindowsTransferPath(DropboxNameMapping.MatchPath(entry.Item)));
+            if (invalidName.Item is { } invalid)
+            {
+                ctx.Notices.Add(new Notice(ctx.PairId, 30, NoticeKind.Info, invalid.Path,
+                    "This name is not supported by Windows. Rename it to sync. Suggested name: " + BlockerNames.Suggest(invalid.Path),
+                    "windows-name-invalid", Repair: new NoticeRepair(invalidName.Side, invalid)));
+                return;
+            }
+            var exportRequired = (row.A?.Flags.HasFlag(ItemFlags.RequiresExport) ?? false) ||
+                (row.B?.Flags.HasFlag(ItemFlags.RequiresExport) ?? false);
+            if (!exportRequired)
+            {
+                AddNotice(ctx, 30, NoticeKind.Info, PrimaryPath(row), PlanNotices.CannotRead); // rule 30
+                return;
+            }
+            // Offer exactly the formats the provider reported for this item; the notice persists those formats so
+            // the action needs no rescan. Older rows without export facts leave the field null (legacy guidance).
+            var exportItem = new[] { row.A, row.B }.FirstOrDefault(item =>
+                item is not null && item.Flags.HasFlag(ItemFlags.RequiresExport));
+            var exportNotice = new Notice(ctx.PairId, 30, NoticeKind.Info, PrimaryPath(row),
+                PlanNotices.ExportRequired.Detail, PlanNotices.ExportRequired.Key,
+                ExportInfo: DropboxExportFacts.ForItem(exportItem));
+            if (ctx.NoticeKeys.Add(exportNotice)) ctx.Notices.Add(exportNotice);
             return;
         }
         // a path the reviewed prepare saw on both sides is ordinary ongoing sync when it becomes

@@ -1,5 +1,9 @@
 using Massdex.SyncShark;
 
+// Before opening product state or credentials: expose Cloud Files placeholder attributes for the
+// whole process. Non-Windows hosts make no native call.
+WindowsPlaceholderCompatibility.Expose();
+
 // This diagnostic is never an implicit primary-account or legacy-pair reader.
 // Reuse the product CLI's exact-account/provider/credential routing rather than
 // owning a second browser, credential lookup or folder-selection mechanism.

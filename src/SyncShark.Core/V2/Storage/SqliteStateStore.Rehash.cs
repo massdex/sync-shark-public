@@ -83,7 +83,7 @@ public sealed partial class SqliteStateStore
     {
         // Fresh authoritative writes supersede even metadata-identical staged gap results.
         StoreSchema.Execute(_connection, tx,
-            "UPDATE local_gap_item SET hash=NULL,proof_json=NULL,result_seq=0 WHERE root_no=$r AND object_id=$o;",
+            "UPDATE local_gap_item SET hash=NULL,proof_json=NULL,result_seq=0,metadata_ready=0 WHERE root_no=$r AND object_id=$o;",
             ("$r", root), ("$o", item.ObjectId));
         StoreSchema.Execute(_connection, tx,
             "INSERT INTO local_rehash(root_no,object_id,last_attempt,reason) VALUES($r,$o,$order,$why) " +
@@ -95,7 +95,7 @@ public sealed partial class SqliteStateStore
     }
 
     internal string RehashRootSql => _storageEnabled
-        ? "SELECT 1 FROM file_state INDEXED BY fs_nonpointer WHERE root_no=$r AND (flags & ~512) != 0 AND (flags & 256)!=0 LIMIT 1;"
+        ? "SELECT 1 FROM file_state INDEXED BY fs_nonpointer WHERE root_no=$r AND (flags & ~1024) != 0 AND (flags & 256)!=0 LIMIT 1;"
         : "SELECT 1 FROM file_state INDEXED BY fs_flagged WHERE root_no=$r AND flags != 0 AND (flags & 256)!=0 LIMIT 1;";
 
     public bool RehashTouches(string rootId, string path, bool descendants) => InStore(() =>

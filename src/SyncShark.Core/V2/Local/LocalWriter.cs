@@ -6,7 +6,7 @@ namespace Massdex.SyncShark.V2;
 
 /// <summary>Applies planned effects to one local NTFS folder through the conditional local endpoint store.</summary>
 public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResourceEndpoint,
-    ILocalFreeSpaceAdmission, ISyncDirectDownloadTarget, ILocalRetainedNoticeReader, IRecoveryAvailability
+    ILocalFreeSpaceAdmission, ISyncDirectDownloadTarget, ILocalRetainedNoticeReader, IRecoveryAvailability, ISourceAbsenceProbe
 
 {
     private readonly SyncLocalEndpointStore _store;
@@ -483,6 +483,40 @@ public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResource
             ?? throw new FileNotFoundException("The retained Recovery archive is unavailable.", path);
         return new FileStream(archive.RecoveryPath, FileMode.Open, FileAccess.Read, FileShare.Read,
             64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+    }
+
+    /// <inheritdoc/>
+    public async Task<ItemState?> ObserveSourceMetadataAsync(string path, CancellationToken ct)
+    {
+        var item = await _store.FindMetadataAtPathAsync(path, ct).ConfigureAwait(false);
+        return item is null ? null : new ItemState(item.RelativePath,
+            item.Kind == PilotEntryKind.Directory ? ItemKind.Folder : ItemKind.File,
+            item.Id!, null, null, item.Size, DateTimeOffset.MinValue, ItemFlags.None);
+    }
+
+    /// <inheritdoc/>
+    public Task<bool?> IsHistoricalSourcePresentAsync(ItemState historical, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        using var absence = new LocalFileAbsence(_rootPath, _rootIdentity);
+        return Task.FromResult<bool?>(absence.Check(historical) switch
+        {
+            FileAbsence.Present => true,
+            FileAbsence.Gone => false,
+            _ => null,
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task<bool?> IsSourceAbsentAsync(ItemState? historical, string path, CancellationToken ct)
+    {
+        bool? present = historical is null ? false : await IsHistoricalSourcePresentAsync(historical, ct).ConfigureAwait(false);
+        if (present == true) return false;
+        // A replacement at the old path blocks even when the historical identity was retired.
+        if (await ObserveSourceMetadataAsync(path, ct).ConfigureAwait(false) is not null) return false;
+        if (historical is not null && !PairPath.Same(historical.Path, path) &&
+            await ObserveSourceMetadataAsync(historical.Path, ct).ConfigureAwait(false) is not null) return false;
+        return present == false ? true : null;
     }
 
     /// <inheritdoc/>

@@ -10,6 +10,9 @@ internal static class ProcessEntry
     [STAThread]
     public static int Main(string[] args)
     {
+        // Process-wide and before any product file I/O: Windows otherwise disguises the placeholder
+        // attributes this process must see. A missing API is reported, never thrown.
+        WindowsPlaceholderCompatibility.Expose();
         if (CliEntry.IsCliInvocation(args)) return CliEntry.Execute(args);
         var selected = CoreSwitch.Select(args, Environment.GetEnvironmentVariable(CoreSwitch.EnvironmentVariable));
         if (selected.Args is ["--background-host"] or ["--autosync-supervisor"])

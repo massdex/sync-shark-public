@@ -187,7 +187,7 @@ public sealed partial class V2SyncHost
     {
         cancellationToken.ThrowIfCancellationRequested();
         var count = _store.Pairs().Where(pair => InScope(pair, connectionId))
-            .Sum(pair => _store.UnresolvedIntents(pair.PairId).Count);
+            .Sum(pair => _store.CountUnresolvedIntents(pair.PairId));
         return Task.FromResult(count);
     }
 
@@ -284,7 +284,8 @@ public sealed partial class V2SyncHost
 
     private static string Summary(SyncPair pair, RunReport report) =>
         $"{pair.Name} ({report.Outcome}): {report.Uploaded} uploaded, {report.Downloaded} downloaded, {report.Deleted} deleted, " +
-        $"{report.Moved} moved, {report.KeptBoth} kept both, {report.Held} held, {report.Failed} failed.";
+        $"{report.Moved} moved, {report.KeptBoth} kept both, {report.Held} held, {report.Failed} failed." +
+        (report.PendingVerification > 0 ? $" {report.PendingVerification} changes pending background verification." : string.Empty);
 
     // A failed progress delivery is named on the host's log-error channel, which the window shows with the log.
     private void ProgressNotShown(Exception error) =>

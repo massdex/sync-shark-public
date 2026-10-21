@@ -9,7 +9,7 @@ public enum ItemKind { File, Folder }
 /// <summary>Bit flags describing special states of an item.</summary>
 /// <remarks>Placeholder: an online-only cloud-files stub (decision 57). Link: a junction, symlink or mount point that is
 /// never followed; it and its path on both sides are excluded from the pair (decision 59).</remarks>
-[Flags] public enum ItemFlags { None = 0, Placeholder = 1, Locked = 2, Unreadable = 4, Ignored = 8, Link = 16, CarriedIgnore = 32, ProviderNameRefused = 64, Quarantined = 128, NeedsRehash = 256, OwnedPointer = 512 }
+[Flags] public enum ItemFlags { None = 0, Placeholder = 1, Locked = 2, Unreadable = 4, Ignored = 8, Link = 16, CarriedIgnore = 32, ProviderNameRefused = 64, Quarantined = 128, NeedsRehash = 256, RequiresExport = 512, OwnedPointer = 1024 }
 
 /// <summary>One item's observed state on one side.</summary>
 public sealed record ItemState(string Path, ItemKind Kind, string ObjectId, string? VersionId,
@@ -104,6 +104,10 @@ public sealed record SyncAction(string ActionId, int Rule, ActionKind Kind, Side
     /// </summary>
     public bool ChoiceRemove { get; init; }
 
+    /// <summary>Trusted historical opposite object ID for a prepared deletion without a baseline; absence checks
+    /// verify this identity as well as the exact path. Older action JSON may omit it.</summary>
+    public string? DeletionSourceObjectId { get; init; }
+
     private string _actionId = ActionId;
     /// <summary>The durable effect id; finalized by the planner before the action escapes its draft.</summary>
     public string ActionId { get => _actionId; init => _actionId = value; }
@@ -123,6 +127,9 @@ public sealed record SyncAction(string ActionId, int Rule, ActionKind Kind, Side
 
     /// <summary>Re-include retired this intent's old history. Verify its effect, but never restore a baseline from it.</summary>
     public bool SuppressReconciledBaseline { get; init; }
+
+    /// <summary>Explicit blocker repair requires the observed revision as well as the stable identity.</summary>
+    public bool RequireMoveRevision { get; init; }
 
     /// <summary>Close this same-pair notice atomically only when its explicit restore effect commits Done.</summary>
     public string? ResolvedNoticeId { get; init; }
@@ -196,7 +203,13 @@ public sealed record SyncRetry(string Path, string Kind, int Attempts, string La
     DateTimeOffset RetryAfter, PrepareMatch? Match = null, HeldDeletion? Held = null,
     IReadOnlyList<SyncAction>? ReviewedActions = null, bool HeldReviewed = false,
     IReadOnlyList<SyncAction>? ProposedActions = null, ItemState? HeldExpected = null,
-    IReadOnlyList<string>? ReadRoots = null, Notice? PendingNotice = null);
+    IReadOnlyList<string>? ReadRoots = null, Notice? PendingNotice = null, bool ReprobeEvidence = false, bool EvidenceReleased = false)
+{
+    /// <summary>Display-only deletion hold; never supplies deletion authority or changes retry ownership.</summary>
+    public string? DeleteBlockedDetail { get; init; }
+    public bool DeleteBlockedDeferred { get; init; }
+    public bool MissingDeleteIdentityReview { get; init; }
+}
 
 /// <summary>The kind of notice raised to the user.</summary>
 public enum NoticeKind { Info, KeepBoth, EditBeatsDelete, AutoConflict, UserDecision }
@@ -207,7 +220,8 @@ public enum NoticeKind { Info, KeepBoth, EditBeatsDelete, AutoConflict, UserDeci
 /// </summary>
 public sealed record Notice(string PairId, int Rule, NoticeKind Kind, string Path, string Detail, string ReasonKey,
     string? NoticeId = null, FreeSpaceNoticeMetadata? FreeSpace = null,
-    RetainedNoticeVersion? RetainedVersion = null, QuarantineNotice? Quarantine = null, DefenderHistoryNotice? DefenderHistory = null, ConflictNoticeVersions? ConflictVersions = null, ConflictNoticeOperation? ConflictOperation = null, IReadOnlyList<Side>? RemovalSides = null, string? RemovalOriginReason = null, StorageNotice? Storage = null);
+    RetainedNoticeVersion? RetainedVersion = null, QuarantineNotice? Quarantine = null, DefenderHistoryNotice? DefenderHistory = null, ConflictNoticeVersions? ConflictVersions = null, ConflictNoticeOperation? ConflictOperation = null, IReadOnlyList<Side>? RemovalSides = null, string? RemovalOriginReason = null, NoticeRepair? Repair = null, bool FolderInspection = false, bool? UploadSuspended = null, Side? UploadQuotaSide = null, long? UploadQuotaNeedBytes = null,
+    NoticeRebuildableRule? RebuildableRule = null, NoticeExportInfo? ExportInfo = null, StorageNotice? Storage = null);
 
 public sealed record DefenderHistoryNotice(string RootId, string Batch, long Count, string Cause, RootDef? ReviewedRoot = null,
     DefenderSharedRelease? SharedRelease = null);
@@ -269,6 +283,20 @@ public enum ChoiceVictimState
 public sealed record ConflictNoticeVersions(ItemState A, ItemState B, Baseline? Base = null,
     string? CopyOnA = null, string? CopyOnB = null, SyncAction? Incoming = null,
     ItemState? PendingOccupantSource = null);
+
+/// <summary>The formats the cloud provider itself said it supports for one document. An empty list means the
+/// provider reported no export_info at all, so no export button is offered; null means an older notice whose
+/// formats were never captured.</summary>
+public sealed record NoticeExportInfo(string? DefaultFormat, IReadOnlyList<string> Formats);
+
+/// <summary>Identity-bound repair evidence, stored in the existing notice detail payload.</summary>
+/// <param name="RetainedStaging">Bounded (20) list of excluded staging folders this link's attempts created; never deleted.</param>
+public sealed record NoticeRepair(Side Side, ItemState Item, string? Destination = null,
+    IReadOnlyList<string>? RetainedStaging = null);
+
+/// <summary>A first-sync rebuildable rule whose scoped prefix matched no folder. The category and prefix are the
+/// rule's stable identity: changing either is a different rule, so a kept notice is not raised again for it.</summary>
+public sealed record NoticeRebuildableRule(string Category, string Prefix);
 
 /// <summary>Exact per-item provenance for explicitly recovering a newest-wins loser, never a path-based guess.</summary>
 public sealed record RetainedNoticeVersion(string ActionId, Side Side, ItemState Loser, ItemState Winner);
@@ -387,6 +415,11 @@ public sealed record ActionResult(string ActionId, Outcome Outcome, ItemState? N
 
     /// <summary>Fresh reconciliation proved only a temporary wait; null requires ordinary review.</summary>
     public int? RetryAfterSeconds { get; init; }
+    public bool UploadQuotaBlocked { get; init; }
+
+    /// <summary>No delete attempted because its source evidence was unverified; retain baseline and queue replan.</summary>
+    public bool DeleteSourceUnconfirmed { get; init; }
+    public bool DeleteSourceIdentityMissing { get; init; }
 
     /// <summary>Handled by ignoring the refused name, not by completing an endpoint effect.</summary>
     public bool ProviderNameRefused { get; init; }
@@ -400,6 +433,9 @@ public sealed record ActionResult(string ActionId, Outcome Outcome, ItemState? N
     public bool ParentNameRefused { get; init; }
     /// <summary>Settled download has no target: atomically forget only its baseline, never propagate a deletion.</summary>
     public bool ForgetAbsentDownloadBaseline { get; init; }
+    /// <summary>Interrupted delete ended with target absent but the original source alive: atomically
+    /// retire only this baseline and queue restoration, never infer an opposite-direction user deletion.</summary>
+    public bool ForgetUnsafeDeleteBaseline { get; init; }
 }
 
 /// <summary>A configured pair and its rules.</summary>

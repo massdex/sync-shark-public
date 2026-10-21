@@ -3,7 +3,7 @@ namespace Massdex.SyncShark.V2;
 internal static class NewPointerNativeChecks
 {
     // Invoke only inside the explicitly disposable registered native fixture. This method registers nothing.
-    internal static void CheckCreateOnly(WindowsCloudFilesProvider provider, PilotDirectoryIdentity rootIdentity,
+    internal static PilotRemoteEntry CheckCreateOnly(WindowsCloudFilesProvider provider, PilotDirectoryIdentity rootIdentity,
         PilotRemoteEntry remote, string hydratedPath, Action assertNoAdditionalDownloads)
     {
         var newRemote = remote with { RelativePath = "direct-new-pointer.bin", ModifiedUtc = DateTimeOffset.UnixEpoch.AddDays(1) };
@@ -21,5 +21,6 @@ internal static class NewPointerNativeChecks
         { rejected = true; }
         if (!rejected || !File.ReadAllBytes(hydratedPath).SequenceEqual(bytes))
             throw new IOException("Create-only pointer publication overwrote a hydrated local file.");
+        return newRemote;
     }
 }

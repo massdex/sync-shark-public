@@ -78,30 +78,58 @@ public static partial class NtfsUsnJournal
     [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
     private static extern bool SetFileInformationByHandle(SafeFileHandle handle, int infoClass, ref int value, int size);
 
-    internal static bool TryReadFileUsn(SafeFileHandle handle, out NtfsFileUsn? evidence)
+    internal static bool TryReadFileUsn(SafeFileHandle handle, out NtfsFileUsn? evidence) =>
+        TryReadFileUsn(handle, out evidence, out _);
+
+    internal static bool TryReadFileUsn(SafeFileHandle handle, out NtfsFileUsn? evidence, out string? failureReason)
     {
         evidence = null;
-        if (!PilotDirectoryLease.GetFileInformationByHandle(handle, out var before) ||
-            (before.FileAttributes & (FileAttributes.Directory | FileAttributes.ReparsePoint |
-                FileAttributes.Offline | (FileAttributes)0x00400000 | (FileAttributes)0x00040000)) != 0)
+        failureReason = null;
+        if (!PilotDirectoryLease.GetFileInformationByHandle(handle, out var before))
+        {
+            failureReason = "metadata-unavailable(" + System.Runtime.InteropServices.Marshal.GetLastWin32Error() + ")";
             return false;
+        }
+        if ((before.FileAttributes & (FileAttributes.Directory | FileAttributes.ReparsePoint |
+                FileAttributes.Offline | (FileAttributes)0x00400000 | (FileAttributes)0x00040000)) != 0)
+        {
+            failureReason = "metadata-unsupported";
+            return false;
+        }
         var bytes = new byte[4096];
-        if (!DeviceIoControlBytes(handle, FsctlReadFileUsnData, null, 0, bytes, bytes.Length,
-                out var count, IntPtr.Zero) || count < 60 ||
-            BinaryPrimitives.ReadUInt32LittleEndian(bytes) > count ||
+        if (!DeviceIoControlBytes(handle, FsctlReadFileUsnData, null, 0, bytes, bytes.Length, out var count, IntPtr.Zero))
+        {
+            failureReason = "ioctl-failed(" + System.Runtime.InteropServices.Marshal.GetLastWin32Error() + ")";
+            return false;
+        }
+        if (count < 60 || BinaryPrimitives.ReadUInt32LittleEndian(bytes) > count ||
             BinaryPrimitives.ReadUInt32LittleEndian(bytes) < 60 ||
             BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(4)) != 2)
+        {
+            failureReason = "ioctl-unsupported-record";
             return false; // Unknown/unsupported record formats are never evidence of unchanged content.
+        }
         var id = ((ulong)before.FileIndexHigh << 32) | before.FileIndexLow;
         var usn = BinaryPrimitives.ReadInt64LittleEndian(bytes.AsSpan(24));
-        if (usn < 0 || BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(8)) != id ||
-            !PilotDirectoryLease.GetFileInformationByHandle(handle, out var after) ||
-            after.VolumeSerialNumber != before.VolumeSerialNumber ||
+        if (usn < 0 || BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(8)) != id)
+        {
+            failureReason = "metadata-mismatch";
+            return false;
+        }
+        if (!PilotDirectoryLease.GetFileInformationByHandle(handle, out var after))
+        {
+            failureReason = "metadata-unavailable(" + System.Runtime.InteropServices.Marshal.GetLastWin32Error() + ")";
+            return false;
+        }
+        if (after.VolumeSerialNumber != before.VolumeSerialNumber ||
             after.FileIndexHigh != before.FileIndexHigh || after.FileIndexLow != before.FileIndexLow ||
             after.FileSizeHigh != before.FileSizeHigh || after.FileSizeLow != before.FileSizeLow ||
             after.LastWriteTime.dwHighDateTime != before.LastWriteTime.dwHighDateTime ||
             after.LastWriteTime.dwLowDateTime != before.LastWriteTime.dwLowDateTime)
+        {
+            failureReason = "metadata-mismatch";
             return false;
+        }
         evidence = new(before.VolumeSerialNumber, id, usn,
             checked((long)(((ulong)before.FileSizeHigh << 32) | before.FileSizeLow)),
             ((long)before.LastWriteTime.dwHighDateTime << 32) | (uint)before.LastWriteTime.dwLowDateTime);

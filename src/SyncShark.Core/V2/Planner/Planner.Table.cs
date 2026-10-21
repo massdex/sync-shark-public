@@ -196,6 +196,57 @@ public static partial class Planner
     private static string? DeletedSideHash(PlanRow row, Side present) =>
         present == Side.A ? row.Base?.B.Hash : row.Base?.A.Hash;
 
+    // Local bytes only Recovery can restore; a cloud target keeps the deleted revision in its own history.
+    private static bool IsLocalTarget(Context ctx, Side target) =>
+        string.Equals(target == Side.A ? ctx.Options.ProviderA : ctx.Options.ProviderB,
+            SyncProviders.Local, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The hash inside a prepare stamp ("objectId|h:hash"); null for folder, version or metadata stamps.</summary>
+    private static string? PreparedHash(string stamp)
+    {
+        var split = stamp.IndexOf('|');
+        var kind = split < 0 ? string.Empty : stamp[(split + 1)..];
+        return kind.StartsWith("h:", StringComparison.Ordinal) && kind.Length > 2 ? kind[2..] : null;
+    }
+
+    /// <summary>The endpoint object id in a prepare stamp ("objectId|stamp"); null unless id and stamp type are valid.</summary>
+    private static string? PreparedObjectId(PrepareMatch match, Side side)
+    {
+        var stamp = side == Side.A ? match.A : match.B;
+        var split = stamp.IndexOf('|');
+        return split > 0 && ValidStampType(stamp[(split + 1)..]) ? stamp[..split] : null;
+    }
+
+    // The kinds Content.SideStamp writes: folder, hash, version, or "m:size:ticks" metadata.
+    private static bool ValidStampType(string kind)
+    {
+        if (kind == "d") return true;
+        if (kind.Length <= 2) return false;
+        if ((kind[0] == 'h' || kind[0] == 'v') && kind[1] == ':') return true;
+        if (!kind.StartsWith("m:", StringComparison.Ordinal)) return false;
+        var parts = kind[2..].Split(':');
+        return parts.Length == 2 &&
+            long.TryParse(parts[0], System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out _) &&
+            long.TryParse(parts[1], System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out _);
+    }
+
+    // Emit has no seam for the optional identity, which lets the executor recognize a relocated original.
+    // A prepared Delete without a trusted opposite identity never runs path-only: it holds with one notice.
+    private static void EmitPreparedDeleteOrHold(Context ctx, PlanRow row, Side target, ItemState victim,
+        string? deletionSourceObjectId)
+    {
+        if (deletionSourceObjectId is null)
+        {
+            Emit(ctx, row, 6, ActionKind.Hold, target, victim.Path, null, null, null, false, null);
+            AddNotice(ctx, 6, NoticeKind.Info, victim.Path, PlanNotices.ContentUnconfirmed);
+            return;
+        }
+        Append(ctx, ctx.Draft, row, new SyncAction("s" + ctx.Draft.Count, 6, ActionKind.Delete, target,
+            victim.Path, null, null, victim, true, null) { DeletionSourceObjectId = deletionSourceObjectId });
+    }
+
     private static void WithoutBaseline(Context ctx, PlanRow row, RowState sA, RowState sB)
     {
         if (row.A is not null && row.B is not null)
@@ -234,9 +285,13 @@ public static partial class Planner
     /// <summary>
     /// one-sided rows whose path the reviewed prepare saw on both sides are ordinary ongoing sync.
     /// The survivor still at its prepare-time identity/content means the other side's post-prepare disappearance is a
-    /// normal deletion to propagate; a changed survivor wins (RQ-043) and is copied back. Runs before first-sync
-    /// winners and one-sided choices (Planner.Dispatch), so a copy choice cannot resurrect the survivor and a remove
-    /// choice cannot turn an ordinary propagation into a reviewed removal.
+    /// normal deletion to propagate; a changed survivor wins (RQ-043) and is copied back. A local file additionally
+    /// needs content proof: a hash-stamped prepare that still matches (identity and bytes) deletes recovery-first, an
+    /// unknown hash (or one the prepare never recorded) holds with one notice, and a changed identity or hash is the
+    /// copy-back. A prepared Delete also holds when the absent side's prepare stamp carries no valid identity, so a
+    /// Delete never runs path-only. Folders carry no hash and propagate unchanged. Runs before first-sync winners and
+    /// one-sided choices (Planner.Dispatch), so a copy choice cannot resurrect the survivor and a remove choice cannot
+    /// turn an ordinary propagation into a reviewed removal.
     /// </summary>
     private static bool TryPreparedMatch(Context ctx, PlanRow row)
     {
@@ -252,9 +307,31 @@ public static partial class Planner
         if (!absentKnown) return false;
         if (!matched.TryGetValue(cur.Path, out var prepareMatch))
             return false;
-        if (prepareMatch.Unchanged(present, cur))
+        var missing = Opposite(present);
+        // Trusted opposite identity from "objectId|stamp". A missing or malformed stamp yields no identity, and
+        // the prepared Delete then holds with one notice instead of running path-only.
+        var deletionSourceObjectId = PreparedObjectId(prepareMatch, missing);
+        // Local files need content proof: row.Base is null here, so the prepare stamp's hash is the baseline.
+        // Unknown hash (or a stamp that recorded none) holds with one dedup notice. A hash-stamped prepare that
+        // still matches proves both identity and content and deletes; a different identity or hash is the RQ-043
+        // copy-back below. Folders carry no hash and still propagate.
+        if (IsLocalTarget(ctx, present) && cur.Kind == ItemKind.File)
         {
-            Emit(ctx, row, 6, ActionKind.Delete, present, cur.Path, null, null, cur, true, null);
+            if (cur.Hash is null || PreparedHash(present == Side.A ? prepareMatch.A : prepareMatch.B) is null)
+            {
+                Emit(ctx, row, 6, ActionKind.Hold, present, cur.Path, null, null, null, false, null);
+                AddNotice(ctx, 6, NoticeKind.Info, cur.Path, PlanNotices.ContentUnconfirmed);
+                return true;
+            }
+            if (prepareMatch.Unchanged(present, cur))
+            {
+                EmitPreparedDeleteOrHold(ctx, row, present, cur, deletionSourceObjectId);
+                return true;
+            }
+        }
+        else if (prepareMatch.Unchanged(present, cur))
+        {
+            EmitPreparedDeleteOrHold(ctx, row, present, cur, deletionSourceObjectId);
             return true;
         }
         CreateOn(ctx, row, 7, Opposite(present), cur.Path, cur,

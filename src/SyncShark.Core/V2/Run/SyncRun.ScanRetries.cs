@@ -91,6 +91,17 @@ public sealed partial class SyncRun
                         if (notice.ReasonKey == "sync-retry" && PairPath.Same(notice.Path, retry.Path) && notice.NoticeId is not null)
                             _store.CloseNotice(notice.NoticeId, "resolved");
             }
+        // A transient metadata observation is one durable per-entity retry, but above the limit it is ONE pair
+        // notice: a root-wide handle/registration cause must not write a notice per file. Counting and testing
+        // the per-path observation inline keeps no second million-entry collection.
+        var transientCount = failed.Count(path => path.Length > 0 && IsTransientObservation(scan, path));
+        // Aggregation is a SQLite notice-store feature; other stores keep the per-path contract unchanged.
+        var storage = _store as SqliteStateStore;
+        var summaryState = storage?.OwnedPointerObservationSummaryState(pair.PairId) ?? ObservationSummaryState.None;
+        var aggregateTransient = transientCount > StorageNotices.NoticeAggregateLimit && storage is not null;
+        // While a summary is open (or the user silenced it) it stands for the remaining failures until none
+        // remain: deaggregating below the limit would hide unresolved failures until the next scan.
+        var keepTransientSummary = summaryState is ObservationSummaryState.Open or ObservationSummaryState.Ignored;
         foreach (var path in failed)
         {
             var previous = _store.SyncRetryAt(pair.PairId, path);
@@ -109,13 +120,54 @@ public sealed partial class SyncRun
             }
             if (previous?.RetryAfter > _time.GetUtcNow()) continue;
             var attempts = (previous?.Attempts ?? 0) + 1;
-            _store.SaveSyncRetry(pair.PairId, (previous ?? new SyncRetry(path, "scan", 0, "", DateTimeOffset.MinValue)) with
+            var updated = (previous ?? new SyncRetry(path, "scan", 0, "", DateTimeOffset.MinValue)) with
             {
                 Attempts = attempts, LastError = reason, ReadRoots = roots,
+                DeleteBlockedDetail = null, DeleteBlockedDeferred = false,
                 RetryAfter = _time.GetUtcNow().AddSeconds(Math.Min(300, 10 * Math.Pow(2, Math.Min(attempts - 1, 5))))
-            });
+            };
+            var suppressed = (aggregateTransient || keepTransientSummary) && path.Length > 0 &&
+                IsTransientObservation(scan, path);
+            // The one pair notice represents these paths; never leave a queued per-file notice behind.
+            _store.SaveSyncRetry(pair.PairId, suppressed ? updated with { PendingNotice = null } : updated);
+            if (suppressed) continue;
             WriteNotices([new Notice(pair.PairId, 40, NoticeKind.Info, path, reason +
                 " Nothing in this subtree was synced or deleted. Options: retry now / exclude / ignore.", "sync-retry")]);
         }
+        if (storage is not null)
+        {
+            if (transientCount == 0)
+            {
+                if (summaryState == ObservationSummaryState.Open)
+                    storage.CloseOwnedPointerObservationSummary(pair.PairId);
+            }
+            else if (aggregateTransient || summaryState == ObservationSummaryState.Open)
+            {
+                // Above the limit, or an existing summary standing for the remaining failures: refresh the one
+                // summary and remove every per-file notice.
+                storage.CloseOwnedPointerObservationNotices(pair.PairId, OwnedPointerProof.ObservationMessage);
+                WriteNotices([OwnedPointerObservationSummary(pair, transientCount)]);
+            }
+            else if (summaryState == ObservationSummaryState.Ignored)
+            {
+                // The user silenced this pair cause; every per-entity retry keeps running silently.
+                storage.CloseOwnedPointerObservationNotices(pair.PairId, OwnedPointerProof.ObservationMessage);
+            }
+            // A run with no verification failures writes no item notice, so the scan itself retires a stale
+            // pointer-verification summary once every durable debt is settled.
+            storage.RetirePointerVerificationSummaries(pair.PairId);
+        }
     }
+
+    private static bool IsTransientObservation(BothScan scan, string path) =>
+        scan.A.IncompleteReasons.GetValueOrDefault(path) == OwnedPointerProof.ObservationMessage ||
+        scan.B.IncompleteReasons.GetValueOrDefault(path) == OwnedPointerProof.ObservationMessage;
+
+    private static Notice OwnedPointerObservationSummary(PairDef pair, int count) =>
+        new(pair.PairId, 40, NoticeKind.Info, string.Empty,
+            $"{count} online-only files could not be observed because their metadata was temporarily unavailable. " +
+            "Nothing in those subtrees was synced or deleted; each file keeps its durable retry debt and is retried " +
+            "automatically without downloading. Close apps that hold the files or restore the Cloud Files binding, " +
+            "then Retry; Ignore keeps the files protected and retries silently.",
+            NoticeChoices.PointerObservationSummary);
 }

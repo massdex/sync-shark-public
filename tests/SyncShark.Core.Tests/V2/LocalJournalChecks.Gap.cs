@@ -5,6 +5,9 @@ internal static partial class LocalJournalChecks
     private static async Task GapStoreAsync(string folder)
     {
         GapSchemaUpgradeChecks(folder);
+        await SavedCursorWrapAsync(folder);
+        await GapDiscoveryReasonChecks(folder);
+        ProtectionBatchChecks.Run(Path.Combine(folder, "protection-" + Guid.NewGuid().ToString("N")));
         var product = Path.Combine(folder, "gap-" + Guid.NewGuid().ToString("N"));
         var stamp = DateTimeOffset.UtcNow;
         var oldHash = new string('a', 64); var newHash = new string('b', 64);
@@ -40,6 +43,9 @@ internal static partial class LocalJournalChecks
                 "gap discovery is durable and does not feed foreground debt");
             LocalChecks.Require(store.ProtectionBatch(root.RootId, ItemFlags.NeedsRehash, [""])[0].Contains,
                 "discovered gap root containment is driven by remaining entity obligations");
+            LocalChecks.Require(store.ProtectionBatch(root.RootId, ItemFlags.NeedsRehash, [rows[0].Path])[0].Covered,
+                "unchanged metadata discovery stays protected until next-run promotion");
+            gaps.PromoteGapDiscovery(root.RootId);
             var summary = new RehashProtection(store, new PairDef("gap-pair", "gap", root, root, [], [], true)).Summary("gap-pair");
             LocalChecks.Require(summary.Detail.Contains("hashed 0/2") && summary.Detail.Contains("Options:") &&
                 summary.Detail.Contains("Sync Now"), "gap notice reports honest queue progress and existing-framework options");
@@ -170,6 +176,51 @@ internal static partial class LocalJournalChecks
         Console.WriteLine("PASS isolated gap store and background lifecycle");
     }
 
+    private static async Task SavedCursorWrapAsync(string folder)
+    {
+        var product = Path.Combine(folder, "gap-" + Guid.NewGuid().ToString("N"));
+        var root = new RootDef("gap-root", SyncProviders.Local, null, folder, SyncLocalEndpointStore.ObjectId(1, 1));
+        var stamp = DateTimeOffset.UtcNow;
+        const string cursor = "0000000000000001:100";
+        var rows = Enumerable.Range(1, 2).Select(n => new ItemState("folder/" + n, ItemKind.File,
+            SyncLocalEndpointStore.ObjectId(1, (ulong)n + 10), null, new string('a', 64), 3, stamp, ItemFlags.None)).ToArray();
+        using (var store = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System))
+        {
+            var gen = store.BeginGeneration(root.RootId, "full");
+            store.WriteSnapshot(new(root.RootId, Side.A, gen, cursor, rows, []));
+            store.CompleteGeneration(gen, cursor, true);
+        }
+        using var reopened = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System);
+        var saved = reopened.Cursor(root.RootId);
+        LocalChecks.Require(saved == cursor && NtfsUsnCheckpoint.TryParseCursor(saved, out _, out _),
+            "current-schema restart retains a readable next-unprocessed journal cursor");
+        NtfsUsnCheckpoint.TryParseCursor(saved, out var journalId, out var next);
+        // Retention advanced past the saved cursor; resizing alone is absent from this identity comparison.
+        var through = new NtfsUsnCheckpoint(1, 150, 200, 150);
+        LocalChecks.Require(through.RequiresFullReconciliation(saved) &&
+            !new NtfsUsnCheckpoint(1, 0, 200, 0).RequiresFullReconciliation(saved),
+            "same journal requires reconciliation only when retention passes the saved cursor, not on resize");
+        var inventory = new LocalInventory(root, Side.A, reopened, new HashSet<string>(), StorageChecks.Fast, TimeProvider.System);
+        inventory.BeginJournalGap(root.RootId, journalId, next, through);
+        inventory.BeginFullGap(root.RootId, through.Cursor, journalDeleted: false);
+        var gaps = (ILocalGapStore)reopened;
+        var epoch = gaps.GapEpoch(root.RootId)!;
+        LocalChecks.Require(epoch is { TrustFileUsn: true, Boundary: 100 },
+            "same-ID wrap and full fallback preserve the trusted saved boundary");
+        var io = new GapCheckIo(stamp, through.Cursor);
+        await using (var worker = new LocalGapWorker(gaps, io))
+            worker.Discover(root, epoch, default);
+        LocalChecks.Require(reopened.ProtectionBatch(root.RootId, ItemFlags.NeedsRehash, [rows[0].Path])[0].Covered,
+            "same-run unchanged USN proof remains held");
+        gaps.PromoteGapDiscovery(root.RootId);
+        var held = reopened.ProtectionBatch(root.RootId, ItemFlags.NeedsRehash, [rows[0].Path, rows[1].Path]);
+        LocalChecks.Require(io.Probes == 2 && io.Reads == 0 && reopened.RehashWatermark(root.RootId) == 0 &&
+            !held[0].Covered && held[1].Covered && gaps.GapHashPage(root.RootId, epoch, 128).Count == 1,
+            "saved-cursor wrap retires USN below boundary without content/debt/hold; equality alone remains a candidate");
+        LocalChecks.Require(reopened.ByObject(root.RootId, rows[0].ObjectId)!.Hash == rows[0].Hash,
+            "trusted unchanged entity retains its reusable content hash");
+    }
+
     private static void GapSchemaUpgradeChecks(string folder)
     {
         var product = Path.Combine(folder, "schema-" + Guid.NewGuid().ToString("N"));
@@ -194,11 +245,14 @@ internal static partial class LocalJournalChecks
         using (var db = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + Path.Combine(product, "v2", "state.db")))
         {
             db.Open();
-            StoreSchema.Execute(db, null, "DROP INDEX gap_ready; DROP INDEX gap_failed; DROP INDEX gap_waiting; " +
+            StoreSchema.Execute(db, null, "DROP INDEX gap_ready; DROP INDEX gap_failed; DROP INDEX gap_waiting; DROP INDEX gap_metadata; " +
+                "UPDATE local_gap SET after_object=worker_after,discovery_done=worker_done; " +
+                "ALTER TABLE local_gap DROP COLUMN worker_after; ALTER TABLE local_gap DROP COLUMN worker_done; " +
+                "ALTER TABLE local_gap_item DROP COLUMN metadata_ready; ALTER TABLE local_gap_item DROP COLUMN metadata_stamp; " +
                 "ALTER TABLE local_gap DROP COLUMN reason; " +
                 "ALTER TABLE local_gap_item DROP COLUMN failure_count; ALTER TABLE local_gap_item DROP COLUMN failure_reason; " +
                 "ALTER TABLE local_gap_item DROP COLUMN retry_allowed; ALTER TABLE local_gap_item DROP COLUMN defer_count; " +
-                "ALTER TABLE local_gap_item DROP COLUMN defer_reason; " +
+                "ALTER TABLE local_gap_item DROP COLUMN defer_reason; ALTER TABLE local_gap_item DROP COLUMN discovery_reason; " +
                 "CREATE INDEX IF NOT EXISTS gap_retry ON local_gap_item(root_no,epoch,last_attempt,object_id) WHERE hash IS NULL;");
         }
         using (var upgraded = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System))
@@ -206,8 +260,8 @@ internal static partial class LocalJournalChecks
             var gaps = (ILocalGapStore)upgraded;
             gaps.RetryGapFailures(root);
             LocalChecks.Require(gaps.GapHashPage(root, gaps.GapEpoch(root)!, 128).Count == 1 &&
-                upgraded.ByObject(root, row.ObjectId)!.Hash == row.Hash,
-                "same-version previous branch store gains columns and indexes without losing inventory or gap obligations");
+                upgraded.ByObject(root, row.ObjectId)!.Hash == row.Hash && gaps.GapEpoch(root)!.AfterObject == row.ObjectId,
+                "previous branch gains columns and indexes preserving inventory, gap obligations and worker cursor");
         }
         using (var db = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + Path.Combine(product, "v2", "state.db")))
         {
@@ -281,6 +335,8 @@ internal static partial class LocalJournalChecks
         var io = new GapCheckIo(stamp, cursor) { IsPaused = true };
         await using (var worker = new LocalGapWorker(gaps, io))
             worker.Discover(root, gaps.GapEpoch(root.RootId)!, default);
+        LocalChecks.Require(gaps.HasGapProtection(root.RootId), "metadata-only worker stages rather than discharges protection");
+        gaps.PromoteGapDiscovery(root.RootId);
         LocalChecks.Require(io.Probes == 0 && io.Reads == 0 && !gaps.HasGapProtection(root.RootId),
             "active user does not pause metadata-only settlement; placeholders links ignored quarantine never queue");
 
@@ -297,6 +353,7 @@ internal static partial class LocalJournalChecks
             gaps.StageGapHash(root.RootId, epoch, item, newHash, io.Proof(item, 100));
         }
         gaps.GapDiscoveryDone(root.RootId, epoch);
+        gaps.PromoteGapDiscovery(root.RootId); // Simulate the next run's metadata entrypoint.
         var touched = new List<string>();
         LocalGapWorker.Promote(gaps, store, io, root, gaps.GapResultWatermark(root.RootId),
             new(1, 0, 200, 0), path => path == many[^1].Path, touched.Add, default);
@@ -335,6 +392,7 @@ internal static partial class LocalJournalChecks
             gaps.StageGapHash(root.RootId, epoch, item, newHash, io.Proof(item, 100));
         }
         gaps.GapDiscoveryDone(root.RootId, epoch);
+        gaps.PromoteGapDiscovery(root.RootId); // Simulate the next run's metadata entrypoint.
         var beforeProbes = io.Probes;
         LocalGapWorker.Promote(gaps, store, io, root, gaps.GapResultWatermark(root.RootId), new(1, 0, 200, 0), _ => true, _ => { }, default);
         LocalChecks.Require(io.Probes - beforeProbes == 512 && gaps.GapResults(root.RootId, gaps.GapResultWatermark(root.RootId), 128).Count == 88,

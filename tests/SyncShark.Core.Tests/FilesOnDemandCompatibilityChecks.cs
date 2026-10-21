@@ -23,7 +23,7 @@ internal static class FilesOnDemandCompatibilityChecks
             Require(!store.HasStorageWork() && !store.HasOwnedPointers("fixture-root") && store.StorageRegistrations().Count == 0 &&
                 store.StorageSettlementPage().Count == 0 && store.ChangedStoragePointers().Count == 0 && store.StorageHydrationPage().Count == 0,
                 "disabled feature APIs return defaults without creating schema");
-            Require(before.SequenceEqual(Schema()), "no-command v20 open preserves every sqlite_master definition exactly");
+            Require(before.SequenceEqual(Schema()), "no-command final26.2 open preserves every sqlite_master definition exactly");
             using (var connection = Open(root))
             {
                 var reads = new FileStateReader(connection, new DirTable(connection));
@@ -42,7 +42,7 @@ internal static class FilesOnDemandCompatibilityChecks
                 var noChange = cli.SetStorageIntentAsync("fixture-pair", "Missing", mode, CancellationToken.None).GetAwaiter().GetResult();
                 Require(System.Text.Json.JsonSerializer.Serialize(noChange).Contains("No change"), "CLI explains never-used no-op");
             }
-            Require(before.SequenceEqual(Schema()), "list, inherit and offline preserve exact v20 schema");
+            Require(before.SequenceEqual(Schema()), "list, inherit and offline preserve the exact final26.2 schema");
             var invalidBackup = Path.Combine(root, "not-a-directory");
             File.WriteAllText(invalidBackup, "retained fixture");
             var held = cli.SetStorageIntentAsync("fixture-pair", "", "online-only", CancellationToken.None,
@@ -88,7 +88,7 @@ internal static class FilesOnDemandCompatibilityChecks
             Require(Directory.GetFiles(Path.Combine(recovery, "StateBackups"), "*.db").Length == 1, "repeated opt-in does not copy database again");
             Require(!before.SequenceEqual(Schema()), "first online-only command creates feature objects after backup");
             using var enabled = Open(root);
-            Require(Convert.ToInt64(StoreSchema.Scalar(enabled, null, "PRAGMA user_version;")) == 20, "opt-in keeps base version");
+            Require(Convert.ToInt64(StoreSchema.Scalar(enabled, null, "PRAGMA user_version;")) == 21, "opt-in keeps the final26.2 base version");
             Require(StoreSchema.Scalar(enabled, null, "SELECT sql FROM sqlite_master WHERE name='fs_flagged';") is string sql && sql.EndsWith("WHERE flags != 0", StringComparison.Ordinal), "shared index unchanged");
             var enabledReads = new FileStateReader(enabled, new DirTable(enabled)) { StorageEnabled = true };
             foreach (var (mask, expected) in new[] { (ItemFlags.NeedsRehash, "fs_nonpointer"), (ItemFlags.OwnedPointer, "fs_owned"),
@@ -100,12 +100,12 @@ internal static class FilesOnDemandCompatibilityChecks
                 "SELECT d.path,f.name FROM file_state f INDEXED BY fs_flagged JOIN dir d ON d.dir_no=f.dir_no WHERE f.root_no=$r AND f.flags!=0 AND (f.flags & $flags)!=0 LIMIT $limit;" })
                 Require(StoreSchema.QueryPlan(enabled, "protection", store.StorageProtectionSql(template, ItemFlags.NeedsRehash), "$r", "$flags", "$limit").Any(p => p.Contains("fs_nonpointer")), "protection root, gap and projection choose narrow index");
             Require(StoreSchema.QueryPlan(enabled, "rehash", store.RehashRootSql, "$r").Any(p => p.Contains("fs_nonpointer")), "root rehash chooses narrow index");
-            StoreSchema.Execute(enabled, null, "UPDATE file_state SET flags=768 WHERE object_id='fixture-item';");
+            StoreSchema.Execute(enabled, null, "UPDATE file_state SET flags=1280 WHERE object_id='fixture-item';");
             Require(store.LiveFlagged("fixture-root", ItemFlags.NeedsRehash).Single().ObjectId == "fixture-item" && store.RehashTouches("fixture-root", "", true), "mixed pointer+rehash remains protected");
             Require(store.ProtectionIndex("fixture-root", ItemFlags.NeedsRehash) is not null && store.ProtectionBatch("fixture-root", ItemFlags.NeedsRehash, [""]).Count == 1, "opt-in protection routes execute");
-            StoreSchema.Execute(enabled, null, "UPDATE file_state SET flags=640 WHERE object_id='fixture-item';");
+            StoreSchema.Execute(enabled, null, "UPDATE file_state SET flags=1152 WHERE object_id='fixture-item';");
             Require(store.LiveFlagged("fixture-root", ItemFlags.Quarantined).Single().ObjectId == "fixture-item", "mixed pointer+quarantine remains protected");
-            StoreSchema.Execute(enabled, null, "UPDATE file_state SET flags=512 WHERE object_id='fixture-item';");
+            StoreSchema.Execute(enabled, null, "UPDATE file_state SET flags=1024 WHERE object_id='fixture-item';");
             Require(store.LiveFlagged("fixture-root", ItemFlags.NeedsRehash).Count == 0 && store.LiveFlagged("fixture-root", ItemFlags.OwnedPointer).Count == 1, "pure pointers use owned route");
         }
         using (var confirmed = SqliteStateStore.Open(Path.Combine(root, "confirmed"), V2Settings.Default, TimeProvider.System))

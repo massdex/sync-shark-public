@@ -156,13 +156,20 @@ internal static partial class RunChecks
         { Calls++; beforeFailure?.Invoke(); throw new Win32Exception(1223); }
     }
 
-    private class QuarantineWriter(IEndpointWriter inner, string mode, int code) : IEndpointWriter
+    private class QuarantineWriter(IEndpointWriter inner, string mode, int code) : IEndpointWriter, ISourceAbsenceProbe
     {
+        public Task<bool?> IsSourceAbsentAsync(ItemState? historical, string path, CancellationToken ct) =>
+            ((ISourceAbsenceProbe)inner).IsSourceAbsentAsync(historical, path, ct);
+        public Task<bool?> IsHistoricalSourcePresentAsync(ItemState historical, CancellationToken ct) =>
+            ((ISourceAbsenceProbe)inner).IsHistoricalSourcePresentAsync(historical, ct);
+        public Task<ItemState?> ObserveSourceMetadataAsync(string path, CancellationToken ct) =>
+            ((ISourceAbsenceProbe)inner).ObserveSourceMetadataAsync(path, ct);
         internal bool Enabled = true;
         internal bool Checkpoint;
         internal HashSet<string>? AllowedPaths;
         internal string? TargetRoot;
         internal int Attempts;
+        internal Action<SyncAction>? BeforeDelete;
         private void Fail(string path, string operation)
         {
             if (!Enabled || path != "blocked.txt" || mode != operation) return;
@@ -189,7 +196,11 @@ internal static partial class RunChecks
             return await inner.OpenReadAsync(item, ct);
         }
         public Task<ItemState> MoveAsync(SyncAction action, CancellationToken ct) => inner.MoveAsync(action, ct);
-        public Task DeleteAsync(SyncAction action, CancellationToken ct) => inner.DeleteAsync(action, ct);
+        public Task DeleteAsync(SyncAction action, CancellationToken ct)
+        {
+            BeforeDelete?.Invoke(action);
+            return inner.DeleteAsync(action, ct);
+        }
         public Task<ItemState> MkDirAsync(string path, CancellationToken ct) => inner.MkDirAsync(path, ct);
         public Task<RecoveryRef> PreserveAsync(ItemState item, string id, CancellationToken ct) => inner.PreserveAsync(item, id, ct);
         public Task<ItemState?> ObserveAsync(string path, CancellationToken ct) => inner.ObserveAsync(path, ct);

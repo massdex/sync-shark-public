@@ -2,6 +2,17 @@ namespace Massdex.SyncShark.V2;
 
 internal static partial class DropboxChecks
 {
+    // A move outside the root keeps the global identity alive and must NOT authorize propagation.
+    // These fixtures exercise actual deletion, so remove the object through the stateful provider wire.
+    private static async Task DeleteDeltaFixtureSourceAsync(Harness h, string path)
+    {
+        var writer = h.Writer();
+        var original = await writer.ObserveAsync(path, CancellationToken.None);
+        Require(original is not null, "delta fixture source exists before its deletion");
+        await writer.DeleteAsync(new SyncAction("fixture-delete-" + path, 6, ActionKind.Delete,
+            Side.B, path, null, null, original, false, null), CancellationToken.None);
+    }
+
     private static async Task DeltaFolderRunsAsync()
     {
         using var h = new Harness();
@@ -25,7 +36,7 @@ internal static partial class DropboxChecks
         Require(!string.IsNullOrEmpty(h.Known.Cursor(RootId)),
             "successful prepared apply commits its cursor without an extra full incremental run");
         var before = h.Known.Cursor(RootId)!;
-        h.Wire.MoveOutsideRoot("empty", "removed/empty");
+        await DeleteDeltaFixtureSourceAsync(h, "empty");
         h.Wire.SeedDeletedEntry("empty");
         h.Wire.RevisionErrorTag = "not_file";
         h.Wire.SeedChangePage(before, [h.Wire.ChangeDeleted("/Pilot/empty")], false, "folder-after");
@@ -65,9 +76,9 @@ internal static partial class DropboxChecks
         Require(!string.IsNullOrEmpty(h.Known.Cursor(RootId)),
             "successful prepared apply commits its cursor without an extra full incremental run");
         var before = h.Known.Cursor(RootId)!;
-        h.Wire.MoveOutsideRoot("gone.txt", "removed/gone.txt");
+        await DeleteDeltaFixtureSourceAsync(h, "gone.txt");
         h.Wire.SeedDeletedEntry("gone.txt");
-        h.Wire.MoveOutsideRoot("finished-folder", "removed/finished-folder");
+        await DeleteDeltaFixtureSourceAsync(h, "finished-folder");
         h.Wire.SeedDeletedEntry("finished-folder");
         h.Wire.SeedChangePage(before,
             [h.Wire.ChangeDeleted("/Pilot/gone.txt"), h.Wire.ChangeDeleted("/Pilot/finished-folder")],

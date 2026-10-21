@@ -150,6 +150,12 @@ jobs:
           - suite: conflict-choices
             flag: --v2-conflict-choice-checks
             takes-root: false
+          - suite: planning-protection
+            flag: --v2-planning-protection-checks
+            takes-root: true
+          - suite: interrupted-delete
+            flag: --v2-interrupted-delete-checks
+            takes-root: true
           - suite: gap-verification
             flag: --v2-gap-checks
             takes-root: true
@@ -193,6 +199,12 @@ jobs:
             flag: --v2-dates-checks
             takes-root: true
             drive: c
+          - suite: blockers
+            flag: --blocker-checks
+            takes-root: false
+          - suite: reincluded-evidence
+            flag: --reincluded-evidence-checks
+            takes-root: false
           - suite: local-offline
             flag: --v2-local-offline-checks
             takes-root: true

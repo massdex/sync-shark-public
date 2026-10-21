@@ -158,7 +158,7 @@ internal static partial class DropboxChecks
         ProviderAssertNotice(fx, 2, ["stay.txt", "new-refusal.txt"], ["rename.txt", "delete.txt"]);
         fx.Reopen();
         fx.ClearEffects();
-        var stale = fx.Store.OpenNotices("p1").Single(n => n.ReasonKey == ProviderNameRefusedException.NoticeKey);
+        var stale = fx.Store.OpenNotices("p1").First(n => n.ReasonKey == ProviderNameRefusedException.NoticeKey && n.Path == "stay.txt");
         fx.Store.AddNotices([stale with { Detail = "stale summary" }]);
         await fx.NextAsync(false);
         Require(fx.WriterA.Effects.Count == 0 && fx.WriterB.Effects.Count == 0,
@@ -177,8 +177,8 @@ internal static partial class DropboxChecks
         await ProviderDeleteAsync(fx.A, "stay.txt");
         await ProviderRenameAsync(fx.A, "new-refusal.txt", "also-accepted.txt");
         await fx.NextAsync(true);
-        Require(fx.Store.OpenNotices("p1").All(n => n.ReasonKey != ProviderNameRefusedException.NoticeKey),
-            "last refused item gone closes the aggregate notice automatically");
+        Require(!fx.Store.OpenNotices("p1").Any(n => n.ReasonKey == ProviderNameRefusedException.NoticeKey),
+            "last refused item gone closes the notice automatically");
     }
 
     private static async Task ProviderRefusalReportAsync(string root)
@@ -258,11 +258,10 @@ internal static partial class DropboxChecks
 
     private static void ProviderAssertNotice(ProviderFollowupFixture fx, int count, string[] present, string[] absent)
     {
-        var notice = fx.Store.OpenNotices("p1").Single(n => n.ReasonKey == ProviderNameRefusedException.NoticeKey);
-        Require(notice.Detail.Contains(count + " name(s)", StringComparison.Ordinal) &&
-            present.All(p => notice.Detail.Contains(p, StringComparison.Ordinal)) &&
-            absent.All(p => !notice.Detail.Contains(p, StringComparison.Ordinal)),
-            "aggregate notice counts current stored refusals, not this run's new failures or stale examples");
+        var notices = fx.Store.OpenNotices("p1").Where(n => n.ReasonKey == ProviderNameRefusedException.NoticeKey).ToArray();
+        Require(present.Length == count && present.All(path => notices.Count(n => n.Path == path && n.Repair is not null) == 1) &&
+            notices.Length == count && absent.All(path => notices.All(n => n.Path != path)),
+            "current refused entities have one actionable notice each; deleted or repaired entities close automatically");
     }
 
     private static async Task ProviderRenameAsync(FakeEndpoint endpoint, string from, string to)
@@ -333,7 +332,7 @@ internal static partial class DropboxChecks
 
     // Refusal is injected at the provider boundary, not in Executor/SyncRun/store. Like Dropbox Put,
     // this writer attempts implicit parent creation; logging before refusal catches those attempts too.
-    private sealed class ProviderFollowupWriter(FakeEndpoint inner) : IEndpointWriter
+    private sealed class ProviderFollowupWriter(FakeEndpoint inner) : IEndpointWriter, ISourceAbsenceProbe
     {
         public HashSet<string> Refused { get; } = new(StringComparer.OrdinalIgnoreCase);
         public System.Collections.Concurrent.ConcurrentQueue<(string Kind, string Path)> Effects { get; } = new();
@@ -362,6 +361,12 @@ internal static partial class DropboxChecks
         public Task<RecoveryRef> PreserveAsync(ItemState victim, string actionId, CancellationToken ct)
         { Effects.Enqueue(("preserve", victim.Path)); return inner.PreserveAsync(victim, actionId, ct); }
         public Task<ItemState?> ObserveAsync(string path, CancellationToken ct) => inner.ObserveAsync(path, ct);
+        public Task<ItemState?> ObserveSourceMetadataAsync(string path, CancellationToken ct) =>
+            inner.ObserveSourceMetadataAsync(path, ct);
+        public Task<bool?> IsHistoricalSourcePresentAsync(ItemState historical, CancellationToken ct) =>
+            inner.IsHistoricalSourcePresentAsync(historical, ct);
+        public Task<bool?> IsSourceAbsentAsync(ItemState? historical, string path, CancellationToken ct) =>
+            inner.IsSourceAbsentAsync(historical, path, ct);
         public Task<Stream> OpenReadAsync(ItemState item, CancellationToken ct) => inner.OpenReadAsync(item, ct);
     }
 }

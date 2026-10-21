@@ -213,8 +213,15 @@ public sealed partial class SyncLocalEndpointStore : ISyncRemoteStore, ISyncUplo
     /// the requested leaf or an ancestor under the unchanged verified root; a root failure, denied access, a
     /// sharing violation, cancellation, a malformed path, or a foreign/reparse target is always an error.
     /// </summary>
-    public async Task<PilotRemoteEntry?> FindEntryAtPathAsync(string relativePath,
-        CancellationToken cancellationToken = default)
+    public Task<PilotRemoteEntry?> FindEntryAtPathAsync(string relativePath,
+        CancellationToken cancellationToken = default) => FindEntryAtPathCoreAsync(relativePath, true, cancellationToken);
+
+    // Same held-root/ancestor and native absence contract, without reading file content.
+    internal Task<PilotRemoteEntry?> FindMetadataAtPathAsync(string relativePath, CancellationToken cancellationToken) =>
+        FindEntryAtPathCoreAsync(relativePath, false, cancellationToken);
+
+    private async Task<PilotRemoteEntry?> FindEntryAtPathCoreAsync(string relativePath, bool readContent,
+        CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var relative = PilotPath.NormalizeRelative(relativePath);
@@ -259,7 +266,14 @@ public sealed partial class SyncLocalEndpointStore : ISyncRemoteStore, ISyncUplo
                 return DescribeDirectory(directory, relative);
             }
             using var file = held.OpenFile();
-            var described = await DescribeFileAsync(file, relative, cancellationToken);
+            PilotRemoteEntry described;
+            if (readContent) described = await DescribeFileAsync(file, relative, cancellationToken);
+            else
+            {
+                var identity = file.ReadIdentity();
+                described = new PilotRemoteEntry(relative, PilotEntryKind.File,
+                    ObjectId(identity.VolumeSerialNumber, identity.FileId), null, file.Stream.Length, null);
+            }
             root.VerifyBinding();
             held.Parent.VerifyBinding();
             return described;

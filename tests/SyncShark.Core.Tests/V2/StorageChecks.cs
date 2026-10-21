@@ -77,6 +77,13 @@ internal static partial class StorageChecks
         await Executor_FolderDeleteExpansion_RealStore(root);
         await Executor_MoveThenUpdate_RealStore(root);
         Intents_ResolvedDeletedAtCommit(root);
+        Both(root, "held-classification", IntentHolds_ClassificationCountAndPaging);
+        Both(root, "held-upsert", IntentHolds_RecordIntentsUpsert);
+        Both(root, "held-batch", IntentHolds_BatchClassification);
+        Both(root, "held-ownership", IntentHolds_OwnershipEnforced);
+        Both(root, "held-batch-rollback", IntentHolds_BatchOwnershipRollsBack);
+        IntentOrderIndex_RecreatedOnOpen(root);
+        Both(root, "intent-stream-horizon", IntentStream_RowidHorizonIsMutationStable);
         Notices_OnePerProblem(root);
         FreeSpacePresentationRoundTrip(root);
         NoticeVersionChecks(root);

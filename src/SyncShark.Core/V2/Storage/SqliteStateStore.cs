@@ -6,6 +6,9 @@ namespace Massdex.SyncShark.V2;
 /// <summary>The SQLite state store; the only place that opens the database and owns SQL.</summary>
 public sealed partial class SqliteStateStore : IStateStore
 {
+    /// <summary>Bounded page size for the lazy unresolved-intent stream.</summary>
+    private const int IntentStreamPageSize = 200;
+
     private readonly object _gate = new();
     private readonly SqliteConnection _connection;
     private readonly V2Settings _settings;
@@ -25,6 +28,9 @@ public sealed partial class SqliteStateStore : IStateStore
     private bool _disposed;
     private bool _storageEnabled;
     private long _storageProbeTimestamp;
+
+    /// <summary>Test-only: how many one-time legacy identity sweeps this store has run.</summary>
+    internal int LegacyFoldPassesForTest => _notices.LegacyFoldPasses;
 
     private SqliteStateStore(SqliteConnection connection, V2Settings settings, TimeProvider clock)
     {
@@ -204,6 +210,31 @@ public sealed partial class SqliteStateStore : IStateStore
         return rootNo is null ? Array.Empty<ItemState>() : _reads.LiveChildren(rootNo.Value, directory);
     });
 
+    public IReadOnlyList<ItemState> LiveChildrenPage(string rootId, string directory, int offset, int limit) => InStore(() =>
+    {
+        if (offset < 0 || limit is < 1 or > 200) throw new ArgumentOutOfRangeException(nameof(limit));
+        var rootNo = RootNo(rootId);
+        return rootNo is null ? Array.Empty<ItemState>() : _reads.LiveChildrenPage(rootNo.Value, directory, offset, limit);
+    });
+
+    public IReadOnlyList<string> RebuildableFoldersUnder(string rootId, string prefix, IReadOnlyList<string> names,
+        int offset, int limit) => InStore(() =>
+    {
+        if (offset < 0 || limit is < 1 or > 200) throw new ArgumentOutOfRangeException(nameof(limit));
+        var rootNo = RootNo(rootId);
+        return rootNo is null ? Array.Empty<string>()
+            : _reads.RebuildableFoldersUnder(rootNo.Value, prefix, names, offset, limit);
+    });
+
+    public IReadOnlyList<ItemState> LiveFlaggedPage(string rootId, ItemFlags flags, ItemState? after, int limit, long? afterDirNo = null) => InStore(() =>
+    {
+        if (limit is < 1 or > 200) throw new ArgumentOutOfRangeException(nameof(limit));
+        var rootNo = RootNo(rootId);
+        return rootNo is null ? Array.Empty<ItemState>() : _reads.LiveFlaggedPage(rootNo.Value, flags, after, limit, afterDirNo);
+    });
+
+    public long? DirectoryNumber(string rootId, string path) => InStore(() => _dir.Find(path));
+
     public IReadOnlyList<string> DirectorySpellings(string rootId, string path) => InStore(() =>
     {
         var rootNo = RootNo(rootId);
@@ -323,6 +354,11 @@ public sealed partial class SqliteStateStore : IStateStore
     public void CommitResult(string pairId, long gen, SyncAction action, ActionResult result) =>
         CommitResults(pairId, gen, [(action, result)]);
 
+    // The outcome that will actually be stored, after the quarantine and provider-refusal rules below.
+    private static bool Resolves(SyncAction action, ActionResult result) =>
+        !(result.Quarantined && action.ProviderEffect is not null) &&
+        (result.ProviderNameRefused || result.Outcome is Outcome.Done or Outcome.Skipped);
+
     /// <summary>Commits the results in order in one transaction; any failure rolls back all of them.</summary>
     public void CommitResults(string pairId, long gen, IReadOnlyList<(SyncAction Action, ActionResult Result)> results) =>
         InStore(() =>
@@ -349,8 +385,15 @@ public sealed partial class SqliteStateStore : IStateStore
                 ExpectedTarget = Retained(action.ExpectedTarget, action.Target == Side.A ? rootNoA : rootNoB)
             } }, pair);
         }
+        // M1: one bounded lookup per commit batch for the parked verification retries this batch may resolve. A
+        // per-result lookup would add a point query to every completed effect at 1M-row scale.
+        var resolvedPaths = results.Where(row => Resolves(row.Action, row.Result))
+            .Select(row => row.Action.Path).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var now = NowMs();
         using var transaction = _connection.BeginTransaction();
+        var parkedKeys = resolvedPaths.Length == 0
+            ? new HashSet<string>(StringComparer.Ordinal)
+            : ParkedSyncRetryKeys(transaction, pairNo, resolvedPaths);
         foreach (var (action, result) in results)
         {
             // Read durable intent metadata before Commit removes a resolved row; a caller may hold a pre-include action.
@@ -359,10 +402,41 @@ public sealed partial class SqliteStateStore : IStateStore
                 "FROM pending_effect WHERE pair_no=$p AND action_id=$id;",
                 ("$p", pairNo), ("$id", action.ActionId)) is long flag && flag != 0;
             var retainedAction = suppressBaseline ? action with { SuppressReconciledBaseline = true } : action;
-            _intents.Commit(transaction, pairNo, retainedAction, result.Quarantined && action.ProviderEffect is not null ? Outcome.Uncertain : result.ProviderNameRefused ? Outcome.Skipped : result.Outcome, now);
+            var committed = result.Quarantined && action.ProviderEffect is not null ? Outcome.Uncertain :
+                result.ProviderNameRefused ? Outcome.Skipped : result.Outcome;
+            _intents.Commit(transaction, pairNo, retainedAction, committed, now);
+            // M1: a resolved or retired intent must not leave a parked verification retry behind. Clear only the
+            // parked shape this run owns (Kind sync, no held evidence, deadline at MaxValue); decision, deletion
+            // evidence and restored-held rows are different owners.
+            if (committed is Outcome.Done or Outcome.Skipped)
+            {
+                if (parkedKeys.Remove(RowCodec.Key(action.Path)))
+                    DeleteParkedSyncRetry(transaction, pairNo, pairId, action.Path);
+            }
+            if (action.Kind == ActionKind.Delete && result.Outcome == Outcome.Uncertain && result.RetryAfterSeconds is not null &&
+                (long)StoreSchema.Scalar(_connection, transaction, "SELECT COUNT(*) FROM (SELECT 1 FROM pending_effect WHERE " +
+                    UncertainDeleteWhere + " LIMIT 21);", ("$p", pairNo))! <= 20)
+                _notices.Add(transaction, pairNo, new Notice(pairId, action.Rule, NoticeKind.Info, action.Path,
+                    result.Reason ?? "Interrupted deletion could not be verified; Retry checks both endpoints again.",
+                    "interrupted-delete-unverified"), now);
+            else if (action.Kind == ActionKind.Delete && committed is Outcome.Done or Outcome.Skipped)
+                StoreSchema.Execute(_connection, transaction,
+                    "UPDATE notice SET state='closed',choice='resolved' WHERE notice_id=$id;",
+                    ("$id", ShortId.Make("n", pairId, action.Rule.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                        RowCodec.Key(action.Path), "interrupted-delete-unverified")));
             if (SyncDirectDownloadCheckpoint.NoticeFor(pairId, action, result) is { } notice)
                 _notices.Add(transaction, pairNo, notice, now);
-            if (result.Outcome == Outcome.Skipped && result.ForgetAbsentDownloadBaseline)
+            if (result.Outcome == Outcome.Skipped && result.DeleteSourceUnconfirmed)
+            {
+                QueueUnconfirmedDeleteSource(transaction, pairNo, pairId, action, result);
+                foreach (var (rule, reason) in new[] { ("40", "sync-retry"), ("30", "content-unconfirmed") })
+                    StoreSchema.Execute(_connection, transaction,
+                        "UPDATE notice SET state='closed',choice='aggregated' WHERE notice_id=$id AND state='open';",
+                        ("$id", ShortId.Make("n", pairId, rule, RowCodec.Key(action.Path), reason)));
+            }
+            if (result.Outcome == Outcome.Skipped && result.ForgetUnsafeDeleteBaseline)
+                QueueInterruptedDeleteRestore(transaction, pairNo, pairId, rootNoA, rootNoB, action, result);
+            if (result.Outcome == Outcome.Skipped && (result.ForgetAbsentDownloadBaseline || result.ForgetUnsafeDeleteBaseline))
                 _points.CommitDone(transaction, pairNo, pairId, gen, rootNoA, rootNoB,
                     action with { Kind = ActionKind.Forget }, result,
                     (rootNo, objectId) => _points.HasBaseline(transaction, RootSides(rootNo, transaction), objectId));
@@ -429,6 +503,12 @@ public sealed partial class SqliteStateStore : IStateStore
 
             }
         }
+        if (results.Any(row => row.Result.Outcome == Outcome.Skipped && row.Result.ForgetUnsafeDeleteBaseline))
+            RefreshInterruptedDeleteNotice(transaction, pairNo, pairId, now);
+        if (results.Any(row => row.Result.DeleteSourceUnconfirmed))
+            RefreshBlockedDeleteNotice(transaction, pairNo, pairId, now);
+        if (results.Any(row => row.Action.Kind == ActionKind.Delete))
+            RefreshDeleteReviewNotices(transaction, pairNo, pairId, now, exact: false);
         transaction.Commit();
         CleanupStorageItems();
     });
@@ -451,6 +531,93 @@ public sealed partial class SqliteStateStore : IStateStore
         return pairNo is null ? new List<SyncAction>() : _intents.Unresolved(pairNo.Value);
     });
 
+    public int CountUnresolvedIntents(string pairId) => InStore(() =>
+        PairNo(pairId) is { } pairNo ? (int)_intents.CountUnresolved(pairNo) : 0);
+
+    public void SetIntentHeld(string pairId, string actionId, bool held) => InStore(() =>
+    {
+        var pairNo = RequirePair(pairId);
+        using var transaction = _connection.BeginTransaction();
+        _intents.SetHeld(transaction, pairNo, actionId, held);
+        transaction.Commit();
+    });
+
+    public void SetIntentsHeld(string pairId, IReadOnlyList<string> actionIds, bool held) => InStore(() =>
+    {
+        ArgumentNullException.ThrowIfNull(actionIds);
+        if (actionIds.Count == 0) return;
+        var pairNo = RequirePair(pairId);
+        // Bound each transaction so a large classification batch never holds one long write.
+        for (var offset = 0; offset < actionIds.Count; offset += 256)
+        {
+            using var transaction = _connection.BeginTransaction();
+            var end = Math.Min(offset + 256, actionIds.Count);
+            for (var index = offset; index < end; index++)
+                _intents.SetHeld(transaction, pairNo, actionIds[index], held);
+            transaction.Commit();
+        }
+    });
+
+    public int CountHeldIntents(string pairId) => InStore(() =>
+        PairNo(pairId) is { } pairNo ? (int)_intents.CountHeld(pairNo) : 0);
+
+    public bool IsIntentHeld(string pairId, string actionId) => InStore(() =>
+        PairNo(pairId) is { } pairNo && _intents.IsHeld(pairNo, actionId));
+
+    public IntentPage HeldIntentsPage(string pairId, string? cursor, int limit)
+    {
+        if (limit is < 1 or > 200)
+            throw new ArgumentOutOfRangeException(nameof(limit), limit, "Intent pages are limited to 1..200.");
+        var after = cursor is null ? ((long Updated, long RowId)?)null : IntentPageCursor.Parse(cursor);
+        return InStore(() => PairNo(pairId) is { } pairNo
+            ? _intents.HeldPage(pairNo, after?.Updated, after?.RowId, limit)
+            : new IntentPage([], null));
+    }
+
+    public IEnumerable<SyncAction> StreamUnresolvedIntents(string pairId) =>
+        StreamUnresolvedIntentRows(pairId).Select(row => row.Action);
+
+    public IEnumerable<IntentRow> StreamUnresolvedIntentRows(string pairId)
+    {
+        var pairNo = InStore(() => PairNo(pairId));
+        if (pairNo is null) yield break;
+        // Fix the snapshot horizon once: inserts made after enumeration starts have a larger rowid and stay out.
+        var through = InStore(() => _intents.UnresolvedHorizon(pairNo.Value));
+        if (through == 0) yield break;
+        long after = 0;
+        while (after < through)
+        {
+            // Each bounded page takes and releases the store lock, so a long stream never blocks commits.
+            var from = after;
+            var page = InStore(() => _intents.UnresolvedRowsPage(pairNo.Value, from, through, IntentStreamPageSize));
+            if (page.Items.Count == 0) yield break;
+            foreach (var row in page.Items) yield return row;
+            var next = page.NextCursor;
+            if (next is null) yield break;
+            after = IntentPageCursor.Parse(next).RowId;
+        }
+    }
+
+    public string? PairForIntent(string actionId) => InStore(() =>
+        StoreSchema.Scalar(_connection, null,
+            "SELECT p.pair_id FROM pending_effect e JOIN pair p ON p.pair_no=e.pair_no WHERE e.action_id=$id;",
+            ("$id", actionId)) as string);
+
+    /// <summary>How many hold-state UPDATEs this store issued; a run skips rows already in the wanted state.</summary>
+    internal long IntentHoldWrites => _intents.HoldWrites;
+
+    public void RefreshProviderNameNotices(PairDef pair) => InStore(() =>
+    {
+        var pairNo = RequirePair(pair.PairId);
+        var roots = new Dictionary<string, long?> { [pair.A.RootId] = RootNo(pair.A.RootId), [pair.B.RootId] = RootNo(pair.B.RootId) };
+        using var transaction = _connection.BeginTransaction();
+        var now = NowMs();
+        foreach (var notice in ProviderNameNotices.Read(pair, (root, after) =>
+            roots[root.RootId] is { } rootNo ? _reads.LiveFlaggedPage(rootNo, ItemFlags.ProviderNameRefused, after, 100, transaction: transaction) : Array.Empty<ItemState>()))
+            _notices.Add(transaction, pairNo, notice, now);
+        transaction.Commit();
+    });
+
     public void AddNotices(IEnumerable<Notice> notices) => InStore(() =>
     {
         var captured = notices.Select(notice => notice.Quarantine is null ? notice :
@@ -459,6 +626,8 @@ public sealed partial class SqliteStateStore : IStateStore
         var now = NowMs();
         foreach (var notice in captured)
             _notices.Add(transaction, RequirePair(notice.PairId), notice, now);
+        foreach (var pairId in captured.Where(notice => notice.ReasonKey == "deletion-review").Select(notice => notice.PairId).Distinct())
+            RefreshDeleteReviewNotices(transaction, RequirePair(pairId), pairId, now, exact: false);
         transaction.Commit();
     });
 
@@ -471,6 +640,12 @@ public sealed partial class SqliteStateStore : IStateStore
             if (pairNo is null) return new List<Notice>();
         }
         return _notices.Open(pairNo);
+    });
+
+    public IReadOnlyList<Notice> OpenLinkNotices(string pairId) => InStore(() =>
+    {
+        var pairNo = PairNo(pairId);
+        return pairNo is null ? new List<Notice>() : _notices.OpenLinks(pairNo.Value);
     });
 
     public IReadOnlyList<RecoveryRecord> Recoveries(string pairId) => InStore(() =>

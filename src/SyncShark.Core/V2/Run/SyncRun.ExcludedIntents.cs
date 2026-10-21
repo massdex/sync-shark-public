@@ -5,6 +5,15 @@ public sealed partial class SyncRun
     internal const string ExcludedIntentReason = "excluded after planning; not applied";
     internal const string ExcludedIntentNoticeKey = "excluded-outstanding-intents";
 
+    // User exclusions/ignores have their own verify-only lane. Permanent ownership boundaries
+    // retire separately with an informational notice; links/quarantine/verification holds retain authority.
+    private static ActionGuard ExclusionPredicates(PairDef pair)
+    {
+        bool Include(string path) => !pair.Excluded.Any(excluded => PairPath.IsSelfOrUnder(path, excluded));
+        bool Strict(string path) => Include(path) && !pair.Excluded.Any(excluded => PairPath.IsUnder(excluded, path));
+        return new(Include, Include, Strict, Strict, IgnoreRules: PairInclude.IgnoreRules(pair));
+    }
+
     private static bool ReconcileAllowed(ActionGuard guard, SyncAction action)
     {
         // Group recovery bypasses any guard (exclusions, nested pairs) — restore-only, never delete.
@@ -85,7 +94,7 @@ public sealed partial class SyncRun
     {
         var outstanding = _store.UnresolvedIntents(pair.PairId).Where(action => !IsQuarantinedIntent(pair, action)).ToArray();
         if (outstanding.Length == 0) return 0;
-        var guard = ActionPredicates(pair, LeftAlone(pair));
+        var guard = ExclusionPredicates(pair);
         var excluded = GuardedActions(outstanding, guard).Where(entry => !ReconcileAllowed(entry.Guard, entry.Action))
             .Select(entry => entry.Action).ToArray();
         await SyncByteProgressStream.ReportCurrentProcessAsync("First-sync completion",

@@ -23,6 +23,45 @@ public partial class MainWindow
         return dialog.ShowDialog() == true ? input.Text.Trim() : null;
     }
 
+    private async Task ShowRemainingNoticeItemsAsync(DecisionRow row)
+    {
+        var offset = 0;
+        string? cursor = null;
+        string? pageToken = null;
+        var text = new System.Windows.Controls.TextBox { IsReadOnly = true, TextWrapping = TextWrapping.Wrap,
+            VerticalScrollBarVisibility = System.Windows.Controls.ScrollBarVisibility.Auto, Height = 380, Margin = new Thickness(12) };
+        var panel = new System.Windows.Controls.StackPanel();
+        panel.Children.Add(text);
+        var next = new Button { Content = "Next 50 per side", Margin = new Thickness(12) };
+        panel.Children.Add(next);
+        async Task LoadPage()
+        {
+            next.IsEnabled = false;
+            try
+            {
+                var result = await _authorityHost.ResolveConflictSelectionCommandAsync(
+                    [new(new(row.ConflictId ?? "", row.PairId, row.Path, row.ConflictGeneration ?? 0),
+                        SyncAuthorityConflictResolutionKind.PreserveBoth, V2.NoticeChoices.ShowRemaining, NoticeInput: new(Name: cursor, Offset: cursor is null ? offset : 0, PageToken: pageToken))],
+                    connectionId: _workspaceAccountId);
+                text.Text = result.Items.Single().Result?.Decisions.Single().Reason ?? "Listing unavailable; retry.";
+                const string cursorPrefix = "Next cursor (--name): ";
+                cursor = text.Text.Split('\n').FirstOrDefault(line => line.StartsWith(cursorPrefix, StringComparison.Ordinal))?[cursorPrefix.Length..].Trim();
+                const string marker = "Next page token: ";
+                var markerAt = text.Text.IndexOf(marker, StringComparison.Ordinal);
+                pageToken = markerAt < 0 ? null : text.Text[(markerAt + marker.Length)..].Trim();
+                if (markerAt >= 0) text.Text = text.Text[..markerAt].TrimEnd();
+                next.IsEnabled = cursor is not null || pageToken is not null || text.Text.Contains("More items: next offset", StringComparison.Ordinal);
+            }
+            catch (Exception error) { text.Text = error.Message; }
+        }
+        next.Click += async (_, _) => { if (pageToken is null) offset += 50; await LoadPage(); };
+        await LoadPage();
+        new Window { Title = "Remaining items", Owner = this, Content = panel, Width = 720,
+            SizeToContent = SizeToContent.Height, WindowStartupLocation = WindowStartupLocation.CenterOwner }.ShowDialog();
+        // Online-only paging publishes bounded per-item choices through the same authority.
+        await LoadConflictPageAsync(reset: true);
+    }
+
     private async void NoticeOption_Click(object sender, RoutedEventArgs e)
     {
         using var feedback = ActionFeedback.Begin(sender);
@@ -46,6 +85,30 @@ public partial class MainWindow
                 ExpandPairRow(pair);
                 ShowPairEditorStatus("Review selection and ignore rules for: " + row.Path);
                 ShowStatus("Folder settings opened. The notice stays open; no files changed.");
+                return;
+            }
+            NoticeActionInput? input = null;
+            if (option.RequestsName && option.Choice != V2.NoticeChoices.ShowRemaining)
+            {
+                var rename = option.Choice == V2.NoticeChoices.Rename;
+                var name = new System.Windows.Controls.TextBox { Text = rename ? V2.BlockerNames.Suggest(row.Path) : "", MinWidth = 320, Margin = new Thickness(12) };
+                var panel = new System.Windows.Controls.StackPanel();
+                panel.Children.Add(new System.Windows.Controls.TextBlock { Text = rename
+                    ? "Choose a new name. Existing files are never overwritten."
+                    : "Paste the exact path from Show target to confirm reading it, including excluded or nested-pair content. Copy again may leave this blank for an included target.",
+                    TextWrapping = TextWrapping.Wrap, MaxWidth = 540, Margin = new Thickness(12) });
+                panel.Children.Add(name);
+                var confirm = new Button { Content = rename ? "Rename" : "Confirm copy", IsDefault = true, Margin = new Thickness(12) };
+                panel.Children.Add(confirm);
+                var dialog = new Window { Title = rename ? "Rename blocked item" : "Confirm link target access", Owner = this, Content = panel,
+                    SizeToContent = SizeToContent.WidthAndHeight, WindowStartupLocation = WindowStartupLocation.CenterOwner };
+                confirm.Click += (_, _) => dialog.DialogResult = true;
+                if (dialog.ShowDialog() != true) return;
+                input = new NoticeActionInput(string.IsNullOrWhiteSpace(name.Text) ? null : name.Text);
+            }
+            if (option.Choice == V2.NoticeChoices.ShowRemaining)
+            {
+                await ShowRemainingNoticeItemsAsync(row);
                 return;
             }
             if (option.Choice is V2.NoticeChoices.DefenderKeep or V2.NoticeChoices.DefenderProceed &&
@@ -120,7 +183,7 @@ public partial class MainWindow
             SharedPresentation.SetInlineFeedback(ConflictActionFeedback, "Recording your choice…", isError: false);
             var batch = await _authorityHost.ResolveConflictSelectionCommandAsync(
                 [new(new(row.ConflictId ?? "", row.PairId, requestPath, row.ConflictGeneration ?? 0),
-                    SyncAuthorityConflictResolutionKind.PreserveBoth, choice, destination)],
+                    SyncAuthorityConflictResolutionKind.PreserveBoth, choice, destination, input)],
                 connectionId: _workspaceAccountId);
             var result = batch.Items.Single();
             var message = result.Result?.Decisions.Single().Reason ?? "The choice was not completed. Refresh and try again.";
@@ -129,6 +192,8 @@ public partial class MainWindow
             _pairSet = await _authorityHost.LoadPairsAsync();
             RefreshFullApp();
             SharedPresentation.SetInlineFeedback(ConflictActionFeedback, message, isError: result.Result is null);
+            if (option.Choice == V2.NoticeChoices.OpenStorage && result.Result is not null && message == "ms-settings:storagesense")
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(message) { UseShellExecute = true });
             ShowStatus(message);
         }
         catch (Exception error)

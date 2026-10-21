@@ -59,6 +59,15 @@ public sealed record PilotRemoteEntry(
 {
     /// <summary>Dropbox client_modified (the uploader's file mtime), when listed. Inventory evidence only.</summary>
     public DateTimeOffset? ClientModifiedUtc { get; init; }
+
+    /// <summary>Provider metadata explicitly says direct download is unavailable; export is required.</summary>
+    public bool RequiresExport { get; init; }
+
+    /// <summary>Dropbox export_info.export_as: the provider's default export format, when listed.</summary>
+    public string? ExportAs { get; init; }
+
+    /// <summary>Dropbox export_info.export_options: exactly the formats the provider supports for this item.</summary>
+    public IReadOnlyList<string>? ExportOptions { get; init; }
 }
 
 /// <summary>
@@ -100,4 +109,8 @@ public interface IPilotRemoteStore
 
 public sealed class PilotLimitException(string message) : IOException(message);
 
-public sealed class DropboxEffectUncertainException(string message, Exception? innerException = null) : IOException(message, innerException);
+public sealed class DropboxEffectUncertainException(string message, Exception? innerException = null) : IOException(message, innerException)
+{
+    /// <summary>The provider explicitly rejected an expired/unknown async job id, not a transient lookup failure.</summary>
+    public bool JobIdUnavailable { get; init; }
+}

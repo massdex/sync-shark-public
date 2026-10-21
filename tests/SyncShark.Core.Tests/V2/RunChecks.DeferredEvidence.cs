@@ -561,6 +561,10 @@ internal static partial class RunChecks
         public bool Fail { get; init; }
         public bool ProviderOutage { get; init; }
         public bool Pause { get; set; }
+        public bool LookupFailure { get; init; }
+        // Runs after every per-path answer, so a check can pause the pair when Dropbox has already
+        // answered (the paused-run budget case) instead of before the lane starts.
+        public Action? AfterAnswer { get; init; }
         public bool CancelWithoutCaller { get; init; }
         public IReadOnlyDictionary<string, DateTimeOffset?> Cached { get; init; } = new Dictionary<string, DateTimeOffset?>();
         public DateTimeOffset? Deleted { get; init; }
@@ -589,7 +593,8 @@ internal static partial class RunChecks
             if (CancelWithoutCaller) throw new OperationCanceledException("Evidence probe cancelled internally");
             foreach (var path in paths)
                 resolved(ResolvedPath?.Invoke(path) ?? path, new SyncRemoteDeletionEvidence(Cached.TryGetValue(path, out var cached) ? cached : Deleted,
-                    "probed Dropbox deletion", ContentHash: HistoryHashes.GetValueOrDefault(path)));
+                    "probed Dropbox deletion", LookupFailed: LookupFailure, ContentHash: HistoryHashes.GetValueOrDefault(path)));
+            AfterAnswer?.Invoke();
         }
         public Task<Snapshot> FullAsync(long gen, Func<string, bool> include, IProgress<string> progress,
             CancellationToken ct) => inner.FullAsync(gen, include, progress, ct);
@@ -601,8 +606,25 @@ internal static partial class RunChecks
             CancellationToken ct) => throw new InvalidOperationException("Deferred evidence must not use the eager probe");
     }
 
-    private sealed class SignalingWriter(IEndpointWriter inner) : IEndpointWriter
+    private sealed class SignalingWriter(IEndpointWriter inner) : IEndpointWriter, ISourceAbsenceProbe
     {
+        public async Task<bool?> IsSourceAbsentAsync(ItemState? historical, string path, CancellationToken ct)
+        {
+            if (await ObserveSourceMetadataAsync(path, ct) is not null) return false;
+            return await ((ISourceAbsenceProbe)inner).IsSourceAbsentAsync(historical, path, ct);
+        }
+        public async Task<bool?> IsHistoricalSourcePresentAsync(ItemState historical, CancellationToken ct)
+        {
+            await ObserveSourceMetadataAsync(historical.Path, ct);
+            return await ((ISourceAbsenceProbe)inner).IsHistoricalSourcePresentAsync(historical, ct);
+        }
+        public async Task<ItemState?> ObserveSourceMetadataAsync(string path, CancellationToken ct)
+        {
+            ObservedPaths.Add(path);
+            if (BeforeObserve is not null) await BeforeObserve(path, ct);
+            var observed = await ((ISourceAbsenceProbe)inner).ObserveSourceMetadataAsync(path, ct);
+            return AfterObserve is null ? observed : AfterObserve(observed);
+        }
         public TaskCompletionSource PutCompleted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public async Task<ItemState> PutAsync(SyncAction action, Stream content, CancellationToken ct)
         {

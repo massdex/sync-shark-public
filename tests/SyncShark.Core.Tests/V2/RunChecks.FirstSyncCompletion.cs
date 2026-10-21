@@ -47,7 +47,9 @@ internal static partial class RunChecks
         store.SaveSyncRetry(fx.Pair.PairId, new("skip.txt", "sync", 3, "unavailable", DateTimeOffset.MinValue));
         store.AddNotices([new Notice(fx.Pair.PairId, 40, NoticeKind.Info, "skip.txt", "retry", "sync-retry")]);
         var notice = store.OpenNotices(fx.Pair.PairId).Single(item => item.ReasonKey == "sync-retry");
-        await runtime.ResolveConflictAsync(fx.Pair.PairId, notice.Path, NoticeChoices.Exclude, notice.NoticeId, 0, null, default);
+        Require(NoticeChoices.Options(notice).Any(option => option.Choice == NoticeChoices.Ignore),
+            "retry notice offers Ignore as its path-exclusion action");
+        await runtime.ResolveConflictAsync(fx.Pair.PairId, notice.Path, NoticeChoices.Ignore, notice.NoticeId, 0, null, default);
         var result = await runtime.ApplyFirstSyncAsync(fx.Pair.PairId, null, true, null, _ => { }, default);
         Require(result.FirstSyncComplete && await fx.B.ObserveAsync("good.txt", default) is not null &&
             await fx.B.ObserveAsync("skip.txt", default) is null && await fx.A.ObserveAsync("skip.txt", default) is not null &&
@@ -414,7 +416,7 @@ internal static partial class RunChecks
         }
         var stuck = store.OpenNotices(fx.Pair.PairId).Single(notice => notice.ReasonKey == "sync-retry");
         Require(NoticeChoices.Options(stuck).Select(option => option.Choice).SequenceEqual(
-            new[] { NoticeChoices.RetryNow, NoticeChoices.Exclude, NoticeChoices.Ignore }), "retry options are real shared notice choices");
+            new[] { NoticeChoices.RepairHelp, NoticeChoices.RetryNow, NoticeChoices.Ignore }), "retry options are real shared notice choices");
         await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, stuck.NoticeId!, NoticeChoices.RetryNow, CancellationToken.None);
         Require(store.SyncRetryAt(fx.Pair.PairId, "stuck.txt") is { Attempts: 3 } state &&
             state.RetryAfter == DateTimeOffset.MinValue, "retry-now resets backoff without losing attempt count or intent");
@@ -436,7 +438,7 @@ internal static partial class RunChecks
         var excluded = ignored with { Path = "excluded.txt" };
         store.AddNotices([excluded]);
         var excludeId = store.OpenNotices(fx.Pair.PairId).Single(item => item.Path == "excluded.txt").NoticeId!;
-        await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, excludeId, NoticeChoices.Exclude, CancellationToken.None);
+        await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, excludeId, NoticeChoices.Ignore, CancellationToken.None);
         Require(store.Pair(fx.Pair.PairId)!.Excluded.Contains("excluded.txt") && fx.WriterA.Deletes == 0 && fx.WriterB.Deletes == 0,
             "exclude changes normal pair policy without deleting either side");
         for (var i = 0; i < 300; i++)

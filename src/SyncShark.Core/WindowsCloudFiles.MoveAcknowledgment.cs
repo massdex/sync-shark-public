@@ -22,18 +22,22 @@ public sealed partial class WindowsCloudFilesProvider
             parents.Add(parent);
         }
         using var held = OpenAttributes(path, writeDac: true, exclusive: true);
-        if (!PilotDirectoryLease.GetFileInformationByHandle(held.Handle, out var objectInfo) ||
-            new PilotDirectoryIdentity(objectInfo.VolumeSerialNumber, ((ulong)objectInfo.FileIndexHigh << 32) | objectInfo.FileIndexLow) != expectedLocalIdentity)
+        RequireCurrentNativeBinding();
+        // Failure to observe metadata is not evidence of a byte edit. Keep the durable ack
+        // retryable instead of converting a transient native read/binding failure into hydration debt.
+        if (!PilotDirectoryLease.GetFileInformationByHandle(held.Handle, out var physical))
+            throw new IOException("The pointer file identity is temporarily unreadable. Retry metadata acknowledgment.");
+        if (new PilotDirectoryIdentity(physical.VolumeSerialNumber, ((ulong)physical.FileIndexHigh << 32) | physical.FileIndexLow) != expectedLocalIdentity)
             throw new PointerAcknowledgmentChangedException();
-        if (!TryReadOwnedPlaceholder(held.Handle, false, out var current) || current is null || current.IsDirectory ||
-            current.SyncRootFileId != _pair.LocalRootFileId ||
-            !SameIdentity(current.Identity with { RelativePath = expected.RelativePath }, expected) ||
-            ReadStubState(held.Handle) is not { OnDiskBytes: 0, ModifiedBytes: 0 } stub ||
-            stub.PlaceholderState == uint.MaxValue || (stub.PlaceholderState & 1) == 0 ||
-            (stub.PlaceholderState & 0x10) == 0 || current.ModifiedDataSize != 0 ||
-            !PilotDirectoryLease.GetFileInformationByHandle(held.Handle, out var physical) || physical.NumberOfLinks != 1 ||
+        if (!TryReadOwnedPlaceholder(held.Handle, false, out var current) || current is null ||
+            current.RawPlaceholderState == uint.MaxValue || current.State.OnDiskBytes < 0 || current.ModifiedDataSize < 0)
+            throw new IOException("The pointer metadata is temporarily unreadable. Retry metadata acknowledgment.");
+        if (expected.ModifiedUtc is not { } modified)
+            throw new IOException("The pointer receipt timestamp is unavailable. Rescan before retrying metadata acknowledgment.");
+        if (current.IsDirectory || current.SyncRootFileId != _pair.LocalRootFileId ||
+            !SameIdentity(current.Identity with { RelativePath = expected.RelativePath, DropboxRevision = expected.DropboxRevision }, expected) ||
+            !V2.OwnedPointerProof.IsDehydrated(current) || physical.NumberOfLinks != 1 ||
             (((long)physical.FileSizeHigh << 32) | physical.FileSizeLow) != expected.LogicalSize ||
-            expected.ModifiedUtc is not { } modified ||
             DateTime.FromFileTimeUtc(((long)physical.LastWriteTime.dwHighDateTime << 32) |
                 (uint)physical.LastWriteTime.dwLowDateTime) != modified.UtcDateTime)
             throw new PointerAcknowledgmentChangedException();
@@ -41,10 +45,21 @@ public sealed partial class WindowsCloudFilesProvider
         root.VerifyBinding();
         foreach (var heldParent in parents) heldParent.VerifyBinding();
         revalidate();
-        // Same exclusive native handle for the proof and effect; replay is harmless when already in sync.
-        Check(CfSetInSyncState(held.Handle.DangerousGetHandle(), 1, 0, IntPtr.Zero), "Acknowledging the committed pointer move");
+        // One metadata-only effect on the proven exclusive handle. No invalidation ranges or
+        // DEHYDRATE flag: update the fetch identity and in-sync bit without touching file data.
+        // Repeating the same identity after a crash is harmless.
+        var bytes = expected.Serialize();
+        var pinned = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+        try
+        {
+            var metadata = Metadata(expected);
+            Check(Native.CfUpdatePlaceholder(held.Handle.DangerousGetHandle(), ref metadata,
+                pinned.AddrOfPinnedObject(), checked((uint)bytes.Length), IntPtr.Zero, 0,
+                0x00000002u, IntPtr.Zero, IntPtr.Zero), "Acknowledging the committed pointer move");
+        }
+        finally { pinned.Free(); }
         if (!TryReadOwnedPlaceholder(held.Handle, false, out var updated) || updated is null ||
-            !SameIdentity(updated.Identity, current.Identity) || !updated.State.IsInSync ||
+            !SameIdentity(updated.Identity, expected) || !updated.State.IsInSync ||
             ReadStubState(held.Handle) is not { OwnedFullyDehydrated: true })
             throw new IOException("The move acknowledgment could not be confirmed. Retry metadata verification.");
         return updated;
@@ -57,7 +72,4 @@ public sealed partial class WindowsCloudFilesProvider
 
     internal sealed class PointerAcknowledgmentChangedException()
         : IOException("The pointer changed after the remote move. Normal content verification is required; no in-sync mark was applied.");
-
-    [DllImport("cldapi.dll", ExactSpelling = true)]
-    private static extern int CfSetInSyncState(IntPtr fileHandle, uint inSyncState, uint flags, IntPtr inSyncUsn);
 }

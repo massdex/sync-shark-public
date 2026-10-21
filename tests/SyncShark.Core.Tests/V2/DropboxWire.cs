@@ -9,6 +9,9 @@ namespace Massdex.SyncShark.V2;
 /// <summary>An in-memory Dropbox account under the root "/Pilot" (folder id id:pilot-folder) for the v2 checks.</summary>
 internal sealed partial class DropboxWire : HttpMessageHandler
 {
+    public bool QuotaFull { get; set; }
+    public long QuotaFreeBytes { get; set; } = 999;
+
     internal const string RootId = "id:pilot-folder";
 
     private sealed record Node(string Relative, string Id, string Rev, byte[] Bytes, bool Folder,
@@ -54,6 +57,9 @@ internal sealed partial class DropboxWire : HttpMessageHandler
     /// <summary>When set, the download body is these bytes instead of the node's exact revision bytes.</summary>
     public byte[]? DownloadBodyOverride { get; set; }
 
+    /// <summary>When set, every download is refused with this exact status and body (refusal-mapping checks).</summary>
+    public (HttpStatusCode Status, string Body)? DownloadRefusalOverride { get; set; }
+
     /// <summary>The cursor returned by get_latest_cursor.</summary>
     public string LatestCursor { get; set; } = "cursor-latest";
     public string? RevisionDeletedTime { get; set; } = "2026-10-12T08:00:00Z";
@@ -64,6 +70,7 @@ internal sealed partial class DropboxWire : HttpMessageHandler
 
     /// <summary>When positive, the deleted-item listing is split into pages of this many entries.</summary>
     public int DeletedPageSize { get; set; }
+    public int LivePageSize { get; set; }
 
     /// <summary>The limit sent with the most recent include_deleted list_folder request.</summary>
     public int? LastDeletedListingLimit { get; private set; }
@@ -79,6 +86,7 @@ internal sealed partial class DropboxWire : HttpMessageHandler
     public Dictionary<string, string> NameWriteErrors { get; } = new(StringComparer.Ordinal);
     public List<string> AttemptedWritePaths { get; } = [];
     public bool UploadRefusalUsesReason { get; set; }
+    public Action? UploadSessionStarted { get; set; }
 
     /// <summary>Every list_folder scope, to distinguish subtree pruning from result filtering.</summary>
     public List<(string Path, bool Recursive)> ListRequests { get; } = new();
@@ -178,6 +186,8 @@ internal sealed partial class DropboxWire : HttpMessageHandler
                     expires_in = 14400,
                     account_id = "account-id"
                 });
+            case "/2/users/get_space_usage":
+                return Json(new { used = 1, allocation = new Dictionary<string, object> { [".tag"] = "individual", ["allocated"] = QuotaFull ? 1L : 1L + QuotaFreeBytes } });
             case "/2/users/get_current_account":
                 return Json(new
                 {
@@ -254,14 +264,15 @@ internal sealed partial class DropboxWire : HttpMessageHandler
             entries.AddRange(DeletedInScope(prefix, recursive));
         }
         AfterListingCaptured?.Invoke();
-        if (includeDeleted && DeletedPageSize > 0 && entries.Count > DeletedPageSize)
+        var pageSize = includeDeleted ? DeletedPageSize : LivePageSize;
+        if (pageSize > 0 && entries.Count > pageSize)
         {
             _deletedPages.Clear();
-            var pageCount = (entries.Count + DeletedPageSize - 1) / DeletedPageSize;
+            var pageCount = (entries.Count + pageSize - 1) / pageSize;
             for (var index = 1; index < pageCount; index++)
                 _deletedPages["deleted-page-" + index] =
-                    entries.Skip(index * DeletedPageSize).Take(DeletedPageSize).ToArray();
-            return Json(new { entries = entries.Take(DeletedPageSize).ToArray(), cursor = "deleted-page-1", has_more = true });
+                    entries.Skip(index * pageSize).Take(pageSize).ToArray();
+            return Json(new { entries = entries.Take(pageSize).ToArray(), cursor = "deleted-page-1", has_more = true });
         }
         return Json(Paged(entries.ToArray(), "listing-done"));
     }

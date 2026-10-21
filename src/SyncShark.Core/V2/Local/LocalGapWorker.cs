@@ -16,6 +16,7 @@ internal interface ILocalGapProbe : IDisposable
 {
     LocalGapProof? Probe(ItemState item);
     string? UnavailableReason => null;
+    string? LastFailureReason => null;
 }
 
 internal sealed class DelegatingGapProbe(ILocalGapIo io, RootDef root) : ILocalGapProbe
@@ -106,6 +107,16 @@ internal sealed class LocalGapWorker(ILocalGapStore store, ILocalGapIo io) : IAs
         }
         var discovered = new List<(ItemState Item, bool RequiresHash)>();
         var failures = new List<(ItemState Item, string Reason)>();
+        var reasons = new List<(string ObjectId, string Reason)>();
+        var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+        string? firstWin32 = null;
+        void Record(ItemState item, string reason)
+        {
+            reasons.Add((item.ObjectId, reason));
+            var category = reason.Split('(')[0];
+            counts[category] = counts.GetValueOrDefault(category) + 1;
+            if (firstWin32 is null && reason.Contains('(')) firstWin32 = reason;
+        }
         foreach (var item in page)
         {
             ct.ThrowIfCancellationRequested();
@@ -113,26 +124,46 @@ internal sealed class LocalGapWorker(ILocalGapStore store, ILocalGapIo io) : IAs
             {
                 if (MetadataOnly(item) || io.Excluded(root, item))
                 {
-                    store.RetireGapItem(root.RootId, epoch, item);
                     discovered.Add((item, false));
+                    Record(item, "metadata-only");
                     continue;
                 }
                 var proof = epoch.TrustFileUsn ? probes.Probe(item) : null;
-                var unchanged = epoch.TrustFileUsn && proof is not null && ProofFollows(proof.JournalCursor, epoch.JournalCursor) &&
-                    Matches(item, proof.File) && proof.File.Usn < epoch.Boundary;
-                discovered.Add((item, !unchanged));
+                var reason = !epoch.TrustFileUsn ? "untrusted-history" :
+                    proof is null ? probes.LastFailureReason ?? "proof-unavailable" :
+                    !ProofFollows(proof.JournalCursor, epoch.JournalCursor) ? "journal-mismatch" :
+                    !Matches(item, proof.File) ? "metadata-mismatch" :
+                    proof.File.Usn >= epoch.Boundary ? "usn>=boundary" : "proved-unchanged";
+                discovered.Add((item, reason != "proved-unchanged"));
+                Record(item, reason);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception error)
             {
                 discovered.Add((item, true));
                 failures.Add((item, error.Message));
+                Record(item, "probe-exception");
                 RunLog.Trace($"local gap item discovery retained: {item.Path}: {error}");
             }
         }
         // Even a poison item advances discovery. Its protected, entity-owned work is retried separately.
         store.GapDiscoveredBatch(root.RootId, epoch, discovered);
         foreach (var failure in failures) store.FailGapItem(root.RootId, epoch, failure.Item, failure.Reason);
+        // Diagnostics are best effort and must never skip poison-item accounting or
+        // prevent discovery from completing after durable work has been recorded.
+        // Genuine store corruption is still surfaced, never masked as a diagnostic outage.
+        try
+        {
+            if (reasons.Count != 0) store.SetGapDiscoveryReasons(root.RootId, epoch, reasons);
+        }
+        catch (Exception error) when (error is not (StateDamagedException or OperationCanceledException or OutOfMemoryException))
+        {
+            RunLog.Trace($"local gap discovery reasons unavailable: {error}");
+        }
+        if (page.Count > 0)
+            RunLog.Trace($"local gap metadata page: root={root.RootId}; epoch={epoch.Epoch}; count={page.Count}; " +
+                string.Join(", ", counts.OrderBy(entry => entry.Key, StringComparer.Ordinal).Select(entry => $"{entry.Key}={entry.Value}")) +
+                "; first-win32=" + (firstWin32 ?? "none"));
         if (page.Count < 128) store.GapDiscoveryDone(root.RootId, epoch);
         return page.Count > 0;
     }
@@ -203,6 +234,19 @@ internal sealed class LocalGapWorker(ILocalGapStore store, ILocalGapIo io) : IAs
     private static bool ProofFollows(string current, string previous) =>
         NtfsUsnCheckpoint.TryParseCursor(current, out var id, out var next) &&
         NtfsUsnCheckpoint.TryParseCursor(previous, out var oldId, out var oldNext) && id == oldId && next >= oldNext;
+
+    internal static void PromoteDiscovery(ILocalGapStore store, RootDef root, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        try { store.PromoteGapDiscovery(root.RootId); }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception error)
+        {
+            store.SetGapStatus(root.RootId, true, $"metadata promotion deferred: {error.Message}; retry next sync");
+            RunLog.Trace($"local gap metadata promotion deferred: {root.RootId}: {error}");
+            return;
+        }
+    }
 
     internal static void Promote(ILocalGapStore store, IStateStore known, ILocalGapIo io, RootDef root,
         long through, NtfsUsnCheckpoint? runStart, Func<string, bool> include, Action<string> touched, CancellationToken ct)

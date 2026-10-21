@@ -1,7 +1,10 @@
 using Microsoft.Data.Sqlite;
 
-// Frozen final26 (84f0bc18) v20 schema, not the implementation under test.
+// Frozen final26.2 (044d87e9) v21 schema, not the Files On-Demand implementation under test.
 // Kept as SQL so the fixture does not depend on a binary, native APIs or live state.
+// The "V20" name is historical: v20 (84f0bc18) legitimately migrates to v21 on open, so a
+// v20 baseline cannot assert that a no-command open leaves every sqlite_master definition
+// unchanged. This is the exact schema a final26.2 store has before Files On-Demand is enabled.
 internal static class FilesOnDemandV20Fixture
 {
     internal static void Create(string path)
@@ -14,7 +17,9 @@ internal static class FilesOnDemandV20Fixture
         command.ExecuteNonQuery();
         command.CommandText = "INSERT INTO root(root_no,root_id,cursor) VALUES(1,'fixture-root','fixture-cursor'); " +
             "INSERT INTO dir(dir_no,path,path_key) VALUES(1,'Folder','FOLDER'); " +
-            "INSERT INTO file_state(root_no,dir_no,name_key,name,kind,object_id,size,mtime,flags) VALUES(1,1,'FILE','file',0,'fixture-item',17,0,0);";
+            "INSERT INTO file_state(root_no,dir_no,name_key,name,kind,object_id,size,mtime,flags) VALUES(1,1,'FILE','file',0,'fixture-item',17,0,0); " +
+            // A real final26.2 store has already completed the one-time grant backfill.
+            "INSERT INTO quarantine_upgrade VALUES('grant-backfill');";
         command.ExecuteNonQuery();
     }
 
@@ -48,6 +53,7 @@ internal static class FilesOnDemandV20Fixture
         CREATE TABLE pending_effect(action_id TEXT PRIMARY KEY, pair_no INTEGER NOT NULL, action_json TEXT NOT NULL,
           state TEXT NOT NULL, attempts INTEGER NOT NULL, updated INTEGER NOT NULL);
         CREATE INDEX pe_unresolved ON pending_effect(pair_no, state, updated);
+        CREATE INDEX pe_intent_order ON pending_effect(pair_no);
         CREATE TABLE recovery(recovery_id TEXT PRIMARY KEY, pair_no INTEGER NOT NULL, action_id TEXT NOT NULL,
           side TEXT NOT NULL, path TEXT NOT NULL, location TEXT NOT NULL, version_id TEXT, hash TEXT NOT NULL,
           size INTEGER NOT NULL, created INTEGER NOT NULL, expires INTEGER NOT NULL) WITHOUT ROWID;
@@ -97,6 +103,16 @@ internal static class FilesOnDemandV20Fixture
         CREATE TABLE IF NOT EXISTS sync_retry(pair_no INTEGER NOT NULL, path_key TEXT NOT NULL,
           json TEXT NOT NULL, retry_after INTEGER NOT NULL, PRIMARY KEY(pair_no,path_key));
         CREATE INDEX IF NOT EXISTS sync_retry_due ON sync_retry(pair_no,retry_after,path_key);
+        CREATE INDEX IF NOT EXISTS sync_retry_kind ON sync_retry(pair_no,json_extract(json,'$.Kind'),path_key);
+        CREATE INDEX IF NOT EXISTS sync_retry_delete_blocked ON sync_retry(pair_no,path_key)
+          WHERE json_extract(json,'$.DeleteBlockedDetail') IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS sync_retry_delete_review ON sync_retry(pair_no,path_key)
+          WHERE json_extract(json,'$.MissingDeleteIdentityReview')=1;
+        CREATE INDEX IF NOT EXISTS sync_retry_review_path ON sync_retry(pair_no,json_extract(json,'$.Path'))
+          WHERE json_extract(json,'$.MissingDeleteIdentityReview')=1;
+        CREATE INDEX IF NOT EXISTS nt_groupable_delete ON notice(pair_no,reason_key,notice_id) WHERE state='open';
+        CREATE INDEX IF NOT EXISTS pe_uncertain_delete ON pending_effect(pair_no,action_id)
+          WHERE state='uncertain' AND json_extract(action_json,'$.Kind')='Delete';
         CREATE TABLE IF NOT EXISTS listing_checkpoint(root_id TEXT PRIMARY KEY, binding TEXT NOT NULL, mode TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS listing_page(root_id TEXT NOT NULL, request_key TEXT NOT NULL,
           cursor TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(root_id,request_key));
@@ -110,10 +126,10 @@ internal static class FilesOnDemandV20Fixture
         CREATE TABLE IF NOT EXISTS local_gap(root_no INTEGER PRIMARY KEY, epoch TEXT NOT NULL,
           journal_cursor TEXT NOT NULL, boundary INTEGER NOT NULL, trust_usn INTEGER NOT NULL,
           after_object TEXT NOT NULL DEFAULT '', discovery_done INTEGER NOT NULL DEFAULT 0,
-          next_result INTEGER NOT NULL DEFAULT 0);
+          next_result INTEGER NOT NULL DEFAULT 0, worker_after TEXT NOT NULL DEFAULT '', worker_done INTEGER NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT 'journal history discontinuity');
         CREATE TABLE IF NOT EXISTS local_gap_item(root_no INTEGER NOT NULL, object_id TEXT NOT NULL,
           epoch TEXT NOT NULL, expected_json TEXT NOT NULL, hash TEXT, proof_json TEXT,
-          result_seq INTEGER NOT NULL DEFAULT 0, last_attempt INTEGER NOT NULL DEFAULT 0,
+          result_seq INTEGER NOT NULL DEFAULT 0, last_attempt INTEGER NOT NULL DEFAULT 0, metadata_ready INTEGER NOT NULL DEFAULT 0, metadata_stamp TEXT, failure_count INTEGER NOT NULL DEFAULT 0, failure_reason TEXT, retry_allowed INTEGER NOT NULL DEFAULT 1, defer_count INTEGER NOT NULL DEFAULT 0, defer_reason TEXT, discovery_reason TEXT,
           PRIMARY KEY(root_no,object_id)) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS run_summary(seq INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL UNIQUE,
           pair_id TEXT NOT NULL, started INTEGER NOT NULL, completed INTEGER NOT NULL, outcome TEXT NOT NULL,
@@ -123,18 +139,15 @@ internal static class FilesOnDemandV20Fixture
         CREATE INDEX IF NOT EXISTS run_summary_pair ON run_summary(pair_id, seq);
         CREATE TABLE IF NOT EXISTS journal_volume(serial INTEGER PRIMARY KEY, volume TEXT NOT NULL, state_json TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS fs_flagged ON file_state(root_no) WHERE flags != 0;CREATE INDEX IF NOT EXISTS fs_refused ON file_state(root_no, kind) WHERE (flags & 64) != 0;CREATE INDEX IF NOT EXISTS fs_quarantine ON file_state(root_no, kind) WHERE (flags & 128) != 0;
-        ALTER TABLE local_gap ADD COLUMN reason TEXT NOT NULL DEFAULT 'journal history discontinuity';
-        ALTER TABLE local_gap_item ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0;
-        ALTER TABLE local_gap_item ADD COLUMN failure_reason TEXT;
-        ALTER TABLE local_gap_item ADD COLUMN retry_allowed INTEGER NOT NULL DEFAULT 1;
-        ALTER TABLE local_gap_item ADD COLUMN defer_count INTEGER NOT NULL DEFAULT 0;
-        ALTER TABLE local_gap_item ADD COLUMN defer_reason TEXT;
-        CREATE INDEX IF NOT EXISTS gap_ready ON local_gap_item(root_no,epoch,last_attempt,object_id) WHERE hash IS NULL AND retry_allowed=1;
+        CREATE INDEX IF NOT EXISTS gap_ready ON local_gap_item(root_no,epoch,last_attempt,object_id) WHERE hash IS NULL AND retry_allowed=1 AND metadata_ready=0;
+        CREATE INDEX IF NOT EXISTS gap_metadata ON local_gap_item(root_no,epoch,object_id) WHERE metadata_ready=1;
         CREATE INDEX IF NOT EXISTS gap_waiting ON local_gap_item(root_no,object_id) WHERE hash IS NULL AND retry_allowed=0;
         CREATE INDEX IF NOT EXISTS gap_failed ON local_gap_item(root_no,object_id) WHERE failure_count>=3;
         CREATE INDEX IF NOT EXISTS gap_results ON local_gap_item(root_no,result_seq,object_id) WHERE hash IS NOT NULL;
         CREATE INDEX IF NOT EXISTS defender_deferral_batch ON defender_deferral(batch,object_id);
         CREATE INDEX IF NOT EXISTS nt_pair_reason ON notice(pair_no,reason_key);
-        PRAGMA user_version=20;
+        CREATE TABLE IF NOT EXISTS notice_legacy_fold(pair_no INTEGER NOT NULL, reason_key TEXT NOT NULL,
+          PRIMARY KEY(pair_no,reason_key)) WITHOUT ROWID;
+        PRAGMA user_version=21;
         """;
 }

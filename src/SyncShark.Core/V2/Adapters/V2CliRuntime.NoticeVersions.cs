@@ -3,8 +3,12 @@ namespace Massdex.SyncShark.V2;
 public sealed partial class V2CliRuntime
 {
     /// <summary>Explicit notice-only recovery; the general Recovery restore API remains separate.</summary>
-    public async Task<SyncCliRunData> ResolveConflictAsync(string pairId, string relativePath, string choice,
-        string? conflictId, long? generation, string? accountId, CancellationToken cancellationToken)
+    public Task<SyncCliRunData> ResolveConflictAsync(string pairId, string relativePath, string choice,
+        string? conflictId, long? generation, string? accountId, CancellationToken cancellationToken) =>
+        ResolveNoticeAsync(pairId, relativePath, choice, conflictId, generation, accountId, cancellationToken, new());
+
+    public async Task<SyncCliRunData> ResolveNoticeAsync(string pairId, string relativePath, string choice,
+        string? conflictId, long? generation, string? accountId, CancellationToken cancellationToken, NoticeActionInput input)
     {
         var pair = RequirePair(pairId);
         var separator = choice.IndexOf('=');
@@ -67,21 +71,24 @@ public sealed partial class V2CliRuntime
                 if (held.Reason is not null) Console.Error.WriteLine(held.Reason);
                 return new SyncCliRunData(pairId, pair.Name, 0, 0, 0, 0, 0, false);
             }
+            if (notice is not null) conflictId = notice.NoticeId ?? conflictId;
             if (notice is not null && NoticeChoices.IsRetryNotice(notice) && NoticeChoices.IsRetryChoice(choice))
             {
                 var removed = 0;
                 var removalFailures = 0;
                 var removalUncertain = 0;
-                await _run.ApplyRetryNoticeChoiceAsync(pairId, conflictId, choice, cancellationToken,
+                var message = await _run.ApplyRetryNoticeChoiceAsync(pairId, conflictId, choice, cancellationToken,
                     (previous, updated) => SaveNarrowerPair(previous, updated), (action, result) =>
                     {
                         if (result.Outcome == Outcome.Done && action.ExpectedTarget?.Kind == ItemKind.File) removed++;
                         if (result.Outcome == Outcome.Failed) removalFailures++;
                         if (result.Outcome == Outcome.Uncertain) removalUncertain++;
-                    }, new RunProgressForwarder(Console.Error.WriteLine), acceptedExclusion: acceptedExclusion);
+                    }, new RunProgressForwarder(Console.Error.WriteLine), acceptedExclusion: acceptedExclusion, input: input,
+                    updateRebuildableRule: (currentPair, current, replacement) => UpdateRebuildableRule(currentPair, current, replacement));
+                Console.Error.WriteLine(message);
                 if (NoticeChoices.IsPairRetryNotice(notice))
                     return new SyncCliRunData(pairId, pair.Name, 0, 0, 0, 0, 0, false);
-                if (choice is not (NoticeChoices.RetryNow or NoticeChoices.DeleteReviewed or NoticeChoices.KeepRestore) || !_store.FirstSyncDone(pairId))
+                if (choice is not (NoticeChoices.Rename or NoticeChoices.RetryNow or NoticeChoices.DeleteReviewed or NoticeChoices.KeepRestore) || !_store.FirstSyncDone(pairId))
                     return new SyncCliRunData(pairId, pair.Name, 0, 0, 0, 0, 0, false)
                     { Deleted = removed, Failed = removalFailures, NeedsVerification = removalUncertain };
                 var retryReport = await _run.IncrementalAsync(pairId, new RunProgressForwarder(Console.Error.WriteLine), cancellationToken);

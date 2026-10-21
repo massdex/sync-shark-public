@@ -30,6 +30,21 @@ internal sealed class StoreCommitter
         _gen = gen;
     }
 
+    internal bool DeleteRestorePending(SyncAction action) =>
+        _store.SyncRetryAt(_pairId, action.Path)?.Kind == SqliteStateStore.InterruptedDeleteRestoreKind;
+
+    internal ItemState? DeleteSource(SyncAction action) => DeleteSource(_store, _pairId, action);
+
+    internal static ItemState? DeleteSource(IStateStore store, string pairId, SyncAction action)
+    {
+        var baseline = action.ObjectKey is null ? null : store.Baselines(pairId, [action.ObjectKey]).SingleOrDefault();
+        baseline ??= store.BaselinesAt(pairId, action.Target, [action.Path]).SingleOrDefault();
+        if (baseline is not null) return action.Target == Side.A ? baseline.B : baseline.A;
+        return action.DeletionSourceObjectId is { Length: > 0 } id
+            ? new ItemState(action.Path, action.ExpectedTarget?.Kind ?? ItemKind.File, id, null, null, 0,
+                DateTimeOffset.MinValue, ItemFlags.None) : null;
+    }
+
     private bool _pointerPairReported;
 
     // The entity gate spans native effect AND durable baseline/receipt publication. Refresh uses
@@ -110,6 +125,16 @@ internal sealed class StoreCommitter
     internal async Task CommitAsync(SyncAction action, ActionResult result)
     {
         await Enqueue(LatestAction(action), result).ConfigureAwait(false);
+        if (result.Outcome == Outcome.Done)
+        {
+            var noticeId = DeleteSourceGuard.NoticeId(_pairId, action.Path);
+            if (_store.NoticeById(_pairId, noticeId) is { Closed: false })
+            {
+                await RunOperations.WaitAsync(_storeGate, "store commit gate").ConfigureAwait(false);
+                try { _store.CloseNotice(noticeId, "resolved"); }
+                finally { _storeGate.Release(); }
+            }
+        }
         if (result.Outcome is Outcome.Done or Outcome.Skipped)
             _providerActions.TryRemove(action.ActionId, out _);
     }

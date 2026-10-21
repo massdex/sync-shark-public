@@ -12,6 +12,15 @@ public sealed record DeletionEvidenceRecord(string Path, DateTimeOffset? Deleted
 /// <summary>Failed delta history reads are not negative evidence; retained independently of cache validation.</summary>
 public sealed record DeletionEvidenceFailure(int Attempts, DateTimeOffset FirstUtc, long Generation, bool Released);
 
+/// <summary>One bounded page of intents plus the exclusive keyset cursor for the next page.</summary>
+public sealed record IntentPage(IReadOnlyList<SyncAction> Items, string? NextCursor);
+
+/// <summary>One unresolved intent with the state it was streamed with, so a scan need not re-read it per row.</summary>
+public sealed record IntentRow(SyncAction Action, string State);
+
+/// <summary>One bounded page of unresolved intent rows in rowid order, plus the next exclusive cursor.</summary>
+public sealed record IntentRowsPage(IReadOnlyList<IntentRow> Items, string? NextCursor);
+
 /// <summary>The only place that reads and writes the sync database.</summary>
 public interface IStateStore : IDisposable
 {
@@ -72,6 +81,35 @@ public interface IStateStore : IDisposable
 
     /// <summary>Direct children only; production uses the directory index, never a subtree inventory.</summary>
     IReadOnlyList<ItemState> LiveChildren(string rootId, string directory);
+
+    /// <summary>
+    /// Bounded folder paths under a prefix whose leaf name is one of <paramref name="names"/> (an empty list means
+    /// any folder). This is a preview of candidates for a rebuildable rule; it never loads a subtree.
+    /// </summary>
+    IReadOnlyList<string> RebuildableFoldersUnder(string rootId, string prefix, IReadOnlyList<string> names,
+        int offset, int limit)
+    {
+        var rows = prefix.Length == 0 ? Live(rootId) : LiveUnder(rootId, [prefix]);
+        return rows.Where(item => item.Kind == ItemKind.Folder &&
+                (names.Count == 0 || names.Contains(item.Path[(item.Path.LastIndexOf('/') + 1)..], StringComparer.OrdinalIgnoreCase)))
+            .Select(item => item.Path).OrderBy(path => path, StringComparer.Ordinal)
+            .Skip(offset).Take(limit).ToArray();
+    }
+
+    /// <summary>Bounded direct-child page. Persistent stores must limit rows before decoding.</summary>
+    IReadOnlyList<ItemState> LiveChildrenPage(string rootId, string directory, int offset, int limit) =>
+        LiveChildren(rootId, directory).OrderBy(item => item.Path, StringComparer.Ordinal).Skip(offset).Take(limit).ToArray();
+
+    /// <summary>Bounded flagged-item page for catalog backfill.</summary>
+    /// <param name="afterDirNo">The cursor item's stored folder number, so a vanished folder still seeks from its key.</param>
+    IReadOnlyList<ItemState> LiveFlaggedPage(string rootId, ItemFlags flags, ItemState? after, int limit, long? afterDirNo = null)
+    {
+        var rows = LiveFlagged(rootId, flags);
+        return (after is null ? rows : rows.SkipWhile(item => item.Path != after.Path).Skip(1)).Take(limit).ToArray();
+    }
+
+    /// <summary>The stored folder number for a path, when the store keeps one; null permits a path lookup fallback.</summary>
+    long? DirectoryNumber(string rootId, string path) => null;
 
     /// <summary>Exact directory aliases through indexed keys, never ancestor children or subtrees.</summary>
     IReadOnlyList<string> DirectorySpellings(string rootId, string path);
@@ -196,14 +234,26 @@ public interface IStateStore : IDisposable
     bool SyncRetryExists(string pairId, string path) => SyncRetryAt(pairId, path) is not null;
     void SaveSyncRetry(string pairId, SyncRetry retry);
     void ClearSyncRetry(string pairId, string path);
+    void RefreshInterruptedDeleteNotice(string pairId) { }
+    void RefreshBlockedDeleteNotice(string pairId) { }
+    BlockedDeletePage ReadBlockedDeletes(string pairId, string? after = null, int limit = 50) => new([], null);
+    DeleteNoticePage ReadDeleteNoticeItems(string pairId, bool review, string? after = null, int limit = 50) => new([], null);
+    IReadOnlyList<SyncRetry> InterruptedDeleteRepairsAt(string pairId, IReadOnlyCollection<string> paths) =>
+        paths.Select(path => SyncRetryAt(pairId, path)).OfType<SyncRetry>()
+            .Where(retry => retry.Kind == SqliteStateStore.InterruptedDeleteRestoreKind).ToArray();
     void RequestSyncRetryNow(string pairId, string path)
     {
         if (SyncRetryAt(pairId, path) is { } retry) SaveSyncRetry(pairId, retry with { RetryAfter = DateTimeOffset.MinValue });
     }
+    void SuspendHeldRetry(string pairId, SyncRetry retry);
     SyncRetry? SyncRetryAt(string pairId, string path);
     IReadOnlyList<SyncRetry> DueSyncRetries(string pairId, DateTimeOffset now, int limit);
     int CountSyncRetries(string pairId);
-    bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants);
+    bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants, bool restoredOnly = false);
+
+    /// <summary>Whether any restored evidence hold is still active (not dormant). One check per run, never per item.</summary>
+    bool HasActiveRestoredRetries(string pairId) =>
+        ReadSyncRetries(pairId).Any(retry => retry.ReprobeEvidence && retry.RetryAfter < DateTimeOffset.MaxValue);
 
     /// <summary>Several results in one transaction (the Executor's group commit, B-124); the default commits each.</summary>
     void CommitResults(string pairId, long gen, IReadOnlyList<(SyncAction Action, ActionResult Result)> results)
@@ -217,11 +267,65 @@ public interface IStateStore : IDisposable
         foreach (var action in actions) RecordIntent(pairId, action);
     }
 
-    /// <summary>Intents still in play: those whose last outcome was started, uncertain or failed.</summary>
+    /// <summary>Intents still in play: those whose last outcome was started, uncertain, failed or temporarily held.</summary>
     IReadOnlyList<SyncAction> UnresolvedIntents(string pairId);
 
+    /// <summary>How many intents are unresolved (started, uncertain, failed or held); indexed and never materialized.</summary>
+    int CountUnresolvedIntents(string pairId) => UnresolvedIntents(pairId).Count;
+
+    /// <summary>
+    /// Classifies one intent as temporarily held for verification, or returns a held one to uncertain. Holding never
+    /// touches attempts or the update time, and an unknown/removed id is ignored rather than reinserted.
+    /// </summary>
+    void SetIntentHeld(string pairId, string actionId, bool held) { }
+
+    /// <summary>Classifies several intents in one call; stores may reuse one transaction per bounded batch.</summary>
+    void SetIntentsHeld(string pairId, IReadOnlyList<string> actionIds, bool held)
+    {
+        foreach (var actionId in actionIds) SetIntentHeld(pairId, actionId, held);
+    }
+
+    /// <summary>How many of the pair's intents are held for background verification; indexed, never materialized.</summary>
+    int CountHeldIntents(string pairId) => 0;
+
+    /// <summary>Whether this exact intent is currently held; a point lookup, false for an unknown or other pair's id.</summary>
+    bool IsIntentHeld(string pairId, string actionId) => false;
+
+    /// <summary>One bounded held-intent page, ordered by (updated, rowid); a null cursor starts at the first page.</summary>
+    IntentPage HeldIntentsPage(string pairId, string? cursor, int limit) => new([], null);
+
+    /// <summary>All unresolved intents, lazily paged in (updated, rowid) order so mutations cannot reorder the scan.</summary>
+    IEnumerable<SyncAction> StreamUnresolvedIntents(string pairId) => UnresolvedIntents(pairId);
+
+    /// <summary>
+    /// All unresolved intents with their stored state, lazily paged so a run streams a million intents in bounded
+    /// pages and does not point-query each row's state. A store without state pages reports the empty state.
+    /// </summary>
+    IEnumerable<IntentRow> StreamUnresolvedIntentRows(string pairId) =>
+        StreamUnresolvedIntents(pairId).Select(action => new IntentRow(action, string.Empty));
+
+    /// <summary>
+    /// The pair that owns this exact intent, by an indexed primary-key lookup where the store can provide one.
+    /// Reconciliation calls this per intent; the fallback scans pairs only for small custom stores.
+    /// </summary>
+    string? PairForIntent(string actionId) =>
+        Pairs().FirstOrDefault(pair => UnresolvedIntents(pair.PairId)
+            .Any(action => string.Equals(action.ActionId, actionId, StringComparison.Ordinal)))?.PairId;
+
     void AddNotices(IEnumerable<Notice> n);
+    // Persistent stores override this to page reads and notice writes under one transaction.
+    void RefreshProviderNameNotices(PairDef pair)
+    {
+        foreach (var notice in ProviderNameNotices.Read(pair,
+            (root, after) => LiveFlaggedSummary(root.RootId, ItemFlags.ProviderNameRefused, 0).Count == 0
+                ? Array.Empty<ItemState>() : LiveFlaggedPage(root.RootId, ItemFlags.ProviderNameRefused, after, 100)))
+            AddNotices([notice]);
+    }
     IReadOnlyList<Notice> OpenNotices(string? pairId);
+
+    /// <summary>Open link-item notices only; persistent stores filter this in SQL so a page never loads every notice.</summary>
+    IReadOnlyList<Notice> OpenLinkNotices(string pairId) =>
+        OpenNotices(pairId).Where(notice => notice.ReasonKey == "link-item").ToArray();
 
     /// <summary>Recovery copies recorded for this pair; the Recovery owner restores or expires them.</summary>
     IReadOnlyList<RecoveryRecord> Recoveries(string pairId);
@@ -473,6 +577,9 @@ public sealed record RunReport(string PairId, string Outcome, int Done, int Fail
 
     /// <summary>Effects whose commit could not be confirmed, including those outside the failure sample.</summary>
     public int Uncertain { get; init; }
+
+    /// <summary>Pending intents protected by temporary verification/evidence holds, not failed effects.</summary>
+    public int PendingVerification { get; init; }
 
     /// <summary>Total failed or unconfirmed effects, independent of the retained examples.</summary>
     public int FailureCount => Failed + Uncertain;

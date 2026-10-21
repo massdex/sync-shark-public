@@ -12,7 +12,7 @@ internal static class FilesOnDemandSchema
         "storage_refresh", "storage_refresh_due", "storage_cleanup", "storage_registration", "fs_owned",
         "storage_subtree_sweep", "storage_root_backoff", "storage_pending_root", "storage_refresh_root",
         "storage_hydration", "storage_hydration_root", "storage_hydration_due", "fs_nonpointer",
-        "storage_pending_requested", "storage_hydration_requested", "storage_refresh_requested"
+        "storage_pending_requested", "storage_hydration_requested", "storage_refresh_requested", "fs_pointer_verify"
     ];
 
     internal static void Ensure(Microsoft.Data.Sqlite.SqliteConnection connection)
@@ -29,7 +29,7 @@ internal static class FilesOnDemandSchema
         StoreSchema.Execute(connection, tx, RequestedIndexesDdl);
         if (legacyPeriodic) StoreSchema.Execute(connection, tx, "DELETE FROM storage_refresh WHERE due>0;");
         // Preview builds changed the shared index. Restore its final26 predicate only on opted-in stores.
-        if (StoreSchema.Scalar(connection, tx, "SELECT sql FROM sqlite_master WHERE name='fs_flagged';") is string sql && sql.Contains("~512", StringComparison.Ordinal))
+        if (StoreSchema.Scalar(connection, tx, "SELECT sql FROM sqlite_master WHERE name='fs_flagged';") is string sql && sql.Contains("~1024", StringComparison.Ordinal))
             StoreSchema.Execute(connection, tx, "DROP INDEX fs_flagged; CREATE INDEX fs_flagged ON file_state(root_no) WHERE flags != 0;");
         // Resume legacy whole-root sweeps once; new commands create entity-scoped sweeps.
         StoreSchema.Execute(connection, tx, "INSERT OR IGNORE INTO storage_subtree_sweep(root_id,object_id) SELECT root_id,'' FROM storage_policy_sweep; DELETE FROM storage_policy_sweep;");
@@ -44,8 +44,10 @@ internal static class FilesOnDemandSchema
         """;
 
     internal const string Ddl = """
-        CREATE INDEX IF NOT EXISTS fs_nonpointer ON file_state(root_no) WHERE (flags & ~512) != 0;
-        CREATE INDEX IF NOT EXISTS fs_owned ON file_state(root_no) WHERE (flags & 512) != 0;
+        CREATE INDEX IF NOT EXISTS fs_nonpointer ON file_state(root_no) WHERE (flags & ~1024) != 0;
+        CREATE INDEX IF NOT EXISTS fs_owned ON file_state(root_no) WHERE (flags & 1024) != 0;
+        -- Owned pointers that also carry content-verification debt; the literal predicate matches the queries.
+        CREATE INDEX IF NOT EXISTS fs_pointer_verify ON file_state(root_no) WHERE (flags & 1280) = 1280;
         CREATE TABLE IF NOT EXISTS storage_root_backoff(root_id TEXT PRIMARY KEY,due INTEGER NOT NULL) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS storage_subtree_sweep(root_id TEXT NOT NULL,object_id TEXT NOT NULL,
           after_dir_key TEXT NOT NULL DEFAULT '',after_dir INTEGER NOT NULL DEFAULT -1,

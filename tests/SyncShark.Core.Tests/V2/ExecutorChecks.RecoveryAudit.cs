@@ -46,12 +46,18 @@ internal static partial class ExecutorChecks
         var writer = new DropboxWriter(Pair().B, Side.B, UploadSafetyClient(http, new FixedTokenSource()), "unused", settings);
         wire.SeedFile("delete-restart", "old");
         var victim = (await writer.ObserveAsync("delete-restart", default))!;
-        var action = Act(ActionKind.Delete, Side.B, victim.Path, expected: victim, rf: true);
+        var source = new FakeEndpoint(Side.A, "ra");
+        var original = source.Seed(victim.Path, "old");
+        var action = Act(ActionKind.Delete, Side.B, victim.Path, expected: victim, rf: true, key: "delete-key", rule: 6);
         var folder = Path.Combine(root, "delete-job-" + Guid.NewGuid().ToString("N"));
         var previous = ProviderEffectContext.Current.Value;
         using (var store = SqliteStateStore.Open(folder, settings, TimeProvider.System))
         {
             store.SavePair(Pair());
+            var adopt = Act(ActionKind.Adopt, Side.B, victim.Path, source: original, expected: victim, key: "delete-key");
+            store.RecordIntent("p1", adopt);
+            store.CommitResult("p1", 1, adopt, new ActionResult(adopt.ActionId, Outcome.Done, original, victim, null, null));
+            await RemoveSourceAsync(source, victim.Path);
             store.RecordIntent("p1", action);
             ProviderEffectContext.Current.Value = new ProviderEffectContext(checkpoint =>
             {
@@ -71,7 +77,7 @@ internal static partial class ExecutorChecks
         var pending = reopened.UnresolvedIntents("p1");
         Require(pending.Count == 1 && pending[0].ProviderEffect?.Kind == "delete-job", "restart retains the exact job checkpoint");
         var results = await new Executor(reopened, settings, Admission()).ReconcileAsync(pending, 1,
-            new FakeEndpoint(Side.A, "ra"), writer, default);
+            source, writer, default);
         Require(results.Single().Outcome == Outcome.Done && reopened.UnresolvedIntents("p1").Count == 0,
             "saved job resolves its original deletion after store reopen");
         Require(wire.Calls.Count(c => c == "/2/files/delete_batch") == 1 &&

@@ -240,7 +240,8 @@ public sealed partial class DropboxPilotClient
                         { WriteErrorTag = "too_many_write_operations" };
                     }
                     throw new DropboxApiException(HttpStatusCode.Conflict,
-                        "Dropbox refused this file's revision-conditional batch delete; it was not deleted.");
+                        "Dropbox refused this file's revision-conditional batch delete; it was not deleted.")
+                    { WriteErrorTag = WriteErrorTag(entries[index].GetProperty("failure")) };
                 }
                 item.Result.TrySetResult();
             }

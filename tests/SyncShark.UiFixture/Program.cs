@@ -56,6 +56,9 @@ internal static partial class Program
     [STAThread]
     public static int Main(string[] args)
     {
+        // Before the evidence writer or any fixture file I/O: placeholder attributes must be visible
+        // to the whole process. Non-Windows hosts make no native call.
+        WindowsPlaceholderCompatibility.Expose();
         using var interactions = UiInteractionEvidence.Start(args);
         try { return RunFixtureMain(args); }
         catch (Exception error) { Console.Error.WriteLine(error); return 1; }

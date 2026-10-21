@@ -6,16 +6,23 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <AssemblyName>SyncShark.Core.Tests</AssemblyName>
+    <!-- Standalone native/storage host: exclude only the Core.Tests-only observation regression
+         that would otherwise pull in the large RunChecks partial graph. -->
+    <DefineConstants>$(DefineConstants);SYNCSHARK_FOD_STANDALONE</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/SyncShark.Core/SyncShark.Core.csproj" />
     <Compile Include="../SyncShark.Core.Tests/FilesOnDemandNativeChecks.cs" Link="FilesOnDemandNativeChecks.cs" />
     <Compile Include="../SyncShark.Core.Tests/FilesOnDemandStorageChecks.cs" Link="FilesOnDemandStorageChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/FilesOnDemandNoticeAggregationChecks.cs" Link="FilesOnDemandNoticeAggregationChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/FilesOnDemandProtectionChecks.cs" Link="FilesOnDemandProtectionChecks.cs" />
     <Compile Include="../SyncShark.Core.Tests/FilesOnDemandSettlementChecks.cs" Link="FilesOnDemandSettlementChecks.cs" />
     <Compile Include="../SyncShark.Core.Tests/HydrationNoticeWriterChecks.cs" Link="HydrationNoticeWriterChecks.cs" />
     <Compile Include="../SyncShark.Core.Tests/FilesOnDemandNativePointerChecks.cs" Link="FilesOnDemandNativePointerChecks.cs" />
     <Compile Include="../SyncShark.Core.Tests/FilesOnDemandNativeEdgeChecks.cs" Link="FilesOnDemandNativeEdgeChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/FilesOnDemandNativePartialChecks.cs" Link="FilesOnDemandNativePartialChecks.cs" />
     <Compile Include="../SyncShark.Core.Tests/OwnedPointerProofChecks.cs" Link="OwnedPointerProofChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/V2/InMemoryStateStore.cs" Link="InMemoryStateStore.cs" />
     <Compile Include="../SyncShark.Core.Tests/V2/NewPointerNativeChecks.cs" Link="NewPointerNativeChecks.cs" />
     <Compile Include="../SyncShark.Core.Tests/V2/NewPointerDownloadChecks.cs" Link="NewPointerDownloadChecks.cs" />
     <Compile Include="../SyncShark.Core.Tests/CloudFilesLifetimeChecks.cs" Link="CloudFilesLifetimeChecks.cs" />

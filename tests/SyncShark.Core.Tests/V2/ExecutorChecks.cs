@@ -10,6 +10,7 @@ internal static partial class ExecutorChecks
 
     public static async Task RunAsync()
     {
+        await DeleteSourceChecksAsync();
         await Order_PhasesAndLevels();
         await Order_InterleavesTargets();
         await Vacate_DeleteBeforeCreateSamePath();
@@ -45,6 +46,7 @@ internal static partial class ExecutorChecks
         await Cancel_StopsLaunching_KeepsIntents();
         await Apply_EarlyBreak_StopsEffects();
         await Reconcile_ThreeOutcomes();
+        await Reconcile_PairLookupIsIndexedAsync();
         await Reconcile_RecoveryFirstDone_SameRef();
         await Reconcile_Move_Done_WhenSameObject();
         await Reconcile_Move_Done_WhenSourceContentDiffers();
@@ -84,18 +86,21 @@ internal static partial class ExecutorChecks
 
     private static async Task Order_PhasesAndLevels()
     {
-        var (_, a, b, executor) = Rig();
+        var (store, a, b, executor) = Rig();
         var moved = a.Seed("d/x", "x-content", versionId: "v1");
         var copy = a.Seed("d/e/f", "f-content", versionId: "v1");
         var xFolder = b.Seed("x", "x-content", versionId: "v1");
         var old = b.Seed("old", "old-content", versionId: "v1");
+        var original = a.Seed("old", "old-content", versionId: "v1");
+        SeedBaseline(store, "old-key", original, old);
+        await a.DeleteAsync(Act(ActionKind.Delete, Side.A, "old", expected: original), default);
         var record = new RecordingWriter(b);
         var plan = Plan(
             Act(ActionKind.MkDir, Side.B, "d"),
             Act(ActionKind.MkDir, Side.B, "d/e"),
             Act(ActionKind.Move, Side.B, "d/x", from: "x", source: moved, expected: xFolder),
             Act(ActionKind.CopyNew, Side.B, "d/e/f", source: copy),
-            Act(ActionKind.Delete, Side.B, "old", expected: old));
+            Act(ActionKind.Delete, Side.B, "old", expected: old, key: "old-key", rule: 6));
 
         var results = await Apply(executor, plan, a, record);
         var calls = record.Calls;
@@ -123,10 +128,21 @@ internal static partial class ExecutorChecks
                 actions.Add(Act(ActionKind.CopyNew, side, path + "/nested/" + i,
                     source: (side == Side.A ? b : a).Seed(path + "/nested/" + i, "content")));
             var target = side == Side.A ? a : b;
-            var folder = target.Seed("old", "", ItemKind.Folder);
-            var child = target.Seed("old/child", "old");
-            actions.Add(Act(ActionKind.Delete, side, "old", expected: folder) with { DescendantsPlanned = true });
-            actions.Add(Act(ActionKind.Delete, side, "old/child", expected: child));
+            var oldPath = "old-" + side;
+            var folder = target.Seed(oldPath, "", ItemKind.Folder);
+            var child = target.Seed(oldPath + "/child", "old");
+            var source = side == Side.A ? b : a;
+            var originalFolder = source.Seed(oldPath, "", ItemKind.Folder);
+            var originalChild = source.Seed(oldPath + "/child", "old");
+            SeedBaseline(store, oldPath, side == Side.A ? folder : originalFolder,
+                side == Side.A ? originalFolder : folder);
+            SeedBaseline(store, oldPath + "/child", side == Side.A ? child : originalChild,
+                side == Side.A ? originalChild : child);
+            var sourceSide = side == Side.A ? Side.B : Side.A;
+            await source.DeleteAsync(Act(ActionKind.Delete, sourceSide, originalChild.Path, expected: originalChild), default);
+            await source.DeleteAsync(Act(ActionKind.Delete, sourceSide, originalFolder.Path, expected: originalFolder), default);
+            actions.Add(Act(ActionKind.Delete, side, oldPath, expected: folder, key: oldPath, rule: 6) with { DescendantsPlanned = true });
+            actions.Add(Act(ActionKind.Delete, side, oldPath + "/child", expected: child, key: oldPath + "/child", rule: 6));
         }
         var results = await Apply(executor, Plan(actions.ToArray()), a, b);
         Require(results.All(r => r.Outcome == Outcome.Done), "mixed directions retain folder readiness and descendant-delete barriers");
@@ -140,7 +156,7 @@ internal static partial class ExecutorChecks
             var sideActions = admitted.Where(action => action.Target == side).ToArray();
             Require(sideActions.Take(2).All(action => action.Kind == ActionKind.MkDir) &&
                 sideActions.Skip(2).Take(3).All(action => action.Kind == ActionKind.CopyNew) &&
-                sideActions[^2].Path == "old/child" && sideActions[^1].Path == "old",
+                sideActions[^2].Path == "old-" + side + "/child" && sideActions[^1].Path == "old-" + side,
                 "interleaving retains parent-before-content and deepest-first deletes on " + side);
         }
     }
@@ -149,10 +165,11 @@ internal static partial class ExecutorChecks
     {
         var (_, a, b, executor) = Rig();
         var file = b.Seed("p", "file-content", versionId: "v1");
+        var replacement = a.Seed("p", "", ItemKind.Folder, versionId: "v1");
         var record = new RecordingWriter(b);
         var plan = Plan(
-            Act(ActionKind.Delete, Side.B, "p", expected: file, key: "k1"),
-            Act(ActionKind.MkDir, Side.B, "p"));
+            Act(ActionKind.Delete, Side.B, "p", expected: file, key: "k1", rule: 26),
+            Act(ActionKind.MkDir, Side.B, "p", source: replacement, rule: 26));
 
         var results = await Apply(executor, plan, a, record);
         Require(results.All(r => r.Outcome == Outcome.Done), "the vacating delete and the create both succeed");
@@ -172,8 +189,8 @@ internal static partial class ExecutorChecks
         var replacement = a.Seed("d", "file-content", versionId: "v1");
         var record = new RecordingWriter(b);
         var plan = Plan(
-            Act(ActionKind.Delete, Side.B, "d", expected: folder, rf: true, key: "kd"),
-            Act(ActionKind.CopyNew, Side.B, "d", source: replacement));
+            Act(ActionKind.Delete, Side.B, "d", expected: folder, rf: true, key: "kd") with { Rule = 26 },
+            Act(ActionKind.CopyNew, Side.B, "d", source: replacement) with { Rule = 26 });
 
         var results = await Apply(executor, plan, a, record);
         var calls = record.Calls;
@@ -203,7 +220,7 @@ internal static partial class ExecutorChecks
         var (store, a, b, executor) = Rig();
         var stale = a.Seed("x", "before", versionId: "v1");
         var action = new SyncAction("held-delete", 19, ActionKind.Delete, Side.A, "x", null, null,
-            stale, false, null) { NeedsReview = true };
+            stale, false, null) { NeedsReview = true, RemovalReviewChoice = true };
         var edited = a.Seed("x", "edited", versionId: "v2");
         var results = await Apply(executor, Plan(action), a, b);
         Require(results.Single().Outcome == Outcome.Skipped, "an edited held-delete target is skipped");
@@ -312,6 +329,7 @@ internal static partial class ExecutorChecks
         var (store, a, b, executor) = Rig();
         var victim = b.Seed("x", "content", versionId: "v1");
         SeedBaseline(store, "k1", a.Seed("x", "content", versionId: "v1"), victim);
+        await RemoveSourceAsync(a, "x");
         var record = new RecordingWriter(b);
         var action = Act(ActionKind.Delete, Side.B, "x", expected: victim, rf: true, key: "k1");
 
@@ -324,8 +342,10 @@ internal static partial class ExecutorChecks
 
     private static async Task RecoveryFirst_PreserveFails_NoEffect()
     {
-        var (_, a, b, executor) = Rig();
+        var (store, a, b, executor) = Rig();
         var victim = b.Seed("x", "content", versionId: "v1");
+        SeedBaseline(store, "k1", a.Seed("x", "content", versionId: "v1"), victim);
+        await RemoveSourceAsync(a, "x");
         b.FailNextWrites = 1;
         var record = new RecordingWriter(b);
         var action = Act(ActionKind.Delete, Side.B, "x", expected: victim, rf: true, key: "k1");
@@ -343,6 +363,8 @@ internal static partial class ExecutorChecks
     {
         var (store, a, b, executor) = Rig();
         var victim = b.Seed("x", "content", versionId: "v1");
+        SeedBaseline(store, "k1", a.Seed("x", "content", versionId: "v1"), victim);
+        await RemoveSourceAsync(a, "x");
         var record = new RecordingWriter(b) { PreserveFailsMismatch = true };
         var action = Act(ActionKind.Delete, Side.B, "x", expected: victim, rf: true, key: "k1");
 
@@ -679,6 +701,29 @@ internal static partial class ExecutorChecks
         Require(store.UnresolvedIntents("p1").Count == 0, "every reconciled intent is closed");
     }
 
+    // P1: reconcile must find each intent's owning pair by an indexed point lookup, never by materializing every
+    // unresolved intent of every pair once per intent (the 1M-row deploy-time memory/time risk).
+    private static async Task Reconcile_PairLookupIsIndexedAsync()
+    {
+        var inner = new InMemoryStateStore();
+        inner.SavePair(Pair());
+        var store = new JournalStore(inner, new List<string>());
+        var a = new FakeEndpoint(Side.A, "ra");
+        var b = new FakeEndpoint(Side.B, "rb");
+        var source = a.Seed("present", "present-content", versionId: "v1");
+        b.Seed("present", "present-content", versionId: "v1");
+        var action = Act(ActionKind.CopyNew, Side.B, "present", source: source, key: "k1");
+        store.RecordIntent("p1", action);
+        var executor = new Executor(store, Settings(1), Admission());
+
+        var results = await executor.ReconcileAsync([action], 1, new RecordingWriter(a), new RecordingWriter(b),
+            CancellationToken.None);
+        Require(results.Single().Outcome == Outcome.Done, "the indexed lookup still commits the reconcile result");
+        Require(store.UnresolvedIntentLoads == 0,
+            "reconcile resolves the pair by point lookup, never by loading every unresolved intent");
+        Console.WriteLine("PASS Reconcile_PairLookupIsIndexed");
+    }
+
     private static async Task Reconcile_RecoveryFirstDone_SameRef()
     {
         var inner = new InMemoryStateStore();
@@ -688,6 +733,7 @@ internal static partial class ExecutorChecks
         var b = new FakeEndpoint(Side.B, "rb");
         var victim = b.Seed("x", "content", versionId: "v1");
         SeedBaseline(inner, "k1", a.Seed("x", "content", versionId: "v1"), victim);
+        await RemoveSourceAsync(a, "x");
         var executor = new Executor(store, Settings(64), Admission());
         var action = Act(ActionKind.Delete, Side.B, "x", expected: victim, rf: true, key: "k1");
 
@@ -769,6 +815,8 @@ internal static partial class ExecutorChecks
     {
         var (store, a, b, executor) = Rig();
         var victim = b.Seed("x", "content", versionId: "v1");
+        SeedBaseline(store, "k1", a.Seed("x", "content", versionId: "v1"), victim);
+        await RemoveSourceAsync(a, "x");
         await b.DeleteAsync(Act(ActionKind.Delete, Side.B, "x", expected: victim), CancellationToken.None);
         var presentSource = a.Seed("present", "present-content", versionId: "v1");
         b.Seed("present", "present-content", versionId: "v1");
@@ -799,6 +847,12 @@ internal static partial class ExecutorChecks
         store.CompleteGeneration(gen, "1", true);
         SeedBaseline(store, "kx", a.Seed("d/x", "one", versionId: "v1"), fileOne);
         SeedBaseline(store, "ky", a.Seed("d/e/y", "two", versionId: "v1"), fileTwo);
+        await RemoveSourceAsync(a, "d/x");
+        await RemoveSourceAsync(a, "d/e/y");
+        SeedBaseline(store, "ke", a.Seed("d/e", "", ItemKind.Folder), folderE);
+        SeedBaseline(store, "kd", a.Seed("d", "", ItemKind.Folder), folderState);
+        await RemoveSourceAsync(a, "d/e");
+        await RemoveSourceAsync(a, "d");
         var record = new RecordingWriter(b);
         var folder = Act(ActionKind.Delete, Side.B, "d", expected: folderState, rf: true, key: "kd")
             with { FrozenVictimSignature = FolderDelete.Signature(FolderDelete.LiveDescendants(store, "rb", "d")) };
@@ -858,6 +912,10 @@ internal static partial class ExecutorChecks
         store.CompleteGeneration(gen, "1", true);
         SeedBaseline(store, "kx", a.Seed("d/x", "one", versionId: "v1"), fileX);
         SeedBaseline(store, "ky", a.Seed("d/y", "two", versionId: "v1"), fileY);
+        await RemoveSourceAsync(a, "d/x");
+        await RemoveSourceAsync(a, "d/y");
+        SeedBaseline(store, "kd", a.Seed("d", "", ItemKind.Folder), folderState);
+        await RemoveSourceAsync(a, "d");
         var record = new RecordingWriter(b) { FailDeleteAt = "d/x" };
         var folder = Act(ActionKind.Delete, Side.B, "d", expected: folderState, rf: true, key: "kd");
 
@@ -993,9 +1051,11 @@ internal static partial class ExecutorChecks
         public SyncRetry? SyncRetryAt(string pairId, string path) => _inner.SyncRetryAt(pairId, path);
         public IReadOnlyList<SyncRetry> DueSyncRetries(string pairId, DateTimeOffset now, int limit) => _inner.DueSyncRetries(pairId, now, limit);
         public int CountSyncRetries(string pairId) => _inner.CountSyncRetries(pairId);
-        public bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants) => _inner.RetryProtected(pairId, path, active, descendants);
+        public bool HasActiveRestoredRetries(string pairId) => _inner.HasActiveRestoredRetries(pairId);
+        public bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants, bool restoredOnly = false) => _inner.RetryProtected(pairId, path, active, descendants, restoredOnly);
         public void SaveSyncRetry(string pairId, SyncRetry retry) => _inner.SaveSyncRetry(pairId, retry);
         public void ClearSyncRetry(string pairId, string path) => _inner.ClearSyncRetry(pairId, path);
+    public void SuspendHeldRetry(string pairId, SyncRetry retry) => _inner.SuspendHeldRetry(pairId, retry);
         public void RequireRehash(string rootId, ItemState item, string reason) => _inner.RequireRehash(rootId, item, reason);
         public bool CompleteRehash(string rootId, ItemState item, string hash) => _inner.CompleteRehash(rootId, item, hash);
         public IReadOnlyList<ItemState> RehashCandidates(string rootId, int limit) => _inner.RehashCandidates(rootId, limit);
@@ -1011,6 +1071,9 @@ internal static partial class ExecutorChecks
 
         /// <summary>A simulated cost per store transaction, so concurrent writes queue behind a running one.</summary>
         internal TimeSpan WriteCost { get; set; }
+
+        /// <summary>How many times a caller materialized the full unresolved-intent list (must stay 0 on reconcile).</summary>
+        internal int UnresolvedIntentLoads { get; private set; }
 
         /// <summary>The size of each intent and result batch the executor wrote (one store transaction each).</summary>
         internal List<int> IntentBatches { get; } = new();
@@ -1079,7 +1142,22 @@ internal static partial class ExecutorChecks
 
         public IReadOnlyList<Baseline> BaselinesTouching(string pairId, Side side, IEnumerable<string> objectIds,
             IEnumerable<string> pathPrefixes) => _inner.BaselinesTouching(pairId, side, objectIds, pathPrefixes);
-        public IReadOnlyList<SyncAction> UnresolvedIntents(string pairId) => _inner.UnresolvedIntents(pairId);
+        public IReadOnlyList<SyncAction> UnresolvedIntents(string pairId)
+        {
+            UnresolvedIntentLoads++;
+            return _inner.UnresolvedIntents(pairId);
+        }
+        public int CountUnresolvedIntents(string pairId) => _inner.CountUnresolvedIntents(pairId);
+        public void SetIntentHeld(string pairId, string actionId, bool held) => _inner.SetIntentHeld(pairId, actionId, held);
+        public void SetIntentsHeld(string pairId, IReadOnlyList<string> actionIds, bool held) =>
+            _inner.SetIntentsHeld(pairId, actionIds, held);
+        public int CountHeldIntents(string pairId) => _inner.CountHeldIntents(pairId);
+        public bool IsIntentHeld(string pairId, string actionId) => _inner.IsIntentHeld(pairId, actionId);
+        public IntentPage HeldIntentsPage(string pairId, string? cursor, int limit) =>
+            _inner.HeldIntentsPage(pairId, cursor, limit);
+        public IEnumerable<SyncAction> StreamUnresolvedIntents(string pairId) => _inner.StreamUnresolvedIntents(pairId);
+        public IEnumerable<IntentRow> StreamUnresolvedIntentRows(string pairId) => _inner.StreamUnresolvedIntentRows(pairId);
+        public string? PairForIntent(string actionId) => _inner.PairForIntent(actionId);
         public void AddNotices(IEnumerable<Notice> n) => _inner.AddNotices(n);
         public IReadOnlyList<Notice> OpenNotices(string? pairId) => _inner.OpenNotices(pairId);
         public IReadOnlyList<RecoveryRecord> Recoveries(string pairId) => _inner.Recoveries(pairId);

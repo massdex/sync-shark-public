@@ -9,7 +9,8 @@ internal sealed class RetryMatches(IStateStore store, string pairId) : IReadOnly
     public bool ContainsKey(string key) => TryGetValue(key, out _);
     public bool TryGetValue(string key, out PrepareMatch value)
     {
-        value = store.SyncRetryAt(pairId, key)?.Match!;
+        var retry = store.SyncRetryAt(pairId, key);
+        value = retry?.Kind == SqliteStateStore.InterruptedDeleteRestoreKind ? null! : retry?.Match!;
         return value is not null;
     }
     public IEnumerable<string> Keys => Entries().Select(item => item.Key);
@@ -18,5 +19,5 @@ internal sealed class RetryMatches(IStateStore store, string pairId) : IReadOnly
     public IEnumerator<KeyValuePair<string, PrepareMatch>> GetEnumerator() => Entries().GetEnumerator();
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
     private IEnumerable<KeyValuePair<string, PrepareMatch>> Entries() => store.ReadSyncRetries(pairId)
-        .Where(item => item.Match is not null).Select(item => new KeyValuePair<string, PrepareMatch>(item.Path, item.Match!));
+        .Where(item => item.Match is not null && item.Kind != SqliteStateStore.InterruptedDeleteRestoreKind).Select(item => new KeyValuePair<string, PrepareMatch>(item.Path, item.Match!));
 }

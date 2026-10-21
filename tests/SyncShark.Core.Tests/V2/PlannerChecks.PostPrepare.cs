@@ -11,6 +11,7 @@ internal static partial class PlannerChecks
         PostPrepare_MixedNeedsReviewChildKeepsFolderDeleteSeparate();
         PostPrepare_UnchangedSurvivorBeatsChoice();
         PostPrepare_HeldChildNeverCollapsedOver();
+        PreparedLocalDelete_Checks();
     }
 
     // Fourth review finding 2: Dropbox deleted matched p/d/old.txt, p/d and p; local p/d/new.txt is held (hidden from

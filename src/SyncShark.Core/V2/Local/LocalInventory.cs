@@ -213,9 +213,7 @@ public sealed partial class LocalInventory : IInventorySource
         var from = new NtfsUsnCheckpoint(journalId, through.FirstUsn, next, through.LowestValidUsn);
         if (through.RequiresFullReconciliation(cursor))
         {
-            (_known as ILocalGapStore)?.BeginGap(rootId, through.Cursor, next,
-                journalId == through.JournalId && next <= through.NextUsn,
-                journalId != through.JournalId ? "journal replaced" : next > through.NextUsn ? "cursor ahead of journal" : "journal wrapped past saved cursor");
+            BeginJournalGap(rootId, journalId, next, through);
             return Invalid(gen, rootId, cursor,
                 journalId != through.JournalId ? "journal replaced" : next > through.NextUsn ? "cursor ahead of journal" : "journal gap: cursor precedes retained range");
         }
@@ -260,7 +258,7 @@ public sealed partial class LocalInventory : IInventorySource
         {
             var writtenKnown = changes.Where(record => (record.Reason & 0x7) != 0).DistinctBy(record => record.FileId)
                 .Select(record => _known.ByObject(rootId, SyncLocalEndpointStore.ObjectId(_volume, record.FileId)))
-                .Where(item => item is { Kind: ItemKind.File }).Select(item => item!);
+                .Where(item => item is { Kind: ItemKind.File } && !item.Flags.HasFlag(ItemFlags.OwnedPointer)).Select(item => item!);
             _known.RequireRehashBatch(rootId, writtenKnown, "journal data write requires full reconciliation before hashing");
         }
     }
@@ -270,7 +268,7 @@ public sealed partial class LocalInventory : IInventorySource
     {
         // Metadata-only cloud-aware scanning emits hydrated files as ordinary items (CloudAvailability null).
         // Placeholder states from this path are online-only: never hydrate them just to verify content (decision 57).
-        const ItemFlags blocked = ItemFlags.Locked | ItemFlags.Unreadable | ItemFlags.Ignored | ItemFlags.Link | ItemFlags.Placeholder;
+        const ItemFlags blocked = ItemFlags.Locked | ItemFlags.Unreadable | ItemFlags.Ignored | ItemFlags.Link | ItemFlags.Placeholder | ItemFlags.OwnedPointer;
         var candidates = delta.Changes.Where(change => change.State is { Kind: ItemKind.File } state &&
             (state.Flags & blocked) == 0 && _known.ByObject(_root.RootId, state.ObjectId) is { } prior &&
             ((prior.Flags & ItemFlags.NeedsRehash) != 0 ||
@@ -508,6 +506,7 @@ public sealed partial class LocalInventory : IInventorySource
             ReplaceOnlineOnlyStubs = _settings.ReplaceOnlineOnlyStubs,
             OwnedPlaceholderProbeForTest = OwnedPlaceholderProbeForTest,
             ClassifyOwnedPointer = OwnedPointerClassifier(),
+            KnownOwnedPointerPath = KnownOwnedPointerPath,
             ReadOwnedPlaceholderForTest = ReadOwnedPlaceholderForTest }
             .ScanAsync(lease, _productOwnedPaths, ct, refreshPaths: rows.Select(row => row.Path).ToArray(),
                 expectedPairId: _expectedPairId, contentProvider: OwnedContentProvider);
@@ -548,6 +547,7 @@ public sealed partial class LocalInventory : IInventorySource
             DirectoryCompletedForTest = DirectoryCompletedForTest,
             OwnedPlaceholderProbeForTest = OwnedPlaceholderProbeForTest,
             ClassifyOwnedPointer = OwnedPointerClassifier(),
+            KnownOwnedPointerPath = KnownOwnedPointerPath,
             ReadOwnedPlaceholderForTest = ReadOwnedPlaceholderForTest }.ScanAsync(lease, _productOwnedPaths, ct,
             includePath: path => include(path) && !LocalItems.IsExcluded(path, _productOwnedRelative),
             traverseDirectory: path => include(path) && !LocalItems.IsExcluded(path, _productOwnedRelative) && exactPaths?.Contains(path) != true,
@@ -581,10 +581,12 @@ public sealed partial class LocalInventory : IInventorySource
         items.RemoveAll(i => heldPaths.Contains(i.Path));
         foreach (var decision in scan.Decisions.Where(d => d.IsQuarantine)) items.Add(PersistQuarantine(decision));
         items.Sort((left, right) => string.CompareOrdinal(left.Path, right.Path));
+        var unobservedPointers = scan.Decisions.Where(d => d.Reason == OwnedPointerProof.ObservationMessage)
+            .Select(d => d.RelativePath).ToHashSet(StringComparer.OrdinalIgnoreCase);
         // A handled quarantine is not a run-wide incomplete scan, but its unobserved subtree
         // must remain untouched in storage until an explicit retry obtains fresh evidence.
         return new Snapshot(rootId, _side, gen, cursor, items, scan.Complete ? DecisionPaths(scan, include) : [string.Empty])
-            { IncludesPath = path => include(path) && !UnderHeldDescendant(path, heldPaths), IncompleteReasons = DecisionReasons(scan, include),
+            { IncludesPath = path => include(path) && !UnderHeldDescendant(path, heldPaths) && !unobservedPointers.Contains(path), IncompleteReasons = DecisionReasons(scan, include),
                 VerifyAbsence = HasOnlyHistoryHolds(scan) ? _ => FileAbsence.Gone : null,
                 OpenAbsenceVerifier = HasOnlyHistoryHolds(scan) ? null : () => new LocalFileAbsence(_root.RootPath, _rootIdentity) };
     }
@@ -661,6 +663,13 @@ public sealed partial class LocalInventory : IInventorySource
         new(rootId, _side, gen, string.Empty, Array.Empty<ItemState>(), new[] { string.Empty });
 
     internal string? LastFallbackReason { get; private set; }
+
+    // Shared by the journal branch and its synthetic wrap regression. The cursor is the
+    // next UNPROCESSED USN: equality is a candidate, and journal sizing is not identity.
+    internal void BeginJournalGap(string rootId, ulong journalId, long next, NtfsUsnCheckpoint through) =>
+        (_known as ILocalGapStore)?.BeginGap(rootId, through.Cursor, next,
+            journalId == through.JournalId && next <= through.NextUsn,
+            journalId != through.JournalId ? "journal replaced" : next > through.NextUsn ? "cursor ahead of journal" : "journal wrapped past saved cursor");
 
     internal void BeginFullGap(string rootId, string cursor, bool journalDeleted)
     {

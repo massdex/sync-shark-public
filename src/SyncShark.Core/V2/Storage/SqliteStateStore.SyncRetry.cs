@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
 
 namespace Massdex.SyncShark.V2;
 
@@ -92,26 +93,36 @@ public sealed partial class SqliteStateStore
         return (IReadOnlyList<SyncRetry>)rows;
     });
 
+    // An indefinite pair-wide decision hold (Kind decision at the root path) waits for the user; it is not scheduling
+    // debt, so it never makes a completed run look deferred. A root decision still carrying PendingNotice failed to
+    // write its notice, so it still needs the fast retry and counts. Real failures and deletion evidence still count.
     public int CountSyncRetries(string pairId) => InStore(() => (int)Math.Min(int.MaxValue,
-        (long)StoreSchema.Scalar(_connection, null, "SELECT COUNT(*) FROM sync_retry WHERE pair_no=$p AND retry_after<$held;",
-            ("$p", RequirePair(pairId)), ("$held", DateTimeOffset.MaxValue.ToUnixTimeMilliseconds()))!));
+        (long)StoreSchema.Scalar(_connection, null,
+            "SELECT COUNT(*) FROM sync_retry WHERE pair_no=$p AND retry_after<$held " +
+            "AND NOT (path_key=$root AND json_extract(json,'$.Kind')='decision' " +
+            "AND json_extract(json,'$.PendingNotice') IS NULL);",
+            ("$p", RequirePair(pairId)), ("$held", DateTimeOffset.MaxValue.ToUnixTimeMilliseconds()),
+            ("$root", RowCodec.Key(string.Empty)))!));
 
-    public bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants) => InStore(() =>
+    public bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants, bool restoredOnly = false) => InStore(() =>
     {
         var pairNo = RequirePair(pairId);
         var key = RowCodec.Key(path);
+        var filter = " AND NOT (retry_after=" + DateTimeOffset.MaxValue.ToUnixTimeMilliseconds() +
+            " AND COALESCE(json_extract(json,'$.ReprobeEvidence'),0)=1)" +
+            (restoredOnly ? " AND json_extract(json,'$.ReprobeEvidence')=1" : "");
         if (!descendants)
         {
             foreach (var parent in new[] { path }.Concat(PairPath.Ancestors(path)))
                 if (!active.Contains(parent) && StoreSchema.Scalar(_connection, null,
-                    "SELECT 1 FROM sync_retry WHERE pair_no=$p AND path_key=$k;",
+                    "SELECT 1 FROM sync_retry WHERE pair_no=$p AND path_key=$k" + filter + ";",
                     ("$p", pairNo), ("$k", RowCodec.Key(parent))) is not null) return true;
             return false;
         }
         // At most active.Count rows can be ignored. Read only one more than that, never the whole subtree.
         using var command = StoreSchema.Command(_connection, null,
             "SELECT path_key FROM sync_retry WHERE pair_no=$p AND path_key >= $lo AND path_key < $hi " +
-            "ORDER BY path_key LIMIT $limit;");
+            filter + " ORDER BY path_key LIMIT $limit;");
         command.Parameters.AddWithValue("$p", pairNo);
         command.Parameters.AddWithValue("$lo", key.Length == 0 ? "" : key + "/");
         command.Parameters.AddWithValue("$hi", key.Length == 0 ? "￿" : key + "0");
@@ -121,11 +132,83 @@ public sealed partial class SqliteStateStore
         return false;
     });
 
+    public bool HasActiveRestoredRetries(string pairId) => InStore(() =>
+        StoreSchema.Scalar(_connection, null,
+            "SELECT 1 FROM sync_retry WHERE pair_no=$p AND retry_after<$held " +
+            "AND json_extract(json,'$.ReprobeEvidence')=1 LIMIT 1;",
+            ("$p", RequirePair(pairId)), ("$held", DateTimeOffset.MaxValue.ToUnixTimeMilliseconds())) is not null);
+
+    public void SuspendHeldRetry(string pairId, SyncRetry retry) => InStore(() =>
+    {
+        using var transaction = _connection.BeginTransaction();
+        var dormant = new SyncRetry(retry.Path, "deletion-evidence", 0, retry.LastError,
+            DateTimeOffset.MaxValue, Held: retry.Held, ReprobeEvidence: true);
+        StoreSchema.Execute(_connection, transaction,
+            "INSERT INTO sync_retry(pair_no,path_key,json,retry_after) VALUES($p,$k,$j,$due) " +
+            "ON CONFLICT(pair_no,path_key) DO UPDATE SET json=excluded.json,retry_after=excluded.retry_after;",
+            ("$p", RequirePair(pairId)), ("$k", RowCodec.Key(retry.Path)),
+            ("$j", JsonSerializer.Serialize(dormant, RowCodec.Json)), ("$due", dormant.RetryAfter.ToUnixTimeMilliseconds()));
+        // Close the derived notice ids exactly as ClearSyncRetry does, so the update uses nt_open and
+        // never rewrites the choice of an already-closed notice.
+        StoreSchema.Execute(_connection, transaction,
+            "UPDATE notice SET state='closed',choice='exclude' WHERE notice_id=$id AND state='open';",
+            ("$id", ShortId.Make("n", pairId, "40", RowCodec.Key(retry.Path), "sync-retry")));
+        foreach (var rule in new[] { "4", "19" })
+            StoreSchema.Execute(_connection, transaction,
+                "UPDATE notice SET state='closed',choice='exclude' WHERE notice_id=$id AND state='open';",
+                ("$id", ShortId.Make("n", pairId, rule, RowCodec.Key(retry.Path), "deletion-evidence-pending")));
+        transaction.Commit();
+    });
+
     public void ClearSyncRetry(string pairId, string path) => InStore(() =>
     {
         using var transaction = _connection.BeginTransaction();
+        var pairNo = RequirePair(pairId);
         StoreSchema.Execute(_connection, transaction, "DELETE FROM sync_retry WHERE pair_no=$p AND path_key=$key;",
-            ("$p", RequirePair(pairId)), ("$key", RowCodec.Key(path)));
+            ("$p", pairNo), ("$key", RowCodec.Key(path)));
+        CloseRetryNotices(transaction, pairId, path);
+        StoreSchema.Execute(_connection, transaction,
+            "UPDATE notice SET state='closed',choice='resolved' WHERE notice_id=$id;",
+            ("$id", DeleteSourceGuard.NoticeId(pairId, path)));
+        StoreSchema.Execute(_connection, transaction,
+            "UPDATE notice SET state='closed',choice='resolved' WHERE notice_id=$id;",
+            ("$id", ShortId.Make("n", pairId, NoticeChoices.DeletionReviewRule.ToString(System.Globalization.CultureInfo.InvariantCulture), RowCodec.Key(path), "deletion-review")));
+        transaction.Commit();
+    });
+
+    /// <summary>
+    /// The keys in this resolved batch that hold the exact parked shape (Kind sync, no held evidence, deadline at
+    /// MaxValue). One indexed query for the whole batch; every other retry owner keeps its row. Runs inside the
+    /// caller's commit transaction, so resolution and unparking cannot split.
+    /// </summary>
+    private HashSet<string> ParkedSyncRetryKeys(SqliteTransaction transaction, long pairNo,
+        IReadOnlyList<string> paths)
+    {
+        var keys = new HashSet<string>(StringComparer.Ordinal);
+        var wanted = paths.Select(RowCodec.Key).Distinct(StringComparer.Ordinal).ToArray();
+        using var command = StoreSchema.Command(_connection, transaction,
+            "SELECT path_key,json FROM sync_retry WHERE pair_no=$p AND path_key IN (SELECT value FROM json_each($paths));");
+        command.Parameters.AddWithValue("$p", pairNo);
+        command.Parameters.AddWithValue("$paths", JsonSerializer.Serialize(wanted));
+        var found = new List<(string Key, string Json)>();
+        using (var reader = command.ExecuteReader())
+            while (reader.Read()) found.Add((reader.GetString(0), reader.GetString(1)));
+        foreach (var (key, json) in found)
+            if (JsonSerializer.Deserialize<SyncRetry>(json, RowCodec.Json) is { Kind: "sync", Held: null } retry &&
+                retry.RetryAfter == DateTimeOffset.MaxValue)
+                keys.Add(key);
+        return keys;
+    }
+
+    private void DeleteParkedSyncRetry(SqliteTransaction transaction, long pairNo, string pairId, string path)
+    {
+        StoreSchema.Execute(_connection, transaction, "DELETE FROM sync_retry WHERE pair_no=$p AND path_key=$key;",
+            ("$p", pairNo), ("$key", RowCodec.Key(path)));
+        CloseRetryNotices(transaction, pairId, path);
+    }
+
+    private void CloseRetryNotices(SqliteTransaction transaction, string pairId, string path)
+    {
         StoreSchema.Execute(_connection, transaction,
             "UPDATE notice SET state='closed',choice='resolved' WHERE notice_id=$id;",
             ("$id", ShortId.Make("n", pairId, "40", RowCodec.Key(path), "sync-retry")));
@@ -133,6 +216,5 @@ public sealed partial class SqliteStateStore
             StoreSchema.Execute(_connection, transaction,
                 "UPDATE notice SET state='closed',choice='resolved' WHERE notice_id=$id;",
                 ("$id", ShortId.Make("n", pairId, rule, RowCodec.Key(path), "deletion-evidence-pending")));
-        transaction.Commit();
-    });
+    }
 }

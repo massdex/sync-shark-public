@@ -30,12 +30,61 @@ internal static partial class RunChecks
                 ProviderEffect = intent.ProviderEffect! with { RecordedAtUtc = DateTimeOffset.UtcNow - TimeSpan.FromDays(1) }
             });
             await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+            Require(fx.Store.UnresolvedIntents(fx.Pair.PairId).Count == 1,
+                "an aged delete submission without a job id remains protected");
+
+            var jobWriter = new ExcludedDeleteJobWriter(fx.WriterB);
+            fx.Provider.AddWriter(fx.Pair.B, jobWriter);
+            var jobIntent = intent with
+            {
+                ProviderEffect = new ProviderEffectCheckpoint("delete-job", "pending-job",
+                    DateTimeOffset.UtcNow - TimeSpan.FromDays(1))
+            };
+            fx.Store.RecordIntent(fx.Pair.PairId, jobIntent);
+            foreach (var failure in new Exception?[]
+            {
+                null, new IOException("job lookup failed"),
+                new DropboxEffectUncertainException("internal error"), new HttpRequestException("offline")
+            })
+            {
+                jobWriter.Failure = failure;
+                await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+                Require(fx.Store.UnresolvedIntents(fx.Pair.PairId).Count == 1,
+                    "excluded live jobs and generic lookup failures never expire by age");
+                Require(!fx.Store.OpenNotices(fx.Pair.PairId).Any(n => n.ReasonKey == SyncRun.ExcludedIntentNoticeKey),
+                    "unverified excluded job does not get a not-applied notice");
+            }
+
+            jobWriter.Failure = new DropboxEffectUncertainException("expired job") { JobIdUnavailable = true };
+            fx.Store.RecordIntent(fx.Pair.PairId, jobIntent with
+            {
+                ProviderEffect = jobIntent.ProviderEffect! with { RecordedAtUtc = intent.ProviderEffect!.RecordedAtUtc }
+            });
+            await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+            Require(fx.Store.UnresolvedIntents(fx.Pair.PairId).Count == 1,
+                "typed expired excluded job still honors file grace and folder minimum two hours");
+            fx.Store.RecordIntent(fx.Pair.PairId, jobIntent);
+            await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
             Require(fx.Store.UnresolvedIntents(fx.Pair.PairId).Count == 0,
-                "unchanged target settles after resolver grace expiry");
+                "unchanged excluded target settles only with typed expired-job evidence after grace");
             Require(fx.WriterB.Deletes == 0, "pending or expired excluded effect is never replayed");
             Require(fx.Store.OpenNotices(fx.Pair.PairId).Count(n => n.ReasonKey == SyncRun.ExcludedIntentNoticeKey) == 1,
                 "definitive expired effect gets the settlement notice");
         }
+    }
+
+    private sealed class ExcludedDeleteJobWriter(IEndpointWriter inner) : IEndpointWriter, IProviderEffectReconciler
+    {
+        public Exception? Failure { get; set; }
+        public Task<bool?> ResolveProviderEffectAsync(SyncAction action, ProviderJobCheckCache? jobChecks, CancellationToken ct) =>
+            Failure is { } failure ? Task.FromException<bool?>(failure) : Task.FromResult<bool?>(null);
+        public Task<ItemState?> ObserveAsync(string path, CancellationToken ct) => inner.ObserveAsync(path, ct);
+        public Task<RecoveryRef> PreserveAsync(ItemState victim, string id, CancellationToken ct) => throw new InvalidOperationException("Excluded effect must not preserve.");
+        public Task<ItemState> PutAsync(SyncAction action, Stream content, CancellationToken ct) => throw new InvalidOperationException("Excluded effect must not write.");
+        public Task<ItemState> MoveAsync(SyncAction action, CancellationToken ct) => throw new InvalidOperationException("Excluded effect must not move.");
+        public Task DeleteAsync(SyncAction action, CancellationToken ct) => throw new InvalidOperationException("Excluded effect must not delete.");
+        public Task<ItemState> MkDirAsync(string path, CancellationToken ct) => throw new InvalidOperationException("Excluded effect must not create.");
+        public Task<Stream> OpenReadAsync(ItemState state, CancellationToken ct) => throw new InvalidOperationException("Excluded effect must not transfer bytes.");
     }
 
     private static async Task Reconcile_ExcludedMoveCompletesFirstSyncAsync()

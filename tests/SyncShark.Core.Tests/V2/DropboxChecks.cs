@@ -57,6 +57,7 @@ internal static partial class DropboxChecks
         await DownloadToChecksAsync(Path.Combine(root, "spool-direct"));
         await DownloadSingleCallChecksAsync();
         await DownloadRefusalChecksAsync();
+        await DownloadRefusalMappingChecksAsync();
         await ObserveChecksAsync();
         Console.WriteLine("--v2-dropbox-checks passed.");
     }

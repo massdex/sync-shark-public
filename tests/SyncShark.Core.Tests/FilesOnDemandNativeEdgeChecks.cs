@@ -1,3 +1,6 @@
+using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using Massdex.SyncShark;
 using Massdex.SyncShark.V2;
 
@@ -180,6 +183,7 @@ internal static class FilesOnDemandNativeEdgeChecks
             new RootDef(LocalRootIdFor(fullRoot), SyncProviders.Local, null, fullRoot,
                 SyncLocalEndpointStore.ObjectId(rootIdentity.VolumeSerialNumber, rootIdentity.FileId)),
             Side.A, pairId, InstallationId, recoveryRoot, cancellationToken).ConfigureAwait(false);
+        VerifyUnelevatedControlSecurity(fullRoot);
         var downloadsBefore = downloads();
 
         var move = new SyncAction("edge-move-refused", 6, ActionKind.Move, Side.A, destination,
@@ -273,6 +277,161 @@ internal static class FilesOnDemandNativeEdgeChecks
         return result;
     }
 
+    internal sealed record RangeRequest(PilotRemoteEntry Remote, long Offset, long Length);
+
+    internal sealed record PartialRangeObservation(
+        WindowsCloudFilesProvider.StubState NativeAfter,
+        SyncCloudFileAvailability Availability,
+        long RangeBytes,
+        int DownloadsBefore,
+        int DownloadsAfter);
+
+    /// <summary>
+    /// Produces genuine partial native residency: fully dehydrates the large pointer, asks Windows to
+    /// hydrate only its first range (CfHydratePlaceholder with a bounded range), and lets the supplied
+    /// fake source serve only a bounded prefix of the first request. The check asserts the real native
+    /// byte count and availability, never a simulated managed state. The remaining ranges are refused
+    /// by the fixture, so FULL policy cannot quietly complete the object.
+    /// The production registration uses FULL hydration policy, so the first native request may cover
+    /// the whole object; the byte budget then delivers only the requested prefix and fails the rest.
+    /// If Windows discards a failed transfer's prefix, the check reports that it cannot establish a
+    /// true partial state on this platform instead of fabricating one. A PROGRESSIVE registration is
+    /// not created here because only the caller's disposable root may be registered. Native stub and
+    /// identity reads use the same held handle, and FetchAsync derives its identity from the callback
+    /// context (it never reopens the local file), so exclusive sharing does not block the proof.
+    /// Serve limits are reset on every exit path.
+    /// </summary>
+    internal static async Task<PartialRangeObservation> CheckTruePartialRangeAsync(
+        string root, WindowsCloudFilesProvider provider, PilotRemoteEntry remote,
+        Func<int> downloads, Action<int, int> serveOnlyRanges, Func<RangeRequest[]> requests,
+        string pairId, Func<Task> verifyPartialProtection, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        ArgumentNullException.ThrowIfNull(downloads);
+        ArgumentNullException.ThrowIfNull(serveOnlyRanges);
+        var fullRoot = RequireRoot(root);
+        if (!provider.IsConnected)
+            throw new IOException("The disposable Cloud Files provider must already be connected.");
+        var full = Path.Combine(fullRoot, remote.RelativePath);
+        Require(File.Exists(full), "The large pointer is absent before the true partial-range check.");
+        const int rangeBytes = 4096;
+        const uint fileReadAttributes = 0x00000080, writeDacAccess = 0x00040000;
+        const uint openExisting = 3, fileFlagBackupSemantics = 0x02000000, fileFlagOpenReparsePoint = 0x00200000;
+        WindowsCloudFilesProvider.StubState? native = null;
+        WindowsCloudPlaceholderInfo? partial = null;
+        var downloadsBefore = 0;
+        try
+        {
+            using var handle = WindowsCloudFilesProvider.Native.CreateFile(full,
+                fileReadAttributes | writeDacAccess, FileShare.None, IntPtr.Zero, openExisting,
+                fileFlagBackupSemantics | fileFlagOpenReparsePoint, IntPtr.Zero);
+            if (handle.IsInvalid)
+                throw new IOException("The partial-range fixture could not be opened without hydration.",
+                    new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()));
+            var dehydrate = WindowsCloudFilesProvider.Native.CfDehydratePlaceholder(
+                handle.DangerousGetHandle(), 0, -1, 0, IntPtr.Zero);
+            if (dehydrate < 0)
+                throw new IOException("The partial-range fixture could not be fully dehydrated.",
+                    Marshal.GetExceptionForHR(dehydrate));
+            await PollAsync(() => WindowsCloudFilesProvider.ReadStubState(handle) is { OnDiskBytes: 0 },
+                "The pointer did not become fully dehydrated.", cancellationToken).ConfigureAwait(false);
+            serveOnlyRanges(1, rangeBytes);
+            downloadsBefore = downloads();
+            // The bounded request may complete synchronously with a failure after the native prefix
+            // was accepted, so its HRESULT is only decisive when no partial residency appears.
+            var hydrate = WindowsCloudFilesProvider.Native.CfHydratePlaceholder(
+                handle.DangerousGetHandle(), 0, rangeBytes, 0, IntPtr.Zero);
+            // Read the native state through the same held handle while the transfer completes.
+            try
+            {
+                await PollAsync(() =>
+                    {
+                        native = WindowsCloudFilesProvider.ReadStubState(handle);
+                        return native is { OnDiskBytes: >= rangeBytes };
+                    }, "The bounded hydration request did not make any range resident.", cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (IOException) when (hydrate < 0)
+            {
+                throw new IOException("The bounded native hydration request failed (HRESULT 0x" +
+                    unchecked((uint)hydrate).ToString("x8") + ") and left no resident range.",
+                    Marshal.GetExceptionForHR(hydrate));
+            }
+            if (hydrate < 0)
+            {
+                // Partial data arrived even though the call reported failure (FULL policy may abort
+                // the unsatisfied remainder); the genuine native stub state below is decisive.
+                Console.WriteLine("NOTE bounded hydration returned HRESULT 0x" +
+                    unchecked((uint)hydrate).ToString("x8") + " after a native partial prefix.");
+            }
+            WindowsCloudFilesProvider.TryReadOwnedPlaceholder(handle, false, out partial);
+        }
+        finally { serveOnlyRanges(-1, 0); }
+        Require(native is not null, "The native placeholder state is unavailable after the bounded hydration.");
+        partial = partial ?? throw new IOException("The owned placeholder identity is unavailable after the bounded hydration.");
+        Require(native!.OnDiskBytes > 0 && native.OnDiskBytes < remote.Size,
+            "The bounded hydration did not produce genuinely partial residency. Native state: " + Describe(native));
+        Require(partial!.State.Availability == SyncCloudFileAvailability.PartiallyHydrated,
+            "Windows did not report a partially hydrated placeholder after a bounded range request: " +
+            partial!.State.Availability + " (resident=" + native.OnDiskBytes + ")");
+        Require(partial.Identity.RelativePath == remote.RelativePath && partial.Identity.DropboxId == remote.Id &&
+                partial.Identity.DropboxRevision == remote.Revision && partial.Identity.ContentHash == remote.ContentHash &&
+                partial.Identity.LogicalSize == remote.Size && partial.ModifiedDataSize == 0,
+            "Interrupted hydration changed the exact pointer identity or introduced modified bytes.");
+        var downloadsAtPartial = downloads();
+        var scannedPartial = await ScanAsync(fullRoot, pairId, remote.RelativePath, cancellationToken)
+            .ConfigureAwait(false);
+        Require(scannedPartial.Item is not null
+                ? scannedPartial.Item.Flags.HasFlag(ItemFlags.OwnedPointer)
+                : scannedPartial.Decision is { Kind: PilotDecisionKind.Blocked or PilotDecisionKind.OnlineOnly },
+            "The interrupted partial pointer was published as complete ordinary local bytes.");
+        await verifyPartialProtection().ConfigureAwait(false);
+        Require(downloads() == downloadsAtPartial,
+            "Partial-state protection or metadata scanning fetched file contents.");
+        Require(WindowsCloudFilesProvider.TryReadOwnedPlaceholder(full, out var retained) && retained is not null &&
+                retained.State.OnDiskBytes == partial.State.OnDiskBytes &&
+                retained.State.IsInSync == partial.State.IsInSync && retained.Identity == partial.Identity &&
+                retained.State.Availability == SyncCloudFileAvailability.PartiallyHydrated,
+            "Partial-state protection changed native residency, identity or in-sync state.");
+        Require(provider.IsConnected, "The provider disconnected before FULL-policy recovery.");
+        var requestsBeforeRead = requests().Length;
+        // FULL policy completes the entire object even for a one-byte user read. Genuine partial
+        // residency does not promise a no-fetch ordinary read. Windows may request only the missing
+        // suffix or re-request the prefix; either must use this exact revision and return its hash.
+        // https://learn.microsoft.com/windows/win32/api/cfapi/ne-cfapi-cf_hydration_policy_primary
+        var hydratedBytes = await File.ReadAllBytesAsync(full, cancellationToken).ConfigureAwait(false);
+        Require(hydratedBytes.AsSpan().SequenceEqual(LargeEdgeContent().AsSpan()) &&
+                DropboxContentHash.Compute(hydratedBytes) == remote.ContentHash,
+            "FULL-policy recovery returned bytes or a hash different from the exact cloud revision.");
+        var recoveryRequests = requests().Skip(requestsBeforeRead).ToArray();
+        Require(recoveryRequests.Length > 0, "FULL-policy recovery did not request the missing content.");
+        foreach (var request in recoveryRequests)
+            Require(request.Remote.RelativePath == remote.RelativePath && request.Remote.Id == remote.Id &&
+                    request.Remote.Revision == remote.Revision && request.Remote.ContentHash == remote.ContentHash &&
+                    request.Remote.Size == remote.Size && request.Offset >= 0 && request.Length > 0 &&
+                    request.Offset <= remote.Size && request.Length <= remote.Size - request.Offset,
+                "Partial recovery requested a different identity or an out-of-bounds range: " + request);
+        Console.WriteLine("Native FULL recovery ranges: " + string.Join("; ", recoveryRequests.Select(request =>
+            $"offset={request.Offset},length={request.Length},residentPrefixRequested={request.Offset < rangeBytes}")));
+        Require(WindowsCloudFilesProvider.TryReadOwnedPlaceholder(full, out var complete) && complete is not null &&
+                complete.State.Availability == SyncCloudFileAvailability.AvailableOffline &&
+                complete.State.OnDiskBytes == remote.Size && complete.State.IsInSync &&
+                complete.Identity.RelativePath == remote.RelativePath &&
+                complete.Identity.DropboxRevision == remote.Revision && complete.Identity.ContentHash == remote.ContentHash,
+            "FULL-policy recovery did not finish as the exact in-sync fully resident object.");
+        return new(native!, partial!.State.Availability, rangeBytes, downloadsBefore, downloadsAtPartial);
+    }
+
+    private static async Task PollAsync(Func<bool> condition, string message, CancellationToken cancellationToken)
+    {
+        var deadline = Environment.TickCount64 + 15_000;
+        while (!condition())
+        {
+            if (Environment.TickCount64 >= deadline) throw new IOException(message);
+            await Task.Delay(25, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     private static async Task<ScanObservation> ScanAsync(string root, string pairId, string relativePath,
         CancellationToken cancellationToken)
     {
@@ -324,6 +483,25 @@ internal static class FilesOnDemandNativeEdgeChecks
                 StringComparison.OrdinalIgnoreCase))
             throw new IOException("The private control namespace is not the fixture root's sibling.");
         return control;
+    }
+
+    private static void VerifyUnelevatedControlSecurity(string root)
+    {
+        using var identity = WindowsIdentity.GetCurrent();
+        Require(!new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator),
+            "Run the native staging-security regression unelevated; an elevated run cannot prove this boundary.");
+        var sid = identity.User ?? throw new IOException("The fixture token has no user SID.");
+        var security = new DirectoryInfo(ControlNamespacePath(root)).GetAccessControl(AccessControlSections.Access);
+        Require(security.AreAccessRulesProtected, "Private staging inherited its parent DACL.");
+        var rules = security.GetAccessRules(true, true, typeof(SecurityIdentifier))
+            .Cast<FileSystemAccessRule>().ToArray();
+        Require(rules.Length == 1 && rules[0].IdentityReference.Equals(sid) && !rules[0].IsInherited &&
+                rules[0].AccessControlType == AccessControlType.Allow &&
+                rules[0].FileSystemRights == FileSystemRights.FullControl &&
+                rules[0].InheritanceFlags == (InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit) &&
+                rules[0].PropagationFlags == PropagationFlags.None,
+            "Private staging did not retain its exact protected current-user-only FullControl DACL.");
+        Console.WriteLine("PASS native unelevated staging allocation retains protected user-only DACL");
     }
 
     internal static bool ControlNamespaceExists(string root) => Directory.Exists(ControlNamespacePath(root));

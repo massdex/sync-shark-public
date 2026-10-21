@@ -238,8 +238,11 @@ internal static partial class ExecutorChecks
         var (store, a, b, executor) = Rig();
         var victim = b.Seed("victim", "old", versionId: "v1");
         const string Job = "{\"jobId\":\"job-88\",\"entryIndex\":0,\"entryCount\":1}";
+        var original = a.Seed("victim", "old", versionId: "source-v1");
+        await a.DeleteAsync(Act(ActionKind.Delete, Side.A, "victim", expected: original), default);
         var stuck = Act(ActionKind.Delete, Side.B, "victim", expected: victim) with
         {
+            DeletionSourceObjectId = original.ObjectId,
             ProviderEffect = new ProviderEffectCheckpoint("delete-job", Job, DateTimeOffset.UtcNow.AddHours(-7))
         };
         store.RecordIntent("p1", stuck);
@@ -250,7 +253,7 @@ internal static partial class ExecutorChecks
 
         // The job resolves: the victim is gone, so reconcile proves the delete Done and must close the notice.
         await b.DeleteAsync(Act(ActionKind.Delete, Side.B, "victim", expected: victim), CancellationToken.None);
-        var resolved = (await executor.ReconcileAsync([stuck], 1, a, new PendingJobWriter(b, fail: false),
+        var resolved = (await executor.ReconcileAsync([stuck], 1, a, new ResolvedJobWriter(b, true),
             CancellationToken.None)).Single();
         Require(resolved.Outcome == Outcome.Done, "an absent target resolves the stuck delete Done: " + resolved.Reason);
         Require(store.OpenNotices("p1").Count == 0, "resolving the delete closes its open stuck-job notice");
@@ -269,17 +272,23 @@ internal static partial class ExecutorChecks
         Require(result.Outcome == Outcome.Uncertain && result.Reason!.Contains("pending"),
             "a job Dropbox reports in progress stays Unverified past grace, never replanned while it may run: " +
             result.Reason);
-        // An unknown/expired/unavailable job falls back to the grace policy.
+        // Explicit expired/invalid job ids are finished-unknown after grace; endpoint checks still decide.
         result = await EffectResolver.ResolveAsync(action, new PendingJobWriter(b, fail: true), a, default);
-        Require(result.Outcome == Outcome.Skipped && result.Reason == EffectResolver.NotApplied,
-            "an unavailable or expired job permits unchanged observation after grace");
+        Require(result.Outcome == Outcome.Skipped && result.DeleteSourceIdentityMissing &&
+            result.DeleteSourceUnconfirmed && !result.ForgetUnsafeDeleteBaseline,
+            "an expired delete job without trusted identity parks review and retains baseline");
+        result = await EffectResolver.ResolveAsync(action with { Path = "absent" },
+            new PendingJobWriter(b, fail: true), a, default);
+        Require(result.Outcome == Outcome.Skipped && result.DeleteSourceIdentityMissing &&
+            !result.ForgetUnsafeDeleteBaseline,
+            "expired job with absent target and no trusted identity also parks review, never Done");
         result = await EffectResolver.ResolveAsync(action, new PendingJobWriter(b, fail: false, outage: true), a, default);
         Require(result.Outcome == Outcome.Uncertain && result.RetryAfterSeconds == 30,
             "transient job lookup failure never expires the job into replay after grace");
-        // A pending job still permits independent positive observation of the target.
+        // An absent target is not terminal proof: a pending delete could still remove a restored copy.
         result = await EffectResolver.ResolveAsync(action with { Path = "absent" },
             new PendingJobWriter(b, fail: false), a, default);
-        Require(result.Outcome == Outcome.Done, "absent target proves delete despite pending or expired job");
+        Require(result.Outcome == Outcome.Uncertain, "absent target remains protected while the delete job is pending");
     }
 
     // A reconciler double whose job check is definitive: true (applied), false (refused) or null (still running),
@@ -302,7 +311,7 @@ internal static partial class ExecutorChecks
     {
         public Task<bool?> ResolveProviderEffectAsync(SyncAction action, ProviderJobCheckCache? jobChecks, CancellationToken ct) => outage
             ? Task.FromException<bool?>(new HttpRequestException("offline")) : fail
-                ? Task.FromException<bool?>(new IOException("expired job")) : Task.FromResult<bool?>(null);
+                ? Task.FromException<bool?>(new DropboxEffectUncertainException("expired job") { JobIdUnavailable = true }) : Task.FromResult<bool?>(null);
         public Task<ItemState?> ObserveAsync(string path, CancellationToken ct) => inner.ObserveAsync(path, ct);
         public Task<RecoveryRef> PreserveAsync(ItemState victim, string id, CancellationToken ct) => inner.PreserveAsync(victim, id, ct);
         public Task<ItemState> PutAsync(SyncAction a, Stream content, CancellationToken ct) => throw new InvalidOperationException();

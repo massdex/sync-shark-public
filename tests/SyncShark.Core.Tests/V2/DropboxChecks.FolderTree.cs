@@ -9,6 +9,8 @@ internal static partial class DropboxChecks
     private static async Task FolderTreeChecksAsync()
     {
         await FolderTreeUnchangedAsync();
+        await FolderTreeLargeGuardedAsync(false);
+        await FolderTreeLargeGuardedAsync(true);
         await FolderTreeAddedAfterScanAsync();
         await FolderTreeEditedAfterScanAsync();
         await FolderTreeFeedFailureAsync();
@@ -59,12 +61,47 @@ internal static partial class DropboxChecks
         var folder = snapshot.Items.Single(item => item.Path == "big");
         var delete = new SyncAction("del-big", 32, ActionKind.Delete, Side.B, "big", null, null, folder, false, null)
         {
+            ChoiceRemove = true,
             FrozenVictimSignature = FolderDelete.Signature(FolderDelete.LiveDescendants(store, RootId, "big")),
         };
         var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"),
             V2Settings.Default with { DeleteBatchSize = 1, UploadBatchSize = 1, MkDirBatchSize = 1 });
         return new TreeRig(h, store, new Executor(store, V2Settings.Default, ExecutorChecks.Admission()),
             new FakeEndpoint(Side.A, "ra"), writer, delete, snapshot.CursorAfter);
+    }
+
+    private static async Task FolderTreeLargeGuardedAsync(bool keepOneSource)
+    {
+        using var rig = await TreeRigAsync(140);
+        var victims = FolderDelete.LiveDescendants(rig.Store, RootId, "big")
+            .Append(rig.Delete.ExpectedTarget!).ToArray();
+        foreach (var victim in victims)
+        {
+            var source = rig.A.Seed(victim.Path, "content", victim.Kind);
+            var key = "baseline-" + victim.ObjectId;
+            var adopt = new SyncAction("adopt-" + victim.ObjectId, 1, ActionKind.Adopt, Side.B,
+                victim.Path, null, source, victim, false, key);
+            rig.Store.CommitResult("p1", 1, adopt, new ActionResult(adopt.ActionId, Outcome.Done, source, victim, null, null));
+            if (keepOneSource && victim.Path == "big/f0.txt") continue;
+            await rig.A.DeleteAsync(new SyncAction("remove-" + source.ObjectId, 6, ActionKind.Delete, Side.A,
+                source.Path, null, null, source, false, null), default);
+        }
+        var delete = rig.Delete with { Rule = 6, ChoiceRemove = false,
+            ObjectKey = "baseline-" + rig.Delete.ExpectedTarget!.ObjectId };
+        var results = await rig.ApplyAsync(rig.Plan() with { Actions = [delete] });
+        if (!keepOneSource)
+            Require(results.All(result => result.Outcome == Outcome.Done) && rig.H.Wire.WholeFolderDeletes == 1,
+                "more than128 admitted actions retain whole-folder delete_batch after bounded source preflight");
+        else
+        {
+            Require(rig.H.Wire.WholeFolderDeletes == 0 &&
+                await rig.B.ObserveAsync("big/f0.txt", default) is not null &&
+                await rig.B.ObserveAsync("big", default) is not null,
+                "one present source excludes its child and every enclosing folder from destructive submission");
+            Require(results.Any(result => result.Outcome == Outcome.Done) &&
+                rig.H.Wire.Calls.Contains("/2/files/delete_batch"),
+                "safe sibling files still use conditional delete_batch rather than blocking the whole tree");
+        }
     }
 
     private static async Task FolderTreeUnchangedAsync()

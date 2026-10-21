@@ -89,6 +89,21 @@ internal static class StorageDamage
             (string)StoreSchema.Scalar(connection, null, "SELECT sql FROM sqlite_master WHERE name='fs_flagged';")!);
     }
 
+    /// <summary>Models an existing database from before the performance-only intent-order index.</summary>
+    public static void RemoveIntentOrderIndex(string dbPath)
+    {
+        using var connection = OpenRaw(dbPath);
+        StoreSchema.Execute(connection, null, "DROP INDEX pe_intent_order;");
+    }
+
+    public static (long Version, long RootPage, string Sql) IntentOrderIndexState(string dbPath)
+    {
+        using var connection = OpenRaw(dbPath);
+        return ((long)StoreSchema.Scalar(connection, null, "PRAGMA user_version;")!,
+            (long)StoreSchema.Scalar(connection, null, "SELECT rootpage FROM sqlite_master WHERE name='pe_intent_order';")!,
+            (string)StoreSchema.Scalar(connection, null, "SELECT sql FROM sqlite_master WHERE name='pe_intent_order';")!);
+    }
+
     private static SqliteConnection OpenRaw(string dbPath)
     {
         var connection = new SqliteConnection(new SqliteConnectionStringBuilder

@@ -19,7 +19,8 @@ public sealed partial class SyncRun
                 _store.SaveSyncRetry(pair.PairId, new(action.Path, "post-preview", 0, "", DateTimeOffset.MinValue, match));
         }
         foreach (var held in plan.UnreviewedHeldDeletions)
-            if (_store.SyncRetryAt(pair.PairId, held.Path)?.Kind != "decision")
+            if (_store.SyncRetryAt(pair.PairId, held.Path) is not { ReprobeEvidence: true } &&
+                _store.SyncRetryAt(pair.PairId, held.Path)?.Kind != "decision")
                 _store.SaveSyncRetry(pair.PairId, new(held.Path, "post-preview", 0, "", DateTimeOffset.MinValue, Held: held));
         if (deferred.Count == 0) return plan;
         var guard = ActionPredicates(pair, LeftAlone(pair).WithPending(deferred));
@@ -92,7 +93,7 @@ public sealed partial class SyncRun
     {
         var byPath = previous.ToDictionary(item => item.Path, StringComparer.OrdinalIgnoreCase);
         var leftAlone = LeftAlone(pair);
-        var includes = BuildPredicates(pair, PairInclude.ForAction);
+        var includes = BuildPredicates(pair, PairInclude.For);
         var ignoreRules = PairInclude.IgnoreRules(pair);
         var decisions = _store.OpenNotices(pair.PairId).Where(PlanNotices.HasPathScope).Where(notice => notice.Kind == NoticeKind.UserDecision)
             .Select(notice => notice.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -100,6 +101,8 @@ public sealed partial class SyncRun
         var reasons = FailureReasons(plan, tally);
         var notices = _store.OpenNotices(pair.PairId).Where(PlanNotices.HasPathScope).Where(notice => notice.ReasonKey is "sync-retry" or "deletion-history-unavailable")
             .ToLookup(notice => notice.Path, StringComparer.OrdinalIgnoreCase);
+        var sourceBlocked = plan.Actions.Where(action => tally.WasDeleteSourceBlocked(action.ActionId))
+            .Select(action => action.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var remaining = pending.ToHashSet(StringComparer.OrdinalIgnoreCase);
         var failed = plan.Actions.Where(action => action.Kind != ActionKind.Hold && !tally.WasSettled(action.ActionId))
             .Select(action => action.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -122,11 +125,23 @@ public sealed partial class SyncRun
             if (_store.SyncRetryAt(pair.PairId, item.Path)?.Kind == "decision")
             { remaining.Remove(item.Path); continue; }
             var rebuildable = item.ReviewedActions?.Any(action => action.RebuildableRemove) == true;
-            var excluded = !rebuildable && (pair.Excluded.Any(path => PairPath.IsSelfOrUnder(item.Path, path)) ||
-                !includes.A(item.Path) || !includes.B(item.Path) || leftAlone.Covers(item.Path));
+            var excluded = !rebuildable && pair.Excluded.Any(path => PairPath.IsSelfOrUnder(item.Path, path));
             var a = _store.Live(pair.A.RootId, [item.Path]).FirstOrDefault();
             var b = _store.Live(pair.B.RootId, [item.Path]).FirstOrDefault();
             var ignored = SyncIgnorePolicy.IsIgnored(item.Path, (a ?? b)?.Kind == ItemKind.Folder, ignoreRules);
+            // A hold is not an exclusion or proof of success. In particular, inventory narrowed by
+            // a root/quarantine/grant hold may look absent or equal without evaluating this retry.
+            // Only the user's actual exclusion/ignore can retire debt in a protected scope.
+            if (!excluded && !ignored && ((rebuildable ? leftAlone.CoversExceptLocalLinks(item.Path) : leftAlone.Covers(item.Path)) ||
+                !rebuildable && (!includes.A(item.Path) || !includes.B(item.Path))))
+            {
+                // Rotate held debt out of the bounded due page without recording a failed attempt.
+                var current = _store.SyncRetryAt(pair.PairId, item.Path);
+                if (current is not null)
+                    _store.SaveSyncRetry(pair.PairId, current with { RetryAfter = _time.GetUtcNow().AddMinutes(5) });
+                remaining.Remove(item.Path);
+                continue;
+            }
             var refused = (a?.Flags.HasFlag(ItemFlags.ProviderNameRefused) ?? false) ||
                 (b?.Flags.HasFlag(ItemFlags.ProviderNameRefused) ?? false);
             var absent = scanComplete && a is null && b is null && !uncertain.Contains(item.Path);
@@ -135,35 +150,59 @@ public sealed partial class SyncRun
                 item.Held is not null && !pending.Contains(item.Path, StringComparer.OrdinalIgnoreCase)))
             {
                 remaining.Remove(item.Path);
-                _store.ClearSyncRetry(pair.PairId, item.Path);
-                if (item.Held is { } held)
+                if (excluded && item.Held is not null) _store.SuspendHeldRetry(pair.PairId, item);
+                else _store.ClearSyncRetry(pair.PairId, item.Path);
+                // RQ-052: an excluded held item is suspended, not settled. Keep its stored evidence while it
+                // is excluded; re-inclusion starts a fresh probe (SavePairIncluded invalidates cached evidence
+                // first), so an exclusion never destroys the deletion history.
+                if (!excluded && item.Held is { } held)
                     _store.RemoveDeletionEvidence(pair.PairId, held.Local == Side.A ? pair.B.RootId : pair.A.RootId, [item.Path]);
                 foreach (var notice in notices[item.Path])
                     if (notice.NoticeId is not null) _store.CloseNotice(notice.NoticeId, excluded ? "exclude" : "resolved");
+                // A fresh equal/no-op replan can settle the retry without any Done action.
+                var sourceNotice = DeleteSourceGuard.NoticeId(pair.PairId, item.Path);
+                if (!sourceBlocked.Contains(item.Path) && _store.NoticeById(pair.PairId, sourceNotice) is { Closed: false })
+                    _store.CloseNotice(sourceNotice, excluded ? "exclude" : "resolved");
             }
             else remaining.Add(item.Path); // Back off unresolved no-action rows too; they cannot monopolize a bounded batch.
         }
         foreach (var path in remaining)
         {
             var old = _store.SyncRetryAt(pair.PairId, path) ?? byPath.GetValueOrDefault(path);
+            if (sourceBlocked.Contains(path))
+            {
+                // The executor already committed the retry with its one explanatory notice. Keep it due
+                // next run; do not replace it with a second generic failure notice/backoff.
+                // Preserve provider Retry-After from the durable guard result.
+                if (old is not null) _store.SaveSyncRetry(pair.PairId, old);
+                continue;
+            }
             SaveFailedRetry(pair, path, reasons.GetValueOrDefault(path), old);
         }
+        _store.RefreshInterruptedDeleteNotice(pair.PairId);
+        _store.RefreshBlockedDeleteNotice(pair.PairId);
     }
 
     private void SaveFailedRetry(PairDef pair, string path, string? reason, SyncRetry? old)
     {
         if (old?.Kind == "decision") return;
-        var attempts = (old?.Attempts ?? 0) + 1;
+        // The evidence probe owns the attempt counter for restored (reprobe) rows; counting again here
+        // would halve the owner's three-run release budget.
+        var attempts = old is { ReprobeEvidence: true } ? old.Attempts : (old?.Attempts ?? 0) + 1;
         var retry = (old ?? new SyncRetry(path, "sync", 0, "", DateTimeOffset.MinValue)) with
         {
             Attempts = attempts,
+            // This is a new non-guard failure; the guard-owned branch above retains its own fields.
+            DeleteBlockedDetail = null, DeleteBlockedDeferred = false,
             LastError = reason ?? (old?.LastError is { Length: > 0 } previous ? previous : "The item could not be confirmed or applied."),
             RetryAfter = _time.GetUtcNow().AddSeconds(Math.Min(300, 10 * Math.Pow(2, Math.Min(attempts - 1, 5))))
         };
         _store.SaveSyncRetry(pair.PairId, retry);
-        if (attempts >= 1 && retry.Kind is not ("planning" or "recovery"))
+        if (retry.DeleteBlockedDetail is null && !retry.ReprobeEvidence && retry.LastError != DropboxQuota.Detail && attempts >= 1 && retry.Kind is not ("planning" or "recovery"))
             WriteNotices([new Notice(pair.PairId, 40, NoticeKind.Info, path,
-                $"Sync will retry this item later ({attempts} attempts): {retry.LastError}. Options: retry now / exclude / ignore.", "sync-retry")]);
+                $"Sync will retry this item later ({attempts} attempts): {retry.LastError}. Options: retry now / exclude / ignore.", "sync-retry",
+                FolderInspection: _store.Live(pair.A.RootId, [path]).Concat(_store.Live(pair.B.RootId, [path]))
+                    .Any(item => item.Kind == ItemKind.Folder))]);
     }
 
     private static Dictionary<string, string> FailureReasons(Plan plan, Tally tally)
@@ -171,7 +210,8 @@ public sealed partial class SyncRun
         var failed = tally.Failures.GroupBy(result => result.ActionId).ToDictionary(group => group.Key, group => group.Last().Reason);
         var reasons = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var action in plan.Actions)
-            if (failed.GetValueOrDefault(action.ActionId) is { } reason) reasons[action.Path] = reason;
+            if (tally.WasQuotaBlocked(action.ActionId)) reasons[action.Path] = DropboxQuota.Detail;
+            else if (failed.GetValueOrDefault(action.ActionId) is { } reason) reasons[action.Path] = reason;
         return reasons;
     }
 
@@ -188,6 +228,7 @@ public sealed partial class SyncRun
             .Concat(plan.Actions.Where(action => action.Kind != ActionKind.Hold && !tally.WasSettled(action.ActionId))
                 .Select(action => action.Path)).Distinct(StringComparer.OrdinalIgnoreCase))
         {
+            if (_store.SyncRetryAt(pair.PairId, path) is { ReprobeEvidence: true }) continue;
             // Recovery holds already retained exact reviewed authority before filtering effects.
             if (plan.RecoveryPending.Contains(path, StringComparer.OrdinalIgnoreCase)) continue;
             // A decision supersedes prepare authority. Preserve its proposal and dormant scheduling.
@@ -210,8 +251,9 @@ public sealed partial class SyncRun
                 HeldReviewed: held.ContainsKey(path), HeldExpected: held.TryGetValue(path, out var heldItem)
                     ? _store.Live(heldItem.Local == Side.A ? pair.A.RootId : pair.B.RootId, [path]).FirstOrDefault() : null,
                 PendingNotice: _store.SyncRetryAt(pair.PairId, path)?.PendingNotice));
+            if (reason == DropboxQuota.Detail) continue;
             WriteNotices([new Notice(pair.PairId, 40, NoticeKind.Info, path,
-                reason + " First sync is complete; this item will be retried. Options: retry now / exclude / ignore.", "sync-retry")]);
+                reason + " This item is not synced yet and will be retried. Other items can continue. Options: retry now / exclude / ignore.", "sync-retry")]);
         }
     }
 }

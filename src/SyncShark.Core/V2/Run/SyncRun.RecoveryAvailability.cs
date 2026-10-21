@@ -22,7 +22,7 @@ public sealed partial class SyncRun
             var old = _store.SyncRetryAt(pair.PairId, group.Key);
             if (old?.Kind == "decision") continue;
             _store.SaveSyncRetry(pair.PairId, (old ?? new SyncRetry(group.Key, "recovery", 0, "", DateTimeOffset.MinValue)) with
-            { LastError = old?.LastError ?? unavailable,
+            { LastError = unavailable, DeleteBlockedDetail = null, DeleteBlockedDeferred = false,
                 ReviewedActions = old?.ReviewedActions ?? (plan.FirstSyncOptions?.FirstSync == true ? group.ToArray() : null),
                 ProposedActions = old?.ProposedActions ?? group.ToArray(), RetryAfter = old?.RetryAfter ?? DateTimeOffset.MinValue });
         }
@@ -34,11 +34,12 @@ public sealed partial class SyncRun
                 reviewedDeletes?.Contains(FolderDelete.VictimKey(item.Local, item.Path)) != true)
             {
                 // An unavailable Recovery location never upgrades an unreviewed held path.
-                _store.SaveSyncRetry(pair.PairId, old ?? new SyncRetry(item.Path, "recovery", 0, unavailable, DateTimeOffset.MinValue));
+                _store.SaveSyncRetry(pair.PairId, (old ?? new SyncRetry(item.Path, "recovery", 0, unavailable, DateTimeOffset.MinValue)) with
+                { LastError = unavailable, DeleteBlockedDetail = null, DeleteBlockedDeferred = false });
                 continue;
             }
             _store.SaveSyncRetry(pair.PairId, (old ?? new SyncRetry(item.Path, "recovery", 0, "", DateTimeOffset.MinValue)) with
-            { LastError = old?.LastError ?? unavailable, Held = old?.Held ?? item,
+            { LastError = unavailable, DeleteBlockedDetail = null, DeleteBlockedDeferred = false, Held = old?.Held ?? item,
                 HeldReviewed = old?.HeldReviewed == true || reviewedDeletes?.Contains(FolderDelete.VictimKey(item.Local, item.Path)) == true,
                 HeldExpected = old?.HeldExpected ?? _store.Live(item.Local == Side.A ? pair.A.RootId : pair.B.RootId, [item.Path]).FirstOrDefault() });
         }

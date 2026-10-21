@@ -9,6 +9,10 @@ public static class PlanNotices
     /// <summary>An item could not be read and was skipped (rule 30).</summary>
     public static readonly NoticeReason CannotRead = new("unreadable", "skipped: cannot read");
 
+    /// <summary>A cloud-native item is present, but needs an explicit export rather than download.</summary>
+    public static readonly NoticeReason ExportRequired = new("export-required",
+        "This cloud document requires export to a standard file in Dropbox. The original and any local copy remain unchanged.");
+
     /// <summary>Two versions could not be compared yet (hashing failed or pending); nothing was done (rule 30).</summary>
     public static readonly NoticeReason ContentUnconfirmed = new("content-unconfirmed", "content not confirmed; will retry");
 

@@ -9145,7 +9145,7 @@ public sealed record SyncConflictComparison(
     string Status,
     IReadOnlyList<SyncNoticeOption>? Options = null);
 
-public sealed record SyncNoticeOption(string Choice, string Label);
+public sealed record SyncNoticeOption(string Choice, string Label, bool RequestsName = false);
 
 public sealed record SyncConflictSelection(
     string ConflictId,

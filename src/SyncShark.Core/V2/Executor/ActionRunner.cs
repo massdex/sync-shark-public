@@ -13,6 +13,7 @@ internal sealed class ActionRunner
     private const string UnexpectedKind = "Unexpected effect kind ";
 
     private readonly StoreCommitter _committer;
+    private readonly DropboxQuota _quota;
     private readonly SyncTransferResourceController _admission;
     private readonly string _pairId;
     private readonly TimeSpan _admissionRetryDelay;
@@ -20,15 +21,22 @@ internal sealed class ActionRunner
     private readonly IEndpointWriter _a;
     private readonly IEndpointWriter _b;
     private readonly IReadOnlyList<SyncAction> _dependencies;
+    private readonly IReadOnlyDictionary<(Side, int, string), ItemState> _replacementActions;
     private readonly ConcurrentDictionary<string, Outcome> _outcomes;
+    private readonly ConcurrentDictionary<string, Outcome> _actionOutcomes = new(StringComparer.Ordinal);
+    private readonly IReadOnlyDictionary<(Side, string), List<SyncAction>> _pairedEffects;
+    private readonly HashSet<string> _pairedActionIds;
     private readonly ConcurrentDictionary<string, byte> _refusedParents = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> _grantHeldParents = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, byte> _sourceBlockedDeletes = new(StringComparer.Ordinal);
 
     internal ActionRunner(StoreCommitter committer, V2Settings settings, SyncTransferResourceController admission,
         string pairId, IEndpointWriter a, IEndpointWriter b, IReadOnlyList<SyncAction> dependencies,
-        ConcurrentDictionary<string, Outcome> outcomes)
+        ConcurrentDictionary<string, Outcome> outcomes, DropboxQuota? quota = null,
+        IReadOnlyList<SyncAction>? replacementActions = null)
     {
         _committer = committer;
+        _quota = quota ?? new DropboxQuota(null, false);
         _admission = admission;
         _pairId = pairId;
         _admissionRetryDelay = settings.AdmissionRetryDelay;
@@ -36,6 +44,11 @@ internal sealed class ActionRunner
         _a = a;
         _b = b;
         _dependencies = dependencies;
+        var planActions = replacementActions ?? dependencies;
+        _replacementActions = DeleteSourceGuard.Replacements(planActions);
+        _pairedEffects = IndexPairedEffects(planActions);
+        _pairedActionIds = _pairedEffects.Values.SelectMany(items => items).Select(item => item.ActionId)
+            .ToHashSet(StringComparer.Ordinal);
         _outcomes = outcomes;
     }
 
@@ -43,6 +56,7 @@ internal sealed class ActionRunner
     internal async Task<ActionResult?> RunAsync(SyncAction action, CancellationToken ct)
     {
         var result = await RunStepsAsync(action, ct).ConfigureAwait(false);
+        if (result is not null && _pairedActionIds.Contains(action.ActionId)) _actionOutcomes[action.ActionId] = result.Outcome;
         if (result is not null && action.Kind is ActionKind.MkDir or ActionKind.Move or ActionKind.Delete)
         {
             if ((result.ProviderNameRefused || result.ParentNameRefused) &&
@@ -50,6 +64,7 @@ internal sealed class ActionRunner
                 _refusedParents[OutcomeKey(action)] = 0;
             if (result.DefenderGrantHeld && (action.Kind == ActionKind.MkDir || action.Source?.Kind == ItemKind.Folder))
                 _grantHeldParents[OutcomeKey(action)] = 0;
+            if (result.DeleteSourceUnconfirmed) _sourceBlockedDeletes[OutcomeKey(action)] = 0;
             _outcomes[OutcomeKey(action)] = result.Outcome;
         }
         return result;
@@ -58,6 +73,8 @@ internal sealed class ActionRunner
     private async Task<ActionResult?> RunStepsAsync(SyncAction action, CancellationToken ct)
     {
         if (await CommitOnlyOrSkipAsync(action, ct).ConfigureAwait(false) is { } early) return early;
+        if (_quota.Blocks(action))
+            return await CommitAsync(action, Failed(action, DropboxQuota.Detail) with { UploadQuotaBlocked = true });
         if (RecoverySafety.RequiresRecovery(action) && RecoverySafety.Unavailable(_a, _b) is { } recovery)
             return Failed(action, "Recovery location unavailable: " + recovery);
         var target = action.Target == Side.A ? _a : _b;
@@ -81,7 +98,10 @@ internal sealed class ActionRunner
                 DefenderGrantHeld = _grantHeldParents.ContainsKey(OutcomeKey(parent))
             }).ConfigureAwait(false);
         return UndeletedDescendant(action) is { } child
-            ? await CommitAsync(action, Skipped(action, FolderNotEmptied + child)).ConfigureAwait(false)
+            ? await CommitAsync(action, Skipped(action, FolderNotEmptied + child) with
+            {
+                DeleteSourceUnconfirmed = _sourceBlockedDeletes.ContainsKey("delete|" + action.Target + "|" + child.ToLowerInvariant())
+            }).ConfigureAwait(false)
             : null;
     }
 
@@ -112,12 +132,18 @@ internal sealed class ActionRunner
         try
         {
             if (await GrantHoldAsync(action).ConfigureAwait(false) is { } held) return held;
+            if (await DeleteSourceGuard.CheckAsync(action, source, _committer, _pairId, ct,
+                DeleteSourceGuard.Replacement(action, _replacementActions),
+                pairedAdmitted: await PairedDeleteAdmittedAsync(action, ct).ConfigureAwait(false)).ConfigureAwait(false) is { } blocked)
+                return await CommitAsync(action, blocked).ConfigureAwait(false);
             freeSpace = target is ILocalFreeSpaceAdmission admission
                 ? await admission.AdmitFreeSpaceAsync(action, ct).ConfigureAwait(false)
                 : FreeSpaceAdmission.Granted;
             if (freeSpace.Refusal is { } refusal)
                 return await PendingForFreeSpaceAsync(action, refusal).ConfigureAwait(false);
 
+            if (_quota.Blocks(action))
+                return await CommitAsync(action, Failed(action, DropboxQuota.Detail) with { UploadQuotaBlocked = true });
             ProviderEffectContext.Current.Value = _committer.CreateProviderContext(action);
             // Step 4: the intent is durable before any effect is attempted (group-committed with its neighbours').
             await _committer.RecordIntentAsync(action, ct).ConfigureAwait(false);
@@ -151,6 +177,76 @@ internal sealed class ActionRunner
             lease.Complete(success);
             SyncTransferResourceController.Lease.Current.Value = null;
         }
+    }
+
+    private static IReadOnlyDictionary<(Side, string), List<SyncAction>> IndexPairedEffects(IReadOnlyList<SyncAction> actions)
+    {
+        var needed = actions.Where(action => action.Kind == ActionKind.Delete && action.Rule is 4 or 12 && action.Source is not null)
+            .Select(action => (action.Target == Side.A ? Side.B : Side.A, action.Source!.ObjectId)).ToHashSet();
+        var index = new Dictionary<(Side, string), List<SyncAction>>();
+        if (needed.Count == 0) return index;
+        foreach (var action in actions)
+        {
+            if (action.Kind is not (ActionKind.Move or ActionKind.Adopt or ActionKind.Update)) continue;
+            Add(action.Target == Side.A ? Side.B : Side.A, action.Source, action);
+            Add(action.Target, action.ExpectedTarget, action);
+        }
+        return index;
+
+        void Add(Side side, ItemState? item, SyncAction action)
+        {
+            if (item is null || !needed.Contains((side, item.ObjectId))) return;
+            if (!index.TryGetValue((side, item.ObjectId), out var matches))
+                index[(side, item.ObjectId)] = matches = new List<SyncAction>();
+            matches.Add(action);
+        }
+    }
+
+    // Collision deletes are authorized by a specific same-plan effect, never by a rule number alone.
+    // A vacating delete precedes its Move, so admit that Move read-only without writing a speculative intent.
+    private async Task<bool> PairedDeleteAdmittedAsync(SyncAction action, CancellationToken ct)
+    {
+        if (action.Kind != ActionKind.Delete || action.Rule is not (4 or 12) ||
+            action.Source is not { } incoming || !action.RecoveryFirst) return false;
+        var sourceSide = action.Target == Side.A ? Side.B : Side.A;
+        if (!_pairedEffects.TryGetValue((sourceSide, incoming.ObjectId), out var candidates)) return false;
+        foreach (var paired in candidates)
+        {
+            var matches = action.Rule == 12
+                ? paired.Kind == ActionKind.Adopt && PairPath.Same(paired.Path, incoming.Path) &&
+                    !PairPath.Same(action.Path, paired.Path)
+                : (paired.Kind == ActionKind.Move && paired.Target == action.Target &&
+                    PairPath.Same(paired.Path, action.Path) && paired.Source?.ObjectId == incoming.ObjectId) ||
+                  (paired.Kind == ActionKind.Update && paired.Target == sourceSide &&
+                    PairPath.Same(paired.Path, incoming.Path) && paired.ExpectedTarget?.ObjectId == incoming.ObjectId);
+            if (!matches) continue;
+            if (_actionOutcomes.TryGetValue(paired.ActionId, out var outcome))
+            {
+                if (outcome == Outcome.Done) return true;
+                continue;
+            }
+            // Adopt runs in the earlier commit-only phase and Update before removal. A still-pending
+            // one is not completion evidence. Only a Move may depend on this vacating Delete.
+            if (paired.Kind != ActionKind.Move || paired.FromPath is null || paired.Source is null ||
+                paired.ExpectedTarget is null || _quota.Blocks(paired) ||
+                _committer.DefenderGrantConflict(paired) is not null || BlockingParent(paired) is not null ||
+                (RecoverySafety.RequiresRecovery(paired) && RecoverySafety.Unavailable(_a, _b) is not null)) continue;
+            try
+            {
+                var source = paired.Target == Side.A ? _b : _a;
+                var target = paired.Target == Side.A ? _a : _b;
+                if (source is not ISourceAbsenceProbe sourceProbe || target is not ISourceAbsenceProbe targetProbe) continue;
+                var currentSource = await sourceProbe.ObserveSourceMetadataAsync(paired.Source.Path, ct).ConfigureAwait(false);
+                var currentTarget = await targetProbe.ObserveSourceMetadataAsync(paired.FromPath, ct).ConfigureAwait(false);
+                if (currentSource is not null && currentTarget is not null &&
+                    currentSource.ObjectId == paired.Source.ObjectId && currentSource.Kind == paired.Source.Kind &&
+                    currentTarget.ObjectId == paired.ExpectedTarget.ObjectId && currentTarget.Kind == paired.ExpectedTarget.Kind)
+                    return true;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception error) when (error is not OutOfMemoryException) { /* Unknown is not admission. */ }
+        }
+        return false;
     }
 
     private async Task<ActionResult?> GrantHoldAsync(SyncAction action)
@@ -197,6 +293,12 @@ internal sealed class ActionRunner
             return await CommitAsync(action, new ActionResult(action.ActionId, Outcome.Skipped, null, null,
                 recoveryHolder.Reference, ProviderNameRefusedException.Detail) { ProviderNameRefused = true })
                 .ConfigureAwait(false);
+        }
+        catch (ProviderWriteBlockedException e) when (e.Code == "insufficient_space")
+        {
+            if (_quota.Suspend())
+                await _committer.AddNoticeAsync(DropboxQuota.Notice(_pairId, action.Target, action.Source?.Size));
+            return await CommitAsync(action, Failed(action, DropboxQuota.Detail) with { UploadQuotaBlocked = true });
         }
         catch (OwnedPointerDeferredException deferred) when (OwnedPointerUpdates.IsMetadataUpdate(action))
         {
@@ -287,7 +389,7 @@ internal sealed class ActionRunner
             return await direct.PutDownloadedAsync(action, remote, preservedAfterVerify, ct).ConfigureAwait(false);
         }
         var content = await source.OpenReadAsync(action.Source, ct).ConfigureAwait(false);
-        await using var owner = new SyncUploadSource(content);
+        await using var owner = new SyncUploadSource(content, () => _quota.CheckUploadStart(action));
         var previous = SyncUploadSource.Current.Value;
         SyncUploadSource.Current.Value = owner;
         try { return await target.PutAsync(action, content, ct).ConfigureAwait(false); }
@@ -355,7 +457,8 @@ internal sealed class ActionRunner
         var uncertain = new ActionResult(action.ActionId, Outcome.Uncertain, null, null, null, UncertainReason);
         await CommitAsync(action, uncertain).ConfigureAwait(false);
         var resolved = await EffectResolver.ResolveAsync(_committer.LatestAction(action), target, source, ct,
-            _unknownCommitGracePeriod).ConfigureAwait(false);
+            _unknownCommitGracePeriod, historicalDeleteSource: action.Kind == ActionKind.Delete
+                ? _committer.DeleteSource(action) : null).ConfigureAwait(false);
         // Still unverifiable: the committed Uncertain stands; report the actual failure in its reason.
         if (resolved.Outcome == Outcome.Uncertain) return resolved;
         await CommitAsync(action, resolved).ConfigureAwait(false);
@@ -439,7 +542,7 @@ internal sealed class ActionRunner
     // exception (for example a malformed provider body) names its source instead of vanishing into a bare type name.
     private static string Describe(Exception e)
     {
-        var reason = e.GetType().Name + ": " + e.Message;
+        var reason = BlockerDiagnostic.Describe(e);
         var frame = e.StackTrace?.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .FirstOrDefault();
         if (string.IsNullOrWhiteSpace(frame)) return reason;

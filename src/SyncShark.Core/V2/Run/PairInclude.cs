@@ -47,6 +47,27 @@ internal static class PairInclude
         };
     }
 
+    /// <summary>Names the permanent boundary rejecting this path, without treating temporary holds as exclusions.</summary>
+    internal static string? PermanentBoundary(PairDef pair, Side side, string path, bool rejectAncestors,
+        IReadOnlyList<PairDef> allPairs, IReadOnlyList<string> productOwned)
+    {
+        path = Normalize(path);
+        if ((IsLocal(pair.A) || IsLocal(pair.B)) && LocalItems.IsArtifactPath(path))
+        {
+            var segments = path.Split('/');
+            for (var n = 1; n <= segments.Length; n++)
+            {
+                var prefix = string.Join("/", segments.Take(n));
+                if (LocalItems.IsArtifactPath(prefix)) return prefix;
+            }
+        }
+        var root = side == Side.A ? pair.A : pair.B;
+        return productOwned.Select(Normalize).Where(boundary => boundary.Length > 0)
+            .Concat(NestedRoots(root, pair.PairId, allPairs))
+            .FirstOrDefault(boundary => PairPath.IsSelfOrUnder(path, boundary) ||
+                rejectAncestors && PairPath.IsUnder(boundary, path));
+    }
+
     /// <summary>Parses this pair's stored ignore-rule strings the way 'ignores set' does, then normalizes them.</summary>
     internal static IReadOnlyList<SyncIgnoreRule> IgnoreRules(PairDef pair) =>
         SyncIgnorePolicy.Normalize(pair.IgnoreRules.SelectMany(SyncIgnorePolicy.Parse).ToArray());

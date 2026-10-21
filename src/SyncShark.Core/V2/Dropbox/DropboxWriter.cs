@@ -2,8 +2,10 @@ namespace Massdex.SyncShark.V2;
 
 /// <summary>Applies planned effects to one Dropbox root with conditional, never-blindly-retried writes.</summary>
 public sealed partial class DropboxWriter : IEndpointWriter, ISyncTransferResourceEndpoint, IProviderEffectReconciler,
-    IFolderTreeDeleter, ISyncDirectDownloadSource, IEndpointMetadataPages
+    IFolderTreeDeleter, ISyncDirectDownloadSource, IEndpointMetadataPages, ISourceAbsenceProbe
 {
+    internal Task<bool> HasUploadSpaceAsync(long needBytes, CancellationToken ct) => _client.HasUploadSpaceAsync(needBytes, ct);
+
     private readonly Side _side;
     private readonly DropboxPilotClient _client;
     private readonly string _spoolDirectory;
@@ -49,8 +51,8 @@ public sealed partial class DropboxWriter : IEndpointWriter, ISyncTransferResour
     {
         if (string.IsNullOrWhiteSpace(a.FromPath) || a.ExpectedTarget is null)
             throw new ArgumentException("A Dropbox move requires a source path and the expected target.");
-        var moved = await _client.MoveAsync(
-            DropboxItems.ToEntry(a.ExpectedTarget with { Path = a.FromPath! }), a.Path, ct);
+        var moved = await _client.MoveRevisionAsync(
+            DropboxItems.ToEntry(a.ExpectedTarget with { Path = a.FromPath! }), a.Path, a.RequireMoveRevision, ct);
         return DropboxItems.ToItem(moved);
     });
 
@@ -101,6 +103,43 @@ public sealed partial class DropboxWriter : IEndpointWriter, ISyncTransferResour
         return Task.FromResult(new RecoveryRef(_side, victim.Path, victim.VersionId, victim.Hash, victim.Size));
     }
 
+    private readonly SemaphoreSlim _absenceReads = new(8, 8);
+
+    /// <inheritdoc/>
+    public Task<ItemState?> ObserveSourceMetadataAsync(string path, CancellationToken ct) => ObserveAsync(path, ct);
+
+    /// <inheritdoc/>
+    public async Task<bool?> IsHistoricalSourcePresentAsync(ItemState historical, CancellationToken ct)
+    {
+        await _absenceReads.WaitAsync(ct).ConfigureAwait(false);
+        try { return await _client.ObjectExistsAsync(historical.ObjectId, ct).ConfigureAwait(false); }
+        finally { _absenceReads.Release(); }
+    }
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyList<bool?>> IsAbsentBatchAsync(
+        IReadOnlyList<(ItemState Historical, string Path)> requests, CancellationToken ct)
+    {
+        if (requests.Count > 128) throw new ArgumentOutOfRangeException(nameof(requests));
+        return _client.ProbeSourceAbsenceAsync(requests.Select(x =>
+            (x.Historical.ObjectId, x.Historical.Path, x.Path)).ToArray(), _absenceReads, ct);
+    }
+
+    /// <inheritdoc/>
+    public async Task<bool?> IsSourceAbsentAsync(ItemState? historical, string path, CancellationToken ct)
+    {
+        if (historical is not null)
+            return (await IsAbsentBatchAsync([(historical, path)], ct).ConfigureAwait(false))[0];
+        // Bound aggregate metadata reads across ordinary workers and whole-folder victim checks.
+        await _absenceReads.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var page = await _client.ReadMetadataPageAsync([path], ct).ConfigureAwait(false);
+            return page.TryGetValue(path, out var item) && item is null;
+        }
+        finally { _absenceReads.Release(); }
+    }
+
     /// <summary>One fresh exact-path observation; absence is returned as null.</summary>
     public async Task<ItemState?> ObserveAsync(string path, CancellationToken ct)
     {
@@ -135,9 +174,8 @@ public sealed partial class DropboxWriter : IEndpointWriter, ISyncTransferResour
         try
         {
             var download = await _client.DownloadAsync(DropboxItems.ToEntry(s), spool, ct);
-            if (!string.Equals(download.Revision, s.VersionId, StringComparison.Ordinal) ||
-                !string.Equals(download.ContentHash, s.Hash, StringComparison.OrdinalIgnoreCase))
-                throw new ExpectedTargetMismatchException($"Dropbox '{s.Path}' changed since planning.");
+            RequireDownloadIdentity(s, download);
+            if (spool.Length != s.Size) throw new ExpectedTargetMismatchException("Dropbox download length differs from the planned file.");
             spool.Position = 0;
             keep = true;
             return spool;
@@ -165,12 +203,18 @@ public sealed partial class DropboxWriter : IEndpointWriter, ISyncTransferResour
                 throw new InvalidDataException("A direct Dropbox download requires a planned file revision and hash.");
             var download = await _client.DownloadAsync(DropboxItems.ToEntry(s), destination, ct)
                 .ConfigureAwait(false);
-            if (!string.Equals(download.Revision, s.VersionId, StringComparison.Ordinal) ||
-                download.Size != s.Size ||
-                !string.Equals(download.ContentHash, s.Hash, StringComparison.OrdinalIgnoreCase))
-                throw new ExpectedTargetMismatchException($"Dropbox '{s.Path}' changed since planning.");
+            RequireDownloadIdentity(s, download);
             return download;
         });
+
+    internal static void RequireDownloadIdentity(ItemState expected, SyncDownloadResult actual)
+    {
+        if (!string.Equals(actual.FileId, expected.ObjectId, StringComparison.Ordinal) ||
+            !string.Equals(actual.Revision, expected.VersionId, StringComparison.Ordinal) ||
+            actual.Size != expected.Size ||
+            !string.Equals(actual.ContentHash, expected.Hash, StringComparison.OrdinalIgnoreCase))
+            throw new ExpectedTargetMismatchException("Dropbox download identity or size differs from the planned file.");
+    }
 
     private FileStream NewSpool()
     {

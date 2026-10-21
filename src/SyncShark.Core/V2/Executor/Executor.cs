@@ -44,7 +44,8 @@ public sealed partial class Executor : IExecutor
         var dependencies = actions.Concat(trees.Where(tree => tree.Handled).SelectMany(tree => tree.Actions))
             .Where(action => action.Kind is ActionKind.MkDir or ActionKind.Move or ActionKind.Delete).ToArray();
         var runner = new ActionRunner(committer, _settings, _admission, p.PairId, a, b,
-            dependencies, outcomes);
+            dependencies, outcomes, new DropboxQuota(_store.Pair(p.PairId),
+                _store.NoticeById(p.PairId, DropboxQuota.Id(p.PairId))?.Notice.UploadSuspended == true), actions);
 
         using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
         // Two worker waves can finish while Run consumes results. Capacity follows the existing worker
@@ -132,8 +133,13 @@ public sealed partial class Executor : IExecutor
                         { ConflictingGrantId = grant.GrantId, GrantedExclusionPath = grant.Path, GrantedStagePath = grant.StagePath } }]), token).ConfigureAwait(false);
                 }
             }
+            ItemState? historicalDeleteSource = null;
+            if (pairId is not null && intent.Kind == ActionKind.Delete)
+                await StoreAsync(() => historicalDeleteSource = StoreCommitter.DeleteSource(_store, pairId, intent),
+                    token).ConfigureAwait(false);
             var result = await EffectResolver.ResolveAsync(intent, target, source, token,
-                _settings.UnknownCommitGracePeriod, jobChecks: jobChecks, materializationBlock: materializationBlock).ConfigureAwait(false);
+                _settings.UnknownCommitGracePeriod, jobChecks: jobChecks, materializationBlock: materializationBlock,
+                historicalDeleteSource: historicalDeleteSource).ConfigureAwait(false);
             if (pairId is not null)
             {
                 await StoreAsync(() => _store.CommitResult(pairId, gen, intent, result), token).ConfigureAwait(false);
@@ -446,7 +452,15 @@ public sealed partial class Executor : IExecutor
             // No bytes are lost by removing a verified fully-dehydrated reference. The local
             // writer rechecks ownership and physical state exclusively; hydration/edit races fail.
             RecoveryFirst: item.Kind == ItemKind.File && !(localDropbox && item.Flags.HasFlag(ItemFlags.OwnedPointer)),
-            keys.GetValueOrDefault(item.ObjectId))).ToList();
+            keys.GetValueOrDefault(item.ObjectId))
+            {
+                ChoiceRemove = folder.ChoiceRemove,
+                RebuildableRemove = folder.RebuildableRemove,
+                RemovalReviewChoice = folder.RemovalReviewChoice,
+                FrozenChoiceId = folder.FrozenChoiceId,
+                SuppressReconciledBaseline = folder.SuppressReconciledBaseline,
+                FirstSyncChoice = folder.FirstSyncChoice
+            }).ToList();
         children.Add(folder with { RecoveryFirst = false });
         if (whole(folder, descendants.Count)) trees.Add(new WholeFolder(children, descendants));
         else expanded.AddRange(children);
@@ -464,17 +478,11 @@ public sealed partial class Executor : IExecutor
         return byObject;
     }
 
-    private async Task<string?> PairForAsync(SyncAction intent, CancellationToken ct)
-    {
-        var pairs = await GateAsync(() => _store.Pairs(), ct).ConfigureAwait(false);
-        foreach (var pair in pairs)
-        {
-            var intents = await GateAsync(() => _store.UnresolvedIntents(pair.PairId), ct).ConfigureAwait(false);
-            if (intents.Any(i => string.Equals(i.ActionId, intent.ActionId, StringComparison.Ordinal)))
-                return pair.PairId;
-        }
-        return null;
-    }
+    // One indexed point lookup per reconciled intent (action_id is the pending_effect primary key). The previous
+    // implementation materialized every unresolved intent of every pair once per intent: at ~1M rows that was
+    // gigabytes and tens of minutes for a 256-intent reconcile page.
+    private async Task<string?> PairForAsync(SyncAction intent, CancellationToken ct) =>
+        await GateAsync(() => _store.PairForIntent(intent.ActionId), ct).ConfigureAwait(false);
 
     private async Task StoreAsync(Action work, CancellationToken ct)
     {

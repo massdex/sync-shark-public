@@ -17,6 +17,8 @@ internal static class FilesOnDemandStorageChecks
         await SettlementInventoryChecks.RunAsync(Path.Combine(root, "settlement-inventory"));
         await HydrationNoticeWriterChecks.RunAsync(Path.Combine(root, "hydration-notices"));
         await FilesOnDemandSettlementChecks.RunAsync(Path.Combine(root, "settlement-service"));
+        await FilesOnDemandNoticeAggregationChecks.RunAsync(Path.Combine(root, "notice-aggregation"));
+        FilesOnDemandProtectionChecks.Run(Path.Combine(root, "pointer-protection"));
         await StoreWorkChecksAsync(Path.Combine(root, "store-work"));
         var remote = new PilotRemoteEntry("Folder/file.txt", PilotEntryKind.File, "id:file", "revision-1", 4, new string('a', 64));
         var local = new RootDef("local", SyncProviders.Local, null, root, "root-object");

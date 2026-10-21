@@ -27,15 +27,15 @@ internal static partial class RunChecks
         IReadOnlyList<ItemState> items = new[] { item };
         var hide = typeof(RunScope).GetMethod("Hide", BindingFlags.Instance | BindingFlags.NonPublic)!;
         var scope = new RunScope(store, _ => true, _ => true);
-        Require(ReferenceEquals(items, hide.Invoke(scope, [items, Side.A])),
+        Require(ReferenceEquals(items, hide.Invoke(scope, [items, Side.A, null])),
             "unchanged scope returns its input collection");
 
         var ignored = item with { Flags = ItemFlags.Ignored };
         IReadOnlyList<ItemState> ignoredItems = new[] { ignored };
         var excluding = new RunScope(store, _ => false, _ => false);
-        Require(ReferenceEquals(ignoredItems, hide.Invoke(excluding, [ignoredItems, Side.A])),
+        Require(ReferenceEquals(ignoredItems, hide.Invoke(excluding, [ignoredItems, Side.A, null])),
             "already-ignored rows need no flags clone or collection");
-        var changed = (IReadOnlyList<ItemState>)hide.Invoke(excluding, [items, Side.A])!;
+        var changed = (IReadOnlyList<ItemState>)hide.Invoke(excluding, [items, Side.A, null])!;
         Require(changed.Count == 1 && changed[0].Flags == ItemFlags.Ignored && item.Flags == ItemFlags.None,
             "new ignored flags clone the row without mutating input or adding carried-ignore");
     }

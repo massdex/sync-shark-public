@@ -25,7 +25,7 @@ public static class SyncCliRegistry
     private static readonly string[] ValueOptions =
     [
         "--pair", "--account", "--path", "--key", "--search", "--choice", "--rules", "--settings", "--update",
-        "--limit", "--offset", "--generation", "--minutes", "--selection", "--availability", "--local",
+        "--page-token", "--limit", "--offset", "--generation", "--minutes", "--selection", "--availability", "--local",
         "--until", "--timeout-seconds", "--backup-directory",
         "--name", "--priority", "--provider"
         , "--description", "--choices", "--group", "--filter", "--seconds", "--side",
@@ -232,10 +232,10 @@ public static class SyncCliRegistry
             SyncCliRequestKind.State, "none", "one conflict's identities, sizes, hashes and retained-text flags",
             "the product state or the running application", "direct|running-application",
             "--pair,--path,--account", RequiresPair: true),
-        new("conflicts resolve", "conflicts resolve --pair <exact-id> [--path <relative-path-or-volume>] --choice <decision|restore-existing|restore-as-copy|dismiss|enlarge-journal|journal-not-now|journal-never> --key <conflict-id> --generation <n> --yes [--timeout-seconds <seconds>]",
-            SyncCliRequestKind.State, "yes", "conflict notices support compare, merge=<relative-path>, keep-a, keep-b, keep-both, rename-incoming=<relative-path>, replace-existing, restore-existing, restore-as-copy and dismiss; removal notices support review-removal, removal-next-page, removal-previous-page and confirm-removal (generation 0); review and pages never delete; applies one guarded conflict or quarantine choice: quarantine-retry, quarantine-ignore, quarantine-exclude, quarantine-delete-dropbox, defender-exclude (attended UAC; two exact file and sibling-stage exclusions; never folders; generation 0 for notices; retained ignored key supports later retry), defender-verify (explicit read-only UAC verification of recorded exclusions; hidden or unavailable visibility stays held), defender-keep (confirmed current file only; existing exclusion; no UAC/settings change), defender-proceed-deletions and defender-keep-held (reviewed UNKNOWN-history batch only), defender-release-held (all Keep-held items), defender-release-item (one Keep-held item named by --path; shared items open a separate review), defender-exclude-held (exclude one held item), defender-release-all-pairs and defender-keep-shared-held (explicit shared-item review choices)",
+        new("conflicts resolve", "conflicts resolve --pair <exact-id> [--path <relative-path-or-volume>] --choice <decision|restore-existing|restore-as-copy|dismiss|enlarge-journal|journal-not-now|journal-never> --key <conflict-id> --generation <n> --yes [--name <safe-name|confirmed-target|link-page-cursor|folder-path|remaining-page-cursor>] [--offset <n>] [--page-token <token>] [--timeout-seconds <seconds>]",
+            SyncCliRequestKind.State, "yes", "conflict notices support compare, merge=<relative-path>, keep-a, keep-b, keep-both, rename-incoming=<relative-path>, replace-existing, restore-existing, restore-as-copy and dismiss; removal notices support review-removal, removal-next-page, removal-previous-page and confirm-removal (generation 0); review and pages never delete; applies one guarded conflict or quarantine choice: quarantine-retry, quarantine-ignore, quarantine-exclude, quarantine-delete-dropbox, defender-exclude (attended UAC; two exact file and sibling-stage exclusions; never folders; generation 0 for notices; retained ignored key supports later retry), defender-verify (explicit read-only UAC verification of recorded exclusions; hidden or unavailable visibility stays held), defender-keep (confirmed current file only; existing exclusion; no UAC/settings change), defender-proceed-deletions and defender-keep-held (reviewed UNKNOWN-history batch only), defender-release-held (all Keep-held items), defender-release-item (one Keep-held item named by --path; shared items open a separate review), defender-exclude-held (exclude one held item), defender-release-all-pairs and defender-keep-shared-held (explicit shared-item review choices); also applies explicit blocker actions with the stale-plan guard: rebuildable-rule preview/choose/remove/keep, single-file offline (including a confirmed large download) and document export (docx, markdown, pdf, html)",
             "the product state or the running application", "direct|running-application",
-            "--pair,--path,--choice,--key,--generation,--account,--yes,--timeout-seconds", Mutating: true, RequiresYes: true,
+            "--pair,--path,--choice,--key,--generation,--account,--yes,--timeout-seconds,--name,--offset,--page-token", Mutating: true, RequiresYes: true,
             RequiresPair: true),
         new("recovery list", "recovery list --pair <exact-id> [--account <exact-id>] [--search <text>] [--limit 1..200] [--offset <n>] [--deleted]", SyncCliRequestKind.State,
             "none", "retained recovery catalog and optional deleted cloud items, including Google Trash; partial-listing warnings are retained",
@@ -617,7 +617,8 @@ public static class SyncCliRegistry
     private static readonly string[] ChoiceNames = [.. Enum.GetNames<SyncAuthorityConflictResolutionKind>(),
         V2.NoticeChoices.UseOtherVersion, V2.NoticeChoices.SaveOtherVersionAsCopy, V2.NoticeChoices.Dismiss,
         V2.NoticeChoices.RetryNow, V2.NoticeChoices.Exclude, V2.NoticeChoices.Ignore,
-        V2.NoticeChoices.DeleteReviewed, V2.NoticeChoices.KeepRestore,
+        V2.NoticeChoices.ShowTarget, V2.NoticeChoices.SyncTargetSeparately, V2.NoticeChoices.CopyLink, V2.NoticeChoices.CopyLinkOutsideRoot, V2.NoticeChoices.CopyLinkAgain, V2.NoticeChoices.RemoveLinkStaging, V2.NoticeChoices.ConfirmLargeDownload, V2.NoticeChoices.MakeAvailableOffline, V2.NoticeChoices.ExportDocx, V2.NoticeChoices.ExportMarkdown, V2.NoticeChoices.ExportPdf, V2.NoticeChoices.ExportHtml, V2.NoticeChoices.CheckHistoryAgain, V2.NoticeChoices.ReviewDeletion, V2.NoticeChoices.OpenStorage, V2.NoticeChoices.ReviewReserve, V2.NoticeChoices.OpenRecoverySettings, V2.NoticeChoices.RepairHelp, V2.NoticeChoices.Rename, V2.NoticeChoices.ShowRemaining, V2.NoticeChoices.OpenDropbox, V2.NoticeChoices.DeleteReviewed, V2.NoticeChoices.KeepRestore,
+        V2.NoticeChoices.PreviewMatches, V2.NoticeChoices.ChooseFolder, V2.NoticeChoices.RemoveRule, V2.NoticeChoices.KeepRule,
         V2.NoticeChoices.QuarantineRetry, V2.NoticeChoices.QuarantineIgnore, V2.NoticeChoices.QuarantineExclude,
         V2.NoticeChoices.QuarantineDeleteDropbox, V2.NoticeChoices.DefenderExclude, V2.NoticeChoices.DefenderVerify, V2.NoticeChoices.DefenderKeep, V2.NoticeChoices.DefenderProceed, V2.NoticeChoices.DefenderHold,
         V2.NoticeChoices.DefenderReleaseHeld, V2.NoticeChoices.DefenderReleaseItem, V2.NoticeChoices.DefenderExcludeHeld,
@@ -627,7 +628,6 @@ public static class SyncCliRegistry
         V2.NoticeChoices.RestoreExisting, V2.NoticeChoices.RestoreAsCopy,
         V2.NoticeChoices.ReviewRemoval, V2.NoticeChoices.ReviewRemovalA, V2.NoticeChoices.ReviewRemovalB, V2.NoticeChoices.ConfirmRemoval,
         V2.NoticeChoices.RemovalNextPage, V2.NoticeChoices.RemovalPreviousPage, V2.NoticeChoices.OpenFolderSettings, V2.JournalSizing.Enlarge, V2.JournalSizing.NotNow, V2.JournalSizing.Never];
-
 
     public static SyncCliCapabilityData Capabilities() => new("Sync Shark", ProductVersion(),
         BuildIdentity.SourceRevision,
@@ -1186,9 +1186,22 @@ public static class SyncCliRegistry
                 return await operations.LoadConflictAsync(invocation.PairId!, RequirePath(invocation),
                     invocation.AccountId, cancellationToken);
             case "conflicts resolve":
+            {
+                // Retry/retained-version choices are notice actions even without --name or --offset.
+                var noticeChoice = invocation.Choice is { } selected &&
+                    (V2.NoticeChoices.IsRetryChoice(selected.ToLowerInvariant()) ||
+                     V2.NoticeChoices.IsRetainedVersionChoice(selected.ToLowerInvariant()));
+                if (invocation.Name is not null || invocation.Options?.ContainsKey("--offset") == true ||
+                    invocation.Value("--page-token") is not null || noticeChoice)
+                    // Key-only pair notices carry an empty path: Windows PowerShell 5.1 drops a "" argument
+                    // to a native exe, and the v2 runtime itself enforces --path for item notices.
+                    return await operations.ResolveNoticeAsync(invocation.PairId!, invocation.Path ?? string.Empty,
+                        RequireChoice(invocation), invocation.Key, invocation.Generation, invocation.AccountId,
+                        cancellationToken, new NoticeActionInput(invocation.Name, invocation.Offset, invocation.Value("--page-token")));
                 return await operations.ResolveConflictAsync(invocation.PairId!, invocation.Path ?? string.Empty,
                     RequireChoice(invocation), invocation.Key, invocation.Generation, invocation.AccountId,
                     cancellationToken, Progress);
+            }
             case "recovery list":
                 return await operations.ExecuteSurfaceAsync(invocation, cancellationToken);
             case "recovery usage":

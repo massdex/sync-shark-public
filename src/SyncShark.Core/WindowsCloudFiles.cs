@@ -122,6 +122,9 @@ public sealed record WindowsCloudPlaceholderInfo(
     uint RawPlaceholderState)
 {
     public long ModifiedDataSize { get; init; }
+    // Native standard-info success proves placeholder metadata exists even when Windows
+    // disguises the attribute/tag view. This does not establish provider/entity ownership.
+    internal bool HasStandardInfo { get; init; }
 }
 
 /// <summary>
@@ -473,6 +476,7 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
                 placeholder.IsDirectory ||
                 !placeholder.Identity.IsBoundTo(_pair.Id, _pair.Provider))
                 continue;
+            RequireObservedResidencyForUnregistration(placeholder);
             if (!placeholder.State.IsInSync)
             {
                 if (placeholder.State.Availability != SyncCloudFileAvailability.AvailableOffline)
@@ -707,6 +711,9 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
             if (!existing.Identity.IsBoundTo(_pair.Id, _pair.Provider) ||
                 existing.Identity.RelativePath != identity.RelativePath)
                 throw new IOException("Another provider, pair or path owns this placeholder.");
+            if (existing.RawPlaceholderState == uint.MaxValue ||
+                existing.State.Availability == SyncCloudFileAvailability.NotManaged)
+                throw new IOException("Placeholder residency could not be inspected safely. Retry conversion without reading file contents.");
             if (dehydrate && SameIdentity(existing.Identity, identity) &&
                 existing.State.Availability == SyncCloudFileAvailability.OnlineOnly &&
                 existing.State.IsInSync)
@@ -845,6 +852,9 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
             inspected++;
             try
             {
+                if (placeholder.RawPlaceholderState == uint.MaxValue ||
+                    placeholder.State.Availability == SyncCloudFileAvailability.NotManaged)
+                    throw new IOException("Owned placeholder residency is temporarily unavailable; retry metadata inspection before changing availability.");
                 if (!placeholder.IsDirectory && keepOnDevice &&
                     !HasSufficientDiskSpace(path,
                         Math.Max(0, placeholder.State.LogicalSize - placeholder.State.OnDiskBytes)))
@@ -1038,9 +1048,10 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
         // Windows reports PARTIALLY_ON_DISK (0x20) even for our zero-resident-byte pointers.
         // Owned identity was verified by the caller; native byte counts and in-sync state are decisive.
         // Keep the older foreign-stub replacement predicate separate and unchanged.
-        internal bool OwnedFullyDehydrated => PlaceholderState != uint.MaxValue &&
-            (PlaceholderState & 1) != 0 && (PlaceholderState & 0x10) != 0 &&
-            OnDiskBytes == 0 && ModifiedBytes == 0 && InSyncState == 1;
+        internal bool HasStandardInfo { get; init; }
+        internal bool OwnedFullyDehydrated =>
+            (V2.OwnedPointerProof.IsDehydrated(PlaceholderState, OnDiskBytes, ModifiedBytes) ||
+             HasStandardInfo && PlaceholderState == 0 && OnDiskBytes == 0 && ModifiedBytes == 0) && InSyncState == 1;
         internal bool FullyDehydrated => PlaceholderState != uint.MaxValue &&
             (PlaceholderState & 1) != 0 && (PlaceholderState & 0x10) != 0 && (PlaceholderState & 0x20) == 0 &&
             OnDiskBytes == 0 && ModifiedBytes == 0 && InSyncState == 1;
@@ -1059,12 +1070,14 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
             if (!Native.GetFileInformationByHandleEx(raw, 9, out var tag,
                     (uint)Marshal.SizeOf<Native.FileAttributeTagInfo>())) return null;
             var state = Native.CfGetPlaceholderStateFromAttributeTag(tag.FileAttributes, tag.ReparseTag);
-            if (state == uint.MaxValue || (state & 1) == 0) return null;
+            if (state == uint.MaxValue) return null;
+            // A zero attribute-derived state can be the compatibility disguise view.
+            // Require actual CF metadata instead of treating the missing tag as byte evidence.
             var hr = Native.CfGetPlaceholderInfo(raw, 1, buffer, capacity, out var returned);
             if (hr < 0 || returned < 60 || returned > capacity) return null;
             var header = Marshal.PtrToStructure<Native.PlaceholderStandardInfo>(buffer);
             return new StubState(state, header.OnDiskDataSize, header.ModifiedDataSize,
-                header.InSyncState, unchecked((ulong)header.FileId));
+                header.InSyncState, unchecked((ulong)header.FileId)) { HasStandardInfo = true };
         }
         catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException)
         { return null; }
@@ -1127,26 +1140,39 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
                 if (!WindowsCloudFileIdentity.TryDeserialize(bytes, out var identity) || identity is null)
                     return false;
                 var logicalSize = directory ? 0 : identity.LogicalSize;
-                var placeholderState = 0u;
+                // Query the same held object, not the receipt's potentially stale logical EOF.
+                // Dirty fully resident files can legitimately differ from their last receipt.
+                var physicalObserved = PilotDirectoryLease.GetFileInformationByHandle(handle, out var physical);
+                var physicalSize = !physicalObserved ? -1 : directory ? 0 : ((long)physical.FileSizeHigh << 32) | physical.FileSizeLow;
+                var placeholderState = uint.MaxValue;
+                var attributes = (uint)physical.FileAttributes;
                 if (Native.GetFileInformationByHandleEx(rawHandle, 9, out var tag,
                         checked((uint)Marshal.SizeOf<Native.FileAttributeTagInfo>())))
+                {
+                    attributes |= tag.FileAttributes;
                     placeholderState = Native.CfGetPlaceholderStateFromAttributeTag(tag.FileAttributes,
                         tag.ReparseTag);
-                var availability = directory
-                    ? SyncCloudFileAvailability.AvailableOffline
-                    : (placeholderState & 0x00000010) != 0 &&
-                      header.OnDiskDataSize == 0 && header.PinState != 1
-                        ? SyncCloudFileAvailability.OnlineOnly
-                        : (placeholderState & (0x00000010u | 0x00000020u)) != 0
-                            ? SyncCloudFileAvailability.PartiallyHydrated
-                            : SyncCloudFileAvailability.AvailableOffline;
+                }
+                SyncCloudFileAvailability availability;
+                try
+                {
+                    availability = DecodePlaceholderAvailability(directory, physicalSize,
+                        header.OnDiskDataSize, header.ModifiedDataSize, attributes, placeholderState);
+                }
+                catch (IOException)
+                {
+                    // Preserve proved ownership, not a fabricated partial/resident state. The
+                    // invalid raw-state sentinel makes owned inventory explicitly NotObserved.
+                    availability = SyncCloudFileAvailability.NotManaged;
+                    placeholderState = uint.MaxValue;
+                }
                 var relative = identity.ObjectKind == "root" ? "." : identity.RelativePath;
                 var state = new SyncCloudFileState(relative, availability, header.PinState == 1,
-                    header.InSyncState == 1, logicalSize, Math.Max(0, header.OnDiskDataSize),
+                    header.InSyncState == 1, logicalSize, header.OnDiskDataSize,
                     identity.DropboxId, identity.DropboxRevision, identity.ContentHash);
                 result = new WindowsCloudPlaceholderInfo(identity, state,
                     unchecked((ulong)header.FileId), unchecked((ulong)header.SyncRootFileId), directory,
-                    placeholderState) { ModifiedDataSize = header.ModifiedDataSize };
+                    placeholderState) { ModifiedDataSize = header.ModifiedDataSize, HasStandardInfo = true };
                 return true;
             }
             finally
@@ -1575,7 +1601,7 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
             throw new IOException("Windows did not confirm the complete offline copy.");
     }
 
-    private static AttributeCloudFileHandle OpenAttributes(string path, bool writeDac, bool exclusive)
+    internal static AttributeCloudFileHandle OpenAttributes(string path, bool writeDac, bool exclusive)
     {
         const uint fileReadAttributes = 0x00000080;
         const uint writeDacAccess = 0x00040000;
@@ -1625,7 +1651,7 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
         Disconnect();
     }
 
-    private sealed class AttributeCloudFileHandle(SafeFileHandle handle) : IDisposable
+    internal sealed class AttributeCloudFileHandle(SafeFileHandle handle) : IDisposable
     {
         public SafeFileHandle Handle { get; } = handle;
         public void Dispose() => Handle.Dispose();

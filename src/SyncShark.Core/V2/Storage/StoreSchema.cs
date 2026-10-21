@@ -7,8 +7,9 @@ internal static class StoreSchema
 {
     /// <summary>The schema version written to and required by <c>PRAGMA user_version</c>; any schema change bumps it.</summary>
     // Coordinated additive slots: v12 retry, v13 quarantine, v14 gap verification,
-    // v15 listing/pair pause, v16 local walk, v17 explicit conflict choices, v18 removal review, v19 journal sizing, v20 run summaries and notice-family index.
-    public const int Version = 20;
+    // v15 listing/pair pause, v16 local walk, v17 explicit conflict choices, v18 removal review,
+    // v19 journal sizing, v20 run summaries and notice-family index, v21 staged gap metadata/protection frontier.
+    public const int Version = 21;
 
     /// <summary>The state database path relative to the app data root.</summary>
     public const string DatabaseRelativePath = @"v2\state.db";
@@ -64,6 +65,12 @@ internal static class StoreSchema
           path_key TEXT NOT NULL, deleted_at INTEGER, probed_at INTEGER NOT NULL, basis_cursor TEXT, content_hash TEXT, failure_json TEXT,
           PRIMARY KEY(pair_no, root_no, path_key)) WITHOUT ROWID;
         """;
+
+    // Performance-only, additive index for the intent stream and the rowid horizon. It is replayed on every
+    // compatible open: (pair_no) carries rowid as the implicit final key, so MAX(rowid) and the ordered rowid
+    // keyset never degrade to a primary-key scan after concurrent state changes.
+    private const string IntentOrderIndexDdl =
+        "CREATE INDEX IF NOT EXISTS pe_intent_order ON pending_effect(pair_no);";
 
     // Performance-only, additive index; no persisted row format changes or version bump.
     private const string FlaggedIndexDdl =
@@ -139,6 +146,16 @@ internal static class StoreSchema
         CREATE TABLE IF NOT EXISTS sync_retry(pair_no INTEGER NOT NULL, path_key TEXT NOT NULL,
           json TEXT NOT NULL, retry_after INTEGER NOT NULL, PRIMARY KEY(pair_no,path_key));
         CREATE INDEX IF NOT EXISTS sync_retry_due ON sync_retry(pair_no,retry_after,path_key);
+        CREATE INDEX IF NOT EXISTS sync_retry_kind ON sync_retry(pair_no,json_extract(json,'$.Kind'),path_key);
+        CREATE INDEX IF NOT EXISTS sync_retry_delete_blocked ON sync_retry(pair_no,path_key)
+          WHERE json_extract(json,'$.DeleteBlockedDetail') IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS sync_retry_delete_review ON sync_retry(pair_no,path_key)
+          WHERE json_extract(json,'$.MissingDeleteIdentityReview')=1;
+        CREATE INDEX IF NOT EXISTS sync_retry_review_path ON sync_retry(pair_no,json_extract(json,'$.Path'))
+          WHERE json_extract(json,'$.MissingDeleteIdentityReview')=1;
+        CREATE INDEX IF NOT EXISTS nt_groupable_delete ON notice(pair_no,reason_key,notice_id) WHERE state='open';
+        CREATE INDEX IF NOT EXISTS pe_uncertain_delete ON pending_effect(pair_no,action_id)
+          WHERE state='uncertain' AND json_extract(action_json,'$.Kind')='Delete';
         """;
 
     // Presence-guarded on every open; integration assigns v15.
@@ -154,6 +171,13 @@ internal static class StoreSchema
         CREATE TABLE IF NOT EXISTS local_walk(root_id TEXT PRIMARY KEY, binding TEXT NOT NULL, cursor TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS local_walk_page(root_id TEXT NOT NULL, ordinal INTEGER NOT NULL,
           payload TEXT NOT NULL, PRIMARY KEY(root_id,ordinal));
+        """;
+
+    // One row per (pair, reason) whose pre-fa93b15f path-bearing notice ids have already been folded. This is
+    // additive, presence-guarded feature storage: no version bump and no existing row changes.
+    private const string LegacyFoldDdl = """
+        CREATE TABLE IF NOT EXISTS notice_legacy_fold(pair_no INTEGER NOT NULL, reason_key TEXT NOT NULL,
+          PRIMARY KEY(pair_no,reason_key)) WITHOUT ROWID;
         """;
 
     private const string RehashDdl = """
@@ -179,6 +203,12 @@ internal static class StoreSchema
         // Presence guards also recover an interrupted additive migration before its version stamp.
         foreach (var (table, column, definition) in new[]
         {
+            // v21 separates worker progress from published protection. The small root
+            // progress rows are seeded from the legacy frontier only when columns are added.
+            ("local_gap", "worker_after", "TEXT NOT NULL DEFAULT ''"),
+            ("local_gap", "worker_done", "INTEGER NOT NULL DEFAULT 0"),
+            ("local_gap_item", "metadata_ready", "INTEGER NOT NULL DEFAULT 0"),
+            ("local_gap_item", "metadata_stamp", "TEXT"),
             ("local_gap", "next_result", "INTEGER NOT NULL DEFAULT 0"),
             ("local_gap", "reason", "TEXT NOT NULL DEFAULT 'journal history discontinuity'"),
             ("local_gap_item", "proof_json", "TEXT"),
@@ -188,17 +218,25 @@ internal static class StoreSchema
             ("local_gap_item", "failure_reason", "TEXT"),
             ("local_gap_item", "retry_allowed", "INTEGER NOT NULL DEFAULT 1"),
             ("local_gap_item", "defer_count", "INTEGER NOT NULL DEFAULT 0"),
-            ("local_gap_item", "defer_reason", "TEXT")
+            ("local_gap_item", "defer_reason", "TEXT"),
+            ("local_gap_item", "discovery_reason", "TEXT")
         })
             if (Convert.ToInt64(Scalar(connection, transaction,
                 $"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name=$name;", ("$name", column))) == 0)
+            {
                 Execute(connection, transaction, $"ALTER TABLE {table} ADD COLUMN {column} {definition};");
+                if (table == "local_gap" && column == "worker_after")
+                    Execute(connection, transaction, "UPDATE local_gap SET worker_after=after_object;");
+                if (table == "local_gap" && column == "worker_done")
+                    Execute(connection, transaction, "UPDATE local_gap SET worker_done=discovery_done;");
+            }
         // Replace only the old ready predicate; the entity work and legacy gap_retry remain intact.
         if (Scalar(connection, transaction, "SELECT sql FROM sqlite_master WHERE name='gap_ready';") is string ready &&
-            !ready.Contains("retry_allowed=1", StringComparison.Ordinal))
+            !ready.Contains("metadata_ready=0", StringComparison.Ordinal))
             Execute(connection, transaction, "DROP INDEX gap_ready;");
         Execute(connection, transaction,
-            "CREATE INDEX IF NOT EXISTS gap_ready ON local_gap_item(root_no,epoch,last_attempt,object_id) WHERE hash IS NULL AND retry_allowed=1;" +
+            "CREATE INDEX IF NOT EXISTS gap_ready ON local_gap_item(root_no,epoch,last_attempt,object_id) WHERE hash IS NULL AND retry_allowed=1 AND metadata_ready=0;" +
+            "CREATE INDEX IF NOT EXISTS gap_metadata ON local_gap_item(root_no,epoch,object_id) WHERE metadata_ready=1;" +
             "CREATE INDEX IF NOT EXISTS gap_waiting ON local_gap_item(root_no,object_id) WHERE hash IS NULL AND retry_allowed=0;" +
             "CREATE INDEX IF NOT EXISTS gap_failed ON local_gap_item(root_no,object_id) WHERE failure_count>=3;" +
             "CREATE INDEX IF NOT EXISTS gap_results ON local_gap_item(root_no,result_seq,object_id) WHERE hash IS NOT NULL;");
@@ -286,6 +324,7 @@ internal static class StoreSchema
         if (fromVersion < 10) Execute(connection, null, ObservationDdl);
         Execute(connection, null, RehashDdl);
         Execute(connection, null, RetryDdl);
+        Execute(connection, null, LegacyFoldDdl);
         EnsureFeatureSchema(connection, fromVersion);
     }
 
@@ -297,6 +336,7 @@ internal static class StoreSchema
         Execute(connection, null, QuarantineDdl);
         EnsureDefenderColumns(connection, null);
         Execute(connection, null, FlaggedIndexDdl);
+        Execute(connection, null, IntentOrderIndexDdl);
         BackfillDefenderGrants(connection);
         Step(13, null);
         Step(14, tx => EnsureGapSchema(connection, tx));
@@ -306,6 +346,7 @@ internal static class StoreSchema
         Step(18, tx => Execute(connection, tx, RemovalReviewDdl));
         Step(19, tx => Execute(connection, tx, JournalDdl));
         Step(20, tx => MigrateRunSummary(connection, tx));
+        Step(21, tx => EnsureGapSchema(connection, tx));
 
         void Step(int version, Action<SqliteTransaction>? create)
         {
@@ -352,10 +393,10 @@ internal static class StoreSchema
 
     private static readonly string[] ExpectedNames =
     [
-        "journal_volume", "dir", "root", "pair", "generation", "file_state", "tombstone", "sync_point", "pending_effect", "sync_retry", "sync_retry_due", "recovery",
-        "notice", "local_gap", "local_gap_item", "gap_ready", "gap_failed", "gap_waiting", "gap_results", "local_rehash", "rehash_retry", "deletion_evidence", "dir_key", "dir_mapped_key", "fs_obj", "fs_flagged", "fs_refused", "sp_a_obj", "sp_b_obj", "sp_a_dir", "sp_b_dir",
+        "journal_volume", "dir", "root", "pair", "generation", "file_state", "tombstone", "sync_point", "pending_effect", "sync_retry", "sync_retry_due", "sync_retry_kind", "sync_retry_delete_blocked", "sync_retry_delete_review", "sync_retry_review_path", "nt_groupable_delete", "pe_uncertain_delete", "recovery",
+        "notice", "notice_legacy_fold", "local_gap", "local_gap_item", "gap_ready", "gap_failed", "gap_waiting", "gap_results", "gap_metadata", "local_rehash", "rehash_retry", "deletion_evidence", "dir_key", "dir_mapped_key", "fs_obj", "fs_flagged", "fs_refused", "sp_a_obj", "sp_b_obj", "sp_a_dir", "sp_b_dir",
 
-        "removal_review", "pe_unresolved", "rc_pair", "nt_open", "prepare_header", "prepare_row", "prepare_lookup", "prepare_cursor",
+        "removal_review", "pe_unresolved", "pe_intent_order", "rc_pair", "nt_open", "prepare_header", "prepare_row", "prepare_lookup", "prepare_cursor",
         "quarantine_upgrade", "defender_deferral_batch", "fs_quarantine", "defender_deferral", "defender_deferral_updated", "defender_grant", "defender_grant_path",
         "choice_victim", "cv_op", "cv_item", "cv_scan", "choice_restore_receipt", "choice_merge",
         "run_summary", "run_summary_pair", "nt_pair_reason",
@@ -438,7 +479,9 @@ internal static class StoreSchema
         Execute(connection, transaction, RetryDdl);
         EnsureGapSchema(connection, transaction);
         MigrateRunSummary(connection, transaction);
+        Execute(connection, transaction, LegacyFoldDdl);
         Execute(connection, transaction, FlaggedIndexDdl);
+        Execute(connection, transaction, IntentOrderIndexDdl);
         Execute(connection, transaction, QuarantineDdl);
         Execute(connection, transaction, "INSERT INTO quarantine_upgrade VALUES('grant-backfill');");
         EnsureDefenderColumns(connection, transaction);
@@ -475,6 +518,7 @@ internal static class StoreSchema
         Execute(connection, null, ClassificationDdl);
         Execute(connection, null, ObservationDdl);
         EnsureFeatureSchema(connection, version);
+        Execute(connection, null, LegacyFoldDdl);
         var names = new HashSet<string>(StringComparer.Ordinal);
         using (var command = Command(connection, null,
             "SELECT name FROM sqlite_master WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%';"))

@@ -13,7 +13,8 @@ internal static class EffectResolver
     /// </summary>
     internal static async Task<ActionResult> ResolveAsync(SyncAction x, IEndpointWriter target, IEndpointWriter source,
         CancellationToken ct, TimeSpan? unknownCommitGracePeriod = null, TimeProvider? timeProvider = null,
-        ProviderJobCheckCache? jobChecks = null, string? materializationBlock = null)
+        ProviderJobCheckCache? jobChecks = null, string? materializationBlock = null,
+        ItemState? historicalDeleteSource = null)
     {
         // Restore creates only: without the atomic receipt we cannot claim ownership. Abandon the
         // intent, not the Recovery copy or notice, even if observation/provider lookup is unavailable.
@@ -22,27 +23,32 @@ internal static class EffectResolver
         var now = (timeProvider ?? TimeProvider.System).GetUtcNow();
         var providerReportsInProgress = false;
         var providerTemporarilyUnavailable = false;
+        var deleteJobTerminal = false;
+        var deleteJobUnavailable = false;
         if (x.ProviderEffect is { Kind: "delete-job" or "mkdir-job" } checkpoint &&
             target is IProviderEffectReconciler reconciler)
         {
             try
             {
                 var applied = await reconciler.ResolveProviderEffectAsync(x, jobChecks, ct).ConfigureAwait(false);
-                // A delete carries no post-effect state, so a proven job is Done as-is. A proven folder create
-                // must instead fall through to the MkDir observation rule, which reads the created folder's state
-                // back and returns Done with it (leaving the effect unverified when that folder cannot be read).
-                if (applied == true && checkpoint.Kind == "delete-job")
-                    return await DoneAsync(x, null, target, ct).ConfigureAwait(false);
-                if (applied == false) return Skipped(x, NotApplied);
+                deleteJobTerminal = checkpoint.Kind == "delete-job" && applied is not null;
+                // Proven jobs still fall through to endpoint observation: creates need their new state,
+                // and deletes need confirmation that the original source has not survived/reappeared.
+                // A completed delete still needs both endpoint observations: its source may have
+                // reappeared while the process was down. Never acknowledge absence as a user deletion.
+                if (applied == false && x.Kind != ActionKind.Delete) return Skipped(x, NotApplied);
                 // Dropbox definitively reports the job still in progress: it may still run, so the effect must
                 // never expire by grace while the target survives, or a replan-restored copy could be deleted late.
                 if (applied is null) providerReportsInProgress = true;
             }
-            catch (Exception e) when (Unverifiable(e, ct))
+            catch (Exception e) when (Unverifiable(e, ct) || x.Kind == ActionKind.Delete &&
+                e is not OutOfMemoryException && !(e is OperationCanceledException && ct.IsCancellationRequested))
             {
                 // A transient lookup failure is not proof that the job expired. Positive
                 // observation may still prove completion, but do not expire a live job on an outage.
                 providerTemporarilyUnavailable = ProviderTransientFailure.IsTransient(e, ct);
+                deleteJobUnavailable = checkpoint.Kind == "delete-job" &&
+                    e is DropboxEffectUncertainException { JobIdUnavailable: true };
             }
         }
         // A direct download records one narrow durable checkpoint after verifying its stage and before archiving
@@ -84,15 +90,35 @@ internal static class EffectResolver
             }
         }
 
-        var path = await ObserveAsync(target, x.Path, ct).ConfigureAwait(false);
+        (ItemState? State, Exception? Failure) path;
+        try { path = await ObserveAsync(target, x.Path, ct).ConfigureAwait(false); }
+        catch (EndpointAccessException error) when (x.Kind == ActionKind.Delete)
+        {
+            return Unverified(x, Describe(error)) with
+                { RetryAfterSeconds = ProviderTransientFailure.VerificationRetrySeconds };
+        }
         if (path.Failure is { } failure) return Unverified(x, Describe(failure)) with
-            { RetryAfterSeconds = ProviderTransientFailure.IsTransient(failure, ct) ? ProviderTransientFailure.VerificationRetrySeconds : null };
+            { RetryAfterSeconds = x.Kind == ActionKind.Delete || ProviderTransientFailure.IsTransient(failure, ct)
+                ? ProviderTransientFailure.VerificationRetrySeconds : null };
         var obs = path.State;
+        // Unknown/expired job ids become finished-unknown after grace, never a proof of deletion.
+        // Both endpoints (including trusted source identity) still decide the outcome below. An active
+        // job or a transient lookup outage cannot expire, nor can a submission lacking a job id.
+        if (x.Kind == ActionKind.Delete && x.ProviderEffect is { Kind: "delete-job" } deleteJob &&
+            deleteJobUnavailable && !providerReportsInProgress && !providerTemporarilyUnavailable &&
+            deleteJob.RecordedAtUtc is { } submittedDelete &&
+            now - submittedDelete >= (unknownCommitGracePeriod ?? V2Settings.Default.UnknownCommitGracePeriod))
+            deleteJobTerminal = true;
+        // Even an absent target must not be restored underneath a provider job still running.
+        if (x.Kind == ActionKind.Delete && (providerReportsInProgress || providerTemporarilyUnavailable ||
+            x.ProviderEffect?.Kind == "delete-submit" || x.ProviderEffect?.Kind == "delete-job" && !deleteJobTerminal))
+            return Unverified(x, ExecutionReasons.ProviderPending.Detail) with
+                { RetryAfterSeconds = ProviderTransientFailure.VerificationRetrySeconds };
         // An absent or old path does not prove an asynchronous commit has stopped running.
         // Keep its evidence until a read proves success or the provider reports a terminal rejection.
         var uploadMatches = DefinitelyMatches(obs, x.Source) &&
             (x.ExpectedTarget is null || string.Equals(obs?.ObjectId, x.ExpectedTarget.ObjectId, StringComparison.Ordinal));
-        if (x.ProviderEffect is { } effect && MayStillRun(effect, obs, uploadMatches))
+        if (!deleteJobTerminal && x.ProviderEffect is { } effect && MayStillRun(effect, obs, uploadMatches))
         {
             // A job Dropbox still reports in progress is never expired by grace: grace applies only when the job is
             // unknown, expired or unavailable, so a possibly-running job can never be replanned over.
@@ -121,8 +147,16 @@ internal static class EffectResolver
             case ActionKind.Move:
                 return await ResolveMoveAsync(x, obs, target, ct).ConfigureAwait(false);
             case ActionKind.Delete:
-                if (obs is null) return await DoneAsync(x, null, target, ct).ConfigureAwait(false);
-                return Skipped(x, SameAsExpected(obs, x.ExpectedTarget) ? NotApplied : Superseded);
+                // Typed expired/invalid job + elapsed grace ends verify-only waiting, not deletion
+                // authority. Without a trusted original identity retain history and park a user review.
+                // This also covers an absent target: never infer the opposite user's deletion from it.
+                if (deleteJobUnavailable && deleteJobTerminal &&
+                    string.IsNullOrWhiteSpace(historicalDeleteSource?.ObjectId) &&
+                    !DeleteSourceGuard.ExplicitRemoval(x) && x.Rule is not (26 or 32))
+                    return Skipped(x, "The delete job expired without a trusted source identity. Review the item; nothing further was deleted.") with
+                    { DeleteSourceUnconfirmed = true, DeleteSourceIdentityMissing = true };
+                if (obs is not null) return Skipped(x, SameAsExpected(obs, x.ExpectedTarget) ? NotApplied : Superseded);
+                return await ResolveAbsentDeleteAsync(x, target, source, historicalDeleteSource, ct).ConfigureAwait(false);
             case ActionKind.MkDir:
                 if (obs?.Kind == ItemKind.Folder) return await DoneAsync(x, obs, target, ct).ConfigureAwait(false);
                 // A create job Dropbox still reports in progress must not be replanned over: its own outcome
@@ -131,6 +165,45 @@ internal static class EffectResolver
                 return Skipped(x, obs is null ? NotApplied : Superseded);
             default:
                 return Unverified(x, string.Format(ExecutionReasons.NoObservationRule.Detail, x.Kind));
+        }
+    }
+
+    private static async Task<ActionResult> ResolveAbsentDeleteAsync(SyncAction action, IEndpointWriter target,
+        IEndpointWriter source, ItemState? historical, CancellationToken ct)
+    {
+        // Explicit victim choices and type replacement are not absence propagation. Their durable
+        // authority must not be reinterpreted as a mistaken missing-source delete after a crash.
+        if (DeleteSourceGuard.ExplicitRemoval(action) || action.Rule is 26 or 32)
+            return await DoneAsync(action, null, target, ct).ConfigureAwait(false);
+        try
+        {
+            if (historical is not null && !string.IsNullOrWhiteSpace(historical.ObjectId) && source is ISourceAbsenceProbe probe)
+            {
+                if (historical is not null &&
+                    await probe.IsHistoricalSourcePresentAsync(historical, ct).ConfigureAwait(false) == true)
+                {
+                    var current = await probe.ObserveSourceMetadataAsync(action.Path, ct).ConfigureAwait(false);
+                    if (current is not null && string.Equals(current.ObjectId, historical.ObjectId, StringComparison.Ordinal))
+                        return Skipped(action, NotApplied) with
+                        {
+                            ForgetUnsafeDeleteBaseline = true,
+                            NewA = action.Target == Side.B ? current : null,
+                            NewB = action.Target == Side.A ? current : null
+                        };
+                    // The original moved: retain correspondence until its new location can be reconciled.
+                }
+                if (await probe.IsSourceAbsentAsync(historical, action.Path, ct).ConfigureAwait(false) == true)
+                    return await DoneAsync(action, null, target, ct).ConfigureAwait(false);
+            }
+            return Unverified(action, "The interrupted deletion's source identity or absence could not be confirmed. " +
+                "The surviving copy is protected; Retry checks both endpoints again.") with
+                { RetryAfterSeconds = ProviderTransientFailure.VerificationRetrySeconds };
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            return Unverified(action, "Interrupted deletion source check: " + Describe(error)) with
+                { RetryAfterSeconds = ProviderTransientFailure.VerificationRetrySeconds };
         }
     }
 
@@ -213,7 +286,7 @@ internal static class EffectResolver
     private static ActionResult Unverified(SyncAction x, string detail) =>
         new(x.ActionId, Outcome.Uncertain, null, null, null, string.Format(ExecutionReasons.Unverified.Detail, detail));
 
-    private static string Describe(Exception e) => e.GetType().Name + ": " + e.Message;
+    private static string Describe(Exception e) => BlockerDiagnostic.Describe(e);
 
     private static bool DefinitelyMatches(ItemState? obs, ItemState? source) =>
         obs is not null && source is not null && Content.SameContent(obs, source) == true;

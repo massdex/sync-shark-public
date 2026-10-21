@@ -13,11 +13,22 @@ internal sealed class RehashProtection
     private readonly PathProtectionIndex? _a;
     private readonly PathProtectionIndex? _b;
     private readonly IReadOnlyDictionary<string, ProtectionMatch>? _batch;
+    private readonly Func<IReadOnlyList<string>, IReadOnlyList<ProtectionMatch>>? _frozenRead;
+
+    internal RehashProtection Freeze(Func<IReadOnlyList<string>, IReadOnlyList<ProtectionMatch>> read) => new(this, read);
+
+    private RehashProtection(RehashProtection source, Func<IReadOnlyList<string>, IReadOnlyList<ProtectionMatch>> read)
+    {
+        _store = source._store; _pair = source._pair; _flag = source._flag; _gap = source._gap;
+        Count = Math.Max(1, source.Count);
+        _frozenRead = read;
+    }
 
     private RehashProtection(RehashProtection source, IReadOnlyDictionary<string, ProtectionMatch> batch)
     {
         _store = source._store; _pair = source._pair; _flag = source._flag; Count = source.Count;
         _a = source._a; _b = source._b; _gap = source._gap; _batch = batch;
+        _frozenRead = source._frozenRead;
     }
 
     internal bool RequiresBatch => _a is null || _b is null;
@@ -27,6 +38,12 @@ internal sealed class RehashProtection
         if (_a is not null && _b is not null) return this;
         var input = paths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         if (input.Length > 1024) throw new ArgumentOutOfRangeException(nameof(paths));
+        if (_frozenRead is not null)
+        {
+            var frozen = _frozenRead(input);
+            return new(this, input.Select((path, n) => (path, match: frozen[n]))
+                .ToDictionary(entry => entry.path, entry => entry.match, StringComparer.OrdinalIgnoreCase));
+        }
         var left = _a is null ? _store.ProtectionBatch(_pair.A.RootId, _flag, input) : null;
         var right = _b is null ? _store.ProtectionBatch(_pair.B.RootId, _flag, input) : null;
         var matches = new Dictionary<string, ProtectionMatch>(StringComparer.OrdinalIgnoreCase);
@@ -65,20 +82,31 @@ internal sealed class RehashProtection
         return ForPaths([path]).Touches(path, descendants);
     }
 
-    internal Notice Summary(string pairId)
+    /// <summary>
+    /// The one background-verification summary. It carries both counts: files awaiting content verification (rehash
+    /// or gap debt) and changes parked waiting for that verification. It is display-only (empty path, never a hold)
+    /// and the run closes it only when both counts are zero.
+    /// </summary>
+    internal Notice Summary(string pairId, int heldCount = 0)
     {
+        var waiting = heldCount > 0
+            ? $"{heldCount} {(heldCount == 1 ? "change is" : "changes are")} waiting for background verification; "
+            : string.Empty;
         if (_gap) return new Notice(pairId, Rule, NoticeKind.Info, "",
             "Local journal verification is pending; unvisited and unverified files stay protected while other files continue. " +
+            waiting +
             string.Join("; ", new[] { _pair.A.RootId, _pair.B.RootId }.Distinct()
                 .Where(id => ((ILocalGapStore)_store).HasGapProtection(id))
                 .Select(id => ((ILocalGapStore)_store).GapProgress(id))) +
             ". Options: when the journal is readable, leave the computer idle on AC power to verify automatically; " +
             "use Sync Now to admit verified results or retry failed items after correcting the reported cause. " +
-            "If the journal is unavailable, restore/enable it with a Windows administrator before retrying.", Reason);
+            "If the journal is unavailable, restore/enable it with a Windows administrator before retrying. " +
+            "Show remaining lists the changes parked for this verification; they are not marked synced.", Reason);
         var examples = _store.RehashReasons(_pair.A.RootId, 5).ToList();
         examples.AddRange(_store.RehashReasons(_pair.B.RootId, 5 - examples.Count));
         return new Notice(pairId, Rule, NoticeKind.Info, "",
-            $"{Count} files awaiting content verification; kept safe on both sides while other files continue; " +
-            "automatically retried next sync. " + string.Join("; ", examples), Reason);
+            $"{Count} files awaiting content verification; {waiting}kept safe on both sides while other files continue; " +
+            "automatically retried next sync. Show remaining lists the changes parked for this verification; they are not " +
+            "marked synced. " + string.Join("; ", examples), Reason);
     }
 }

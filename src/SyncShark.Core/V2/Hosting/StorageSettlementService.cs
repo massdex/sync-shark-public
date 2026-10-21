@@ -6,7 +6,8 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
     StorageNotice? target = null, Func<PairDef, bool>? paused = null,
     Func<PairDef, ItemState, Action, CancellationToken, Task<StorageObserved>>? hydrate = null,
     Func<StorageSettlement, CancellationToken, Task<StorageObserved>>? convert = null,
-    Func<StorageSettlement, ItemState, CancellationToken, Task<PilotRemoteEntry?>>? refresh = null) : IAsyncDisposable
+    Func<StorageSettlement, ItemState, CancellationToken, Task<PilotRemoteEntry?>>? refresh = null,
+    Func<StorageSettlement, Action, StorageObserved>? acknowledge = null) : IAsyncDisposable
 {
     private readonly CancellationTokenSource _stop = new();
     private Task? _loop;
@@ -269,14 +270,25 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
             var latest = Pair(job);
             if (latest is null || !Active(latest) || !store.IsCurrentStorageSettlement(job))
                 throw new IOException("Move acknowledgment is queued. Resume the pair and Retry.");
-            if (store.ByObject(job.RootId, job.ObjectId) is not { } current || current.Path != job.Remote.RelativePath ||
-                (current.Flags & ~ItemFlags.OwnedPointer) != 0 || !Included(latest, current.Path))
-                throw new WindowsCloudFilesProvider.PointerAcknowledgmentChangedException();
+            var current = store.ByObject(job.RootId, job.ObjectId);
+            if (current is null || current.Path != job.Remote.RelativePath || !Included(latest, current.Path))
+            {
+                // A later rename is not evidence of changed bytes. Retire only this stale job;
+                // the next committed Move or verified scan will queue the new location.
+                if (store.RetireStorageSettlement(job)) Complete(job);
+                throw new IOException("The pointer acknowledgment location changed; rescan will acknowledge its current location.");
+            }
+            if (current.Flags != ItemFlags.OwnedPointer || current.Hash != job.Remote.ContentHash ||
+                current.Size != job.Remote.Size)
+                throw new IOException("The pointer observation changed; Retry after the next metadata scan.");
             PairMapping.CloudFilesBinding(pair).RequireSame(PairMapping.CloudFilesBinding(latest));
         }
         try
         {
             Revalidate();
+            // Test only the native effect through this seam; admission, claim, entity gate,
+            // revalidation, retirement and completion always run through the real service.
+            if (acknowledge is not null) return acknowledge(job, Revalidate);
             var (volume, id) = LocalItems.ParseObjectId(job.ObjectId);
             var result = Provider(pair, ct).AcknowledgeDehydratedMove(job.Remote, new(volume, id), Revalidate);
             return new(result.State.Availability.ToString(), result.State.IsPinned, result.State.IsInSync);
@@ -284,8 +296,9 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
         catch (WindowsCloudFilesProvider.PointerAcknowledgmentChangedException)
         {
             // Protect the entity before retiring its metadata-only job. Ordinary classification/hashing owns it now.
-            store.RequireRehash(job.RootId, local, "Pointer changed before move acknowledgment");
-            store.RequestPointerVerification(pair.PairId, job.RootId, job.ObjectId, local.Path, job.Remote);
+            var changed = store.ByObject(job.RootId, job.ObjectId) ?? local;
+            store.RequireRehash(job.RootId, changed, "Pointer changed before move acknowledgment");
+            store.RequestPointerVerification(pair.PairId, job.RootId, job.ObjectId, changed.Path, job.Remote);
             store.RetireStorageSettlement(job);
             throw;
         }

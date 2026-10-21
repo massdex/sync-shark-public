@@ -13,6 +13,10 @@ using Massdex.SyncShark;
 using Microsoft.Data.Sqlite;
 #pragma warning disable CS8321
 
+// Before any fixture file I/O, including child-process modes below: expose Cloud Files placeholder
+// attributes for the whole test host. Non-Windows hosts make no native call.
+WindowsPlaceholderCompatibility.Expose();
+
 if (args is ["--v2-removal-review-checks"])
 {
     await Massdex.SyncShark.V2.RunChecks.RemovalReviewChecksAsync();
@@ -57,9 +61,28 @@ if (args is ["--retry-protection-checks"])
     return 0;
 }
 
+if (args is ["--blocker-checks"])
+{
+    await Massdex.SyncShark.V2.RunChecks.BlockerChecksAsync();
+    await Massdex.SyncShark.V2.RunChecks.BlockerActionChecksAsync();
+    return 0;
+}
+
+if (args is ["--reincluded-evidence-checks"])
+{
+    await Massdex.SyncShark.V2.RunChecks.ReincludedEvidenceChecksAsync();
+    return 0;
+}
+
 if (args is ["--first-sync-completion-checks"])
 {
     await Massdex.SyncShark.V2.RunChecks.FirstSyncCompletionChecksAsync();
+    return 0;
+}
+
+if (args is ["--quarantine-folder-fullscan-checks", var quarantineFolderRoot])
+{
+    await Massdex.SyncShark.V2.RunChecks.QuarantineFolderFullScanChecksAsync(quarantineFolderRoot);
     return 0;
 }
 
@@ -1068,6 +1091,12 @@ if (args is ["--cloud-files-offline-checks"])
     return 0;
 }
 
+if (args is ["--windows-placeholder-compatibility-checks"])
+{
+    WindowsPlaceholderCompatibilityChecks.Run();
+    return 0;
+}
+
 if (args is ["--v2-memory-checks"])
 {
     await Massdex.SyncShark.V2.ObserverMemoryChecks.RunAsync();
@@ -1181,6 +1210,18 @@ if (args is ["--v2-journal-sizing-checks", var sizingRoot])
 if (args is ["--v2-dates-checks", var datesRoot])
 {
     await Massdex.SyncShark.V2.DateRepairChecks.RunAsync(Path.GetFullPath(datesRoot));
+    return 0;
+}
+
+if (args is ["--v2-planning-protection-checks", var protectionRoot])
+{
+    Massdex.SyncShark.V2.PlanningProtectionChecks.Run(Path.GetFullPath(protectionRoot));
+    return 0;
+}
+
+if (args is ["--v2-interrupted-delete-checks", var interruptedDeleteRoot])
+{
+    await Massdex.SyncShark.V2.InterruptedDeleteChecks.RunAsync(Path.GetFullPath(interruptedDeleteRoot));
     return 0;
 }
 

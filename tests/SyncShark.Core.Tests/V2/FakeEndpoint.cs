@@ -5,7 +5,7 @@ using System.Text;
 namespace Massdex.SyncShark.V2;
 
 /// <summary>In-memory endpoint implementing inventory reads and conditional writes.</summary>
-internal sealed class FakeEndpoint : IInventorySource, IEndpointWriter
+internal sealed class FakeEndpoint : IInventorySource, IEndpointWriter, ISourceAbsenceProbe
 {
     private sealed record Entry(ItemState State, byte[] Bytes);
 
@@ -52,6 +52,9 @@ internal sealed class FakeEndpoint : IInventorySource, IEndpointWriter
     /// <summary>Use the real Dropbox hash when paired with the scripted Dropbox wire.</summary>
     public bool DropboxHashes { get; set; }
 
+    /// <summary>Model local files: identity and hash are available, but no provider revision exists.</summary>
+    public bool OmitVersionIds { get; set; }
+
     /// <summary>Paths HashAsync cannot hash (unreadable, or changed while hashed).</summary>
     public HashSet<string> Unhashable { get; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -79,6 +82,23 @@ internal sealed class FakeEndpoint : IInventorySource, IEndpointWriter
             LogUpsert(state);
             return state;
         }
+    }
+
+    public Task<ItemState?> ObserveSourceMetadataAsync(string path, CancellationToken ct) => ObserveAsync(path, ct);
+
+    public Task<bool?> IsHistoricalSourcePresentAsync(ItemState historical, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        lock (_gate) return Task.FromResult<bool?>(_items.Values.Any(entry => entry.State.ObjectId == historical.ObjectId));
+    }
+
+    public Task<bool?> IsSourceAbsentAsync(ItemState? historical, string path, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        lock (_gate)
+            return Task.FromResult<bool?>(!_items.ContainsKey(path) &&
+                (historical is null || (!_items.ContainsKey(historical.Path) &&
+                    !_items.Values.Any(entry => entry.State.ObjectId == historical.ObjectId))));
     }
 
     public async Task<ItemState> PutAsync(SyncAction a, Stream content, CancellationToken ct)
@@ -361,7 +381,7 @@ internal sealed class FakeEndpoint : IInventorySource, IEndpointWriter
         var objectId = _items.TryGetValue(path, out var existing)
             ? existing.State.ObjectId
             : "id:" + (++_idCounter).ToString(CultureInfo.InvariantCulture);
-        var state = new ItemState(path, kind, objectId, versionId ?? "v" + (++_version), hash, bytes.Length,
+        var state = new ItemState(path, kind, objectId, OmitVersionIds ? null : versionId ?? "v" + (++_version), hash, bytes.Length,
             mtime ?? DateTimeOffset.UnixEpoch, ItemFlags.None, identityJson);
         _items[path] = new Entry(state, bytes);
         return state;
