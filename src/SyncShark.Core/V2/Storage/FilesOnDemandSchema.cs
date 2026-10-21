@@ -19,7 +19,19 @@ internal static class FilesOnDemandSchema
     {
         var legacyPeriodic = IsEnabled(connection) && StoreSchema.Scalar(connection, null, "SELECT 1 FROM sqlite_master WHERE name='storage_root_backoff';") is null;
         using var tx = connection.BeginTransaction();
+        // Pre-1024 opt-in builds defined both pointer indexes with OwnedPointer=512. CREATE INDEX IF NOT EXISTS
+        // cannot replace those definitions, so such a store needs its rows moved and both indexes rebuilt.
+        // Only this index evidence proves 512 meant OwnedPointer here: in a current store 512 is RequiresExport,
+        // which must never be migrated. Detect before the Ddl replay, merge within the same transaction.
+        var legacyOwned = StoreSchema.Scalar(connection, tx,
+            "SELECT 1 FROM sqlite_master WHERE name IN ('fs_owned','fs_nonpointer') AND instr(sql,'512')>0 LIMIT 1;") is not null;
         StoreSchema.Execute(connection, tx, Ddl);
+        if (legacyOwned)
+            StoreSchema.Execute(connection, tx,
+                "UPDATE file_state SET flags=(flags & ~512)|1024 WHERE (flags & 512)!=0;" +
+                "DROP INDEX IF EXISTS fs_owned; DROP INDEX IF EXISTS fs_nonpointer;" +
+                "CREATE INDEX fs_owned ON file_state(root_no) WHERE (flags & 1024) != 0;" +
+                "CREATE INDEX fs_nonpointer ON file_state(root_no) WHERE (flags & ~1024) != 0;");
         // Additive lazy migration: existing opted-in stores gain item-scoped retry scheduling without a schema version.
         if (StoreSchema.Scalar(connection, tx, "SELECT 1 FROM pragma_table_info('storage_settlement') WHERE name='due';") is null)
             StoreSchema.Execute(connection, tx, "ALTER TABLE storage_settlement ADD COLUMN due INTEGER NOT NULL DEFAULT 0;");
@@ -29,7 +41,9 @@ internal static class FilesOnDemandSchema
         StoreSchema.Execute(connection, tx, RequestedIndexesDdl);
         if (legacyPeriodic) StoreSchema.Execute(connection, tx, "DELETE FROM storage_refresh WHERE due>0;");
         // Preview builds changed the shared index. Restore its final26 predicate only on opted-in stores.
-        if (StoreSchema.Scalar(connection, tx, "SELECT sql FROM sqlite_master WHERE name='fs_flagged';") is string sql && sql.Contains("~1024", StringComparison.Ordinal))
+        // Both the 512-era and the 1024-era preview predicates must be repaired; a current store has flags != 0.
+        if (StoreSchema.Scalar(connection, tx, "SELECT sql FROM sqlite_master WHERE name='fs_flagged';") is string sql &&
+            (sql.Contains("~512", StringComparison.Ordinal) || sql.Contains("~1024", StringComparison.Ordinal)))
             StoreSchema.Execute(connection, tx, "DROP INDEX fs_flagged; CREATE INDEX fs_flagged ON file_state(root_no) WHERE flags != 0;");
         // Resume legacy whole-root sweeps once; new commands create entity-scoped sweeps.
         StoreSchema.Execute(connection, tx, "INSERT OR IGNORE INTO storage_subtree_sweep(root_id,object_id) SELECT root_id,'' FROM storage_policy_sweep; DELETE FROM storage_policy_sweep;");

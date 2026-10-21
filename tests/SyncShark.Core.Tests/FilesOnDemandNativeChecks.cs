@@ -287,6 +287,23 @@ internal static class FilesOnDemandNativeChecks
                     " Reads before/after: " + beforeUpdateReads + "/" + source.Reads +
                     " Notices: " + string.Join("; ", verifyStore.OpenNotices(pair.PairId).Select(n => n.Detail)));
             provider.UpdateDehydratedPlaceholder(remote, next, uploadedIdentity); // lost-response retry
+            // F4 regression: an owned online-only placeholder whose identity no longer matches the
+            // settlement receipt must refuse before hashing instead of recalling its bytes.
+            var staleReads = source.Reads;
+            var staleConversionRefused = false;
+            try
+            {
+                await provider.ConvertVerifiedSyncedFileAsync(remote, dehydrateOverride: true,
+                    expectedLocalIdentity: uploadedIdentity);
+            }
+            catch (IOException) { staleConversionRefused = true; }
+            if (!staleConversionRefused || source.Reads != staleReads ||
+                !WindowsCloudFilesProvider.TryReadOwnedPlaceholder(path, out var stillOnlineOnly) ||
+                stillOnlineOnly is null ||
+                stillOnlineOnly.State.Availability != SyncCloudFileAvailability.OnlineOnly ||
+                stillOnlineOnly.Identity.DropboxRevision != next.Revision)
+                throw new IOException(
+                    "Settlement hashed or hydrated an online-only owned placeholder for a stale receipt.");
             source.FailReads = true;
             var failedIo = false;
             try { await File.ReadAllBytesAsync(path); } catch (IOException) { failedIo = true; }
@@ -352,8 +369,35 @@ internal static class FilesOnDemandNativeChecks
             var partial = await FilesOnDemandNativeEdgeChecks.CheckTruePartialRangeAsync(root, provider,
                 FilesOnDemandNativeEdgeChecks.LargeEdgeRemote(), () => source.Reads,
                 source.ServeOnly, source.RangeRequests, binding.PairId,
-                () => FilesOnDemandNativePartialChecks.VerifyAsync(root, pair, verifyStore, edge.PointerBefore,
-                    FilesOnDemandNativeEdgeChecks.LargeEdgeRemote(), () => source.Reads, CancellationToken.None),
+                async () =>
+                {
+                    await FilesOnDemandNativePartialChecks.VerifyAsync(root, pair, verifyStore, edge.PointerBefore,
+                        FilesOnDemandNativeEdgeChecks.LargeEdgeRemote(), () => source.Reads,
+                        CancellationToken.None);
+                    // F4 regression: while genuine partial residency exists, settlement must refuse before
+                    // hashing. The refusal must not fetch bytes or change native residency.
+                    if (!WindowsCloudFilesProvider.TryReadOwnedPlaceholder(
+                            Path.Combine(root, edge.PointerBefore.Path), out var beforePartial) ||
+                        beforePartial is null ||
+                        beforePartial.State.Availability != SyncCloudFileAvailability.PartiallyHydrated)
+                        throw new IOException("The partial pointer was not partially hydrated before settlement.");
+                    var partialReads = source.Reads;
+                    var partialConversionRefused = false;
+                    try
+                    {
+                        await provider.ConvertVerifiedSyncedFileAsync(
+                            FilesOnDemandNativeEdgeChecks.LargeEdgeRemote(), dehydrateOverride: true);
+                    }
+                    catch (IOException) { partialConversionRefused = true; }
+                    if (!partialConversionRefused || source.Reads != partialReads ||
+                        !WindowsCloudFilesProvider.TryReadOwnedPlaceholder(
+                            Path.Combine(root, edge.PointerBefore.Path), out var stillPartial) ||
+                        stillPartial is null ||
+                        stillPartial.State.Availability != SyncCloudFileAvailability.PartiallyHydrated ||
+                        stillPartial.State.OnDiskBytes != beforePartial.State.OnDiskBytes)
+                        throw new IOException(
+                            "Settlement hashed a partially hydrated owned placeholder or changed its native residency.");
+                },
                 CancellationToken.None);
             Console.WriteLine($"PASS native true partial range: resident={partial.NativeAfter.OnDiskBytes} of " +
                 $"{FilesOnDemandNativeEdgeChecks.LargeEdgeRemote().Size}; availability={partial.Availability}");

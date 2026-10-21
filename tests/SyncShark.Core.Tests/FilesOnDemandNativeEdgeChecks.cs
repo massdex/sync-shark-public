@@ -487,6 +487,16 @@ internal static class FilesOnDemandNativeEdgeChecks
 
     private static void VerifyUnelevatedControlSecurity(string root)
     {
+        // Native Cloud Files acceptance is Windows-only; the guard keeps the standalone (net8.0,
+        // warnings-as-errors) build free of CA1416 without suppressing the analyzer.
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Native Cloud Files security checks require Windows.");
+        VerifyUnelevatedControlSecurityWindows(root);
+    }
+
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static void VerifyUnelevatedControlSecurityWindows(string root)
+    {
         using var identity = WindowsIdentity.GetCurrent();
         Require(!new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator),
             "Run the native staging-security regression unelevated; an elevated run cannot prove this boundary.");

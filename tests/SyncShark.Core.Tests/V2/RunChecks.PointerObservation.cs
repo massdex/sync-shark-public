@@ -36,24 +36,91 @@ internal static partial class RunChecks
             "observation retry is not false pointer verification debt");
     }
 
-    private sealed class UnobservedPointerInventory(FakeEndpoint inner, string path) : IInventorySource
+    /// <summary>F2 regression: an Ignore on the observation summary outlives only the failures it silenced.
+    /// Ignore, then a scan with zero transient failures, then a new outage must produce an active notice.</summary>
+    internal static async Task PointerObservationIgnoreExpiryAsync(string folder)
     {
+        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+        var fx = Build(suppliedStore: store);
+        var count = StorageNotices.NoticeAggregateLimit + 1;
+        var first = Enumerable.Range(0, count).Select(index => $"first-{index:D2}.txt").ToArray();
+        var second = Enumerable.Range(0, count).Select(index => $"second-{index:D2}.txt").ToArray();
+        foreach (var path in first.Concat(second))
+        {
+            fx.A.Seed(path, "same bytes");
+            fx.B.Seed(path, "same bytes");
+        }
+        await FirstSyncAsync(fx.Run(), fx);
+        var inventory = new UnobservedPointerInventory(fx.A, first);
+        fx.Provider.AddInventory(fx.Pair.A, inventory);
+
+        await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        var summary = store.OpenNotices(fx.Pair.PairId).Single(notice =>
+            notice.ReasonKey == NoticeChoices.PointerObservationSummary);
+        Require(summary.NoticeId is not null &&
+            store.OwnedPointerObservationSummaryState(fx.Pair.PairId) == ObservationSummaryState.Open,
+            "an above-limit observation outage raises one open pair summary");
+        store.CloseNotice(summary.NoticeId!, NoticeChoices.Ignore);
+        Require(store.OwnedPointerObservationSummaryState(fx.Pair.PairId) == ObservationSummaryState.Ignored,
+            "Ignore silences the pair summary while the failure continues");
+
+        // The same continuing failure stays suppressed: no per-file flood, no reopening, debt untouched.
+        await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        Require(store.OwnedPointerObservationSummaryState(fx.Pair.PairId) == ObservationSummaryState.Ignored &&
+            !store.OpenNotices(fx.Pair.PairId).Any(notice =>
+                notice.ReasonKey is "sync-retry" or NoticeChoices.PointerObservationSummary),
+            "the same continuing failure stays suppressed without per-file notices");
+        Require(store.SyncRetryAt(fx.Pair.PairId, first[0]) is { LastError.Length: > 0 },
+            "suppression leaves every entity observation retry in place");
+
+        // A scan that observes no transient failure retires the ignore.
+        inventory.Fail = false;
+        await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        Require(store.OwnedPointerObservationSummaryState(fx.Pair.PairId) == ObservationSummaryState.None,
+            "an ignored summary expires once a scan observes no transient failure");
+
+        // A later, unrelated outage must raise an actionable notice again rather than stay suppressed.
+        inventory.Paths = second;
+        inventory.Fail = true;
+        await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        var raised = store.OpenNotices(fx.Pair.PairId).Single(notice =>
+            notice.ReasonKey == NoticeChoices.PointerObservationSummary);
+        Require(raised.NoticeId is not null &&
+            store.OwnedPointerObservationSummaryState(fx.Pair.PairId) == ObservationSummaryState.Open,
+            "a new failure after recovery raises a new active pair summary instead of staying suppressed");
+        Require(!store.OpenNotices(fx.Pair.PairId).Any(notice =>
+                notice.ReasonKey == "sync-retry" && notice.Path.Length > 0),
+            "the fresh summary still replaces per-file transient notices");
+        Require(store.SyncRetryAt(fx.Pair.PairId, second[0]) is { LastError.Length: > 0 },
+            "the fresh summary keeps each new entity retry durable");
+    }
+
+    private sealed class UnobservedPointerInventory(FakeEndpoint inner, params string[] paths) : IInventorySource
+    {
+        /// <summary>False models the outage clearing: the endpoints are listed normally, with no incomplete scope.</summary>
+        internal bool Fail { get; set; } = true;
+        internal string[] Paths { get; set; } = paths;
         internal int MetadataReads { get; private set; }
         internal int HashCalls { get; private set; }
+        private bool Hidden(string candidate) => Fail && Paths.Contains(candidate, StringComparer.Ordinal);
         public async Task<Snapshot> FullAsync(long gen, Func<string, bool> include, IProgress<string> progress, CancellationToken ct)
         {
             MetadataReads++;
             var snapshot = await inner.FullAsync(gen, include, progress, ct);
-            return snapshot with { Items = snapshot.Items.Where(item => item.Path != path).ToArray(),
-                IncompleteSubtrees = [path], IncompleteReasons = new Dictionary<string, string> { [path] = OwnedPointerProof.ObservationMessage },
-                IncludesPath = candidate => candidate != path && include(candidate) };
+            if (!Fail) return snapshot;
+            return snapshot with { Items = snapshot.Items.Where(item => !Hidden(item.Path)).ToArray(),
+                IncompleteSubtrees = Paths,
+                IncompleteReasons = Paths.ToDictionary(path => path, _ => OwnedPointerProof.ObservationMessage),
+                IncludesPath = candidate => !Hidden(candidate) && include(candidate) };
         }
         public async Task<Delta> ChangesSinceAsync(string cursor, long gen, Func<string, bool> include, CancellationToken ct)
         {
             MetadataReads++;
             var delta = await inner.ChangesSinceAsync(cursor, gen, include, ct);
-            return delta with { Changes = delta.Changes.Where(change => change.Path != path).ToArray(),
-                IncompleteSubtrees = [path], IncompleteReasons = new Dictionary<string, string> { [path] = OwnedPointerProof.ObservationMessage } };
+            if (!Fail) return delta;
+            return delta with { Changes = delta.Changes.Where(change => !Hidden(change.Path)).ToArray(),
+                IncompleteSubtrees = Paths,
+                IncompleteReasons = Paths.ToDictionary(path => path, _ => OwnedPointerProof.ObservationMessage) };
         }
         public Task<IReadOnlyDictionary<string, string>> HashAsync(IReadOnlyList<string> paths, CancellationToken ct)
         {

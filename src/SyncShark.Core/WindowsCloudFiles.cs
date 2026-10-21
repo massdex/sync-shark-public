@@ -727,6 +727,13 @@ public sealed partial class WindowsCloudFilesProvider : IDisposable, ICloudFiles
                 revalidate?.Invoke();
                 return existing;
             }
+            // Settlement may hash only bytes that are already fully resident. Any other owned residency
+            // (partially hydrated, online-only without a matching receipt, or unknown) would recall data
+            // with no user intent, so fail retryably and let the existing settlement notice/retry lane
+            // re-observe the item. Nothing is opened for data on this path.
+            if (existing.State.Availability != SyncCloudFileAvailability.AvailableOffline)
+                throw new IOException("The owned placeholder is not fully resident (" +
+                    existing.State.Availability + "); retry settlement without reading file contents.");
 
             BeforeDehydrateForTest?.Invoke(target);
             await using var localPlaceholder = SyncLocalFileAuthority.OpenExistingExclusive(target);

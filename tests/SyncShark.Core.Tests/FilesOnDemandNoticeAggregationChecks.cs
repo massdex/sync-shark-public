@@ -12,6 +12,7 @@ internal static class FilesOnDemandNoticeAggregationChecks
         // Core.Tests-only regression: it depends on the large RunChecks/FakeEndpoint graph, which the
         // standalone Files On-Demand host deliberately does not link. Every aggregation check below runs.
         await RunChecks.PointerObservationRetryAsync(Path.Combine(root, "observation-retry"));
+        await RunChecks.PointerObservationIgnoreExpiryAsync(Path.Combine(root, "observation-ignore-expiry"));
 #endif
         const int items = StorageNotices.NoticeAggregateLimit + 1;
         var localRoot = new RootDef("local", SyncProviders.Local, null, root, "id:local:00000001:0000000000000001");

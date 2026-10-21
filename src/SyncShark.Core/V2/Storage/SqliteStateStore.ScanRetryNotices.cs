@@ -60,4 +60,16 @@ public sealed partial class SqliteStateStore
             WHERE pair_no=$p AND rule=40 AND reason_key=$reason AND path='' AND state='open';
             """, ("$p", pair), ("$reason", NoticeChoices.PointerObservationSummary));
     });
+
+    /// <summary>The user's Ignore outlives only the failures it silenced. Once a scan observes no transient
+    /// failure the ignored summary is retired, so a later, unrelated failure raises an actionable notice again
+    /// instead of staying suppressed forever. The ignored row is closed as expired, never reopened here.</summary>
+    internal void ExpireIgnoredOwnedPointerObservationSummary(string pairId) => InStore(() =>
+    {
+        var pair = RequirePair(pairId);
+        StoreSchema.Execute(_connection, null, """
+            UPDATE notice SET state='closed',choice='expired'
+            WHERE pair_no=$p AND rule=40 AND reason_key=$reason AND path='' AND choice='ignore';
+            """, ("$p", pair), ("$reason", NoticeChoices.PointerObservationSummary));
+    });
 }

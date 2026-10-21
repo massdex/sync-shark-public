@@ -14,6 +14,7 @@
     <ProjectReference Include="../../src/SyncShark.Core/SyncShark.Core.csproj" />
     <Compile Include="../SyncShark.Core.Tests/FilesOnDemandNativeChecks.cs" Link="FilesOnDemandNativeChecks.cs" />
     <Compile Include="../SyncShark.Core.Tests/FilesOnDemandStorageChecks.cs" Link="FilesOnDemandStorageChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/FilesOnDemandLegacyIndexChecks.cs" Link="FilesOnDemandLegacyIndexChecks.cs" />
     <Compile Include="../SyncShark.Core.Tests/FilesOnDemandNoticeAggregationChecks.cs" Link="FilesOnDemandNoticeAggregationChecks.cs" />
     <Compile Include="../SyncShark.Core.Tests/FilesOnDemandProtectionChecks.cs" Link="FilesOnDemandProtectionChecks.cs" />
     <Compile Include="../SyncShark.Core.Tests/FilesOnDemandSettlementChecks.cs" Link="FilesOnDemandSettlementChecks.cs" />

@@ -140,6 +140,10 @@ public sealed partial class SyncRun
             {
                 if (summaryState == ObservationSummaryState.Open)
                     storage.CloseOwnedPointerObservationSummary(pair.PairId);
+                // An Ignore silences only the failures that were present when it was chosen. Once no transient
+                // failure remains, retire it so a later new outage is noticed instead of being suppressed forever.
+                else if (summaryState == ObservationSummaryState.Ignored)
+                    storage.ExpireIgnoredOwnedPointerObservationSummary(pair.PairId);
             }
             else if (aggregateTransient || summaryState == ObservationSummaryState.Open)
             {

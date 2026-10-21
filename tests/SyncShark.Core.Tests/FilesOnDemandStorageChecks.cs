@@ -7,6 +7,7 @@ internal static class FilesOnDemandStorageChecks
     {
         if (Directory.Exists(root)) throw new InvalidOperationException("Use a fresh disposable database directory.");
         FilesOnDemandCompatibilityChecks.Run(Path.Combine(root, "v20-fixture"));
+        FilesOnDemandLegacyIndexChecks.Run(Path.Combine(root, "legacy-indexes"));
         await FilesOnDemandServiceChecks.RunAsync(Path.Combine(root, "service"));
         await StorageExplicitRetryChecks.RunAsync(Path.Combine(root, "explicit-retry"));
         await StorageQueuePlanChecks.RunAsync(Path.Combine(root, "queue-plans"));
