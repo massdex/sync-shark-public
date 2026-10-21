@@ -169,6 +169,7 @@ internal static partial class RunChecks
         internal HashSet<string>? AllowedPaths;
         internal string? TargetRoot;
         internal int Attempts;
+        internal Action<SyncAction>? BeforeDelete;
         private void Fail(string path, string operation)
         {
             if (!Enabled || path != "blocked.txt" || mode != operation) return;
@@ -195,7 +196,11 @@ internal static partial class RunChecks
             return await inner.OpenReadAsync(item, ct);
         }
         public Task<ItemState> MoveAsync(SyncAction action, CancellationToken ct) => inner.MoveAsync(action, ct);
-        public Task DeleteAsync(SyncAction action, CancellationToken ct) => inner.DeleteAsync(action, ct);
+        public Task DeleteAsync(SyncAction action, CancellationToken ct)
+        {
+            BeforeDelete?.Invoke(action);
+            return inner.DeleteAsync(action, ct);
+        }
         public Task<ItemState> MkDirAsync(string path, CancellationToken ct) => inner.MkDirAsync(path, ct);
         public Task<RecoveryRef> PreserveAsync(ItemState item, string id, CancellationToken ct) => inner.PreserveAsync(item, id, ct);
         public Task<ItemState?> ObserveAsync(string path, CancellationToken ct) => inner.ObserveAsync(path, ct);

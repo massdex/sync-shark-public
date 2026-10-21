@@ -502,7 +502,11 @@ internal static partial class RunChecks
     }
 
     // Isolate the synthetic inventory case from the broader suite's native scanning/journal checks.
-    public static Task QuarantineFolderFullScanChecksAsync(string root) => QuarantineFolderFullScanAsync(root);
+    public static async Task QuarantineFolderFullScanChecksAsync(string root)
+    {
+        await QuarantineFolderFullScanAsync(root);
+        await QuarantineDeleteChoiceAuthorityAsync(root);
+    }
 
     private static async Task QuarantineFolderFullScanAsync(string root)
     {

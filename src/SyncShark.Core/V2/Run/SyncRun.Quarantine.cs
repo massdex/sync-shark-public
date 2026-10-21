@@ -387,7 +387,10 @@ public sealed partial class SyncRun
                 var baseline = _store.BaselinesAt(pairId, cloudSide, [cloudItem.Path]).FirstOrDefault(b =>
                     (cloudSide == Side.A ? b.A : b.B).ObjectId == cloudItem.ObjectId);
                 var delete = new SyncAction(id, 30, current is null ? ActionKind.Forget : ActionKind.Delete, cloudSide,
-                    cloudItem.Path, null, null, cloudItem, true, baseline?.ObjectKey ?? hold.ObjectKey);
+                    cloudItem.Path, null, null, cloudItem, true, baseline?.ObjectKey ?? hold.ObjectKey)
+                    // Explicit approval belongs only to this reviewed file revision, never a subtree.
+                    // Persist it with the intent so crash reconciliation retains the same authority.
+                    { RemovalReviewChoice = true };
                 var deleted = await ExecuteQuarantineAction(pair, delete, token).ConfigureAwait(false);
                 if (deleted.Outcome == Outcome.Done)
                 {

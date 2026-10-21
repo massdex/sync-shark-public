@@ -174,8 +174,49 @@ internal static partial class RunChecks
         }
     }
 
+    private static async Task QuarantineDeleteChoiceAuthorityAsync(string root)
+    {
+        using var store = SqliteStateStore.Open(Path.Combine(root, "delete-choice-authority"), Settings, TimeProvider.System);
+        var fx = Build(suppliedStore: store);
+        var selected = fx.B.Seed("blocked.txt", "reviewed cloud bytes");
+        fx.Provider.AddWriter(fx.Pair.A, new QuarantineWriter(fx.A, "write", 225));
+        var cloudWriter = new QuarantineWriter(fx.WriterB, "none", 225);
+        fx.Provider.AddWriter(fx.Pair.B, cloudWriter);
+        var run = fx.Run();
+        await FirstSyncAsync(run, fx);
+        var notice = store.OpenNotices("p1").Single(n => n.Quarantine is not null);
+        Require(await fx.A.ObserveAsync(selected.Path, default) is null && store.Baselines("p1").Count == 0,
+            "explicit quarantine deletion fixture has no original local source identity or baseline");
+        var sibling = fx.B.Seed("sibling.txt", "not selected");
+        SyncAction? persisted = null;
+        cloudWriter.BeforeDelete = action =>
+        {
+            persisted = store.IntentById("p1", action.ActionId);
+            Require(persisted is { RemovalReviewChoice: true, Kind: ActionKind.Delete } &&
+                persisted.ExpectedTarget?.ObjectId == selected.ObjectId && persisted.ExpectedTarget?.VersionId == selected.VersionId &&
+                !FolderDelete.Expands(persisted), "exact reviewed file authority is durable before cloud deletion, without subtree expansion");
+        };
+        var resolved = await run.ResolveQuarantineAsync("p1", notice.NoticeId!, NoticeChoices.QuarantineDeleteDropbox, default);
+        Require(resolved.Outcome == Outcome.Done && persisted is not null && await fx.B.ObserveAsync(selected.Path, default) is null &&
+            fx.WriterB.Preserves == 1 && fx.WriterB.Deletes == 1,
+            "actual explicit quarantine Delete choice removes only the reviewed cloud file with Recovery");
+        // Replay the persisted intent after its effect, as if the process stopped before its result commit.
+        store.RecordIntent("p1", persisted!);
+        var reconciled = (await fx.Executor.ReconcileAsync([store.IntentById("p1", persisted!.ActionId)!],
+            store.BeginGeneration("ra", "explicit-delete-reconcile"), fx.A, fx.B, default)).Single();
+        Require(reconciled.Outcome == Outcome.Done, "persisted explicit deletion reconciles without inventing a missing local source identity");
+        var ordinary = new SyncAction("unchosen-delete", 6, ActionKind.Delete, Side.B, sibling.Path, null, null, sibling, true, null);
+        var results = new List<ActionResult>();
+        await foreach (var result in fx.Executor.ApplyAsync(new Plan("p1", store.BeginGeneration("ra", "unchosen-delete"), [ordinary], []),
+            fx.WriterA, fx.WriterB, default)) results.Add(result);
+        Require(results.Single().DeleteSourceIdentityMissing && await fx.B.ObserveAsync(sibling.Path, default) is not null &&
+            fx.WriterB.Deletes == 1 && fx.WriterB.Preserves == 1,
+            "unchosen sibling still requires original source identity and cannot inherit the explicit quarantine choice");
+    }
+
     private static async Task QuarantineChoicesAsync(string root)
     {
+        await QuarantineDeleteChoiceAuthorityAsync(root);
         QuarantineHashFailureBatch(root);
         await QuarantineLegacyHashAsync(root);
         await QuarantineKeepExclusionAsync(root);
