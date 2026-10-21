@@ -307,9 +307,9 @@ public static class SyncCliRegistry
             "runs an explicitly named set through the existing priority and concurrency scheduler after validating every target",
             "the product state or the running application and the providers", "direct|running-application",
             "--selection,--yes,--timeout-seconds", LiveVerificationRequired: true, Mutating: true, RequiresYes: true),
-        new("run", "run --pair <exact-id> --yes [--timeout-seconds <seconds>] | run --pair <exact-id> --plan-only --data-root <absolute-isolated-folder> --export <absolute-csv-file> --yes",
+        new("run", "run --pair <exact-id> --yes [--timeout-seconds <seconds>] | run --pair <exact-id> --plan-only --data-root <absolute-isolated-folder> --export <absolute-csv-file>",
             SyncCliRequestKind.State, "yes",
-            "one explicitly named, already-approved pair through the existing run guards; independent-file concurrency and per-file progress; later arrivals wait for the next sync, while stale plans and move dependencies are re-observed; retained completed-file results if a later scan is cancelled; no implicit time limit; --plan-only previews the shared incremental plan against an explicit isolated data folder and streams it to CSV, retaining planning bookkeeping only in that isolated folder, without executing an effect or opening the live product state",
+            "one explicitly named, already-approved pair through the existing run guards; independent-file concurrency and per-file progress; later arrivals wait for the next sync, while stale plans and move dependencies are re-observed; retained completed-file results if a later scan is cancelled; no implicit time limit; --plan-only is non-mutating, direct-only, never host-forwarded and needs no live verification or --yes; it previews the shared incremental plan against an explicit isolated data folder and streams it to CSV, retaining planning bookkeeping only in that isolated folder, without executing an effect or opening the live product state",
             "the product state or the running application and the Dropbox provider",
             "direct|running-application", "--pair,--yes,--timeout-seconds,--plan-only,--data-root,--export",
             LiveVerificationRequired: true, Mutating: true, RequiresYes: true, RequiresPair: true),
@@ -942,7 +942,7 @@ public static class SyncCliRegistry
             throw new SyncCliUsageException("Use dates restore --audit-log <file> --dry-run to review, or add --yes to restore dates.");
         if (command == "dates repair" && !options.ContainsKey("--dry-run") && !options.ContainsKey("--yes"))
             throw new SyncCliUsageException("Use dates repair --pair <id> --dry-run to review, or add --yes to repair dates.");
-        if (row.RequiresYes && (row.MutationOption is null || options.ContainsKey(row.MutationOption)) &&
+        if (!(command == "run" && options.ContainsKey("--plan-only")) && row.RequiresYes && (row.MutationOption is null || options.ContainsKey(row.MutationOption)) &&
             !options.ContainsKey("--yes"))
             throw new SyncCliUsageException($"The command '{command}' requires --yes. The CLI never auto-approves a " +
                 "first sync, conflict, deletion, ownership or credential decision. Run: " +
@@ -1054,6 +1054,7 @@ public static class SyncCliRegistry
     }
 
     internal static bool MutatesProductState(SyncCliInvocation invocation) =>
+        !(invocation.Command == "run" && invocation.Flag("--plan-only")) &&
         Rows.Any(row => row.Command == invocation.Command && row.Mutating &&
             (row.MutationOption is null || invocation.Flag(row.MutationOption)));
 

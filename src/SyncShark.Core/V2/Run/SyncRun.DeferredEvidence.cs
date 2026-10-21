@@ -91,11 +91,8 @@ public sealed partial class SyncRun
     private sealed record DeferredExecution(Plan Plan, Tally Tally, IReadOnlyList<string> Pending,
         bool EvidenceUnavailable = false);
 
-    // A single result consumer owns the tally and progress throttle. Evidence and ordinary effects run concurrently;
-    // each resolved path re-enters the normal executor, retaining its recovery and conditional-write guards.
-    private async Task<DeferredExecution> ExecuteWithEvidenceAsync(Plan approved, PairDef pair,
-        ProgressThrottle throttle, IReadOnlySet<string>? reviewedDeletes, CancellationToken ct,
-        bool allowUnreviewedEvidence = false)
+    private (Plan Plan, string[] Unapproved, IReadOnlySet<string> Released) PrepareInitialExecution(
+        Plan approved, PairDef pair, IReadOnlySet<string>? reviewedDeletes, bool allowUnreviewedEvidence)
     {
         if (reviewedDeletes is not null)
         {
@@ -114,12 +111,7 @@ public sealed partial class SyncRun
         }
         approved = ReviewMissingDeleteIdentities(pair, approved);
         if (approved.HeldDeletions.Count == 0)
-        {
-            approved = HoldUnavailableRecovery(pair, approved, reviewedDeletes);
-            Trace("0 held deletes skipped Recovery (identical to Dropbox history)");
-            return new(approved, await ExecuteAsync(approved, pair, throttle, ct), approved.RecoveryPending);
-        }
-        var parkedFootprints = LinkExclusions.None.WithPending(OutstandingFootprints(pair.PairId));
+            return (HoldUnavailableRecovery(pair, approved, reviewedDeletes), [], new HashSet<string>(StringComparer.OrdinalIgnoreCase));
         var held = approved.HeldDeletions.ToDictionary(item => item.Path, StringComparer.OrdinalIgnoreCase);
         var releasedAtStart = held.Keys.Where(path => _store.SyncRetryAt(pair.PairId, path) is
             { Kind: "deletion-evidence", Held: not null } retry && (!retry.ReprobeEvidence || retry.EvidenceReleased))
@@ -134,9 +126,28 @@ public sealed partial class SyncRun
             held.Remove(path);
         }
         var authorityGuard = LinkExclusions.None.WithPending(unapproved);
-        approved = ApplySafetyFilter(pair, ActionPredicates(pair, authorityGuard), approved) with { HeldDeletions = held.Values.ToArray() };
+        approved = ApplySafetyFilter(pair, ActionPredicates(pair, authorityGuard), approved) with
+        {
+            HeldDeletions = held.Values.ToArray(),
+            UnreviewedHeldDeletions = approved.UnreviewedHeldDeletions.Concat(
+                approved.HeldDeletions.Where(item => !held.ContainsKey(item.Path))).Distinct().ToArray()
+        };
         approved = HoldUnavailableRecovery(pair, approved, reviewedDeletes);
-        held = approved.HeldDeletions.ToDictionary(item => item.Path, StringComparer.OrdinalIgnoreCase);
+        return (approved, unapproved, releasedAtStart);
+    }
+
+    // A single result consumer owns the tally and progress throttle. Evidence and ordinary effects run concurrently;
+    // each resolved path re-enters the normal executor, retaining its recovery and conditional-write guards.
+    private async Task<DeferredExecution> ExecuteWithEvidenceAsync(Plan approved, PairDef pair,
+        ProgressThrottle throttle, IReadOnlySet<string>? reviewedDeletes, CancellationToken ct,
+        bool allowUnreviewedEvidence = false)
+    {
+        var initial = PrepareInitialExecution(approved, pair, reviewedDeletes, allowUnreviewedEvidence);
+        approved = initial.Plan;
+        var unapproved = initial.Unapproved;
+        var releasedAtStart = initial.Released;
+        var parkedFootprints = LinkExclusions.None.WithPending(OutstandingFootprints(pair.PairId));
+        var held = approved.HeldDeletions.ToDictionary(item => item.Path, StringComparer.OrdinalIgnoreCase);
         if (held.Count == 0)
             return new(approved, await ExecuteAsync(approved, pair, throttle, ct), unapproved.Concat(approved.RecoveryPending).Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
         // RQ-141: one exclusion snapshot for the lane, not a root scan per action. Folder refreshes

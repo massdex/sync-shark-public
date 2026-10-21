@@ -669,7 +669,7 @@ public sealed partial class SyncRun : ISyncRun
         };
     }
 
-    private sealed record IncrementalPreparation(Plan? Plan, RunReport? Completed, Func<Task<RunReport>>? Execute);
+    private sealed record IncrementalPreparation(Plan? Plan, RunReport? Completed, Func<Task<RunReport>>? Execute, Func<Plan>? Initial = null);
 
     private async Task<RunReport> IncrementalBodyAsync(string pairId, IReadOnlyDictionary<string, Side>? decisions,
         string? resolvingNoticeId, IProgress<RunProgress> progress, CancellationToken ct)
@@ -681,7 +681,7 @@ public sealed partial class SyncRun : ISyncRun
 
     /// <summary>Computes the ordinary run's initial execution plan without applying it. The caller must use an
     /// isolated store: observations, reconciliation and retry bookkeeping are persisted there.</summary>
-    public Task<Plan> PreviewIncrementalAsync(string pairId, IProgress<RunProgress> progress, CancellationToken ct) =>
+    internal Task<Plan> PreviewIncrementalAsync(string pairId, IProgress<RunProgress> progress, CancellationToken ct) =>
         RunExclusiveAsync(progress, async (sink, token) =>
         {
             using var pause = PairPause.Begin(_store, pairId);
@@ -690,7 +690,7 @@ public sealed partial class SyncRun : ISyncRun
             var prepared = await reader.PrepareIncrementalAsync(pairId, null, null, sink, token);
             if (endpoints.MutationRequested)
                 throw new SyncRunRefusedException("Read-only reconciliation needed a provider effect; no effect was performed and this preview is incomplete.");
-            return prepared.Plan ?? new Plan(pairId, 0, [], [])
+            return prepared.Initial?.Invoke() ?? prepared.Plan ?? new Plan(pairId, 0, [], [])
             { RunUnavailable = prepared.Completed?.Failures.FirstOrDefault()?.Reason ?? "Inventory could not be read." };
         }, ct);
 
@@ -841,15 +841,16 @@ public sealed partial class SyncRun : ISyncRun
         plan = ApplySafetyFilter(pair, ActionPredicates(retryPair, links.WithPending(
             _store.ReadSyncRetries(pairId).Where(retry => retry.PendingNotice is not null).Select(retry => retry.Path)), retrySelection), plan);
         plan = plan with { HeldDeletions = retryHeld, FirstSyncOptions = Options(pair, false, winners, null) };
-        return new(plan, null, ExecutePreparedAsync);
+        var reviewedDeletes = retries.Where(item => item.HeldReviewed && item.Held is not null && item.HeldExpected is { } expected &&
+                    _store.Live(item.Held.Local == Side.A ? pair.A.RootId : pair.B.RootId, [item.Path]).FirstOrDefault() is { } currentHeld &&
+                    expected.ObjectId == currentHeld.ObjectId && Content.SideStamp(expected) == Content.SideStamp(currentHeld))
+                    .Select(item => FolderDelete.VictimKey(item.Held!.Local, item.Path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return new(plan, null, ExecutePreparedAsync, () => PrepareInitialExecution(plan, pair, reviewedDeletes,
+            allowUnreviewedEvidence: true).Plan);
 
         async Task<RunReport> ExecutePreparedAsync()
         {
-            var execution = await ExecuteWithEvidenceAsync(plan, pair, throttle,
-                retries.Where(item => item.HeldReviewed && item.Held is not null && item.HeldExpected is { } expected &&
-                    _store.Live(item.Held.Local == Side.A ? pair.A.RootId : pair.B.RootId, [item.Path]).FirstOrDefault() is { } currentHeld &&
-                    expected.ObjectId == currentHeld.ObjectId && Content.SideStamp(expected) == Content.SideStamp(currentHeld))
-                    .Select(item => FolderDelete.VictimKey(item.Held!.Local, item.Path)).ToHashSet(StringComparer.OrdinalIgnoreCase), ct,
+            var execution = await ExecuteWithEvidenceAsync(plan, pair, throttle, reviewedDeletes, ct,
                 allowUnreviewedEvidence: true);
             plan = execution.Plan;
             var tally = execution.Tally;

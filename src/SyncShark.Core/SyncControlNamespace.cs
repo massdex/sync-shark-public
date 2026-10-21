@@ -164,7 +164,9 @@ public static class SyncControlNamespace
                 {
                     if (expectedExistingUnmarkedIdentity is not null)
                         SyncLocalFileAuthority.RestoreInterruptedWritableObjectAccess(markerPath, markerPath);
-                    using var marker = SyncLocalFileAuthority.OpenExistingExclusive(markerPath);
+                    using var marker = !createWhenMissing && expectedExistingUnmarkedIdentity is null
+                        ? SyncLocalFileAuthority.OpenExistingSharedRead(markerPath)
+                        : SyncLocalFileAuthority.OpenExistingExclusive(markerPath);
                     markerIdentity = marker.VerifySingleLink();
                     var observed = ReadBounded(marker.Stream);
                     if (!observed.AsSpan().SequenceEqual(markerBytes))

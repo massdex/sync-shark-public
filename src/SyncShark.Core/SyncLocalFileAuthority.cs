@@ -57,6 +57,9 @@ internal sealed class SyncLocalFileAuthority : IDisposable, IAsyncDisposable
         return Open(path, desired, ShareRead | ShareWrite | ShareDelete, OpenExistingDisposition, access);
     }
 
+    internal static SyncLocalFileAuthority OpenExistingSharedRead(string path) =>
+        Open(path, GenericRead, ShareRead | ShareWrite | ShareDelete, OpenExistingDisposition, FileAccess.Read);
+
     public static SyncLocalFileAuthority OpenExistingExclusive(string path, FileAccess access = FileAccess.Read)
     {
         var desired = DeleteAccess | GenericRead | (access == FileAccess.ReadWrite ? GenericWrite : 0);

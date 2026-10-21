@@ -55,7 +55,7 @@ public sealed partial class V2CliRuntime
         // a paired tree would let the store's own files be scanned as pair content, so it is refused before any
         // planning or provider access.
         RejectDataRootInsidePair(pair);
-        var export = ValidatePlanExportPath(exportPath, pair, _productRoot);
+        var export = ValidatePlanExportPath(exportPath, _store.Pairs(), _productRoot);
         await WaitForDataLockAsync(_runGate, progress, cancellationToken);
         try
         {
@@ -78,6 +78,7 @@ public sealed partial class V2CliRuntime
             if (plan.RunUnavailable is { } unavailable)
                 throw new SyncRunPendingVerificationException(unavailable, 30);
             var rows = WritePlanCsv(export, pair, plan, unsupported, cancellationToken);
+            progress("Each preview consumes its isolated copy. Stop the app and make a fresh copy of the database together with its -wal and -shm files before every preview.");
             progress($"Unsupported read-only reconciliation: {unsupported.Length}." +
                 (unsupported.Length == 0 ? "" : " Export is not an exact execution plan; inspect UNSUPPORTED-RECONCILE rows."));
             return new SyncCliPlanExportData(pair.PairId, pair.Name, export, plan.Gen, plan.Actions.Count,
@@ -136,7 +137,7 @@ public sealed partial class V2CliRuntime
     // An isolated data root is mandatory and must be its own canonical folder. The live product folder, any
     // alias (junction, symbolic link, 8.3 short name), either folder containing the other, and a state database
     // hardlinked to the live one are all refused before the runtime opens.
-    private static string ValidateIsolatedDataRoot(string requested)
+    internal static string ValidateIsolatedDataRoot(string requested)
     {
         if (string.IsNullOrWhiteSpace(requested) || requested.Length > MaximumPlanPathCharacters ||
             !Path.IsPathFullyQualified(requested))
@@ -161,7 +162,7 @@ public sealed partial class V2CliRuntime
         if (!string.Equals(TrimSeparators(full), TrimSeparators(canonical), StringComparison.OrdinalIgnoreCase))
             throw new SyncCliUsageException("--data-root must be the canonical folder path; an alias such as a " +
                 "junction or an 8.3 short name is not accepted.");
-        var liveRoot = SafeCanonicalPath(SyncDataLocation.ProductRoot);
+        var liveRoot = SafeCanonicalPath(SyncSharkRuntimePaths.ProductRoot);
         if (IsSameOrInside(canonical, liveRoot) || IsSameOrInside(liveRoot, canonical))
             throw new SyncCliUsageException("--data-root must be a folder separate from the live Sync Shark " +
                 "product folder. Copy the product folder to an isolated location first.");
@@ -279,7 +280,7 @@ public sealed partial class V2CliRuntime
 
     // The export file must be absolute, sit in an existing folder, and be outside the live and isolated
     // product folders and both paired trees. No folder is created, and no paired tree is ever written.
-    private static string ValidatePlanExportPath(string exportPath, PairDef pair, string isolatedRoot)
+    internal static string ValidatePlanExportPath(string exportPath, IReadOnlyList<PairDef> pairs, string isolatedRoot)
     {
         if (string.IsNullOrWhiteSpace(exportPath) || exportPath.Length > MaximumPlanPathCharacters ||
             !Path.IsPathFullyQualified(exportPath))
@@ -307,17 +308,42 @@ public sealed partial class V2CliRuntime
             throw new SyncCliUsageException("--export could not be verified: " + error.Message);
         }
         if (IsSameOrInside(canonical, SafeCanonicalPath(isolatedRoot)) ||
-            IsSameOrInside(canonical, SafeCanonicalPath(SyncDataLocation.ProductRoot)))
+            IsSameOrInside(canonical, SafeCanonicalPath(SyncSharkRuntimePaths.ProductRoot)))
             throw new SyncCliUsageException(
                 "--export must be outside the live and isolated Sync Shark data folders.");
-        foreach (var root in new[] { pair.A, pair.B })
+        foreach (var root in pairs.SelectMany(pair => new[] { pair.A, pair.B }))
         {
             if (string.IsNullOrWhiteSpace(root.RootPath) || !Path.IsPathFullyQualified(root.RootPath)) continue;
             if (IsSameOrInside(canonical, SafeCanonicalPath(root.RootPath)))
                 throw new SyncCliUsageException(
                     "--export must be outside both folders of the pair; choose a file outside the paired trees.");
         }
+        RejectDropboxExport(canonical);
         return canonical;
+    }
+
+    private static void RejectDropboxExport(string path)
+    {
+        for (var folder = Directory.GetParent(path); folder is not null; folder = folder.Parent)
+            if (folder.Name.Equals("Dropbox", StringComparison.OrdinalIgnoreCase) ||
+                folder.Name.StartsWith("Dropbox (", StringComparison.OrdinalIgnoreCase) ||
+                File.Exists(Path.Combine(folder.FullName, ".dropbox")))
+                throw new SyncCliUsageException("--export must be outside Dropbox folders.");
+        foreach (var location in new[] { Environment.SpecialFolder.LocalApplicationData, Environment.SpecialFolder.ApplicationData })
+        {
+            var info = Path.Combine(Environment.GetFolderPath(location), "Dropbox", "info.json");
+            if (!File.Exists(info)) continue;
+            try
+            {
+                using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(info));
+                foreach (var account in document.RootElement.EnumerateObject())
+                    if (account.Value.TryGetProperty("path", out var root) && root.GetString() is { } desktop &&
+                        IsSameOrInside(path, SafeCanonicalPath(desktop)))
+                        throw new SyncCliUsageException("--export must be outside Dropbox folders.");
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+            { throw new SyncCliUsageException("Dropbox folder locations could not be verified: " + error.Message); }
+        }
     }
 
     // An isolated data folder must not sit inside a paired tree, where the engine's own state files would be
@@ -388,21 +414,22 @@ public sealed partial class V2CliRuntime
                 foreach (var held in plan.HeldDeletions)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    WriteMarkerRow(writer, "held-deletion", "held", held.Local, held.Path, held.Rule, null);
+                    WriteMarkerRow(writer, "held-deletion", "held", held.Local, held.Path, held.Rule,
+                        "Deletion evidence is pending; the evidence lane may revise the initial plan.", "HOLD");
                     rows++;
                 }
                 foreach (var held in plan.UnreviewedHeldDeletions)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     WriteMarkerRow(writer, "held-deletion", "unreviewed-held", held.Local, held.Path, held.Rule,
-                        null);
+                        "Deletion needs reviewed authority.", "HOLD");
                     rows++;
                 }
                 foreach (var pending in plan.RecoveryPending)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     WriteMarkerRow(writer, "recovery-pending", "pending", null, pending, null,
-                        "The path awaits recovery evidence; nothing is executed.");
+                        "Recovery unavailable; deletions and replacements paused. Nothing is executed.", "HOLD");
                     rows++;
                 }
                 foreach (var notice in plan.Notices)
@@ -421,7 +448,8 @@ public sealed partial class V2CliRuntime
                 }
                 // A sleeping retained intent is not necessarily named by a notice, so it is exported directly,
                 // as a pending row, from the isolated store's unresolved set.
-                foreach (var intent in _store.UnresolvedIntents(pair.PairId))
+                var exportedIntents = unsupported.Select(intent => intent.ActionId).ToHashSet(StringComparer.Ordinal);
+                foreach (var intent in _store.UnresolvedIntents(pair.PairId).Where(intent => !exportedIntents.Contains(intent.ActionId)))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     WriteActionRow(writer, pair, intent, "pending-intent");
@@ -445,7 +473,7 @@ public sealed partial class V2CliRuntime
     private static void WriteActionRow(TextWriter writer, PairDef pair, SyncAction action, string disposition,
         string? kindOverride = null) =>
         WriteCsvRow(writer,
-            "action", action.ActionId, disposition, kindOverride ?? action.Kind.ToString(),
+            "action", action.ActionId, disposition, kindOverride ?? (action.Kind == ActionKind.Hold ? "HOLD" : action.Kind.ToString()),
             action.Target == Side.A ? "A" : "B", Direction(pair, action), action.Path, action.FromPath,
             action.Rule.ToString(CultureInfo.InvariantCulture), action.RecoveryFirst ? "true" : "false",
             action.Source?.ObjectId, action.Source?.VersionId, action.Source?.Hash,
@@ -453,12 +481,12 @@ public sealed partial class V2CliRuntime
             action.Source?.Mtime.ToString("O", CultureInfo.InvariantCulture),
             action.ExpectedTarget?.ObjectId, action.ExpectedTarget?.VersionId, action.ExpectedTarget?.Hash,
             action.ExpectedTarget?.Size.ToString(CultureInfo.InvariantCulture),
-            action.ExpectedTarget?.Mtime.ToString("O", CultureInfo.InvariantCulture), kindOverride is null ? null :
+            action.ExpectedTarget?.Mtime.ToString("O", CultureInfo.InvariantCulture), kindOverride is null ? (action.Kind == ActionKind.Hold ? "Held by deletion identity or planning safety review; see the notice for this path." : null) :
                 $"Original kind {action.Kind}; checkpoint {action.ProviderEffect?.Kind}. Reconciliation may require restoration or publication and is not supported read-only.");
 
     private static void WriteMarkerRow(TextWriter writer, string record, string disposition, Side? side,
-        string? path, string? rule, string? detail) =>
-        WriteCsvRow(writer, record, null, disposition, null, side is null ? null : side == Side.A ? "A" : "B",
+        string? path, string? rule, string? detail, string? kind = null) =>
+        WriteCsvRow(writer, record, null, disposition, kind, side is null ? null : side == Side.A ? "A" : "B",
             null, path, null, rule, null, null, null, null, null, null, null, null, null, null, null, detail);
 
     // The direction names the source and target endpoint roles, never a fixed side, so same-role pairs read
@@ -497,9 +525,10 @@ public sealed partial class V2CliRuntime
         writer.WriteLine();
     }
 
-    private static string CsvField(string? value)
+    internal static string CsvField(string? value)
     {
         if (string.IsNullOrEmpty(value)) return string.Empty;
+        if (value[0] is '=' or '+' or '-' or '@') value = "'" + value;
         if (value.IndexOfAny(new[] { ',', '"', '\r', '\n' }) < 0) return value;
         return "\"" + value.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
     }

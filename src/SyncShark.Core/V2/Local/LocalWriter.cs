@@ -75,6 +75,8 @@ public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResource
             catch (Exception error) when (error is IOException or UnauthorizedAccessException)
             { recoveryUnavailable = recovery + ": " + error.Message; }
         }
+        if (recoveryUnavailable is null && readOnlyOpen)
+            recoveryUnavailable = ProbeRecoveryReadOnly(recovery);
         var namespaceId = LocalItems.NamespaceId(root.RootId);
         using var lease = PilotDirectoryLease.Open(root.RootPath, identity);
         var plan = SyncControlNamespace.PlanLocalAllocation(lease, installationId, namespaceId);
@@ -89,6 +91,23 @@ public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResource
             new LocalFreeSpaceGuard(volumeSpace ?? new DriveVolumeSpaceProbe(), settings ?? V2Settings.Default,
                 databasePath, time), SyncIgnorePolicy.Normalize(ignoreRules), providerNameRefused, verifyCarriedChoice)
             { RecoveryUnavailable = recoveryUnavailable };
+    }
+
+    // OPEN_EXISTING only: check directory creation rights without creating a probe file.
+    internal static string? ProbeRecoveryReadOnly(string recovery)
+    {
+        var candidate = recovery;
+        while (!Directory.Exists(candidate))
+        {
+            if (File.Exists(candidate)) return recovery + ": Recovery path is occupied by a file.";
+            var parent = Path.GetDirectoryName(candidate);
+            if (string.IsNullOrEmpty(parent)) return recovery + ": Recovery volume is unavailable.";
+            candidate = parent;
+        }
+        using var handle = PilotDirectoryLease.CreateFile(candidate, 0x00000002 | 0x00000004,
+            FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero, 3,
+            PilotDirectoryLease.FileFlagBackupSemantics, IntPtr.Zero);
+        return handle.IsInvalid ? recovery + ": Recovery directory creation access is unavailable." : null;
     }
 
     /// <inheritdoc />
