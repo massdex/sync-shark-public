@@ -63,6 +63,7 @@ internal static partial class RunChecks
         await Incremental_DeletedIdenticalSkipsRecoveryAsync();
         await Incremental_LocalLocalDeleteCreatesRecoveryAsync();
         await Incremental_NoChanges_WritesNothingAsync();
+        await RecoveryRestore_NoNoticeRunsWithoutLookupsAsync();
         await Incremental_FullRescanAfterForgetCursorAsync();
         await RequestRescan_WaitsForRunningScanAsync();
         await RequestRescan_ReconcilesBeforeInventoryAsync();
@@ -779,6 +780,29 @@ internal static partial class RunChecks
         Require(report.Done == 0 && report.Outcome == RunOutcomes.Complete, "a steady-state run has nothing to do");
         Require(fx.Recorder.ChangeRows == 0, "a steady-state run writes no sync-state rows (its run summary is history)");
         Console.WriteLine("PASS Incremental_NoChanges_WritesNothing");
+    }
+
+    // Finding 4: a real first sync and a real incremental run against the SQLite store take the indexed
+    // held-restore gate but issue no per-item restore lookup when no restore notice exists. The protection
+    // helper asserted this in isolation; this pins the SyncRun wiring end to end.
+    private static async Task RecoveryRestore_NoNoticeRunsWithoutLookupsAsync()
+    {
+        using var store = SqliteStateStore.Open(
+            Path.Combine(Path.GetTempPath(), "restore-zero-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System);
+        var fx = Build(suppliedStore: store);
+        fx.A.Seed("same.txt", "same");
+        fx.B.Seed("same.txt", "same");
+        fx.A.Seed("local.txt", "local only");
+        var first = await FirstSyncAsync(fx.Run(), fx);
+        var firstGates = store.RecoveryRestoreGateQueries;
+        Require(first.Failed == 0 && firstGates > 0 && store.RecoveryRestoreLookups == 0,
+            "a first sync with no restore notice takes the indexed gate and issues no per-item restore lookup");
+        fx.A.Seed("incremental.txt", "next run");
+        var incremental = await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        Require(incremental.Failed == 0 && store.RecoveryRestoreGateQueries > firstGates &&
+            store.RecoveryRestoreLookups == 0,
+            "an incremental run with no restore notice takes the indexed gate and issues no per-item restore lookup");
+        Console.WriteLine("PASS RecoveryRestore_NoNoticeRunsWithoutLookups");
     }
 
     private static async Task Incremental_FailedEffect_RetriedNextRunAsync()

@@ -5,6 +5,9 @@ public sealed partial class SyncRun
     internal const string RecoveryRestorePending = "recovery-restore-pending";
     internal const string RecoveryRestoreReady = "recovery-restore-ready";
     private const int RecoveryRestorePageLimit = 500;
+    private const string RecoveryAbsentEffectDetail =
+        "The previous restore attempt wrote nothing at this destination, so this notice no longer protects the path. " +
+        "Retry restores the same destination, Restore as a copy keeps both versions, or Dismiss closes this notice.";
     // Scheduling convenience only: notices and protection remain durable if a process restarts.
     private readonly Dictionary<string, string?> _recoveryRestoreAfter = new(StringComparer.Ordinal);
 
@@ -68,7 +71,7 @@ public sealed partial class SyncRun
             record.VersionId, record.Size, record.Created, classification, destination, detail);
 
     private async Task<RecoveryRestoreItem> RestoreRecoveryRecordAsync(PairDef pair, RecoveryRecord record,
-        bool asCopy, bool dryRun, CancellationToken ct)
+        bool asCopy, bool dryRun, CancellationToken ct, bool retainDestination = false)
     {
         if (record.PairId != pair.PairId) throw new IOException("Recovery entry belongs to a different pair.");
         var id = RecoveryRestoreId(record);
@@ -94,6 +97,25 @@ public sealed partial class SyncRun
         }
         var priorDestination = frozen?.Path;
         var previous = frozen is null ? null : await target.ObserveAsync(frozen.Path, ct).ConfigureAwait(false);
+        // RQ-060/032: an attempt whose effect definitively never landed must not hold a live path. Every
+        // executor intent is resolved above (Failed/Uncertain already stopped the attempt), and an absent
+        // destination proves no bytes of ours exist. Downgrade the receipt to an actionless notice that keeps
+        // the chosen Destination, before any failure save below can re-freeze the path. Retry then targets the
+        // same destination and asCopy starts a fresh copy instead of replaying the old intent.
+        if (!dryRun && frozen is not null && previous is null &&
+            _store.IntentById(pair.PairId, frozen.ActionId) is null)
+        {
+            if (savedRow is { Closed: false } && saved is not null)
+                _store.AddNotices([saved with
+                {
+                    Kind = NoticeKind.Info,
+                    ReasonKey = RecoveryRestorePending,
+                    Detail = RecoveryAbsentEffectDetail,
+                    ConflictOperation = new ConflictNoticeOperation(record.RecoveryId, frozen.Path, [],
+                        saved.ConflictOperation?.Completed ?? [])
+                }]);
+            frozen = null;
+        }
         if (savedRow is { Closed: true })
         {
             if (!asCopy && previous is not null && !RecoveryContentMatches(previous, record))
@@ -105,7 +127,20 @@ public sealed partial class SyncRun
         }
         else if (previous is not null)
         {
-            if (RecoveryContentMatches(previous, record)) return RecoveryResult(record, "SKIP-PRESENT", frozen!.Path);
+            if (RecoveryContentMatches(previous, record))
+            {
+                // The target is verified. A differing opposite file means the path is still held, so Retry
+                // must report that truthfully rather than SKIP-PRESENT, which reads as success while the hold stays.
+                var held = frozen!;
+                var existingOpposite = await opposite.ObserveAsync(held.Path, ct).ConfigureAwait(false);
+                if (existingOpposite is not null && !RecoveryContentMatches(existingOpposite, record))
+                {
+                    var oppositeDetail = RecoveryOppositeChangedDetail(pair, record.Side, held.Path);
+                    if (!dryRun) SaveRecoveryRestoreFailure(record, oppositeDetail, held.Path);
+                    return RecoveryResult(record, "CONFLICT", held.Path, oppositeDetail);
+                }
+                return RecoveryResult(record, "SKIP-PRESENT", held.Path);
+            }
             // A different live entity is not the restored object. Once no provider effect remains
             // unresolved, retire this path hold rather than requiring unrelated bytes to match forever.
             const string detail = "The destination now contains different current bytes. They were left unchanged; Restore as a copy or Dismiss this notice.";
@@ -123,7 +158,12 @@ public sealed partial class SyncRun
         { return RecoveryUnavailable(record, dryRun, asCopy,"The exact retained version is unavailable: " + error.Message); }
         if (!RecoveryContentMatches(source, record))
             return RecoveryUnavailable(record, dryRun, asCopy,"The retained version metadata did not match its durable Recovery record.");
-        var destination = frozen?.Path ?? (savedRow is { Closed: true } && !asCopy ? priorDestination : null) ?? record.Path;
+        // A user Retry keeps the destination the notice selected (an actionless notice preserves it after an
+        // absent effect); an explicit as-copy always derives a fresh copy name below.
+        var destination = frozen?.Path
+            ?? (retainDestination && !asCopy ? saved?.ConflictOperation?.Destination : null)
+            ?? (savedRow is { Closed: true } && !asCopy ? priorDestination : null)
+            ?? record.Path;
         if (asCopy && frozen is null)
         {
             var found = false;
@@ -214,6 +254,21 @@ public sealed partial class SyncRun
     private static bool RecoveryContentMatches(ItemState item, RecoveryRecord record) => item.Kind == ItemKind.File &&
         item.Size == record.Size && !string.IsNullOrEmpty(item.Hash) &&
         string.Equals(item.Hash, record.Hash, StringComparison.OrdinalIgnoreCase);
+
+    // User-facing text names the real endpoints, never internal side letters; a rename is the only non-destructive
+    // resolution while both versions stay in place (RQ-060).
+    private static string RecoveryOppositeChangedDetail(PairDef pair, Side target, string path)
+    {
+        var targetLabel = SyncProviders.DisplayName((target == Side.A ? pair.A : pair.B).Provider);
+        var oppositeLabel = SyncProviders.DisplayName((target == Side.A ? pair.B : pair.A).Provider);
+        return $"The restored file on {targetLabel}, '{path}', is verified, but {oppositeLabel}, '{path}', now contains " +
+            "different bytes. Still held: rename the opposite file first. Keep both files: rename or move the file on " +
+            oppositeLabel + " from '" + path +
+            "' to an included name that is unused on BOTH sides. If that name exists, choose another. " +
+            "Leave the restored target in place and do not delete or overwrite either file; then choose Retry and " +
+            "run sync. Retry verifies the restored original and syncs both distinct paths. Ignore only pauses " +
+            "verification; it does not resolve this difference.";
+    }
 
     private RecoveryRestoreItem RecoveryUnavailable(RecoveryRecord record, bool dryRun, bool asCopy, string detail)
     {
@@ -308,9 +363,11 @@ public sealed partial class SyncRun
                     new RecoveryQuery(Id: recoveryId, Limit: 1)).FirstOrDefault();
                 if (record is not null)
                 {
-                    var copy = notice.ConflictOperation?.Completed.Contains("as-copy") == true ||
-                        notice.ConflictOperation?.Destination is { } destination && !PairPath.Same(destination, record.Path);
-                    await RestoreRecoveryRecordAsync(pair, record, copy, false, token).ConfigureAwait(false);
+                    // Automatic retry keeps the notice's selected destination too; only an explicit as-copy
+                    // decision may derive a fresh copy name. This matches the user Retry path after a downgrade.
+                    var copy = notice.ConflictOperation?.Completed.Contains("as-copy") == true;
+                    await RestoreRecoveryRecordAsync(pair, record, copy, false, token, retainDestination: true)
+                        .ConfigureAwait(false);
                     notice = _store.NoticeById(pair.PairId, notice.NoticeId!)?.Notice ?? notice;
                 }
                 var action = notice.ConflictOperation?.Actions.FirstOrDefault(IsRecoveryRestoreIntent);
@@ -330,13 +387,10 @@ public sealed partial class SyncRun
                 }
                 var other = await _endpoints.Writer(action.Target == Side.A ? pair.B : pair.A)
                     .ObserveAsync(action.Path, token).ConfigureAwait(false);
-                if (other is not null && (other.Kind != ItemKind.File || other.Hash != observed.Hash || other.Size != observed.Size))
-                    throw new IOException($"The restored file at side {action.Target}, '{action.Path}', is verified, but side " +
-                        $"{(action.Target == Side.A ? Side.B : Side.A)}, '{action.Path}', now contains different bytes. " +
-                        $"Keep both files: rename or move the file on side {(action.Target == Side.A ? Side.B : Side.A)} " +
-                        $"from '{action.Path}' to an included name that is unused on BOTH sides. If that name exists, choose another. " +
-                        "Leave the restored target in place and do not delete or overwrite either file; then choose Retry and run sync. " +
-                        "Retry verifies the restored original and syncs both distinct paths. Ignore only pauses verification; it does not resolve this difference.");
+                // Providers may echo the same content hash in different letter case; that is not different bytes.
+                if (other is not null && (other.Kind != ItemKind.File ||
+                    !string.Equals(other.Hash, observed.Hash, StringComparison.OrdinalIgnoreCase) || other.Size != observed.Size))
+                    throw new IOException(RecoveryOppositeChangedDetail(pair, action.Target, action.Path));
                 var generation = _store.BeginGeneration(targetRoot.RootId, RunKind);
                 ForgetRecoveryBaselines(pair, action.Path, generation);
                 foreach (var (root, side) in new[] { (pair.A, Side.A), (pair.B, Side.B) })
@@ -364,9 +418,12 @@ public sealed partial class SyncRun
             {
                 notice = _store.NoticeById(pair.PairId, notice.NoticeId!)?.Notice ?? notice;
                 var protects = notice.ConflictOperation?.Actions.Any(IsRecoveryRestoreIntent) == true;
-                _store.AddNotices([notice with { Detail = "Restore verification failed: " + error.Message +
-                    (protects ? ". Retry or Ignore; the frozen restore remains protected."
-                        : ". Retry after fixing the cause, or Dismiss. This actionless notice does not protect the path.") }]);
+                // Do not add a second full stop after a message that already ends a sentence.
+                var reason = error.Message.TrimEnd();
+                var separator = reason.EndsWith('.') || reason.EndsWith('!') || reason.EndsWith('?') ? " " : ". ";
+                _store.AddNotices([notice with { Detail = "Restore verification failed: " + reason + separator +
+                    (protects ? "Retry or Ignore; the frozen restore remains protected."
+                        : "Retry after fixing the cause, or Dismiss. This actionless notice does not protect the path.") }]);
             }
         }
     }
@@ -415,16 +472,21 @@ public sealed partial class SyncRun
         if (record is null) return "That Recovery version is unavailable. No files changed; Dismiss closes an actionless notice.";
         try
         {
-            var asCopy = choice == NoticeChoices.RestoreAsCopy || notice.ConflictOperation?.Completed.Contains("as-copy") == true ||
-                notice.ConflictOperation?.Destination is { } destination && !PairPath.Same(destination, record.Path);
-            var result = await RestoreRecoveryRecordAsync(pair, record, asCopy, false, ct).ConfigureAwait(false);
+            // Retry keeps the destination the notice already selected; only the explicit copy choice (or a
+            // recorded copy decision) starts a fresh copy name.
+            var asCopy = choice == NoticeChoices.RestoreAsCopy ||
+                notice.ConflictOperation?.Completed.Contains("as-copy") == true;
+            var result = await RestoreRecoveryRecordAsync(pair, record, asCopy, false, ct,
+                retainDestination: choice is NoticeChoices.RetryNow).ConfigureAwait(false);
             return result.Classification + ": " + (result.Detail ?? result.Destination ?? result.Path);
         }
         catch (Exception error) when (error is not OperationCanceledException)
         {
-            SaveRecoveryRestoreFailure(record, error.Message + ". Retry after fixing the cause, or dismiss an actionless notice.",
+            var reason = error.Message.TrimEnd();
+            var separator = reason.EndsWith('.') || reason.EndsWith('!') || reason.EndsWith('?') ? " " : ". ";
+            SaveRecoveryRestoreFailure(record, reason + separator + "Retry after fixing the cause, or dismiss an actionless notice.",
                 asCopy: choice == NoticeChoices.RestoreAsCopy);
-            return "Restore did not finish. Only an unresolved frozen effect remains protected. " + error.Message;
+            return "Restore did not finish. Only an unresolved frozen effect remains protected. " + reason;
         }
     }
 }

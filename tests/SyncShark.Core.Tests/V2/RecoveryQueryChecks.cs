@@ -366,6 +366,31 @@ internal static class RecoveryQueryChecks
         LocalChecks.Require(store.RecoveryNewestForPath(tiePair.PairId, new RecoveryQuery(), "Root/tie")?.RecoveryId == tieWinner,
             "equal Created times break deterministically by greater recovery id");
 
+        // Finding 4: the bounded index and the SQL predicate must agree for descendants on near-miss prefixes,
+        // where a plain string-prefix match would wrongly include a separator sibling or a character neighbour.
+        var parityPair = Pair("pair-parity");
+        store.SavePair(parityPair);
+        store.AddNotices([FrozenPending(parityPair.PairId, "Root/held", "parity-held")]);
+        var parity = RecoveryRestoreProtection.Create(store, parityPair.PairId);
+        LocalChecks.Require(parity.Active && parity.SnapshotComplete, "the parity fixture holds one path in the bounded index");
+        var parityFailures = new List<string>();
+        foreach (var path in new[]
+                 {
+                     "", "Root", "Root/hel", "Root/held", "Root/held/child", "Root/held-sibling",
+                     "Root/held-sibling/child", "Root/held2", "Root/heldx", "ROOT/HELD", "Root/HELD-SIBLING"
+                 })
+        foreach (var descendants in new[] { false, true })
+        {
+            var indexed = parity.Covers(path, descendants);
+            var sql = store.RecoveryRestoreProtected(parityPair.PairId, path, descendants);
+            if (indexed != sql)
+                parityFailures.Add("'" + (path.Length == 0 ? "<root>" : path) + "' descendants=" + descendants +
+                    ": index=" + indexed + ", sql=" + sql);
+        }
+        LocalChecks.Require(parityFailures.Count == 0,
+            "the bounded index and SQL agree on near-miss prefixes for descendants=true and self/ancestor" +
+            (parityFailures.Count == 0 ? string.Empty : ": " + string.Join("; ", parityFailures)));
+
         // Low migration fix: an older binary writes path_key as NULL/stale and leaves restore_hold at zero.
         var migrateState = Path.Combine(LocalChecks.FreshRoot("recovery-migrate-" + Guid.NewGuid().ToString("N")), "state");
         var migratePair = Pair("pair-migrate");
