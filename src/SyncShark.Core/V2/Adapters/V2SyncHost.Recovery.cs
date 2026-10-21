@@ -48,8 +48,10 @@ public sealed partial class V2SyncHost
         ArgumentNullException.ThrowIfNull(item);
         if (string.IsNullOrWhiteSpace(item.PairId) || string.IsNullOrWhiteSpace(item.Key))
             throw new ArgumentException("Select one retained Recovery item before restoring.", nameof(item));
-        if (!await _runGate.WaitAsync(0, ct).ConfigureAwait(false))
-            throw new SyncRunRefusedException("A sync is running. Wait for it to finish, then retry Recovery; no file was changed.");
+        // A restore or preview is a user action, never a refusal: wait for the active run exactly as the CLI waits
+        // for its data lock, so an AutoSync batch finishing never turns a click into "a sync is running". Nothing
+        // is read or written until the gate is acquired, and a cancelled wait changes no file.
+        await _runGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             // The durable receipt is authoritative; never accept catalog-supplied locations or content metadata.

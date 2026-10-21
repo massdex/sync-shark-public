@@ -30,6 +30,16 @@ internal interface IRecoveryRecordReader
     /// provider's existing immutable-read path. The caller owns and disposes the returned stream.
     /// </summary>
     Task<Stream> OpenRecoveryRecordAsync(RecoveryRecord recovery, CancellationToken ct);
+
+    /// <summary>
+    /// Opens the exact retained bytes using metadata already described for this row in the same operation, so an
+    /// apply does not request the provider's historical metadata twice. The implementation must re-validate the
+    /// supplied state against the durable row and the provider's own identity rules before opening, and must not
+    /// cache it; the default keeps every provider or fixture without a narrower path correct by describing again.
+    /// The caller owns and disposes the returned stream.
+    /// </summary>
+    Task<Stream> OpenRecoveryRecordAsync(RecoveryRecord recovery, ItemState described, CancellationToken ct) =>
+        OpenRecoveryRecordAsync(recovery, ct);
 }
 
 /// <summary>Shared completeness and ownership checks for one writer reading a durable Recovery row.</summary>
@@ -58,6 +68,32 @@ internal static class RecoveryRecordReads
             throw new InvalidDataException(
                 "The Recovery record belongs to the other side of the pair; nothing was read or changed.");
     }
+
+    /// <summary>Rejects a row that is not a Dropbox revision reference for its exact path, before any request.</summary>
+    internal static void RequireDropboxRevisionShape(RecoveryRecord recovery)
+    {
+        if (string.IsNullOrEmpty(recovery.VersionId))
+            throw new InvalidDataException(
+                "This Recovery record is not a Dropbox revision reference; nothing was read or changed.");
+        if (Path.IsPathFullyQualified(recovery.Location) || !PairPath.Same(recovery.Location, recovery.Path))
+            throw new InvalidDataException(
+                "This Recovery record is not a Dropbox revision reference for this path; nothing was read or changed.");
+    }
+
+    /// <summary>
+    /// Whether already-described metadata is the exact retained object a durable Recovery row names. Only the fields
+    /// the row stores (path, size, content hash and provider revision) are compared. A mismatch is never trusted:
+    /// the provider refuses instead of opening a supplied identity that the durable row does not name.
+    /// </summary>
+    internal static bool MatchesDescribed(RecoveryRecord recovery, ItemState described) =>
+        described.Kind == ItemKind.File &&
+        PairPath.Same(described.Path, recovery.Path) &&
+        described.Size == recovery.Size &&
+        !string.IsNullOrEmpty(described.Hash) &&
+        string.Equals(described.Hash, recovery.Hash, StringComparison.OrdinalIgnoreCase) &&
+        (string.IsNullOrEmpty(recovery.VersionId)
+            ? described.VersionId is null
+            : string.Equals(described.VersionId, recovery.VersionId, StringComparison.Ordinal));
 }
 
 /// <summary>
@@ -122,15 +158,10 @@ internal static class RecoveryRecordPreviews
         ArgumentNullException.ThrowIfNull(client);
         RecoveryRecordReads.RequireComplete(recovery);
         RecoveryRecordReads.RequireOwnership(pairId, recovery.PairId, writerSide, recovery.Side);
-        var revision = recovery.VersionId;
-        if (string.IsNullOrEmpty(revision))
-            throw new InvalidDataException(
-                "This Recovery record is not a Dropbox revision reference; nothing was read or changed.");
         // Dropbox preserves a displaced revision in the victim's own path. A local archive record (an absolute
         // location) or a record for another spelling is not a Dropbox revision reference for this reader.
-        if (Path.IsPathFullyQualified(recovery.Location) || !PairPath.Same(recovery.Location, recovery.Path))
-            throw new InvalidDataException(
-                "This Recovery record is not a Dropbox revision reference for this path; nothing was read or changed.");
+        RecoveryRecordReads.RequireDropboxRevisionShape(recovery);
+        var revision = recovery.VersionId;
         ct.ThrowIfCancellationRequested();
         IReadOnlyList<DropboxRevisionEntry> revisions;
         try

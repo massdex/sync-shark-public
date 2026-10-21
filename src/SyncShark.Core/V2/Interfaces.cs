@@ -344,14 +344,25 @@ public interface IStateStore : IDisposable
     }
 
     /// <summary>
+    /// One indexed existence gate for a whole run: is any open pending restore notice holding (has a frozen intent)?
+    /// A pair with none pays no per-item restore lookup. Fixtures inspect their open notices.
+    /// </summary>
+    bool HasPendingRestoreHolds(string pairId) => OpenNotices(pairId).Any(RecoveryRestoreHold.Holds);
+
+    /// <summary>Held paths for the run's bounded snapshot; production stores page an index, fixtures materialize.</summary>
+    IEnumerable<string> ReadPendingRestoreHoldPaths(string pairId) =>
+        OpenNotices(pairId).Where(RecoveryRestoreHold.Holds).Select(notice => notice.Path);
+
+    /// <summary>
     /// Whether a Recovery-restore notice protects this path: a notice at or above the path, and when
-    /// <paramref name="descendants"/> also a notice at or below it. Pending notices are always open-only. With
-    /// <paramref name="includeReady"/>, open ready notices count too; persistent stores also honor closed ready
-    /// history, so an approved plan recorded before the ready notice closed cannot replay stale effects.
+    /// <paramref name="descendants"/> also a notice at or below it. A pending notice protects only while it carries a
+    /// frozen intent (bytes may have been written); an action-less failure holds nothing. Pending notices are always
+    /// open-only. With <paramref name="includeReady"/>, ready notices count too (open or closed history), so an
+    /// approved plan recorded before the ready notice closed cannot replay stale effects.
     /// </summary>
     bool RecoveryRestoreProtected(string pairId, string path, bool descendants = false, bool includeReady = false) =>
         OpenNotices(pairId).Any(notice =>
-            (notice.ReasonKey == "recovery-restore-pending" ||
+            (RecoveryRestoreHold.Holds(notice) ||
              (includeReady && notice.ReasonKey == "recovery-restore-ready")) &&
             (PairPath.IsSelfOrUnder(path, notice.Path) ||
              (descendants && PairPath.IsSelfOrUnder(notice.Path, path))));
@@ -393,6 +404,30 @@ public interface IStateStore : IDisposable
             .OrderBy(row => row.RecoveryId, StringComparer.Ordinal)
             .Take(query.Limit)
             .ToArray();
+    }
+
+    /// <summary>
+    /// The newest retained copy for one exact path within the query's filters (finding 1). <see cref="RecoveryQuery.AfterId"/>
+    /// and <see cref="RecoveryQuery.Limit"/> are deliberately ignored: the winner may live on another page. Newest is the
+    /// greatest stored <see cref="RecoveryRecord.Created"/> (whole milliseconds); the recovery id descending is the
+    /// deterministic tie break. Null when no filtered row names that path.
+    /// </summary>
+    RecoveryRecord? RecoveryNewestForPath(string pairId, RecoveryQuery query, string path)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        var sinceMs = query.SinceMillisecondsCeiling();
+        var key = PathKey.Of(path);
+        return Recoveries(pairId)
+            .Where(row => query.Id is not { } id || string.Equals(row.RecoveryId, id, StringComparison.Ordinal))
+            .Where(row => sinceMs is not { } since ||
+                row.Created >= DateTimeOffset.FromUnixTimeMilliseconds(since))
+            .Where(row => query.PathPrefix is not { } prefix || PairPath.IsSelfOrUnder(row.Path, prefix))
+            .Where(row => query.Side is not { } side || row.Side == side)
+            .Where(row => query.ActionId is not { } actionId || string.Equals(row.ActionId, actionId, StringComparison.Ordinal))
+            .Where(row => string.Equals(PathKey.Of(row.Path), key, StringComparison.Ordinal))
+            .OrderByDescending(row => row.Created)
+            .ThenByDescending(row => row.RecoveryId, StringComparer.Ordinal)
+            .FirstOrDefault();
     }
 
     // Production implementations use primary-key reads; defaults support small custom stores.

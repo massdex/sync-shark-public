@@ -87,7 +87,7 @@ public sealed partial class SqliteStateStore
                 "SELECT pair_no FROM pair WHERE pair_id=$id;", ("$id", pairId));
             if (pair is null) return false;
             const string pending = "SELECT 1 FROM notice WHERE pair_no=$p " +
-                "AND reason_key='recovery-restore-pending' AND state='open' ";
+                "AND reason_key='recovery-restore-pending' AND state='open' AND restore_hold=1 ";
             foreach (var ancestor in new[] { path }.Concat(PairPath.Ancestors(path)))
                 if (StoreSchema.Scalar(_connection, _transaction, pending + "AND path_key=$key LIMIT 1;",
                     ("$p", pair), ("$key", PathKey.Of(ancestor))) is not null) return true;

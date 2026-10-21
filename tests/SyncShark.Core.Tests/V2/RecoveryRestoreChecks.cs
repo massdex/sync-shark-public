@@ -7,7 +7,7 @@ internal static partial class RunChecks
     // Registered by the coordinating test runner; no provider credentials or user paths.
     public static async Task RecoveryRestoreChecksAsync()
     {
-        foreach (var mode in new[] { "dry", "identical", "conflict", "apply", "copy", "failure", "no-version" })
+        foreach (var mode in new[] { "dry", "identical", "conflict", "conflict-apply", "opposite-dry", "opposite-apply", "apply", "copy", "failure", "no-version" })
         {
             var root = LocalChecks.FreshRoot("recovery-page-" + mode + "-" + Guid.NewGuid().ToString("N"));
             using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System);
@@ -30,7 +30,8 @@ internal static partial class RunChecks
                 store.CommitResult(fx.Pair.PairId, gen, stale,
                     new ActionResult(stale.ActionId, Outcome.Done, source, opposite, null, null));
             }
-            if (mode is "identical" or "conflict" or "copy")
+            if (mode is "opposite-dry" or "opposite-apply") fx.B.Seed(source.Path, "opposite current bytes");
+            if (mode is "identical" or "conflict" or "conflict-apply" or "copy")
                 fx.A.Seed(source.Path, mode == "identical" ? "retained bytes" : "current bytes");
             if (mode == "failure")
             {
@@ -44,13 +45,13 @@ internal static partial class RunChecks
             fx.Provider.AddWriter(fx.Pair.A, archive);
             var provider = new RecoveryFixtureProvider(fx.Provider);
             var run = new SyncRun(store, fx.Executor, provider, Settings, TimeProvider.System);
-            var dry = mode is "dry" or "identical" or "conflict";
+            var dry = mode is "dry" or "identical" or "conflict" or "opposite-dry";
             var noticesBefore = store.OpenNotices(fx.Pair.PairId).Count;
             var result = (await run.RestoreRecoveryPageAsync(fx.Pair.PairId, new RecoveryQuery(Id: recovery.RecoveryId),
                 mode == "copy", dry, CancellationToken.None)).Single();
             var expected = mode switch
             {
-                "dry" => "RESTORE", "identical" => "SKIP-PRESENT", "conflict" => "CONFLICT",
+                "dry" => "RESTORE", "identical" => "SKIP-PRESENT", "conflict" or "conflict-apply" or "opposite-dry" or "opposite-apply" => "CONFLICT",
                 "failure" => "FAILED", "no-version" => "NO-VERSION", _ => "RESTORED"
             };
             Require(result.Classification == expected, "Recovery page classification: " + mode);
@@ -61,10 +62,31 @@ internal static partial class RunChecks
                     store.CountUnresolvedIntents(fx.Pair.PairId) == 0, "dry restore has no mutation or historical-byte download");
                 continue;
             }
-            Require(store.RecoveryRestoreProtected(fx.Pair.PairId, result.Destination ?? source.Path),
-                "mutation retains durable next-run protection, including byte-read failures");
+            Require(store.RecoveryRestoreProtected(fx.Pair.PairId, result.Destination ?? source.Path) ==
+                (mode is not ("failure" or "no-version" or "conflict-apply" or "opposite-apply")),
+                "only an effect intent retains durable next-run protection; prewrite failures are informational");
+            if (mode is "conflict-apply" or "opposite-apply")
+            {
+                var notice = store.RecoveryRestoreNoticesPage(fx.Pair.PairId).Single();
+                Require(notice.Kind == NoticeKind.Info && notice.ConflictOperation?.Actions.Count == 0 &&
+                    fx.WriterA.Puts == 0 && fx.WriterA.Preserves == 0, "real conflict writes no file and freezes no intent");
+                await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, notice.NoticeId!, NoticeChoices.RetryNow, default);
+                Require(fx.WriterA.Puts == 0, "Retry rechecks conflict without replacing current bytes");
+                await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, notice.NoticeId!, "restore-as-copy", default);
+                Require(fx.WriterA.Puts == 1 && (mode == "conflict-apply"
+                    ? await fx.A.ObserveAsync(source.Path, default)
+                    : await fx.B.ObserveAsync(source.Path, default)) is { Hash: var preserved } && preserved != source.Hash,
+                    "copy choice keeps current original and creates one separate restored file");
+                continue;
+            }
             if (mode == "no-version")
             {
+                var notice = store.RecoveryRestoreNoticesPage(fx.Pair.PairId).Single();
+                await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, notice.NoticeId!, NoticeChoices.Ignore, default);
+                Require(store.NoticeById(fx.Pair.PairId, notice.NoticeId!) is { Closed: true }, "actionless Ignore closes the notice");
+                await run.RestoreRecoveryPageAsync(fx.Pair.PairId, new RecoveryQuery(Id: recovery.RecoveryId), false, false, default);
+                await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, notice.NoticeId!, "dismiss", default);
+                Require(store.NoticeById(fx.Pair.PairId, notice.NoticeId!) is { Closed: true }, "Dismiss closes a reopened actionless notice");
                 fx.A.Seed(source.Path, "retained bytes");
                 store.MarkFirstSyncDone(fx.Pair.PairId);
                 await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
@@ -110,11 +132,186 @@ internal static partial class RunChecks
                 replay.SkippedActions.Single().ActionId == oldDelete.ActionId &&
                 replay.Notices.Single().Detail.Contains("fresh incremental", StringComparison.Ordinal),
                 "old reviewed deletion stays blocked after restore notice closes; fresh adoption remains available");
+            var noticeId = ShortId.Make("rrs", fx.Pair.PairId, recovery.RecoveryId);
+            var completed = store.NoticeById(fx.Pair.PairId, noticeId)!.Value.Notice;
+            var oldActionId = completed.ConflictOperation!.Actions.Single().ActionId;
+            await fx.A.DeleteAsync(oldDelete with { Target = Side.A,
+                ExpectedTarget = await fx.A.ObserveAsync(result.Destination!, default) }, default);
+            var repeat = (await run.RestoreRecoveryPageAsync(fx.Pair.PairId, new RecoveryQuery(Id: recovery.RecoveryId),
+                false, false, default)).Single();
+            Require(repeat.Classification == "RESTORED" && fx.WriterA.Puts == 2 &&
+                store.NoticeById(fx.Pair.PairId, noticeId)!.Value.Notice.ConflictOperation!.Actions.Single().ActionId != oldActionId,
+                "a missing completed destination starts a fresh durable executor attempt under the same receipt notice");
+            await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            fx.A.Seed(repeat.Destination!, "changed since completion");
+            var changed = (await run.RestoreRecoveryPageAsync(fx.Pair.PairId, new RecoveryQuery(Id: recovery.RecoveryId), false, false, default)).Single();
+            Require(changed.Classification == "CONFLICT", "completed changed destination is never replayed over current bytes");
+            var freshCopy = (await run.RestoreRecoveryPageAsync(fx.Pair.PairId, new RecoveryQuery(Id: recovery.RecoveryId), true, false, default)).Single();
+            Require(freshCopy.Classification == "RESTORED" && freshCopy.Destination != repeat.Destination && fx.WriterA.Puts == 3,
+                "explicit as-copy after completion creates a fresh attempt without replacing changed bytes");
         }
+        await RecoveryBulkSelectionCheckAsync();
+        await RecoveryCrashPreviewGateCheckAsync();
+        await RecoveryLateOppositeChangeCheckAsync();
         RecoveryPlanningSnapshotCheck();
         RecoveryDeletionEvidenceAttributionCheck();
         Require(SyncRun.RecoveryCopyPath("Folder/report.txt", new DateTimeOffset(2026, 1, 2, 0, 0, 0, TimeSpan.Zero), 2) ==
             "Folder/report (restored 2026-01-02) 2.txt", "bounded copy names preserve directory and extension");
+    }
+
+    private static RecoveryRecord RetainRecoveryFixture(Fixture fx, ItemState source, string actionId)
+    {
+        var action = new SyncAction(actionId, 0, ActionKind.Delete, Side.A, source.Path, null, null, source, true, null);
+        fx.Store.CommitResult(fx.Pair.PairId, fx.Store.BeginGeneration(fx.Pair.A.RootId, "fixture"), action,
+            new ActionResult(actionId, Outcome.Done, null, null,
+                new RecoveryRef(Side.A, "fixture-archive-" + actionId, source.VersionId, source.Hash!, source.Size), null));
+        return fx.Store.RecoveryPage(fx.Pair.PairId, new RecoveryQuery(ActionId: actionId)).Single();
+    }
+
+    private static async Task RecoveryBulkSelectionCheckAsync()
+    {
+        var root = LocalChecks.FreshRoot("recovery-bulk-" + Guid.NewGuid().ToString("N"));
+        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System);
+        var fx = Build(suppliedStore: store);
+        fx.A.DropboxHashes = fx.B.DropboxHashes = true;
+        var bytes = Encoding.UTF8.GetBytes("retained bytes");
+        var source = new ItemState("Folder/file.txt", ItemKind.File, "archive", "revision",
+            DropboxContentHash.Compute(bytes), bytes.Length, DateTimeOffset.UtcNow.AddDays(-1), ItemFlags.None);
+        RetainRecoveryFixture(fx, source, "archive-first");
+        RetainRecoveryFixture(fx, source with { Path = "folder/FILE.txt" }, "archive-second");
+        var rows = store.RecoveryPage(fx.Pair.PairId, new RecoveryQuery()).ToArray();
+        var newest = rows.OrderByDescending(row => row.Created).ThenByDescending(row => row.RecoveryId, StringComparer.Ordinal).First();
+        var archive = new RecoveryFixtureWriter(fx.WriterA, source, bytes);
+        fx.Provider.AddWriter(fx.Pair.A, archive);
+        var run = fx.Run();
+        var results = new List<RecoveryRestoreItem>();
+        string? after = null;
+        for (var page = 0; page < 2; page++)
+        {
+            var result = (await run.RestoreRecoveryPageAsync(fx.Pair.PairId,
+                new RecoveryQuery(PathPrefix: "folder", AfterId: after, Limit: 1), false, false, default)).Single();
+            results.Add(result);
+            after = result.Id;
+        }
+        Require(results.Single(item => item.Classification == "RESTORED").Id == newest.RecoveryId &&
+            results.Count(item => item.Classification == "SUPERSEDED") == 1 && fx.WriterA.Puts == 1 &&
+            store.RecoveryRestoreNoticesPage(fx.Pair.PairId).Count == 1,
+            "newest path winner spans page boundaries; superseded rows create neither notice nor write");
+        var older = rows.Single(row => row.RecoveryId != newest.RecoveryId);
+        var filtered = (await run.RestoreRecoveryPageAsync(fx.Pair.PairId,
+            new RecoveryQuery(ActionId: older.ActionId), false, true, default)).Single();
+        Require(filtered.Classification != "SUPERSEDED", "winner selection is within the filter, not globally newest");
+        var explicitCopy = await run.RestoreRecoveryPageAsync(fx.Pair.PairId, new RecoveryQuery(), true, false, default);
+        Require(explicitCopy.All(item => item.Classification is "RESTORED" or "SKIP-PRESENT") &&
+            explicitCopy.Select(item => item.Destination).Distinct(StringComparer.OrdinalIgnoreCase).Count() == 2,
+            "as-copy permits older rows while same-path rows execute serially");
+    }
+
+    private static async Task RecoveryCrashPreviewGateCheckAsync()
+    {
+        foreach (var effectWritten in new[] { false, true })
+        {
+            var root = LocalChecks.FreshRoot("recovery-crash-" + Guid.NewGuid().ToString("N"));
+            using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System);
+            var fx = Build(suppliedStore: store);
+            fx.A.DropboxHashes = fx.B.DropboxHashes = true;
+            var bytes = Encoding.UTF8.GetBytes("retained bytes");
+            var source = new ItemState("file.txt", ItemKind.File, "archive", "revision", DropboxContentHash.Compute(bytes),
+                bytes.Length, DateTimeOffset.UtcNow.AddDays(-1), ItemFlags.None);
+            var record = RetainRecoveryFixture(fx, source, "crash-archive");
+            var action = new SyncAction("rrs-crashed-attempt", 0, ActionKind.CopyNew, Side.A, source.Path,
+                null, source, null, false, null) { SuppressReconciledBaseline = true };
+            var id = ShortId.Make("rrs", fx.Pair.PairId, record.RecoveryId);
+            var notice = new Notice(fx.Pair.PairId, 0, NoticeKind.UserDecision, source.Path, "pending", SyncRun.RecoveryRestorePending,
+                id, ConflictOperation: new ConflictNoticeOperation(record.RecoveryId, source.Path, [action], []));
+            store.AddNotices([notice]);
+            store.RecordIntent(fx.Pair.PairId, action);
+            if (effectWritten) fx.A.Seed(source.Path, "retained bytes");
+            var archive = new RecoveryFixtureWriter(fx.WriterA, source, bytes);
+            fx.Provider.AddWriter(fx.Pair.A, archive);
+            var run = fx.Run();
+            var before = store.NoticeById(fx.Pair.PairId, id)!.Value;
+            await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            var afterPreview = store.NoticeById(fx.Pair.PairId, id)!.Value;
+            Require(fx.WriterA.Puts == 0 && archive.Opens == 0 && afterPreview.Closed == before.Closed &&
+                afterPreview.Notice.ReasonKey == before.Notice.ReasonKey && afterPreview.Notice.Detail == before.Notice.Detail &&
+                afterPreview.Notice.ConflictOperation!.Actions.Single().ActionId == action.ActionId &&
+                store.RecoveryRestoreProtected(fx.Pair.PairId, source.Path),
+                "first-sync preview leaves restore state and frozen protections unchanged, with no retry writes");
+            // A queued restore waits for an existing run, rather than refusing or preparing outside its gate.
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var release = new ManualResetEventSlim();
+            var occupying = Task.Run(() => run.UpdatePairSettingsAsync(() => { entered.SetResult(); release.Wait(); }, default));
+            await entered.Task;
+            var queued = run.RestoreRecoveryPageAsync(fx.Pair.PairId, new RecoveryQuery(Id: record.RecoveryId), false, false, default);
+            try { Require(!queued.IsCompleted, "restore queues behind the engine gate"); }
+            finally { release.Set(); }
+            await occupying;
+            var result = (await queued).Single();
+            Require(result.Classification == "RESTORED" && fx.WriterA.Puts == (effectWritten ? 0 : 1) &&
+                store.CountUnresolvedIntents(fx.Pair.PairId) == 0,
+                "crash reconciliation verifies an existing effect or retries the exact frozen absent destination once");
+            await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, id, NoticeChoices.Ignore, default);
+            Require(store.RecoveryRestoreProtected(fx.Pair.PairId, source.Path), "Ignore on a frozen intent retains protection");
+            await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, id, NoticeChoices.RetryNow, default);
+            Require(fx.WriterA.Puts == (effectWritten ? 0 : 1), "Retry after frozen Ignore never duplicates a verified write");
+            fx.A.Seed(source.Path, "unrelated current bytes");
+            store.RecordIntent(fx.Pair.PairId, action);
+            var superseded = (await run.RestoreRecoveryPageAsync(fx.Pair.PairId, new RecoveryQuery(Id: record.RecoveryId), false, false, default)).Single();
+            Require(superseded.Classification == "CONFLICT" && !store.RecoveryRestoreProtected(fx.Pair.PairId, source.Path) &&
+                store.CountUnresolvedIntents(fx.Pair.PairId) == 0 &&
+                store.NoticeById(fx.Pair.PairId, id)!.Value.Notice.ConflictOperation!.Actions.Count == 0,
+                "definitively superseded create intent releases the unrelated live entity and exposes copy/dismiss");
+            await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, id, "dismiss", default);
+            Require(store.NoticeById(fx.Pair.PairId, id) is { Closed: true }, "superseded frozen intent can be dismissed after reconciliation");
+        }
+    }
+
+    private static async Task RecoveryLateOppositeChangeCheckAsync()
+    {
+        foreach (var readyBeforeCrash in new[] { false, true })
+        {
+        var root = LocalChecks.FreshRoot("recovery-late-opposite-" + Guid.NewGuid().ToString("N"));
+        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System);
+        var fx = Build(suppliedStore: store);
+        fx.A.DropboxHashes = fx.B.DropboxHashes = true;
+        var bytes = Encoding.UTF8.GetBytes("retained bytes");
+        var source = new ItemState("file.txt", ItemKind.File, "archive", "revision", DropboxContentHash.Compute(bytes),
+            bytes.Length, DateTimeOffset.UtcNow.AddDays(-1), ItemFlags.None);
+        var record = RetainRecoveryFixture(fx, source, "late-archive");
+        fx.Provider.AddWriter(fx.Pair.A, new RecoveryFixtureWriter(fx.WriterA, source, bytes));
+        var run = fx.Run();
+        await run.RestoreRecoveryPageAsync(fx.Pair.PairId, new RecoveryQuery(Id: record.RecoveryId), false, false, default);
+        if (readyBeforeCrash)
+        {
+            var pending = store.RecoveryRestoreNoticesPage(fx.Pair.PairId).Single();
+            var verified = (await fx.A.ObserveAsync(source.Path, default))!;
+            store.AddNotices([pending with { ReasonKey = SyncRun.RecoveryRestoreReady, Kind = NoticeKind.Info,
+                ConflictOperation = pending.ConflictOperation! with
+                { Actions = [pending.ConflictOperation!.Actions.Single() with { Source = verified }] } }]);
+        }
+        var other = fx.B.Seed(source.Path, "current opposite bytes");
+        store.MarkFirstSyncDone(fx.Pair.PairId);
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        var notice = store.RecoveryRestoreNoticesPage(fx.Pair.PairId).Single();
+        Require(store.RecoveryRestoreProtected(fx.Pair.PairId, source.Path) &&
+            notice.Detail.Contains("side B", StringComparison.Ordinal) && notice.Detail.Contains("rename or move", StringComparison.Ordinal) &&
+            (await fx.A.ObserveAsync(source.Path, default))!.Hash == source.Hash &&
+            (await fx.B.ObserveAsync(source.Path, default))!.Hash == other.Hash && fx.WriterB.Puts == 0,
+            "late opposite change preserves both versions and names the exact non-destructive manual resolution");
+        await fx.B.MoveAsync(new SyncAction("manual-rename", 0, ActionKind.Move, Side.B, "other-current.txt",
+            source.Path, null, other, false, null), default);
+        await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, notice.NoticeId!, NoticeChoices.RetryNow, default);
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        Require(!store.RecoveryRestoreProtected(fx.Pair.PairId, source.Path) &&
+            (await fx.A.ObserveAsync(source.Path, default))!.Hash == source.Hash &&
+            (await fx.B.ObserveAsync(source.Path, default))!.Hash == source.Hash &&
+            (await fx.A.ObserveAsync("other-current.txt", default))!.Hash == other.Hash &&
+            (await fx.B.ObserveAsync("other-current.txt", default))!.Hash == other.Hash,
+            "renaming only the opposite version then Retry and convergence releases the hold with both byte versions preserved");
+        }
     }
 
     private static void RecoveryDeletionEvidenceAttributionCheck()
@@ -159,7 +356,9 @@ internal static partial class RunChecks
         using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System);
         var fx = Build(suppliedStore: store);
         var pending = new Notice(fx.Pair.PairId, 0, NoticeKind.UserDecision, "Folder/file.txt", "pending",
-            SyncRun.RecoveryRestorePending, ConflictOperation: new ConflictNoticeOperation("snapshot-recovery", null, [], []));
+            SyncRun.RecoveryRestorePending, ConflictOperation: new ConflictNoticeOperation("snapshot-recovery", null,
+                [new SyncAction("rrs-snapshot", 0, ActionKind.CopyNew, Side.A, "Folder/file.txt", null, null, null, false, null)
+                    { SuppressReconciledBaseline = true }], []));
         store.AddNotices([pending]);
         using (var snapshot = store.OpenPlanningProtection(fx.Pair))
         {

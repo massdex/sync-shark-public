@@ -1,3 +1,5 @@
+using Microsoft.Data.Sqlite;
+
 namespace Massdex.SyncShark.V2;
 
 /// <summary>Recovery and restore-notice keyset paging against a real SQLite store: filters, continuation and isolation.</summary>
@@ -98,13 +100,13 @@ internal static class RecoveryQueryChecks
         }
 
         store.AddNotices([
-            new Notice(pair.PairId, 0, NoticeKind.Info, "Root/guard", "Pending fixture", "recovery-restore-pending"),
-            new Notice(pair.PairId, 0, NoticeKind.Info, "Root/guard/child", "Pending child fixture", "recovery-restore-pending"),
-            new Notice(pair.PairId, 0, NoticeKind.Info, "Root/guard/sibling", "Pending sibling fixture", "recovery-restore-pending"),
+            FrozenPending(pair.PairId, "Root/guard", "guard-recovery"),
+            FrozenPending(pair.PairId, "Root/guard/child", "guard-child-recovery"),
+            FrozenPending(pair.PairId, "Root/guard/sibling", "guard-sibling-recovery"),
             new Notice(pair.PairId, 0, NoticeKind.Info, "Root/ready", "Ready fixture", "recovery-restore-ready"),
             new Notice(pair.PairId, 0, NoticeKind.Info, "Root/ready/closed", "Ready closed fixture", "recovery-restore-ready"),
             new Notice(pair.PairId, 0, NoticeKind.Info, "Root/other", "Other fixture", "other-reason"),
-            new Notice(other.PairId, 0, NoticeKind.Info, "Root/otherpair", "Other pair fixture", "recovery-restore-pending"),
+            FrozenPending(other.PairId, "Root/otherpair", "other-pair-recovery"),
         ]);
         var readyClosed = store.OpenNotices(pair.PairId).Single(notice => notice.Path == "Root/ready/closed");
         store.CloseNotice(readyClosed.NoticeId!, "resolved");
@@ -185,7 +187,8 @@ internal static class RecoveryQueryChecks
         var durableId = ShortId.Make("rrs", pair.PairId, recoveryId);
         var pending = new Notice(pair.PairId, 0, NoticeKind.UserDecision, "Root/transition",
             "Pending transition", "recovery-restore-pending", durableId,
-            ConflictOperation: new ConflictNoticeOperation(recoveryId, null, [], []));
+            ConflictOperation: new ConflictNoticeOperation(recoveryId, null,
+                [FrozenIntent(pair.PairId, recoveryId, "Root/transition")], []));
         store.AddNotices([pending]);
         LocalChecks.Require(store.NoticeById(pair.PairId, durableId) is { Closed: false } found &&
             found.Notice.ReasonKey == "recovery-restore-pending",
@@ -201,7 +204,8 @@ internal static class RecoveryQueryChecks
             "the transitioned ready notice no longer protects");
         store.AddNotices([pending with { ReasonKey = "recovery-restore-pending", Kind = NoticeKind.UserDecision,
             Path = "Root/transition-copy", Detail = "Retry destination",
-            ConflictOperation = new ConflictNoticeOperation(recoveryId, "Root/transition-copy", [], []) }]);
+            ConflictOperation = new ConflictNoticeOperation(recoveryId, "Root/transition-copy",
+                [FrozenIntent(pair.PairId, recoveryId, "Root/transition-copy")], []) }]);
         var retried = store.NoticeById(pair.PairId, durableId);
         LocalChecks.Require(retried is { Closed: false } retryRow &&
             retryRow.Notice.ReasonKey == "recovery-restore-pending" &&
@@ -250,12 +254,177 @@ internal static class RecoveryQueryChecks
             ShortId.Make("rrs", pair.PairId, "memory-derived")) is not null,
             "in-memory fixture derives the stable rrs id without an explicit id");
 
+        // Finding 2: only a notice with a frozen intent (bytes may have been written) may hold a path.
+        var emptyPair = Pair("pair-empty");
+        store.SavePair(emptyPair);
+        var noNotices = RecoveryRestoreProtection.Create(store, emptyPair.PairId);
+        var noNoticeLookups = store.RecoveryRestoreLookups;
+        LocalChecks.Require(!noNotices.Active && noNotices.Count == 0 &&
+            !noNotices.Covers("Root/anything", false) && !noNotices.Covers("Root", true) &&
+            store.RecoveryRestoreLookups == noNoticeLookups,
+            "a pair with no notices is inert: one gate, no path and no per-item SQL");
+        var gate = Pair("pair-gate");
+        store.SavePair(gate);
+        store.AddNotices([ActionlessPending(gate.PairId, "Root/actionless", "gate-actionless")]);
+        LocalChecks.Require(!store.RecoveryRestoreProtected(gate.PairId, "Root/actionless") &&
+            !store.HasPendingRestoreHolds(gate.PairId),
+            "an action-less failure notice (CONFLICT/PROTECTED/NO-VERSION/FAILED) holds nothing");
+        var gateQueries = store.RecoveryRestoreGateQueries;
+        var inert = RecoveryRestoreProtection.Create(store, gate.PairId);
+        var inertLookups = store.RecoveryRestoreLookups;
+        for (var index = 0; index < 1_000; index++) inert.Covers("Root/missing-" + index, index % 2 == 0);
+        LocalChecks.Require(!inert.Active && inert.Count == 0 && store.RecoveryRestoreGateQueries == gateQueries + 1 &&
+            store.RecoveryRestoreLookups == inertLookups,
+            "no frozen intent: one indexed gate per run and zero per-item SQL");
+
+        // Active-path behaviour: the snapshot answers self, ancestor and descendant with separator boundaries.
+        store.AddNotices([FrozenPending(gate.PairId, "Root/held", "gate-held")]);
+        var activeProtection = RecoveryRestoreProtection.Create(store, gate.PairId);
+        var activeLookups = store.RecoveryRestoreLookups;
+        LocalChecks.Require(activeProtection.Active && activeProtection.Count == 1 &&
+            activeProtection.Covers("Root/held", false) && activeProtection.Covers("root/HELD/child", false) &&
+            activeProtection.Covers("Root", true) && activeProtection.Covers("Root/held/deep", true) &&
+            !activeProtection.Covers("Root/held-sibling", false) && !activeProtection.Covers("Root", false),
+            "a held restore path protects its entity, ancestor depth and descendants, never a separator sibling");
+        for (var index = 0; index < 1_000; index++) activeProtection.Covers("Root/probe-" + index, index % 2 == 0);
+        LocalChecks.Require(store.RecoveryRestoreLookups == activeLookups,
+            "a materialized hold snapshot performs no SQL while Covers runs");
+        var heldId = store.RecoveryRestoreNoticesPage(gate.PairId).Single(notice => notice.Path == "Root/held").NoticeId;
+        store.CloseNotice(heldId!, "verified");
+        LocalChecks.Require(activeProtection.Covers("Root/held", false) &&
+            !RecoveryRestoreProtection.Create(store, gate.PairId).Active,
+            "a run snapshot stays consistent across a live close; the next run's gate releases it");
+
+        // Beyond the bounded cap the cached indexed fallback retains the same answers without a path set.
+        var overflowPair = Pair("pair-overflow");
+        store.SavePair(overflowPair);
+        store.AddNotices(Enumerable.Range(0, 5)
+            .Select(index => FrozenPending(overflowPair.PairId, "Root/held-" + index, "overflow-" + index)).ToArray());
+        var overflow = RecoveryRestoreProtection.Create(store, overflowPair.PairId, pathLimit: 2);
+        var overflowLookups = store.RecoveryRestoreLookups;
+        LocalChecks.Require(overflow.Active && overflow.Count == 0 && overflow.Covers("Root/held-0", false),
+            "beyond the path cap the fallback still protects held paths");
+        var firstLookup = store.RecoveryRestoreLookups;
+        LocalChecks.Require(firstLookup == overflowLookups + 1 && overflow.Covers("Root/held-0", false) &&
+            store.RecoveryRestoreLookups == firstLookup,
+            "the overflow fallback caches a repeated held-path lookup");
+        LocalChecks.Require(!overflow.Covers("Root/unheld", false) && store.RecoveryRestoreLookups == firstLookup + 1 &&
+            !overflow.Covers("Root/unheld", false) && store.RecoveryRestoreLookups == firstLookup + 1,
+            "the overflow fallback caches misses within its bounded cache");
+
+        // Beyond the cap, one planning scope must keep one snapshot: live closes and additions are not observed.
+        var frozenPair = Pair("pair-frozen");
+        store.SavePair(frozenPair);
+        store.AddNotices([
+            FrozenPending(frozenPair.PairId, "Root/frozen-a", "frozen-a"),
+            FrozenPending(frozenPair.PairId, "Root/frozen-b", "frozen-b")]);
+        var capped = RecoveryRestoreProtection.Create(store, frozenPair.PairId, pathLimit: 1);
+        LocalChecks.Require(capped.Active && !capped.SnapshotComplete, "a capped run keeps indexed fallback mode");
+        using (var planning = store.OpenPlanningProtection(frozenPair))
+        {
+            var bound = capped.Bind(planning, frozenPair.PairId);
+            // Pin the snapshot without caching any held path, so the post-mutation reads really use the transaction.
+            LocalChecks.Require(!bound("Root/decoy", false), "the planning fallback pins its read snapshot");
+            var frozenNoticeId = store.RecoveryRestoreNoticesPage(frozenPair.PairId)
+                .Single(notice => notice.Path == "Root/frozen-a").NoticeId;
+            store.CloseNotice(frozenNoticeId!, "verified");
+            store.AddNotices([FrozenPending(frozenPair.PairId, "Root/live-added", "frozen-live")]);
+            LocalChecks.Require(!store.RecoveryRestoreProtected(frozenPair.PairId, "Root/frozen-a"),
+                "the live writer released the closed hold");
+            LocalChecks.Require(bound("Root/frozen-a", false) && !bound("Root/live-added", false),
+                "a capped planning fallback stays frozen against live closes and additions");
+        }
+
+        // Finding 1: the newest row for a path is chosen within the filters, across pages.
+        var newestPair = Pair("pair-newest");
+        store.SavePair(newestPair);
+        clock.Advance(TimeSpan.FromMinutes(1));
+        var winnerSince = clock.GetUtcNow();
+        var olderId = Seed(store, newestPair, "newest-old", Side.A, "Root/winner");
+        clock.Advance(TimeSpan.FromMinutes(1));
+        var newerId = Seed(store, newestPair, "newest-new", Side.A, "Root/winner");
+        clock.Advance(TimeSpan.FromMinutes(1));
+        Seed(store, newestPair, "newest-other", Side.B, "Root/winner-deep");
+        LocalChecks.Require(store.RecoveryNewestForPath(newestPair.PairId,
+                new RecoveryQuery(AfterId: "zzzz", Limit: 1), "root/WINNER")?.RecoveryId == newerId,
+            "newest for a path ignores AfterId/Limit, matches ignoring case and picks the greatest Created");
+        LocalChecks.Require(store.RecoveryNewestForPath(newestPair.PairId,
+                new RecoveryQuery(Since: winnerSince.AddTicks(1)), "Root/winner")?.RecoveryId == newerId,
+            "newest retains the since filter");
+        LocalChecks.Require(store.RecoveryNewestForPath(newestPair.PairId,
+                new RecoveryQuery(PathPrefix: "Root/elsewhere"), "Root/winner") is null &&
+            store.RecoveryNewestForPath(newestPair.PairId, new RecoveryQuery(Side: Side.B), "Root/winner") is null,
+            "newest retains the path-prefix and side filters");
+        LocalChecks.Require(store.RecoveryNewestForPath(newestPair.PairId,
+                new RecoveryQuery(ActionId: "newest-old"), "Root/winner")?.RecoveryId == olderId,
+            "newest retains the action filter");
+        var tiePair = Pair("pair-tie");
+        store.SavePair(tiePair);
+        var tieA = Seed(store, tiePair, "tie-a", Side.A, "Root/tie");
+        var tieB = Seed(store, tiePair, "tie-b", Side.A, "Root/tie");
+        var tieWinner = new[] { tieA, tieB }.OrderBy(id => id, StringComparer.Ordinal).Last();
+        LocalChecks.Require(store.RecoveryNewestForPath(tiePair.PairId, new RecoveryQuery(), "Root/tie")?.RecoveryId == tieWinner,
+            "equal Created times break deterministically by greater recovery id");
+
+        // Low migration fix: an older binary writes path_key as NULL/stale and leaves restore_hold at zero.
+        var migrateState = Path.Combine(LocalChecks.FreshRoot("recovery-migrate-" + Guid.NewGuid().ToString("N")), "state");
+        var migratePair = Pair("pair-migrate");
+        string migrateRow;
+        using (var first = SqliteStateStore.Open(migrateState, StorageChecks.Fast, new ManualClock()))
+        {
+            first.SavePair(migratePair);
+            first.AddNotices([FrozenPending(migratePair.PairId, "Root/original", "migrate-recovery")]);
+            migrateRow = Seed(first, migratePair, "migrate-row", Side.A, "Root/winner");
+        }
+        using (var raw = new SqliteConnection(new SqliteConnectionStringBuilder
+            { DataSource = SqliteStateStore.DatabasePath(migrateState), Pooling = false }.ToString()))
+        {
+            raw.Open();
+            using (var command = raw.CreateCommand())
+            {
+                command.CommandText = "UPDATE notice SET path='Root/moved', path_key=NULL, restore_hold=0 " +
+                    "WHERE reason_key='recovery-restore-pending';";
+                command.ExecuteNonQuery();
+            }
+            using (var command = raw.CreateCommand())
+            {
+                command.CommandText = "UPDATE recovery SET path='Root/moved-winner', path_key=NULL WHERE recovery_id=$id;";
+                command.Parameters.AddWithValue("$id", migrateRow);
+                command.ExecuteNonQuery();
+            }
+        }
+        using (var reopened = SqliteStateStore.Open(migrateState, StorageChecks.Fast, new ManualClock()))
+        {
+            LocalChecks.Require(reopened.RecoveryRestoreProtected(migratePair.PairId, "Root/moved") &&
+                !reopened.RecoveryRestoreProtected(migratePair.PairId, "Root/original") &&
+                reopened.HasPendingRestoreHolds(migratePair.PairId),
+                "reopen recomputes a restore notice's path key and hold after an older binary wrote the row");
+            LocalChecks.Require(reopened.RecoveryNewestForPath(migratePair.PairId, new RecoveryQuery(),
+                    "Root/moved-winner")?.RecoveryId == migrateRow,
+                "reopen fills a Recovery row's path key after an older binary inserted it");
+        }
+
         Console.WriteLine("Recovery query checks passed.");
     }
 
     private static PairDef Pair(string pairId) => new(pairId, pairId,
         new RootDef(pairId + "-a", SyncProviders.Local, null, "/fixture/a", pairId + "-object-a"),
         new RootDef(pairId + "-b", SyncProviders.Local, null, "/fixture/b", pairId + "-object-b"), [], [], true);
+
+    // The restore engine's create-only intent: rrs id and SuppressReconciledBaseline, the frozen-intent predicate.
+    private static SyncAction FrozenIntent(string pairId, string recoveryId, string path) =>
+        new(ShortId.Make("rrs", pairId, recoveryId), 0, ActionKind.CopyNew, Side.A, path, null, null, null, false, null)
+            { SuppressReconciledBaseline = true };
+
+    private static Notice FrozenPending(string pairId, string path, string recoveryId) =>
+        new(pairId, 0, NoticeKind.UserDecision, path, "Pending fixture", "recovery-restore-pending",
+            ConflictOperation: new ConflictNoticeOperation(recoveryId, path,
+                [FrozenIntent(pairId, recoveryId, path)], []));
+
+    // A failure before any write (CONFLICT, PROTECTED, NO-VERSION, FAILED): informational, never a hold.
+    private static Notice ActionlessPending(string pairId, string path, string recoveryId) =>
+        new(pairId, 0, NoticeKind.UserDecision, path, "Failed fixture", "recovery-restore-pending",
+            ConflictOperation: new ConflictNoticeOperation(recoveryId, path, [], []));
 
     private static string Seed(SqliteStateStore store, PairDef pair, string actionId, Side side, string path)
     {

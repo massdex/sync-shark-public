@@ -238,13 +238,15 @@ public static class SyncCliRegistry
             "the product state or the running application", "direct|running-application",
             "--pair,--path,--choice,--key,--generation,--account,--yes,--timeout-seconds,--name,--offset,--page-token", Mutating: true, RequiresYes: true,
             RequiresPair: true),
-        new("recovery list", "recovery list --pair <exact-id> [--since <timestamp>] [--path-prefix <relative-path>] [--side local|dropbox] [--action-id <exact-id>] [--after <recovery-id>] [--limit 1..500] | recovery list --pair <exact-id> [--account <exact-id>] [--search <text>] [--limit 1..200] [--offset <n>] [--deleted]",
+        new("recovery list", "recovery list --pair <exact-id> [--since <timestamp>] [--path-prefix <relative-path>] [--side local|dropbox] [--action-id <exact-id>] [--after <recovery-id>] [--limit 1..500] [--verify] | recovery list --pair <exact-id> [--account <exact-id>] [--search <text>] [--limit 1..200] [--offset <n>] [--deleted]",
             SyncCliRequestKind.State,
             "none", "retained recovery catalog and optional deleted cloud items, including Google Trash; core v2 adds " +
-            "bounded keyset filters that return one page plus the next recovery-id cursor and each row's current-state " +
-            "classification and destination; partial-listing warnings are retained",
+            "bounded keyset filters that return one page plus the next recovery-id cursor and each row's classification; " +
+            "the default is a store-only read (retained, expired or notice open) that contacts no provider and waits for " +
+            "no run, while --verify adds the live per-row classification and destination by observing each endpoint; " +
+            "partial-listing warnings are retained",
             "the product state or the running application", "direct|running-application",
-            "--pair,--account,--search,--limit,--offset,--deleted,--since,--path-prefix,--side,--action-id,--after",
+            "--pair,--account,--search,--limit,--offset,--deleted,--since,--path-prefix,--side,--action-id,--after,--verify",
             RequiresPair: true),
         new("recovery revisions", "recovery revisions --pair <exact-id> --account <exact-id> --path <relative-path>",
             SyncCliRequestKind.State, "none", "loads exact provider revision history (Google binary files or Dropbox)", "the account provider",
@@ -1253,9 +1255,9 @@ public static class SyncCliRegistry
                 // silently ignores a filter the caller asked for.
                 if (runtime is not V2.V2CliRuntime &&
                     (invocation.Flag("--since") || invocation.Flag("--path-prefix") || invocation.Flag("--side") ||
-                     invocation.Flag("--action-id") || invocation.Flag("--after")))
+                     invocation.Flag("--action-id") || invocation.Flag("--after") || invocation.Flag("--verify")))
                     throw new SyncCliUnsupportedException(
-                        "Bounded recovery paging is available in core v2. Nothing was read.");
+                        "Bounded recovery paging and --verify are available in core v2. Nothing was read.");
                 return await operations.ExecuteSurfaceAsync(invocation, cancellationToken);
             case "recovery usage":
                 var recovery = await operations.LoadRecoveryAsync(invocation.PairId!, null, 1, cancellationToken);

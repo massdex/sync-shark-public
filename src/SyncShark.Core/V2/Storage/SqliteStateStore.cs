@@ -661,6 +661,56 @@ public sealed partial class SqliteStateStore : IStateStore
         });
     }
 
+    /// <summary>Test seam: indexed per-path lookups issued by the restore-protection fallback.</summary>
+    internal long RecoveryRestoreLookups { get; private set; }
+
+    /// <summary>Test seam: one indexed existence gate per run, counted apart from per-path lookups.</summary>
+    internal long RecoveryRestoreGateQueries { get; private set; }
+
+    /// <summary>One indexed EXISTS on the held-restore partial index; no per-path work.</summary>
+    public bool HasPendingRestoreHolds(string pairId) => InStore(() =>
+    {
+        if (PairNo(pairId) is not { } pairNo) return false;
+        RecoveryRestoreGateQueries++;
+        return StoreSchema.Scalar(_connection, null,
+            "SELECT 1 FROM notice WHERE pair_no=$p AND state='open' " +
+            "AND reason_key='recovery-restore-pending' AND restore_hold=1 LIMIT 1;",
+            ("$p", pairNo)) is not null;
+    });
+
+    /// <summary>Held restore paths streamed in bounded pages from the held-restore index; never materializes the pair.</summary>
+    public IEnumerable<string> ReadPendingRestoreHoldPaths(string pairId)
+    {
+        string? afterKey = null;
+        var afterId = "";
+        while (true)
+        {
+            var page = InStore(() =>
+            {
+                if (PairNo(pairId) is not { } pairNo) return new List<(string Path, string Key, string Id)>();
+                var rows = new List<(string Path, string Key, string Id)>();
+                using var command = StoreSchema.Command(_connection, null,
+                    "SELECT path,path_key,notice_id FROM notice WHERE pair_no=$p AND state='open' " +
+                    "AND reason_key='recovery-restore-pending' AND restore_hold=1 AND path_key IS NOT NULL " +
+                    (afterKey is null ? "" : "AND (path_key>$after_key OR (path_key=$after_key AND notice_id>$after_id)) ") +
+                    "ORDER BY path_key,notice_id LIMIT 256;");
+                command.Parameters.AddWithValue("$p", pairNo);
+                if (afterKey is not null)
+                {
+                    command.Parameters.AddWithValue("$after_key", afterKey);
+                    command.Parameters.AddWithValue("$after_id", afterId);
+                }
+                using var reader = command.ExecuteReader();
+                while (reader.Read()) rows.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+                return rows;
+            });
+            if (page.Count == 0) yield break;
+            foreach (var row in page) yield return row.Path;
+            afterKey = page[^1].Key;
+            afterId = page[^1].Id;
+        }
+    }
+
     public IReadOnlyList<Notice> RecoveryRestoreReadyAt(string pairId, IReadOnlyCollection<string> paths)
     {
         if (paths.Count == 0) return [];
@@ -698,8 +748,10 @@ public sealed partial class SqliteStateStore : IStateStore
     public bool RecoveryRestoreProtected(string pairId, string path, bool descendants = false, bool includeReady = false) => InStore(() =>
     {
         if (PairNo(pairId) is not { } pairNo) return false;
+        RecoveryRestoreLookups++;
         // Exact point lookups for the path and its bounded ancestor chain; the partial path indexes make each an
-        // indexed seek. Ready lookup includes closed history only for the approved-plan safety callback.
+        // indexed seek. A pending notice holds only while it carries a frozen intent (finding 2): an action-less
+        // failure never protects a live file. Ready lookup includes closed history only for the approved-plan guard.
         var key = PathKey.Of(path);
         if (ProtectedAt(pairNo, key)) return true;
         foreach (var ancestor in PairPath.Ancestors(path))
@@ -714,14 +766,14 @@ public sealed partial class SqliteStateStore : IStateStore
         bool ProtectedAt(long pair, string pathKey) =>
             StoreSchema.Scalar(_connection, null,
                 "SELECT 1 FROM notice WHERE pair_no=$p AND reason_key='recovery-restore-pending' AND state='open' " +
-                "AND path_key=$key LIMIT 1;", ("$p", pair), ("$key", pathKey)) is not null ||
+                "AND restore_hold=1 AND path_key=$key LIMIT 1;", ("$p", pair), ("$key", pathKey)) is not null ||
             (includeReady && StoreSchema.Scalar(_connection, null,
                 "SELECT 1 FROM notice WHERE pair_no=$p AND reason_key='recovery-restore-ready' " +
                 "AND path_key=$key LIMIT 1;", ("$p", pair), ("$key", pathKey)) is not null);
 
         bool PendingRange(long pair, string low, string high) => StoreSchema.Scalar(_connection, null,
             "SELECT 1 FROM notice WHERE pair_no=$p AND reason_key='recovery-restore-pending' AND state='open' " +
-            "AND path_key>=$lo AND path_key<$hi LIMIT 1;",
+            "AND restore_hold=1 AND path_key>=$lo AND path_key<$hi LIMIT 1;",
             ("$p", pair), ("$lo", low), ("$hi", high)) is not null;
 
         bool ReadyRange(long pair, string low, string high) => StoreSchema.Scalar(_connection, null,
@@ -743,6 +795,14 @@ public sealed partial class SqliteStateStore : IStateStore
         return InStore(() => PairNo(pairId) is { } pairNo
             ? _recoveries.ReadPage(pairNo, pairId, query)
             : new List<RecoveryRecord>());
+    }
+
+    public RecoveryRecord? RecoveryNewestForPath(string pairId, RecoveryQuery query, string path)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        return InStore(() => PairNo(pairId) is { } pairNo
+            ? _recoveries.ReadNewestForPath(pairNo, pairId, query, path)
+            : null);
     }
 
     public void CloseNotice(string noticeId, string? choice) => InStore(() => _notices.Close(noticeId, choice));

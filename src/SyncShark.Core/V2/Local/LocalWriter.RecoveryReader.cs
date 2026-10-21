@@ -18,6 +18,20 @@ public sealed partial class LocalWriter
         return await ((ILocalRetainedNoticeReader)this).OpenRecoveryAsync(recovery, retained, ct).ConfigureAwait(false);
     }
 
+    async Task<Stream> IRecoveryRecordReader.OpenRecoveryRecordAsync(RecoveryRecord recovery, ItemState described,
+        CancellationToken ct)
+    {
+        // Keep every confirmed-operation check, including ownership, the exact operation path and interrupted
+        // archive ACL repair; only the metadata describe is skipped. The archive open re-verifies the retained
+        // size/hash against the supplied state and its owned NTFS identity, so a mismatched row is never trusted.
+        PrepareRecoveryRecordRead(recovery, ct);
+        if (!RecoveryRecordReads.MatchesDescribed(recovery, described))
+            throw new InvalidDataException(
+                "The supplied Recovery metadata does not match the durable row; nothing was read or changed.");
+        return await ((ILocalRetainedNoticeReader)this).OpenRecoveryAsync(recovery, described, ct)
+            .ConfigureAwait(false);
+    }
+
     private void PrepareRecoveryRecordRead(RecoveryRecord recovery, CancellationToken ct)
     {
         RecoveryRecordReads.RequireComplete(recovery);

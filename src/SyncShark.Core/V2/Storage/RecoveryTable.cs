@@ -16,10 +16,10 @@ internal sealed class RecoveryTable
     {
         var recoveryId = ShortId.Make("rc", pairId, action.ActionId);
         StoreSchema.Execute(_connection, transaction,
-            "INSERT INTO recovery(recovery_id, pair_no, action_id, side, path, location, version_id, hash, size, created, expires) " +
-            "VALUES($rid, $p, $aid, $side, $path, $loc, $vid, $hash, $size, $created, $expires) ON CONFLICT(recovery_id) DO NOTHING;",
+            "INSERT INTO recovery(recovery_id, pair_no, action_id, side, path, path_key, location, version_id, hash, size, created, expires) " +
+            "VALUES($rid, $p, $aid, $side, $path, $path_key, $loc, $vid, $hash, $size, $created, $expires) ON CONFLICT(recovery_id) DO NOTHING;",
             ("$rid", recoveryId), ("$p", pairNo), ("$aid", action.ActionId), ("$side", recovery.Side.ToString()),
-            ("$path", action.Path), ("$loc", recovery.Location), ("$vid", recovery.VersionId), ("$hash", recovery.Hash),
+            ("$path", action.Path), ("$path_key", PathKey.Of(action.Path)), ("$loc", recovery.Location), ("$vid", recovery.VersionId), ("$hash", recovery.Hash),
             ("$size", recovery.Size), ("$created", now), ("$expires", now + (long)retention.TotalMilliseconds));
         if (StoreSchema.Changes(_connection, transaction) != 0) return;
         using var command = StoreSchema.Command(_connection, transaction,
@@ -57,6 +57,27 @@ internal sealed class RecoveryTable
     /// </summary>
     public IReadOnlyList<RecoveryRecord> ReadPage(long pairNo, string pairId, RecoveryQuery query)
     {
+        var (sql, parameters) = Filter(pairNo, query, applyAfter: true, exactPath: null);
+        sql.Append(" ORDER BY recovery_id LIMIT $limit;");
+        parameters.Add(("$limit", query.Limit));
+        return Read(sql, parameters, pairId);
+    }
+
+    /// <summary>
+    /// The newest filtered row for one exact path (finding 1). AfterId and Limit are ignored on purpose: the winner
+    /// may live on another page. Newest is Created descending, then recovery id descending, so the answer is
+    /// deterministic. The path comparison uses the same case-insensitive key as every other path predicate.
+    /// </summary>
+    public RecoveryRecord? ReadNewestForPath(long pairNo, string pairId, RecoveryQuery query, string path)
+    {
+        var (sql, parameters) = Filter(pairNo, query, applyAfter: false, exactPath: path);
+        sql.Append(" ORDER BY created DESC, recovery_id DESC LIMIT 1;");
+        return Read(sql, parameters, pairId).FirstOrDefault();
+    }
+
+    private static (StringBuilder Sql, List<(string Name, object? Value)> Parameters) Filter(long pairNo,
+        RecoveryQuery query, bool applyAfter, string? exactPath)
+    {
         var sql = new StringBuilder(
             "SELECT recovery_id, action_id, side, path, location, version_id, hash, size, created, expires " +
             "FROM recovery WHERE pair_no=$p");
@@ -88,13 +109,23 @@ internal sealed class RecoveryTable
             sql.Append(" AND action_id=$action");
             parameters.Add(("$action", actionId));
         }
-        if (query.AfterId is { } afterId)
+        if (exactPath is not null)
+        {
+            // Indexed by (pair_no, path_key); the key is the same case-insensitive identity as the path predicates.
+            sql.Append(" AND path_key=$exact");
+            parameters.Add(("$exact", PathKey.Of(exactPath)));
+        }
+        if (applyAfter && query.AfterId is { } afterId)
         {
             sql.Append(" AND recovery_id>$after");
             parameters.Add(("$after", afterId));
         }
-        sql.Append(" ORDER BY recovery_id LIMIT $limit;");
-        parameters.Add(("$limit", query.Limit));
+        return (sql, parameters);
+    }
+
+    private IReadOnlyList<RecoveryRecord> Read(StringBuilder sql,
+        List<(string Name, object? Value)> parameters, string pairId)
+    {
         using var command = StoreSchema.Command(_connection, null, sql.ToString());
         foreach (var (name, value) in parameters) command.Parameters.AddWithValue(name, value ?? DBNull.Value);
         var records = new List<RecoveryRecord>();

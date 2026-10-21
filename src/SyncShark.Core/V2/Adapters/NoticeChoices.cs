@@ -138,7 +138,9 @@ public static class NoticeChoices
         notice.ReasonKey == RehashProtection.Reason && notice.Rule == RehashProtection.Rule ||
         notice.ReasonKey == "held-intents";
 
-    public static bool IsRetryChoice(string choice) => choice is ShowTarget or SyncTargetSeparately or CopyLink or CopyLinkOutsideRoot or CopyLinkAgain or RemoveLinkStaging or ConfirmLargeDownload or PreviewMatches or ChooseFolder or RemoveRule or KeepRule or ExportHtml or CheckHistoryAgain or ReviewDeletion or OpenStorage or ReviewReserve or ExportDocx or ExportMarkdown or ExportPdf or MakeAvailableOffline or Rename or ShowRemaining or OpenDropbox or RepairHelp or RetryNow or Exclude or Ignore or DeleteReviewed or KeepRestore or OpenFolderSettings or OpenRecoverySettings or Dismiss or ReviewRemoval or ReviewRemovalA or ReviewRemovalB or ConfirmRemoval or RemovalNextPage or RemovalPreviousPage;
+    // RestoreAsCopy is a retry-family choice: it re-runs the same frozen Recovery selection with a copy destination,
+    // so it must route through the notice-choice path rather than the ordinary conflict resolver.
+    public static bool IsRetryChoice(string choice) => choice is ShowTarget or SyncTargetSeparately or CopyLink or CopyLinkOutsideRoot or CopyLinkAgain or RemoveLinkStaging or ConfirmLargeDownload or PreviewMatches or ChooseFolder or RemoveRule or KeepRule or ExportHtml or CheckHistoryAgain or ReviewDeletion or OpenStorage or ReviewReserve or ExportDocx or ExportMarkdown or ExportPdf or MakeAvailableOffline or Rename or ShowRemaining or OpenDropbox or RepairHelp or RetryNow or Exclude or Ignore or DeleteReviewed or KeepRestore or OpenFolderSettings or OpenRecoverySettings or Dismiss or RestoreAsCopy or ReviewRemoval or ReviewRemovalA or ReviewRemovalB or ConfirmRemoval or RemovalNextPage or RemovalPreviousPage;
     public const string QuarantineRetry = "quarantine-retry";
     public const string QuarantineIgnore = "quarantine-ignore";
     public const string QuarantineExclude = "quarantine-exclude";
@@ -187,11 +189,32 @@ public static class NoticeChoices
     public const string LeaveAsIs = "leave-as-is";
     public const string RebindPending = "pending: rebind arrives with the central registry (B-191)";
 
+    /// <summary>
+    /// Recovery restore choices. A frozen intent means bytes may already exist: only Retry and Ignore are offered,
+    /// because Ignore pauses retries and keeps both sides protected, and nothing here may abandon a possibly
+    /// written effect. An actionless failure wrote nothing, so Retry re-observes, Restore as a copy is offered when
+    /// a destination was chosen, and Ignore/Dismiss both close the notice while the durable Recovery record stays.
+    /// </summary>
+    private static IReadOnlyList<SyncNoticeOption> RecoveryRestoreOptions(Notice notice)
+    {
+        if (RecoveryRestoreHold.HasFrozenIntent(notice.ConflictOperation))
+            return [new(RetryNow, "Retry Recovery restore"),
+                    new(Ignore, "Pause Recovery retries (keep both sides protected)")];
+        var options = new List<SyncNoticeOption> { new(RetryNow, "Retry Recovery restore") };
+        if (!string.IsNullOrEmpty(notice.ConflictOperation?.Destination))
+            options.Add(new(RestoreAsCopy, "Restore as a copy"));
+        // Ignore stays visible because notice-choice validation requires the rendered set to contain the choice;
+        // on an actionless failure both Ignore and Dismiss close (nothing was written, so no hold is retained).
+        options.Add(new(Ignore, "Ignore this notice (no file changes)"));
+        options.Add(new(Dismiss, "Dismiss (no file changes)"));
+        return options;
+    }
+
     public static IReadOnlyList<SyncNoticeOption> Options(Notice notice) =>
         (notice.ReasonKey is SqliteStateStore.BlockedDeleteSummary or SqliteStateStore.UncertainDeleteSummary or SqliteStateStore.DeleteReviewSummary)
             ? [new(ShowRemaining, "Show remaining blocked deletions (50 per page)")]
             : IsRecoveryRestoreNotice(notice)
-            ? [new(RetryNow, "Retry Recovery restore"), new(Ignore, "Pause Recovery retries (keep both sides protected)")]
+            ? RecoveryRestoreOptions(notice)
             : notice.ReasonKey == "held-intents"
             ? [new(ShowRemaining, "Show remaining changes (50 per page)")]
             : notice.ReasonKey == RehashProtection.Reason

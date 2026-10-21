@@ -53,12 +53,12 @@ internal static class StoreSchema
           state TEXT NOT NULL, attempts INTEGER NOT NULL, updated INTEGER NOT NULL);
         CREATE INDEX pe_unresolved ON pending_effect(pair_no, state, updated);
         CREATE TABLE recovery(recovery_id TEXT PRIMARY KEY, pair_no INTEGER NOT NULL, action_id TEXT NOT NULL,
-          side TEXT NOT NULL, path TEXT NOT NULL, location TEXT NOT NULL, version_id TEXT, hash TEXT NOT NULL,
+          side TEXT NOT NULL, path TEXT NOT NULL, path_key TEXT, location TEXT NOT NULL, version_id TEXT, hash TEXT NOT NULL,
           size INTEGER NOT NULL, created INTEGER NOT NULL, expires INTEGER NOT NULL) WITHOUT ROWID;
         CREATE INDEX rc_pair ON recovery(pair_no, created);
         CREATE TABLE notice(notice_id TEXT PRIMARY KEY, pair_no INTEGER NOT NULL, rule INTEGER NOT NULL, kind TEXT NOT NULL,
           path TEXT NOT NULL, path_key TEXT, detail TEXT NOT NULL, reason_key TEXT NOT NULL, state TEXT NOT NULL, choice TEXT,
-          created INTEGER NOT NULL) WITHOUT ROWID;
+          created INTEGER NOT NULL, restore_hold INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;
         CREATE INDEX nt_open ON notice(state, pair_no, created);
         -- Positive and negative probe results are reusable only after validating their basis cursor.
         CREATE TABLE deletion_evidence(pair_no INTEGER NOT NULL, root_no INTEGER NOT NULL, path TEXT NOT NULL,
@@ -77,6 +77,12 @@ internal static class StoreSchema
     private const string RecoveryOrderIndexDdl =
         "CREATE INDEX IF NOT EXISTS rc_page ON recovery(pair_no, recovery_id);";
 
+    // Indexed exact-path lookup for the bulk winner (finding 1), plus a partial index that makes the reopen repair a
+    // probe when an older binary inserted rows without the key.
+    private const string RecoveryPathIndexDdl =
+        "CREATE INDEX IF NOT EXISTS rc_path ON recovery(pair_no, path_key, created DESC, recovery_id DESC);" +
+        "CREATE INDEX IF NOT EXISTS rc_path_missing ON recovery(recovery_id) WHERE path_key IS NULL;";
+
     // Performance-only, additive index for bounded restore-notice discovery: only the two restore reasons are in the
     // partial index, so a page never walks unrelated open notices.
     private const string RestoreNoticePageIndexDdl =
@@ -93,6 +99,17 @@ internal static class StoreSchema
     private const string RestoreNoticeReadyPathIndexDdl =
         "CREATE INDEX IF NOT EXISTS nt_restore_path_ready ON notice(pair_no, path_key) " +
         "WHERE reason_key='recovery-restore-ready';";
+
+    // A pending restore holds a path only while it carries a frozen intent (bytes may have been written). This
+    // partial index serves both the one-per-run EXISTS gate and the bounded held-path snapshot.
+    private const string RestoreNoticeHoldPathIndexDdl =
+        "CREATE INDEX IF NOT EXISTS nt_restore_hold_path ON notice(pair_no, path_key) " +
+        "WHERE state='open' AND reason_key='recovery-restore-pending' AND restore_hold=1;";
+
+    // The reopen repair pages only restore notices (including closed ready history), never the notice table.
+    private const string RestoreNoticeReasonPageIndexDdl =
+        "CREATE INDEX IF NOT EXISTS nt_restore_reason_page ON notice(notice_id) " +
+        "WHERE reason_key='recovery-restore-pending' OR reason_key='recovery-restore-ready';";
 
     // Performance-only, additive index; no persisted row format changes or version bump.
     private const string FlaggedIndexDdl =
@@ -366,6 +383,92 @@ internal static class StoreSchema
         }
     }
 
+    /// <summary>Adds the indexed Recovery path key once; older binaries insert rows without it (NULL).</summary>
+    private static void EnsureRecoveryPathKeys(SqliteConnection connection)
+    {
+        if (Scalar(connection, null, "SELECT COUNT(*) FROM pragma_table_info('recovery') WHERE name='path_key';") is long columns && columns == 0)
+            Execute(connection, null, "ALTER TABLE recovery ADD COLUMN path_key TEXT;");
+    }
+
+    /// <summary>
+    /// Fills keys an older binary left NULL after a rollback. Recovery rows are immutable, so only NULL needs repair;
+    /// the partial index makes a healthy database one empty probe, and pages of 512 bound memory.
+    /// </summary>
+    private static void RepairRecoveryPathKeys(SqliteConnection connection)
+    {
+        var after = "";
+        while (true)
+        {
+            var page = new List<(string Id, string Path)>();
+            using (var command = Command(connection, null,
+                "SELECT recovery_id,path FROM recovery WHERE path_key IS NULL AND recovery_id>$after " +
+                "ORDER BY recovery_id LIMIT 512;"))
+            {
+                command.Parameters.AddWithValue("$after", after);
+                using var reader = command.ExecuteReader();
+                while (reader.Read()) page.Add((reader.GetString(0), reader.GetString(1)));
+            }
+            if (page.Count == 0) return;
+            using (var transaction = connection.BeginTransaction())
+            {
+                foreach (var (id, path) in page)
+                    Execute(connection, transaction, "UPDATE recovery SET path_key=$key WHERE recovery_id=$id AND path_key IS NULL;",
+                        ("$key", PathKey.Of(path)), ("$id", id));
+                transaction.Commit();
+            }
+            after = page[^1].Id;
+        }
+    }
+
+    /// <summary>Adds the frozen-intent hold marker once; older binaries simply leave it at its zero default.</summary>
+    private static void EnsureNoticeRestoreHold(SqliteConnection connection)
+    {
+        if (Scalar(connection, null, "SELECT COUNT(*) FROM pragma_table_info('notice') WHERE name='restore_hold';") is long columns && columns == 0)
+            Execute(connection, null, "ALTER TABLE notice ADD COLUMN restore_hold INTEGER NOT NULL DEFAULT 0;");
+    }
+
+    /// <summary>
+    /// Recomputes a restore notice's indexed path key and hold marker from its durable row on every open. A rolled-back
+    /// binary writes <c>path_key</c> as NULL (it does not know the column), or updates <c>path</c> while leaving the old
+    /// key, and its INSERT leaves <c>restore_hold</c> at zero. Without this repair a restored file could lose its
+    /// protection. Pages of 512 through the restore-only partial index: a million unrelated notices are never read and
+    /// no state is mutated.
+    /// </summary>
+    private static void ReconcileRestoreNotices(SqliteConnection connection)
+    {
+        var after = "";
+        while (true)
+        {
+            var page = new List<(string Id, string Path, string Reason, string Detail)>();
+            using (var command = Command(connection, null,
+                "SELECT notice_id,path,reason_key,detail FROM notice WHERE notice_id>$after " +
+                "AND (reason_key='recovery-restore-pending' OR reason_key='recovery-restore-ready') " +
+                "ORDER BY notice_id LIMIT 512;"))
+            {
+                command.Parameters.AddWithValue("$after", after);
+                using var reader = command.ExecuteReader();
+                while (reader.Read())
+                    page.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3)));
+            }
+            if (page.Count == 0) return;
+            using (var transaction = connection.BeginTransaction())
+            {
+                foreach (var (id, path, reason, detail) in page)
+                {
+                    var stored = NoticeDetailCodec.Decode(new Notice("", 0, NoticeKind.Info, path, detail, reason));
+                    var hold = reason == RecoveryRestoreHold.PendingReason &&
+                        RecoveryRestoreHold.HasFrozenIntent(stored.ConflictOperation) ? 1 : 0;
+                    Execute(connection, transaction,
+                        "UPDATE notice SET path_key=$key, restore_hold=$hold WHERE notice_id=$id " +
+                        "AND (path_key IS NOT $key OR restore_hold<>$hold);",
+                        ("$key", PathKey.Of(path)), ("$hold", hold), ("$id", id));
+                }
+                transaction.Commit();
+            }
+            after = page[^1].Id;
+        }
+    }
+
     /// <summary>Adds schema objects without removing rows; mapped directory keys backfill in short transactions.</summary>
     private static void Migrate(SqliteConnection connection, long fromVersion)
     {
@@ -398,10 +501,17 @@ internal static class StoreSchema
         Execute(connection, null, FlaggedIndexDdl);
         Execute(connection, null, IntentOrderIndexDdl);
         Execute(connection, null, RecoveryOrderIndexDdl);
+        EnsureRecoveryPathKeys(connection);
+        Execute(connection, null, RecoveryPathIndexDdl);
+        RepairRecoveryPathKeys(connection);
         EnsureNoticePathKeys(connection);
+        EnsureNoticeRestoreHold(connection);
         Execute(connection, null, RestoreNoticePageIndexDdl);
         Execute(connection, null, RestoreNoticePathIndexDdl);
         Execute(connection, null, RestoreNoticeReadyPathIndexDdl);
+        Execute(connection, null, RestoreNoticeHoldPathIndexDdl);
+        Execute(connection, null, RestoreNoticeReasonPageIndexDdl);
+        ReconcileRestoreNotices(connection);
         BackfillDefenderGrants(connection);
         Step(13, null);
         Step(14, tx => EnsureGapSchema(connection, tx));
@@ -461,7 +571,8 @@ internal static class StoreSchema
         "journal_volume", "dir", "root", "pair", "generation", "file_state", "tombstone", "sync_point", "pending_effect", "sync_retry", "sync_retry_due", "sync_retry_kind", "sync_retry_delete_blocked", "sync_retry_delete_review", "sync_retry_review_path", "nt_groupable_delete", "pe_uncertain_delete", "recovery",
         "notice", "notice_legacy_fold", "local_gap", "local_gap_item", "gap_ready", "gap_failed", "gap_waiting", "gap_results", "gap_metadata", "local_rehash", "rehash_retry", "deletion_evidence", "dir_key", "dir_mapped_key", "fs_obj", "fs_flagged", "fs_refused", "sp_a_obj", "sp_b_obj", "sp_a_dir", "sp_b_dir",
 
-        "removal_review", "pe_unresolved", "pe_intent_order", "rc_pair", "rc_page", "nt_open", "nt_restore_page", "nt_restore_path", "nt_restore_path_ready", "prepare_header", "prepare_row", "prepare_lookup", "prepare_cursor",
+        "removal_review", "pe_unresolved", "pe_intent_order", "rc_pair", "rc_page", "rc_path", "rc_path_missing", "nt_open", "nt_restore_page", "nt_restore_path", "nt_restore_path_ready",
+        "nt_restore_hold_path", "nt_restore_reason_page", "prepare_header", "prepare_row", "prepare_lookup", "prepare_cursor",
         "quarantine_upgrade", "defender_deferral_batch", "fs_quarantine", "defender_deferral", "defender_deferral_updated", "defender_grant", "defender_grant_path",
         "choice_victim", "cv_op", "cv_item", "cv_scan", "choice_restore_receipt", "choice_merge",
         "run_summary", "run_summary_pair", "nt_pair_reason",
@@ -548,9 +659,12 @@ internal static class StoreSchema
         Execute(connection, transaction, FlaggedIndexDdl);
         Execute(connection, transaction, IntentOrderIndexDdl);
         Execute(connection, transaction, RecoveryOrderIndexDdl);
+        Execute(connection, transaction, RecoveryPathIndexDdl);
         Execute(connection, transaction, RestoreNoticePageIndexDdl);
         Execute(connection, transaction, RestoreNoticePathIndexDdl);
         Execute(connection, transaction, RestoreNoticeReadyPathIndexDdl);
+        Execute(connection, transaction, RestoreNoticeHoldPathIndexDdl);
+        Execute(connection, transaction, RestoreNoticeReasonPageIndexDdl);
         Execute(connection, transaction, QuarantineDdl);
         Execute(connection, transaction, "INSERT INTO quarantine_upgrade VALUES('grant-backfill');");
         Execute(connection, transaction, "INSERT INTO quarantine_upgrade VALUES('notice-path-key-backfill');");

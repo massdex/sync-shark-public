@@ -13,18 +13,20 @@ internal sealed class RunScope
     private LinkExclusions? _scopeLinks;
     private readonly IReadOnlySet<string>? _activeRetries;
     private readonly bool _restoredRetriesOnly;
-    internal Action? AfterHideAForTest { get; set; }
+    private readonly RecoveryRestoreProtection? _restoreProtection;    internal Action? AfterHideAForTest { get; set; }
     private readonly RebuildableSelection? _rebuildables;
     private ProviderRefusedPaths _refusedFoldersA = new([]);
     private ProviderRefusedPaths _refusedFoldersB = new([]);
 
     public RunScope(IStateStore store, Func<string, bool> includeA, Func<string, bool> includeB,
         LinkExclusions? links = null, RebuildableSelection? rebuildables = null, IReadOnlyList<SyncIgnoreRule>? rules = null, IReadOnlyDictionary<string, Side>? decisions = null,
-        IReadOnlySet<string>? activeRetries = null, bool restoredRetriesOnly = false)
+        IReadOnlySet<string>? activeRetries = null, bool restoredRetriesOnly = false,
+        RecoveryRestoreProtection? restoreProtection = null)
     {
         _store = store;
         _activeRetries = activeRetries;
         _restoredRetriesOnly = restoredRetriesOnly;
+        _restoreProtection = restoreProtection;
         _decisions = decisions;
         _rules = rules ?? [];
         _includeA = includeA;
@@ -190,12 +192,26 @@ internal sealed class RunScope
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         using var snapshot = (_store as SqliteStateStore)?.OpenPlanningProtection(pair);
         _scopeLinks = snapshot is null ? _links : _links.Freeze(snapshot);
+        var restore = _restoreProtection;
+        var active = _activeRetries?.ToHashSet(StringComparer.OrdinalIgnoreCase);
         if (snapshot is not null)
         {
-            var active = _activeRetries?.ToHashSet(StringComparer.OrdinalIgnoreCase);
-            _scopeLinks = _scopeLinks.WithRetryProtection((path, descendants) =>
-                snapshot.RecoveryRestoreProtected(pair.PairId, path, descendants) ||
-                active is not null && snapshot.RetryProtected(pair.PairId, path, descendants, active, _restoredRetriesOnly));
+            // Null means a custom caller supplied no run snapshot and keeps the original planning-transaction read.
+            // An explicit inactive snapshot contributes nothing (no callback, no SQL); beyond the cap the fallback is
+            // bound to THIS transaction, so one scope never mixes a frozen preload with the live writer.
+            Func<string, bool, bool>? restoreLookup = null;
+            if (restore is null)
+                restoreLookup = (path, descendants) => snapshot.RecoveryRestoreProtected(pair.PairId, path, descendants);
+            else if (restore.Active)
+                restoreLookup = restore.Bind(snapshot, pair.PairId);
+            if (restoreLookup is not null || active is not null)
+                _scopeLinks = _scopeLinks.WithRetryProtection((path, descendants) =>
+                    (restoreLookup is not null && restoreLookup(path, descendants)) ||
+                    (active is not null && snapshot.RetryProtected(pair.PairId, path, descendants, active, _restoredRetriesOnly)));
+        }
+        else if (restore is { Active: true })
+        {
+            _scopeLinks = _scopeLinks.WithRetryProtection(restore.Covers);
         }
         try
         {

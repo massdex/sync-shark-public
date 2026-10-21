@@ -29,15 +29,19 @@ public sealed record SyncCliRecoveryRestorePageData(string PairId,
 
 // The core v2 Recovery surface: every `recovery list` is one bounded keyset page, and `recovery restore` selects
 // one exact id or one such page. Both read the store's own Recovery index; restore additionally reaches the
-// engine's guarded effect. Paging continues from an explicit recovery-id cursor, so a large history never has to
-// fit in memory and a bare restore can never broaden into "everything retained".
+// engine's guarded effect. A plain list is store-only (no provider request, no engine gate); --verify explicitly
+// asks for live classification. Paging continues from an explicit recovery-id cursor, so a large history never has
+// to fit in memory and a bare restore can never broaden into "everything retained".
 public sealed partial class V2CliRuntime
 {
     // The CLI page size is bounded by the engine's own RecoveryQuery limit (1..500); a 100-row default keeps one
     // invocation readable and one restore page safely small. An explicit --limit may raise it to 500.
     private const int RecoveryDefaultPageLimit = 100;
 
-    /// <summary>Runs every core v2 `recovery list` as one bounded keyset page with its current-state hints.</summary>
+    /// <summary>
+    /// Runs every core v2 `recovery list` as one bounded keyset page. The default is a store-only read: no provider
+    /// request and no engine gate. An explicit <c>--verify</c> adds the engine's live per-row classification.
+    /// </summary>
     internal async Task<object> LoadRecoveryCommandAsync(SyncCliInvocation invocation,
         CancellationToken cancellationToken)
     {
@@ -69,8 +73,12 @@ public sealed partial class V2CliRuntime
             ActionId: invocation.Value("--action-id"),
             AfterId: invocation.Value("--after"),
             Limit: probe ? limit + 1 : limit);
-        // A dry run is the engine's read-only projection: it classifies each retained row and names its
-        // destination (current, absent, occupied or a copy name) without touching either endpoint.
+        // The default is a durable-state read: no provider request, no historical download and no engine gate, so
+        // a large catalog stays a cheap page and a read never queues behind AutoSync. Live classification is opt-in.
+        if (!invocation.Flag("--verify")) return RecoveryStorePage(pair, query, limit, probe);
+        // --verify is the engine's read-only projection: it observes each destination and retained revision and
+        // names the live classification (current, absent, occupied or a copy name). It therefore contacts providers
+        // and serializes through the engine's run gate; a listing that asked for it may wait behind an active run.
         IReadOnlyList<RecoveryRestoreItem> rows;
         try
         {
@@ -97,6 +105,47 @@ public sealed partial class V2CliRuntime
         return new SyncCliRecoveryPageData(pair.PairId,
             page.Select(item => ProjectRecoveryPageItem(pair, item)).ToArray(), limit, page.Length, more,
             mayHaveMore, next, hint, []);
+    }
+
+    /// <summary>
+    /// One store-only page: each row's classification comes from durable state (an open restore notice, an expired
+    /// retention window, or retained) with no endpoint access and no engine gate. Destinations are unknown without
+    /// observing an endpoint, so they remain null until <c>--verify</c>.
+    /// </summary>
+    private SyncCliRecoveryPageData RecoveryStorePage(PairDef pair, RecoveryQuery query, int limit, bool probe)
+    {
+        var records = _store.RecoveryPage(pair.PairId, query);
+        var page = records.Take(limit).ToArray();
+        var more = records.Count > limit;
+        var mayHaveMore = !more && page.Length == limit && !probe;
+        var next = more || mayHaveMore ? page[^1].RecoveryId : null;
+        var now = TimeProvider.System.GetUtcNow();
+        var hint = (more
+                ? $"Store-only listing; more retained items follow. Repeat with the same filters plus --after {next}."
+                : mayHaveMore
+                    ? $"Store-only listing; this page is full and more may follow. Repeat with the same filters plus --after {next} to check."
+                    : "Store-only listing; this is the end of the filtered retained items.") +
+            " Add --verify to observe each destination and retained revision (contacts providers and waits behind any active sync).";
+        return new SyncCliRecoveryPageData(pair.PairId,
+            page.Select(record => ProjectRecoveryStoreItem(pair, record, now)).ToArray(), limit, page.Length, more,
+            mayHaveMore, next, hint, []);
+    }
+
+    private SyncCliRecoveryPageItemData ProjectRecoveryStoreItem(PairDef pair, RecoveryRecord record,
+        DateTimeOffset now)
+    {
+        // The notice id is the deterministic id the engine writes for this Recovery item. Keep this formula
+        // aligned with SyncRun.RecoveryRestoreId ("rrs", pair, recovery); a store-only row then names its own notice.
+        var saved = _store.NoticeById(record.PairId, ShortId.Make("rrs", record.PairId, record.RecoveryId));
+        var notice = saved is { Closed: false } found ? found.Notice : null;
+        var classification = notice is not null ? "NOTICE-OPEN" : record.Expires <= now ? "EXPIRED" : "RETAINED";
+        var detail = notice is null
+            ? null
+            : notice.ReasonKey == SyncRun.RecoveryRestoreReady
+                ? "A restore was verified and is waiting for ordinary sync."
+                : "A restore notice is open for this item.";
+        return new SyncCliRecoveryPageItemData(record.RecoveryId, RecoverySideName(pair, record.Side.ToString()),
+            record.Path, record.VersionId, record.Size, record.Created, classification, null, detail);
     }
 
     /// <summary>

@@ -164,7 +164,7 @@ public sealed partial class SyncRun
             var pair = _store.Pair(pairId) ?? throw new SyncRunRefusedException("The pair is no longer available.");
             if (notice.ReasonKey is RecoveryRestorePending or RecoveryRestoreReady)
             {
-                if (choice == NoticeChoices.RetryNow) await _endpoints.PrepareAsync(pair, token);
+                if (choice is NoticeChoices.RetryNow or NoticeChoices.RestoreAsCopy) await _endpoints.PrepareAsync(pair, token);
                 return await RetryRecoveryRestoreAsync(pair, notice, choice, token);
             }
             if (notice.RebuildableRule is not null)

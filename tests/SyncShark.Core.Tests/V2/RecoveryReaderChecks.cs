@@ -11,6 +11,7 @@ internal static class RecoveryReaderChecks
         await DropboxRecoveryRecordReadAsync().ConfigureAwait(false);
         await LocalRecoveryRecordReadAsync().ConfigureAwait(false);
         await ReadOnlyLocalObservationAsync().ConfigureAwait(false);
+        await RecoveryAdapterChecks.RunAsync().ConfigureAwait(false);
     }
 
     private static async Task ReadOnlyLocalObservationAsync()
@@ -71,12 +72,35 @@ internal static class RecoveryReaderChecks
         Require((await RecoveryRecordPreviews.DescribeDropboxAsync(client, LocalChecks.PairId, Side.B, record,
                 CancellationToken.None)) == described,
             "Dropbox preview helper describes without a writable writer");
+        int RevisionCalls()
+        {
+            lock (wire.Calls) return wire.Calls.Count(path => path == "/2/files/list_revisions");
+        }
+        var describedCalls = RevisionCalls();
+        await using (var bytes = await reader.OpenRecoveryRecordAsync(record, described, CancellationToken.None))
+        {
+            using var text = new StreamReader(bytes);
+            Require(await text.ReadToEndAsync() == "retained cloud bytes" &&
+                    RevisionCalls() == describedCalls,
+                "opening from already-described metadata reuses that revision with no second list_revisions request");
+        }
+        await Expect<InvalidDataException>(() =>
+            reader.OpenRecoveryRecordAsync(record, described with { VersionId = "rev-not-recorded" },
+                CancellationToken.None));
+        await Expect<InvalidDataException>(() =>
+            reader.OpenRecoveryRecordAsync(record, described with { Hash = "not-the-recorded-hash" },
+                CancellationToken.None));
+        Require(RevisionCalls() == describedCalls,
+            "a supplied revision or hash that differs from the durable row is rejected before any provider request");
+        var plainCalls = RevisionCalls();
         await using (var bytes = await reader.OpenRecoveryRecordAsync(record, CancellationToken.None))
         {
             using var text = new StreamReader(bytes);
             Require(await text.ReadToEndAsync() == "retained cloud bytes",
                 "Dropbox opens the immutable historical revision bytes");
         }
+        Require(RevisionCalls() == plainCalls + 1,
+            "a plain open makes exactly one historical metadata describe");
         Require(wire.AttemptedWritePaths.Count == 0, "Dropbox Recovery reads never send a provider write");
         var copyPath = "file (restored 2026-10-20).txt";
         var action = new SyncAction("restore-cloud", 0, ActionKind.CopyNew, Side.B, copyPath, null,
@@ -127,6 +151,17 @@ internal static class RecoveryReaderChecks
         Require(RecoveryRecordPreviews.DescribeLocal(LocalChecks.PairId, Side.A, setup.Recovery, record,
                 CancellationToken.None) == described,
             "local preview helper describes without opening a writable writer");
+        await using (var bytes = await reader.OpenRecoveryRecordAsync(record, described, CancellationToken.None))
+        {
+            using var text = new StreamReader(bytes);
+            Require(await text.ReadToEndAsync() == "archived local bytes",
+                "local opens from already-described metadata after the same ownership and ACL checks");
+        }
+        await Expect<InvalidDataException>(() =>
+            reader.OpenRecoveryRecordAsync(record, described with { Hash = "not-the-recorded-hash" },
+                CancellationToken.None));
+        Require(File.Exists(reference.Location),
+            "a mismatched supplied local hash reads nothing and keeps the archive");
         await using (var bytes = await reader.OpenRecoveryRecordAsync(record, CancellationToken.None))
         {
             using var text = new StreamReader(bytes);
@@ -147,6 +182,25 @@ internal static class RecoveryReaderChecks
             await Expect<ExpectedTargetMismatchException>(() => setup.Writer.PutAsync(restore, bytes, CancellationToken.None));
         Require(await File.ReadAllTextAsync(Path.Combine(setup.Root, victim.Path)) == "new current bytes",
             "local restore cannot overwrite a current different item");
+        // TOCTOU: a user creates the destination after the restore observed it absent and before the create-only
+        // publish. The real local endpoint must leave that file byte-for-byte untouched and write nothing.
+        Require(await setup.Writer.ObserveAsync("race.txt", CancellationToken.None) is null,
+            "the restore destination is observed absent before the race window");
+        var raceCreated = false;
+        var raceWriter = new RaceLocalWriter(setup.Writer, () =>
+        {
+            if (raceCreated) return;
+            raceCreated = true;
+            LocalChecks.Seed(setup.Root, "race.txt", "user-created bytes");
+        });
+        var raceAction = new SyncAction("restore-race", 0, ActionKind.CopyNew, Side.A, "race.txt", null,
+            described, null, false, null);
+        await using (var bytes = await reader.OpenRecoveryRecordAsync(record, CancellationToken.None))
+            await Expect<ExpectedTargetMismatchException>(() =>
+                raceWriter.PutAsync(raceAction, bytes, CancellationToken.None));
+        Require(raceCreated && await File.ReadAllTextAsync(Path.Combine(setup.Root, "race.txt")) ==
+                "user-created bytes",
+            "a file created between observe and put is never overwritten by a create-only restore");
         await Expect<InvalidDataException>(() =>
             reader.DescribeRecoveryAsync(record with { PairId = "otherpair01" }, CancellationToken.None));
         await Expect<InvalidDataException>(() =>
@@ -165,6 +219,23 @@ internal static class RecoveryReaderChecks
         await Expect<FileNotFoundException>(() => reader.DescribeRecoveryAsync(stale, CancellationToken.None));
         Require(!File.Exists(missingPath) && File.Exists(reference.Location),
             "a stale local Recovery row creates and deletes nothing");
+    }
+
+    /// <summary>Creates the destination in the window between a restore's observe and its create-only put.</summary>
+    private sealed class RaceLocalWriter(IEndpointWriter inner, Action beforePut) : IEndpointWriter
+    {
+        public Task<ItemState?> ObserveAsync(string path, CancellationToken ct) => inner.ObserveAsync(path, ct);
+        public Task<Stream> OpenReadAsync(ItemState state, CancellationToken ct) => inner.OpenReadAsync(state, ct);
+        public Task<ItemState> PutAsync(SyncAction action, Stream content, CancellationToken ct)
+        {
+            beforePut();
+            return inner.PutAsync(action, content, ct);
+        }
+        public Task<ItemState> MoveAsync(SyncAction action, CancellationToken ct) => inner.MoveAsync(action, ct);
+        public Task DeleteAsync(SyncAction action, CancellationToken ct) => inner.DeleteAsync(action, ct);
+        public Task<ItemState> MkDirAsync(string path, CancellationToken ct) => inner.MkDirAsync(path, ct);
+        public Task<RecoveryRef> PreserveAsync(ItemState victim, string actionId, CancellationToken ct) =>
+            inner.PreserveAsync(victim, actionId, ct);
     }
 
     private static RecoveryRecord Record(string id, string actionId, Side side, string path, string location,

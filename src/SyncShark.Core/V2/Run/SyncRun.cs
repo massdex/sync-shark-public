@@ -16,6 +16,9 @@ public sealed partial class SyncRun : ISyncRun
     private readonly Func<PairDef, IReadOnlyList<string>> _productOwned;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly object _stopGate = new();
+    private readonly object _restoreProtectionGate = new();
+    private RecoveryRestoreProtection? _restoreProtection;
+    private string? _restoreProtectionPair;
     private CancellationTokenSource? _activeSource;
     private TaskCompletionSource? _activeDone;
 
@@ -270,6 +273,12 @@ public sealed partial class SyncRun : ISyncRun
         }
         finally
         {
+            lock (_restoreProtectionGate)
+            {
+                // One run scope: the next run re-gates and re-snapshots restore holds.
+                _restoreProtection = null;
+                _restoreProtectionPair = null;
+            }
             lock (_stopGate)
             {
                 _activeSource = null;
@@ -430,7 +439,7 @@ public sealed partial class SyncRun : ISyncRun
         await RefreshDropboxQuotaAsync(pair, ct);
         var throttle = new ProgressThrottle(progress, _time, _settings.ProgressInterval);
         var reconcile = await ReconcileAsync(pair, throttle, ct, narrowedIgnoreRules);
-        var before = LeftAlone(pair).WithPending(reconcile.Protected);
+        var before = LeftAlone(pair, includeRestore: false).WithPending(reconcile.Protected);
         var inventoryScope = InventoryScope(pair);
         var scan = await ScanBothAsync(pair, throttle, ct, inventoryCursors, firstSync: true);
         // Unknown root coverage still cannot authorize any effects. Named unreadable subtrees
@@ -438,7 +447,8 @@ public sealed partial class SyncRun : ISyncRun
         if (scan.A.IncompleteSubtrees.Contains(string.Empty) || scan.B.IncompleteSubtrees.Contains(string.Empty))
             throw new SyncRunRefusedException(IncompleteFirstSync);
         RecordScanRetries(pair, scan);
-        await RefreshRecoveryRestoresAsync(pair, ct);
+        // Preview does not retry restores, forget their baselines, or change their durable state.
+        // Existing frozen intents remain protected until an actual sync verifies them.
         CloseObservedRepairs(pair, scan);
         var current = LeftAlone(pair);
         var restored = _store.DueSyncRetries(pairId, _time.GetUtcNow(), 256)
@@ -448,11 +458,13 @@ public sealed partial class SyncRun : ISyncRun
         var links = before.With(current).WithPending(ScanFailures(scan)).WithPending(PendingDecisions(pairId, null));
         // N1: restored-hold protection is a per-item store lookup (the item plus every ancestor, then a
         // range query). Gate it on one indexed EXISTS for the run, so a pair without restored holds pays
-        // nothing at all.
-        if (_store.HasActiveRestoredRetries(pairId))
+        // nothing at all. Restore holds use the run's single frozen-intent snapshot.
+        var restoreProtection = RecoveryProtection(pair);
+        var restoredHolds = _store.HasActiveRestoredRetries(pairId);
+        if (restoredHolds || restoreProtection.Active)
             links = links.WithRetryProtection((path, descendants) =>
-                _store.RetryProtected(pairId, path, noActiveRetries, descendants, restoredOnly: true) ||
-                _store.RecoveryRestoreProtected(pairId, path, descendants));
+                (restoredHolds && _store.RetryProtected(pairId, path, noActiveRetries, descendants, restoredOnly: true)) ||
+                restoreProtection.Covers(path, descendants));
         var predicates = Predicates(pair, links);
         // Resolved once, before the deletion probe: its persisted-snapshot selection is what the report and the
         // plan both read, and it also keeps its rebuildable paths out of the deletion-evidence lookup below.
@@ -463,7 +475,8 @@ public sealed partial class SyncRun : ISyncRun
             : null;
         // The chosen folders' cloud rows stay visible under a local link, so their single cloud delete is planned.
         var scanner = new RunScope(_store, predicates.A, predicates.B, links, selection, PairInclude.IgnoreRules(pair),
-            activeRetries: noActiveRetries, restoredRetriesOnly: true);
+            activeRetries: noActiveRetries, restoredRetriesOnly: true,
+            restoreProtection: restoreProtection);
         // finding 2: paths the reviewed prepare saw on both sides never enter the deletion-history
         // probe or the held lane. They are ordinary planning input (persisted baselines are excluded the same way),
         // so a cache miss can neither hold nor block their post-prepare propagation.
@@ -559,11 +572,12 @@ public sealed partial class SyncRun : ISyncRun
         var noActiveRetries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var applyLinks = LeftAlone(pair).WithPending(
             _store.ReadSyncRetries(pairId).Where(retry => retry.Kind == "scan" || retry.ReadRoots is { Count: > 0 }).Select(retry => retry.Path));
-        // N1: same one-per-run gate as the preview. No restored holds means no per-item protection lookups.
+        // N1: same one-per-run gate as the preview. No restored or frozen restore holds means no per-item lookups.
+        var applyRestore = RecoveryProtection(pair);
         if (_store.HasActiveRestoredRetries(pairId))
             applyLinks = applyLinks.WithRetryProtection((path, descendants) =>
                 _store.RetryProtected(pairId, path, noActiveRetries, descendants, restoredOnly: true) ||
-                _store.RecoveryRestoreProtected(pairId, path, descendants));
+                applyRestore.Covers(path, descendants));
         approved = GuardReviewedRecoveryRestores(pair, approved);
         var actionPredicates = ActionPredicates(pair, applyLinks, reviewedSelection);
         approved = ApplySafetyFilter(pair, actionPredicates, approved);
@@ -694,7 +708,7 @@ public sealed partial class SyncRun : ISyncRun
         { Excluded = pair.Excluded.Where(path => !reviewScopes.Contains(path)).ToArray() };
         var reconcile = await ReconcileAsync(pair, throttle, ct);
         BothScan scan;
-        var before = LeftAlone(pair).WithPending(reconcile.Protected);
+        var before = LeftAlone(pair, includeRestore: false).WithPending(reconcile.Protected);
         try
         {
             scan = await ScanBothAsync(observationPair, throttle, ct);
@@ -710,6 +724,8 @@ public sealed partial class SyncRun : ISyncRun
         var recoveryTouched = await RefreshRecoveryRestoresAsync(pair, ct);
         CloseObservedRepairs(pair, scan);
         // Finding 1 (Astra): a link or stub that disappears in this run still protects its path for the whole run.
+        // The restore refresh above may have frozen a new intent; take the run's hold snapshot after it.
+        ResetRecoveryProtection();
         var current = LeftAlone(pair);
         var retryCount = _store.CountSyncRetries(pairId);
         var retries = _store.DueSyncRetries(pairId, _time.GetUtcNow(), 256);
@@ -744,13 +760,15 @@ public sealed partial class SyncRun : ISyncRun
         }
         Func<string, bool, bool> retryProtection = RetryProtection.Create(_store, pairId, activeRetries, ReportRetryFallback);
         void RefreshRetryProtection() => retryProtection = RetryProtection.Create(_store, pairId, activeRetries, ReportRetryFallback);
+        var incrementalRestore = RecoveryProtection(pair);
         var links = before.With(current).WithPending(ScanFailures(scan)).WithPending(PendingDecisions(pairId, decisions))
             .WithPending(noticeHeldPaths).WithPending(pendingEvidence.Keys).WithPending(retryHeld.Select(item => item.Path))
             .WithRetryProtection((path, descendants) => retryProtection(path, descendants) ||
-                _store.RecoveryRestoreProtected(pairId, path, descendants));
+                incrementalRestore.Covers(path, descendants));
         var predicates = Predicates(pair, links);
         var scanner = new RunScope(_store, predicates.A, predicates.B, links, rules: PairInclude.IgnoreRules(pair),
-            decisions: decisions, activeRetries: activeRetries);
+            decisions: decisions, activeRetries: activeRetries,
+            restoreProtection: incrementalRestore);
         retryPaths = retryPaths.Concat(recoveryTouched).Concat(retries.Select(item => item.Path)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var touched = new List<string>(scan.Touched(reconcile.Touched.Concat(retryPaths)
             .Concat(decisions?.Keys ?? Enumerable.Empty<string>())));
@@ -1100,9 +1118,43 @@ public sealed partial class SyncRun : ISyncRun
         "the local folder changed after the preview; affected effects were not applied");
 
     // Links always, and online-only stubs while their replacement is off (decision 57), are left alone this run.
-    private LinkExclusions LeftAlone(PairDef pair) =>
-        LinkExclusions.Of(_store, pair, stubsLeftAlone: !_settings.ReplaceOnlineOnlyStubs)
-            .WithRetryProtection((path, descendants) => _store.RecoveryRestoreProtected(pair.PairId, path, descendants));
+    // Restore holds attach the run's one snapshot only when a frozen restore intent exists (finding 6). The pre-scan
+    // snapshot passes includeRestore: false: the post-refresh set owns restore protection, so a run takes one gate.
+    private LinkExclusions LeftAlone(PairDef pair, bool includeRestore = true)
+    {
+        var links = LinkExclusions.Of(_store, pair, stubsLeftAlone: !_settings.ReplaceOnlineOnlyStubs);
+        if (!includeRestore) return links;
+        var restore = RecoveryProtection(pair);
+        return restore.Active ? links.WithRetryProtection(restore.Covers) : links;
+    }
+
+    /// <summary>
+    /// The run's single pending-restore snapshot: one indexed gate and one bounded preload per run, shared by every
+    /// link callback and RunScope. Reset when the run releases the gate, so the next run observes new holds.
+    /// </summary>
+    private RecoveryRestoreProtection RecoveryProtection(PairDef pair)
+    {
+        lock (_restoreProtectionGate)
+        {
+            if (_restoreProtection is { } cached && string.Equals(_restoreProtectionPair, pair.PairId, StringComparison.Ordinal))
+                return cached;
+            var created = RecoveryRestoreProtection.Create(_store, pair.PairId,
+                () => RunLog.Trace("Recovery restore protection snapshot limit reached; using indexed lookups with a bounded cache."));
+            _restoreProtection = created;
+            _restoreProtectionPair = pair.PairId;
+            return created;
+        }
+    }
+
+    /// <summary>Drops the run's cached hold snapshot so the next use observes a pending/ready transition.</summary>
+    private void ResetRecoveryProtection()
+    {
+        lock (_restoreProtectionGate)
+        {
+            _restoreProtection = null;
+            _restoreProtectionPair = null;
+        }
+    }
 
     // Decisions 57/59: the summaries are standing pair-level notices, carried by every plan while their items exist.
     private static Plan WithLinksSummary(PairDef pair, LinkExclusions current, Plan plan) =>

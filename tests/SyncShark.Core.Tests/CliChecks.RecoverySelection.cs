@@ -20,8 +20,18 @@ internal static partial class CliChecks
             "recovery restore documents the exact id, dry run, copy alias and legacy aliases");
 
         var list = SyncCliRegistry.Rows.Single(item => item.Command == "recovery list");
-        foreach (var option in new[] { "--since", "--path-prefix", "--side", "--action-id", "--after", "--limit" })
+        foreach (var option in new[] { "--since", "--path-prefix", "--side", "--action-id", "--after", "--limit",
+                     "--verify" })
             Require(list.Options.Split(',').Contains(option), "recovery list publishes " + option);
+        Require(list.Usage.Contains("--verify", StringComparison.Ordinal) &&
+                list.Effect.Contains("store-only", StringComparison.Ordinal),
+            "recovery list documents that the default is store-only and --verify is the live classification");
+
+        var storeOnly = SyncCliRegistry.Parse(["--cli", "recovery", "list", "--pair", "pair-1"]);
+        Require(!storeOnly.Flag("--verify"),
+            "recovery list is a store-only read unless --verify is explicit");
+        var verified = SyncCliRegistry.Parse(["--cli", "recovery", "list", "--pair", "pair-1", "--verify"]);
+        Require(verified.Flag("--verify"), "--verify reaches the recovery list invocation");
 
         var filtered = SyncCliRegistry.Parse(["--cli", "recovery", "list", "--pair", "pair-1",
             "--since", "2026-10-20T00:00:00Z", "--path-prefix", "docs", "--side", "local",

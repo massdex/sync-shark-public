@@ -46,12 +46,14 @@ internal sealed partial class NoticeTable
         // Keep dismisses one rule until that rule itself changes (its category or prefix changes the id).
         if (notice.RebuildableRule is not null && IsKeptRule(transaction, pairNo, noticeId)) return;
         MigrateLegacyRepair(transaction, pairNo, noticeId, notice);
+        var restoreHold = RecoveryRestoreHold.Holds(notice) ? 1 : 0;
         StoreSchema.Execute(_connection, transaction,
-            "INSERT INTO notice(notice_id, pair_no, rule, kind, path, path_key, detail, reason_key, state, choice, created) " +
-            "VALUES($id, $p, $rule, $kind, $path, $path_key, $detail, $reason, 'open', NULL, $now) ON CONFLICT(notice_id) DO NOTHING;",
+            "INSERT INTO notice(notice_id, pair_no, rule, kind, path, path_key, detail, reason_key, state, choice, created, restore_hold) " +
+            "VALUES($id, $p, $rule, $kind, $path, $path_key, $detail, $reason, 'open', NULL, $now, $hold) ON CONFLICT(notice_id) DO NOTHING;",
             ("$id", noticeId), ("$p", pairNo), ("$rule", notice.Rule), ("$kind", notice.Kind.ToString()),
             ("$path", notice.Path), ("$path_key", PathKey.Of(notice.Path)),
-            ("$detail", NoticeDetailCodec.Encode(notice)), ("$reason", notice.ReasonKey), ("$now", now));
+            ("$detail", NoticeDetailCodec.Encode(notice)), ("$reason", notice.ReasonKey), ("$now", now),
+            ("$hold", restoreHold));
         if (StoreSchema.Changes(_connection, transaction) != 0)
         {
             SupersedeQuarantineReviews(transaction, pairNo, noticeId, notice);
@@ -114,13 +116,14 @@ internal sealed partial class NoticeTable
         // A moved repair can keep identical detail (including a captured destination); its display path
         // must still follow the current observation, including immediately after folding a legacy row.
         StoreSchema.Execute(_connection, transaction,
-            "UPDATE notice SET state='open', choice=NULL, rule=$rule, kind=$kind, path=$path, path_key=$path_key, reason_key=$reason, detail=$detail " +
+            "UPDATE notice SET state='open', choice=NULL, rule=$rule, kind=$kind, path=$path, path_key=$path_key, reason_key=$reason, detail=$detail, restore_hold=$hold " +
             "WHERE notice_id=$id AND NOT ($retry=1 AND COALESCE(choice,'')='ignore') " +
-            "AND (state <> 'open' OR ($refresh=1 AND (detail <> $detail OR path <> $path OR path_key <> $path_key OR reason_key <> $reason OR rule <> $rule)));",
+            "AND (state <> 'open' OR restore_hold <> $hold OR ($refresh=1 AND (detail <> $detail OR path <> $path OR path_key <> $path_key OR reason_key <> $reason OR rule <> $rule)));",
             ("$retry", NoticeChoices.IsRetryNotice(notice) && notice.UploadSuspended is null ? 1 : 0),
             ("$refresh", JournalSizing.IsNotice(notice) || notice.Quarantine is not null || notice.DefenderHistory is not null || NoticeChoices.IsRetryNotice(notice) || notice.FreeSpace is not null || (notice.Kind == NoticeKind.UserDecision && notice.Detail.Contains(ProviderNameRefusedException.Detail, StringComparison.Ordinal)) || notice.ReasonKey == ProviderNameRefusedException.NoticeKey ? 1 : 0),
             ("$id", noticeId), ("$rule", notice.Rule), ("$kind", notice.Kind.ToString()), ("$path", notice.Path),
-            ("$path_key", PathKey.Of(notice.Path)), ("$reason", notice.ReasonKey), ("$detail", NoticeDetailCodec.Encode(notice)));
+            ("$path_key", PathKey.Of(notice.Path)), ("$reason", notice.ReasonKey), ("$detail", NoticeDetailCodec.Encode(notice)),
+            ("$hold", restoreHold));
     }
 
     private void SupersedeQuarantineReviews(SqliteTransaction transaction, long pairNo, string noticeId, Notice notice)

@@ -782,7 +782,7 @@ internal sealed class InMemoryStateStore : IStateStore
     {
         lock (_gate)
             return _notices.Any(notice => notice.PairId == pairId &&
-                (notice.ReasonKey == "recovery-restore-pending" && !_closedNotices.ContainsKey(notice.NoticeId!) ||
+                (RecoveryRestoreHold.Holds(notice) && !_closedNotices.ContainsKey(notice.NoticeId!) ||
                  (includeReady && notice.ReasonKey == "recovery-restore-ready")) &&
                 (PairPath.IsSelfOrUnder(path, notice.Path) ||
                  (descendants && PairPath.IsSelfOrUnder(notice.Path, path))));
