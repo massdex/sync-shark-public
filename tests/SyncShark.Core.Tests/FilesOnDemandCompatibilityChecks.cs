@@ -16,14 +16,55 @@ internal static class FilesOnDemandCompatibilityChecks
             while (reader.Read()) rows.Add(reader.GetString(0));
             return rows.ToArray();
         }
+        string[] Columns(string table)
+        {
+            using var connection = Open(root);
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT name FROM pragma_table_info($table) ORDER BY cid;";
+            cmd.Parameters.AddWithValue("$table", table);
+            using var reader = cmd.ExecuteReader(); var names = new List<string>();
+            while (reader.Read()) names.Add(reader.GetString(0));
+            return names.ToArray();
+        }
+        static string TypeOf(string row) => row.Split('|')[0];
+        static string NameOf(string row) => row.Split('|')[1];
+        // The integrated v2 build legitimately migrates the final26.2 notice and recovery tables and adds
+        // these recovery indexes on every compatible open. They are part of this build's own baseline; Files
+        // On-Demand must still add nothing of its own until it is enabled.
+        string[] RecoveryIndexes = ["rc_page", "rc_path", "rc_path_missing", "nt_restore_page",
+            "nt_restore_path", "nt_restore_path_ready", "nt_restore_hold_path", "nt_restore_reason_page"];
         var before = Schema();
+        var beforeNoticeColumns = Columns("notice");
+        var beforeRecoveryColumns = Columns("recovery");
         using (var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System))
         {
             Require(store.ByObject("fixture-root", "fixture-item")?.Size == 17, "populated final26 fixture survives open");
             Require(!store.HasStorageWork() && !store.HasOwnedPointers("fixture-root") && store.StorageRegistrations().Count == 0 &&
                 store.StorageSettlementPage().Count == 0 && store.ChangedStoragePointers().Count == 0 && store.StorageHydrationPage().Count == 0,
                 "disabled feature APIs return defaults without creating schema");
-            Require(before.SequenceEqual(Schema()), "no-command final26.2 open preserves every sqlite_master definition exactly");
+            // The no-command open produces the integrated build's v2 schema: final26.2 plus the approved
+            // recovery additions. The assertion's purpose is unchanged: before FoD is enabled, the open adds
+            // only the approved recovery objects and no Files On-Demand object, and redefines nothing else.
+            var integrated = Schema();
+            var addedOpen = integrated.Except(before, StringComparer.Ordinal).ToArray();
+            var removedOpen = before.Except(integrated, StringComparer.Ordinal).ToArray();
+            Require(removedOpen.All(row => TypeOf(row) == "table" && (NameOf(row) is "notice" or "recovery")),
+                "no-command open only redefines the notice and recovery tables");
+            Require(addedOpen.All(row => (TypeOf(row) == "table" && (NameOf(row) is "notice" or "recovery")) ||
+                (TypeOf(row) == "index" && RecoveryIndexes.Contains(NameOf(row), StringComparer.Ordinal))),
+                "no-command open adds only the approved recovery objects");
+            Require(addedOpen.Where(row => TypeOf(row) == "table").Select(NameOf).OrderBy(name => name, StringComparer.Ordinal)
+                .SequenceEqual(new[] { "notice", "recovery" }), "the only redefined tables are notice and recovery");
+            Require(!addedOpen.Any(row => FilesOnDemandSchema.Names.Contains(NameOf(row), StringComparer.Ordinal)),
+                "no-command open adds no Files On-Demand objects");
+            var openedNoticeColumns = Columns("notice");
+            var openedRecoveryColumns = Columns("recovery");
+            Require(openedNoticeColumns.Take(beforeNoticeColumns.Length).SequenceEqual(beforeNoticeColumns) &&
+                openedNoticeColumns.Skip(beforeNoticeColumns.Length).SequenceEqual(new[] { "path_key", "restore_hold" }),
+                "notice keeps every final26.2 column and gains only the approved recovery columns");
+            Require(openedRecoveryColumns.Take(beforeRecoveryColumns.Length).SequenceEqual(beforeRecoveryColumns) &&
+                openedRecoveryColumns.Skip(beforeRecoveryColumns.Length).SequenceEqual(new[] { "path_key" }),
+                "recovery keeps every final26.2 column and gains only the approved path key");
             using (var connection = Open(root))
             {
                 var reads = new FileStateReader(connection, new DirTable(connection));
@@ -42,7 +83,7 @@ internal static class FilesOnDemandCompatibilityChecks
                 var noChange = cli.SetStorageIntentAsync("fixture-pair", "Missing", mode, CancellationToken.None).GetAwaiter().GetResult();
                 Require(System.Text.Json.JsonSerializer.Serialize(noChange).Contains("No change"), "CLI explains never-used no-op");
             }
-            Require(before.SequenceEqual(Schema()), "list, inherit and offline preserve the exact final26.2 schema");
+            Require(integrated.SequenceEqual(Schema()), "list, inherit and offline preserve the integrated no-command schema exactly");
             var invalidBackup = Path.Combine(root, "not-a-directory");
             File.WriteAllText(invalidBackup, "retained fixture");
             var held = cli.SetStorageIntentAsync("fixture-pair", "", "online-only", CancellationToken.None,
@@ -50,7 +91,7 @@ internal static class FilesOnDemandCompatibilityChecks
             var heldText = System.Text.Json.JsonSerializer.Serialize(held);
             Require(heldText.Contains("Retry") && heldText.Contains("--backup-directory") && heldText.Contains("--confirm-without-backup"),
                 "backup failure offers retry, other location and explicit proceed");
-            Require(before.SequenceEqual(Schema()) && !store.IsStorageEnabled, "failed backup creates no feature schema");
+            Require(integrated.SequenceEqual(Schema()) && !store.IsStorageEnabled, "failed backup creates no feature schema");
             Require(File.ReadAllText(invalidBackup) == "retained fixture", "backup failure does not overwrite existing files");
             // Keep a WAL connection alive with auto-checkpoint disabled: the snapshot must contain committed WAL data.
             using var wal = Open(root);
@@ -82,11 +123,11 @@ internal static class FilesOnDemandCompatibilityChecks
                 schema.CommandText = "SELECT type||'|'||name||'|'||COALESCE(sql,'') FROM sqlite_master ORDER BY type,name;";
                 using var reader = schema.ExecuteReader(); var definitions = new List<string>();
                 while (reader.Read()) definitions.Add(reader.GetString(0));
-                Require(before.SequenceEqual(definitions), "rollback backup preserves complete final26 schema");
+                Require(integrated.SequenceEqual(definitions), "rollback backup preserves the complete integrated schema");
             }
             store.EnableStorageWithBackup(recovery);
             Require(Directory.GetFiles(Path.Combine(recovery, "StateBackups"), "*.db").Length == 1, "repeated opt-in does not copy database again");
-            Require(!before.SequenceEqual(Schema()), "first online-only command creates feature objects after backup");
+            Require(!integrated.SequenceEqual(Schema()), "first online-only command creates feature objects after backup");
             using var enabled = Open(root);
             Require(Convert.ToInt64(StoreSchema.Scalar(enabled, null, "PRAGMA user_version;")) == 21, "opt-in keeps the final26.2 base version");
             Require(StoreSchema.Scalar(enabled, null, "SELECT sql FROM sqlite_master WHERE name='fs_flagged';") is string sql && sql.EndsWith("WHERE flags != 0", StringComparison.Ordinal), "shared index unchanged");
