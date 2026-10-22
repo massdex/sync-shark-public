@@ -61,7 +61,7 @@ internal static partial class PlannerChecks
         Require(adopt.ObsoleteBaselineKey == "k2" &&
             plan.Actions.All(action => action.Kind != ActionKind.Forget),
             "Rule12d Adopt carries the replaced baseline and no Forget action precedes it");
-        AssertNotices(plan, new NExp(7, NoticeKind.EditBeatsDelete, "q"));
+        AssertEmptyNotices(plan);
     }
 
     /// <summary>First-sync incoming newer over another row's baselined occupant: the winning Update retires the
@@ -95,11 +95,13 @@ internal static partial class PlannerChecks
 
     /// <summary>A rebased create (rule 7 on B) landing after the folder move on A:G/c.</summary>
     private static PlanRow RebasedIncoming(DateTimeOffset mtime) =>
-        Row(Base("kc", F("F/c", "idAc", "h0"), F("F/c", "idBc", "h0")), null, F("F/c", "idBc", "h3", mtime: mtime));
+        Row(Base("kc", F("F/c", "idAc", "h0"), F("F/c", "idBc", "h0")), null,
+            F("F/c", "idBc", "h3", mtime: mtime), Ev(A: true));
 
     /// <summary>The independent occupant of A:G/c with its own baseline; its one mirror create is dropped by the clash.</summary>
     private static PlanRow RebasedOccupant(DateTimeOffset mtime) =>
-        Row(Base("ko", F("G/c", "idAo", "h0"), F("G/c", "idBo", "h0")), F("G/c", "idAo", "h2", mtime: mtime), null);
+        Row(Base("ko", F("G/c", "idAo", "h0"), F("G/c", "idBo", "h0")),
+            F("G/c", "idAo", "h2", mtime: mtime), null, Ev(B: true));
 
     private static void Rule13_MoveOntoChangedOccupant()
     {

@@ -299,8 +299,8 @@ internal sealed class RunScope
                     .Where(x => DropboxNameMapping.LocalPath(x.A) is not null || DropboxNameMapping.LocalPath(x.B) is not null)
                     .SelectMany(x => new[] { DropboxNameMapping.MatchPath(x.A), DropboxNameMapping.MatchPath(x.B) })
                     .ToHashSet(StringComparer.OrdinalIgnoreCase) : new HashSet<string>(),
-                ContextA = Hide(contextA, Side.A, context: true).DistinctBy(i => i.ObjectId).ToArray(),
-                ContextB = Hide(contextB, Side.B, context: true).DistinctBy(i => i.ObjectId).ToArray()
+                ContextA = HideCore(contextA, Side.A, context: true).DistinctBy(i => i.ObjectId).ToArray(),
+                ContextB = HideCore(contextB, Side.B, context: true).DistinctBy(i => i.ObjectId).ToArray()
             };
         }
         finally
@@ -383,7 +383,10 @@ internal sealed class RunScope
     }
 
     // Decision 59: links never reach either item rows or mapping context.
-    private IReadOnlyList<ItemState> Hide(IReadOnlyList<ItemState> items, Side side, HashSet<string>? hidden = null, bool context = false)
+    private IReadOnlyList<ItemState> Hide(IReadOnlyList<ItemState> items, Side side, HashSet<string>? hidden = null) =>
+        HideCore(items, side, hidden, context: false);
+
+    private IReadOnlyList<ItemState> HideCore(IReadOnlyList<ItemState> items, Side side, HashSet<string>? hidden = null, bool context = false)
     {
         List<ItemState>? visible = null;
         var links = _scopeLinks ?? _links;

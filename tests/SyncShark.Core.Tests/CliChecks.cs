@@ -1376,6 +1376,17 @@ internal static partial class CliChecks
             Massdex.SyncShark.V2.NoticeChoices.IsRetryNotice(folderRecovery),
             "whole-folder recovery choices use the shared explicit CLI notice dispatcher");
 
+        var restoreAgain = SyncCliRegistry.Parse(["--cli", "conflicts", "resolve", "--pair", "pair",
+            "--path", "folder", "--key", "notice", "--generation", "0", "--choice", "restore-again", "--yes"]);
+        Require(restoreAgain.Choice == "restore-again", "Restore again parses as the exact explicit notice choice");
+        var recoveryCommand = SyncCliRegistry.Rows.Single(row => row.Command == "conflicts resolve");
+        Require(recoveryCommand.Usage.Contains("restore-again", StringComparison.Ordinal) &&
+            recoveryCommand.RequiresYes && recoveryCommand.RequiresPair,
+            "Restore again shares the confirmed exact-pair command advertised in capabilities and help");
+        Expect("Restore again rejects missing confirmation before opening state",
+            await RunCliAsync(["--cli", "conflicts", "resolve", "--pair", "pair", "--path", "folder",
+                "--key", "notice", "--generation", "0", "--choice", "restore-again"], NeverOpensState), 2);
+
         var helpJson = await RunCliAsync(["--cli", "help", "--json"], NeverOpensState);
         Expect("help --json exits 0 without opening state", helpJson, 0);
         var helpData = JsonData(helpJson, "help --json", "help");

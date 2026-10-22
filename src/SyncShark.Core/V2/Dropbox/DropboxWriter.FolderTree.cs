@@ -14,7 +14,8 @@ public sealed partial class DropboxWriter
     private enum FeedState { Live, DeletedEarlier, DeletedByJob }
 
     // One durable provider state for the whole group, not one copy of the feed per victim.
-    // RestorePending is read-only compatibility for checkpoints predating RestoreStarted; new states never populate it.
+    // RestorePending checkpoints all candidates together before recovery starts. When RestoreStarted exists,
+    // only that per-path map proves submission; legacy checkpoints retain conservative pending semantics.
     private sealed record FolderRecovery(List<DropboxChange> Before, string Middle,
         string? JobId = null, bool[]? Completed = null, string[]? RestorePending = null,
         DateTimeOffset? SubmittedAt = null, List<DropboxChange>? After = null,
@@ -196,7 +197,7 @@ public sealed partial class DropboxWriter
                 {
                     var candidates = paths.ToArray();
                     if (candidates.Length == 0) return;
-                    recovery = recovery with { RestorePending = null, RestoreStarted = started };
+                    recovery = recovery with { RestorePending = candidates, RestoreStarted = started };
                     await SaveRecoveryAsync();
                 }, async (path, revision) =>
                 {

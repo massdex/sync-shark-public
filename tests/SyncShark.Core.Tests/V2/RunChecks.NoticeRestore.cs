@@ -6,7 +6,7 @@ internal static partial class RunChecks
 {
     public static async Task NoticeRestoreChecksAsync()
     {
-        foreach (var mode in new[] { "swap", "copy", "changed", "missing", "pending", "after-effect", "name-refused", "round-trip", "pruned" })
+        foreach (var mode in new[] { "swap", "copy", "changed", "missing", "pending", "after-effect", "legacy-after-effect", "name-refused", "round-trip", "pruned" })
         {
             var root = LocalChecks.FreshRoot("notice-restore-" + mode);
             using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System);
@@ -46,19 +46,46 @@ internal static partial class RunChecks
                     "unverified retained bytes cannot change winner or close notice");
                 continue;
             }
-            if (mode is "pending" or "after-effect")
+            if (mode is "pending" or "after-effect" or "legacy-after-effect")
             {
                 var pending = new SyncAction(SyncRun.NoticeRestoreActionId(fx.Pair.PairId, noticeId), 4,
                     ActionKind.Update, Side.A, "file.txt", null, loser with { VersionId = null }, winnerA, true, null)
                 { SuppressReconciledBaseline = true, ResolvedNoticeId = noticeId };
                 store.RecordIntent(fx.Pair.PairId, pending);
-                if (mode == "after-effect")
+                if (mode is "after-effect" or "legacy-after-effect")
                 {
-                    await fx.Provider.Writer(fx.Pair.A).PreserveAsync(winnerA, pending.ActionId, CancellationToken.None);
+                    var receipt = await fx.Provider.Writer(fx.Pair.A).PreserveAsync(winnerA, pending.ActionId, CancellationToken.None);
+                    if (mode == "after-effect")
+                    {
+                        // Use the production archive callback and committer: the receipt must be durable
+                        // before publication, even when the subsequent result commit is interrupted.
+                        using var gate = new SemaphoreSlim(1, 1);
+                        var committer = new StoreCommitter(store, gate, fx.Pair.PairId, gen);
+                        var context = new ProviderEffectContext(pending, committer, _ => Task.CompletedTask);
+                        await context.RecordRecoveryAsync(pending.ActionId, winnerA.Path, receipt,
+                            fx.Pair.PairId, CancellationToken.None);
+                        Require(store.RecoveryForAction(fx.Pair.PairId, pending.ActionId)?.Location == receipt.Location,
+                            "interrupted restore indexes the displaced winner before publication");
+                    }
+                    else
+                    {
+                        // A pre-receipt build could leave archived bytes but no indexed ownership.
+                        Require(File.Exists(receipt.Location) &&
+                            store.RecoveryForAction(fx.Pair.PairId, pending.ActionId) is null,
+                            "legacy restore retains archive bytes without an indexed receipt");
+                    }
                     using var restoredBytes = new MemoryStream(Encoding.UTF8.GetBytes("retained bytes"));
                     await fx.A.PutAsync(pending, restoredBytes, CancellationToken.None);
                 }
                 var interrupted = await run.RestoreNoticeVersionAsync(fx.Pair.PairId, noticeId, false, CancellationToken.None);
+                if (mode == "legacy-after-effect")
+                {
+                    Require(interrupted.Outcome == Outcome.Uncertain && fx.WriterA.Puts == 0 &&
+                        store.IntentById(fx.Pair.PairId, pending.ActionId) is not null &&
+                        store.OpenNotices(fx.Pair.PairId).Any(item => item.NoticeId == noticeId),
+                        "legacy restore without receipt stays protective and never replays writes");
+                    continue;
+                }
                 Require(interrupted.Outcome == (mode == "pending" ? Outcome.Skipped : Outcome.Done) && fx.WriterA.Puts == 0,
                     "pending restore observes actual outcome, never blindly replays it");
             }

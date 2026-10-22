@@ -520,7 +520,7 @@ internal static class EngineCompositionChecks
         var journalBefore = SyncSharkJournalNative.Query(volume);
         var export = Path.Combine(root, "effects.csv");
         var messages = new List<string>();
-        var runtime = V2CliRuntime.AcquireProduction(["run", "--pair", pairId, "--rehearse",
+        var runtime = V2CliRuntime.AcquireProduction(["--cli", "run", "--pair", pairId, "--rehearse",
             "--data-root", isolated, "--export", export, "--runs", "2"]);
         try { await runtime.RehearseAsync(pairId, export, 2, message => { lock (messages) messages.Add(message); }, default); }
         finally { await runtime.DisposeAsync(); }
