@@ -28,23 +28,7 @@ internal static class ProtectionBatchChecks
         Check(items.Where(i => i.Flags != ItemFlags.None).Select(i => i.Path));
         var gap = (ILocalGapStore)store;
         gap.BeginGap(root, "synthetic-cursor", 1, false, "synthetic gap");
-        var pathReads = 0;
-        var rootNumber = Convert.ToInt64(StoreSchema.Scalar(connection, null,
-            "SELECT root_no FROM local_gap;"));
-        using (var transaction = connection.BeginTransaction())
-        {
-            var whole = SqliteStateStore.ReadProtectionBatch(connection, transaction, rootNumber,
-                ItemFlags.NeedsRehash, items.Select(i => i.Path).ToArray(), false, () => pathReads++);
-            LocalChecks.Require(pathReads == 0 && whole.All(hit => hit == new ProtectionMatch(true, true)),
-                "unpublished whole-root gap protects every file without entering per-path SQL");
-            transaction.Commit();
-        }
-        var conservative = store.ProtectionBatch(root, ItemFlags.NeedsRehash, queries);
-        var exact = LegacyProtectionOracle.Read(connection, root, ItemFlags.NeedsRehash, queries);
-        LocalChecks.Require(conservative.All(hit => hit == new ProtectionMatch(true, true)) &&
-            exact.Zip(conservative).All(pair => (!pair.First.Covered || pair.Second.Covered) &&
-                (!pair.First.Contains || pair.Second.Contains)),
-            "whole-root folders and absent spellings only gain holds, never lose protection");
+        Check(items.Select(i => i.Path));
         using (var command = connection.CreateCommand())
         {
             command.CommandText = "UPDATE local_gap SET after_object=$pending;" +
@@ -53,16 +37,6 @@ internal static class ProtectionBatchChecks
             command.Parameters.AddWithValue("$pending", items[6].ObjectId);
             command.ExecuteNonQuery();
         }
-        IReadOnlyList<ProtectionMatch> partial;
-        using (var transaction = connection.BeginTransaction())
-        {
-            partial = SqliteStateStore.ReadProtectionBatch(connection, transaction, rootNumber,
-                ItemFlags.NeedsRehash, queries, false, () => pathReads++);
-            transaction.Commit();
-        }
-        LocalChecks.Require(pathReads == 1 && partial.SequenceEqual(
-            LegacyProtectionOracle.Read(connection, root, ItemFlags.NeedsRehash, queries)),
-            "partial gap still enters per-path SQL and equals the legacy oracle");
         Check(items.Where(i => i.Flags != ItemFlags.None || i.ObjectId == items[6].ObjectId || i.ObjectId == items[7].ObjectId).Select(i => i.Path));
         using (var command = connection.CreateCommand())
         {
@@ -177,6 +151,18 @@ internal static class ProtectionBatchChecks
             var index = PathProtectionIndex.TryCreate(held)!;
             var actual = store.ProtectionBatch(root, ItemFlags.NeedsRehash, queries);
             var legacy = LegacyProtectionOracle.Read(connection, root, ItemFlags.NeedsRehash, queries);
+            using (var transaction = connection.BeginTransaction())
+            {
+                var rootNumber = Convert.ToInt64(StoreSchema.Scalar(connection, transaction,
+                    "SELECT root_no FROM root WHERE root_id=$r;", ("$r", root)));
+                using var stream = new SqliteStateStore.ProtectionStream(connection, transaction,
+                    rootNumber, null, ItemFlags.NeedsRehash, false, new[] { queries });
+                var distinct = queries.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                var streamed = stream.Read(distinct);
+                var expected = distinct.Select(path => actual[Array.IndexOf(queries, path)]);
+                LocalChecks.Require(streamed.SequenceEqual(expected),
+                    "streamed set protection equals old per-path SQL for mixed files, folders and absent paths");
+            }
             for (var n = 0; n < queries.Length; n++)
             {
                 LocalChecks.Require(actual[n] == legacy[n],

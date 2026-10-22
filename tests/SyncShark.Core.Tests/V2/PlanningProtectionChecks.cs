@@ -9,6 +9,8 @@ internal static class PlanningProtectionChecks
         foreach (var scenario in new[] { "gap-release", "gap-retained", "moved-release", "retry-release", "flag-release", "flag-moved-a", "flag-moved-b" })
             Check(Path.Combine(folder, scenario), scenario);
         CheckIncompleteCoverage();
+        PlanningDeferredChecks.Run(Path.Combine(folder, "planning-deferred"));
+        ProtectionStreamChecks.Run(Path.Combine(folder, "protection-stream"));
         BlockedDeleteNoticeChecks.Run(Path.Combine(folder, "blocked-delete-notices"));
         DeleteReviewNoticeChecks.Run(Path.Combine(folder, "delete-review-notices"));
         Console.WriteLine("PASS immutable scope protection and real scan completeness: no false Delete/Forget");

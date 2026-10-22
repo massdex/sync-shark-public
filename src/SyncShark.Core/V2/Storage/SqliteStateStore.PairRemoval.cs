@@ -47,7 +47,7 @@ public sealed partial class SqliteStateStore
                 "SELECT root_no FROM root WHERE root_id=$id;", ("$id", pair.A.RootId))!;
             var b = (long)StoreSchema.Scalar(_connection, transaction,
                 "SELECT root_no FROM root WHERE root_id=$id;", ("$id", pair.B.RootId))!;
-            var pairTables = new[] { "sync_point", "pending_effect", "sync_retry", "choice_victim", "choice_restore_receipt", "notice", "recovery", "deletion_evidence" };
+            var pairTables = new[] { "planning_deferred", "sync_point", "pending_effect", "sync_retry", "choice_victim", "choice_restore_receipt", "notice", "recovery", "deletion_evidence" };
             var selections = new Dictionary<string, string>
             {
                 ["choice_merge"] = "notice_id IN (SELECT notice_id FROM notice WHERE pair_no=$p)",

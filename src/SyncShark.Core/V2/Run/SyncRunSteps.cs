@@ -1157,7 +1157,8 @@ public sealed partial class SyncRun
     }
 
     private void AcknowledgeVerifiedRehash(PairDef pair, BothScan scan, Plan plan, Tally tally,
-        Func<string, bool> evaluated, Func<string, bool> includeA, Func<string, bool> includeB, CancellationToken ct)
+        Func<string, bool> evaluated, Func<string, bool> includeA, Func<string, bool> includeB, CancellationToken ct,
+        IReadOnlyList<SqliteStateStore.DeferredPlanning>? deferredPlanning = null)
     {
         var unsettled = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var notice in plan.Notices)
@@ -1178,6 +1179,8 @@ public sealed partial class SyncRun
             }
             return !unsettled.GetViewBetween(path + "/", path + "0").Any();
         }
+        if (deferredPlanning is not null && _store is SqliteStateStore deferredStore)
+            deferredStore.AcknowledgeDeferredPlanning(pair.PairId, deferredPlanning, Settled);
         _store.AcknowledgeRehash(pair.A.RootId, scan.A.RehashThrough, path => Settled(path) && includeA(path), ct);
         _store.AcknowledgeRehash(pair.B.RootId, scan.B.RehashThrough, path => Settled(path) && includeB(path), ct);
     }

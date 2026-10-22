@@ -16,7 +16,6 @@ namespace Massdex.SyncShark.V2;
 /// </summary>
 internal sealed class RunActivity : IProgress<RunProgress>, IDisposable
 {
-    // The path the shared seam reports for the run itself when no narrower path is in scope.
     private static readonly AsyncLocal<RunActivity?> Ambient = new();
     private readonly RunActivity? _previous;
     private string? _preparation;
@@ -29,6 +28,7 @@ internal sealed class RunActivity : IProgress<RunProgress>, IDisposable
         lock (activity._gate) activity._preparation = message;
     }
 
+    // The path the shared seam reports for the run itself when no narrower path is in scope.
     private const string RunPath = "<run>";
     private const int LastMessageLimit = 80;
 

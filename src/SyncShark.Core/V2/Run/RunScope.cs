@@ -7,6 +7,9 @@ internal sealed class RunScope
     // RehashProtection accepts at most 1024 distinct paths, bound as one JSON parameter.
     private const int ItemBatchSize = 512;
     private const int BaselineBatchSize = 256;
+    private PairDef? _deferredPair;
+    private readonly List<(string Root, ItemState Item)> _deferred = new(256);
+    private bool _streamingProtection;
     private long _protectionBatches, _protectionTotal, _protectionStarted;
     private readonly IStateStore _store;
     private readonly IReadOnlyDictionary<string, Side>? _decisions;
@@ -201,65 +204,80 @@ internal sealed class RunScope
             Batches(baselines.Count, BaselineBatchSize) + Batches(contextA.Count, ItemBatchSize) +
             Batches(contextB.Count, ItemBatchSize);
         using var snapshot = (_store as SqliteStateStore)?.OpenPlanningProtection(pair);
-        _scopeLinks = snapshot is null ? _links : _links.Freeze(snapshot);
-        var restore = _restoreProtection;
-        var active = _activeRetries?.ToHashSet(StringComparer.OrdinalIgnoreCase);
-        if (snapshot is not null)
-        {
-            // Null means a custom caller supplied no run snapshot and keeps the original planning-transaction read.
-            // An explicit inactive snapshot contributes nothing (no callback, no SQL); beyond the cap the fallback is
-            // bound to THIS transaction, so one scope never mixes a frozen preload with the live writer.
-            Func<string, bool, bool>? restoreLookup = null;
-            if (restore is null)
-                restoreLookup = (path, descendants) => snapshot.RecoveryRestoreProtected(pair.PairId, path, descendants);
-            else if (restore.Active)
-                restoreLookup = restore.Bind(snapshot, pair.PairId);
-            if (restoreLookup is not null || active is not null)
-                _scopeLinks = _scopeLinks.WithRetryProtection((path, descendants) =>
-                    (restoreLookup is not null && restoreLookup(path, descendants)) ||
-                    (active is not null && snapshot.RetryProtected(pair.PairId, path, descendants, active, _restoredRetriesOnly)));
-        }
-        else if (restore is { Active: true })
-        {
-            _scopeLinks = _scopeLinks.WithRetryProtection(restore.Covers);
-        }
+        _deferredPair = pair;
         try
         {
-        RunActivity.Preparation($"Preparing protection scope 0/{_protectionTotal}");
-        LoadRefusedFolders(pair);
-        baselines = NormalizeBaselines(pair, baselines);
-        var hiddenA = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var hiddenB = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        a = Hide(Normalize(pair, Side.A, a), Side.A, baselines.Count == 0 ? null : hiddenA);
-        AfterHideAForTest?.Invoke();
-        b = Hide(Normalize(pair, Side.B, b), Side.B, baselines.Count == 0 ? null : hiddenB);
-        // Hidden means unknown, never absent. Remove the whole established triple,
-        // including a counterpart at a different (moved/mapped) path.
-        (a, b, baselines) = HideProtectedTriples(a, b, baselines, hiddenA, hiddenB);
-        if (WindowsPair(pair))
-        {
-            // Exclusions follow an established link, not an arbitrary same-spelled other entity.
-            var ignoredA = new HashSet<string>(StringComparer.Ordinal);
-            var ignoredB = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var basis in baselines)
-                if (Excluded(basis.A, Side.A) || Excluded(basis.B, Side.B))
-                { ignoredA.Add(basis.A.ObjectId); ignoredB.Add(basis.B.ObjectId); }
-            a = CarryIgnored(a, ignoredA);
-            b = CarryIgnored(b, ignoredB);
-        }
-        return new(a, b, Filter(baselines))
-        {
-            ProtectedAliases = WindowsPair(pair) ? baselines.Where(x => Excluded(x.A, Side.A) || Excluded(x.B, Side.B))
-                .Where(x => DropboxNameMapping.LocalPath(x.A) is not null || DropboxNameMapping.LocalPath(x.B) is not null)
-                .SelectMany(x => new[] { DropboxNameMapping.MatchPath(x.A), DropboxNameMapping.MatchPath(x.B) })
-                .ToHashSet(StringComparer.OrdinalIgnoreCase) : new HashSet<string>(),
-            ContextA = Hide(Normalize(pair, Side.A, contextA), Side.A).DistinctBy(i => i.ObjectId).ToArray(),
-            ContextB = Hide(Normalize(pair, Side.B, contextB), Side.B).DistinctBy(i => i.ObjectId).ToArray()
-        };
+            // Normalize before staging so mapped spellings are identical to the consumer.
+            a = Normalize(pair, Side.A, a);
+            b = Normalize(pair, Side.B, b);
+            baselines = NormalizeBaselines(pair, baselines);
+            contextA = Normalize(pair, Side.A, contextA);
+            contextB = Normalize(pair, Side.B, contextB);
+            using var protection = snapshot is not null && _links.HasRehashProtection
+                ? snapshot.Stream(ProtectionBatches(a, b, baselines, contextA, contextB)) : null;
+            _streamingProtection = protection is not null;
+            _scopeLinks = snapshot is null ? _links : _links.Freeze(snapshot, protection is null ? null : protection.Read);
+            var restore = _restoreProtection;
+            var active = _activeRetries?.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (snapshot is not null)
+            {
+                // Null means a custom caller supplied no run snapshot and keeps the original planning-transaction read.
+                // An explicit inactive snapshot contributes nothing (no callback, no SQL); beyond the cap the fallback is
+                // bound to THIS transaction, so one scope never mixes a frozen preload with the live writer.
+                Func<string, bool, bool>? restoreLookup = null;
+                if (restore is null)
+                    restoreLookup = (path, descendants) => snapshot.RecoveryRestoreProtected(pair.PairId, path, descendants);
+                else if (restore.Active)
+                    restoreLookup = restore.Bind(snapshot, pair.PairId);
+                if (restoreLookup is not null || active is not null)
+                    _scopeLinks = _scopeLinks.WithRetryProtection((path, descendants) =>
+                        (restoreLookup is not null && restoreLookup(path, descendants)) ||
+                        (active is not null && snapshot.RetryProtected(pair.PairId, path, descendants, active, _restoredRetriesOnly)));
+            }
+            else if (restore is { Active: true })
+            {
+                _scopeLinks = _scopeLinks.WithRetryProtection(restore.Covers);
+            }
+            if (!_streamingProtection) RunActivity.Preparation($"Preparing protection scope 0/{_protectionTotal}");
+            LoadRefusedFolders(pair);
+            var hiddenA = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var hiddenB = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            a = Hide(a, Side.A, baselines.Count == 0 ? null : hiddenA);
+            AfterHideAForTest?.Invoke();
+            b = Hide(b, Side.B, baselines.Count == 0 ? null : hiddenB);
+            // Hidden means unknown, never absent. Remove the whole established triple,
+            // including a counterpart at a different (moved/mapped) path.
+            (a, b, baselines) = HideProtectedTriples(a, b, baselines, hiddenA, hiddenB);
+            if (WindowsPair(pair))
+            {
+                // Exclusions follow an established link, not an arbitrary same-spelled other entity.
+                var ignoredA = new HashSet<string>(StringComparer.Ordinal);
+                var ignoredB = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var basis in baselines)
+                    if (Excluded(basis.A, Side.A) || Excluded(basis.B, Side.B))
+                    { ignoredA.Add(basis.A.ObjectId); ignoredB.Add(basis.B.ObjectId); }
+                a = CarryIgnored(a, ignoredA);
+                b = CarryIgnored(b, ignoredB);
+            }
+            return new(a, b, Filter(baselines))
+            {
+                ProtectedAliases = WindowsPair(pair) ? baselines.Where(x => Excluded(x.A, Side.A) || Excluded(x.B, Side.B))
+                    .Where(x => DropboxNameMapping.LocalPath(x.A) is not null || DropboxNameMapping.LocalPath(x.B) is not null)
+                    .SelectMany(x => new[] { DropboxNameMapping.MatchPath(x.A), DropboxNameMapping.MatchPath(x.B) })
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase) : new HashSet<string>(),
+                ContextA = Hide(contextA, Side.A).DistinctBy(i => i.ObjectId).ToArray(),
+                ContextB = Hide(contextB, Side.B).DistinctBy(i => i.ObjectId).ToArray()
+            };
         }
         finally
         {
-            RunActivity.Preparation(null);
+            try { FlushDeferred(); }
+            finally
+            {
+                _deferredPair = null;
+                _streamingProtection = false;
+                RunActivity.Preparation(null);
+            }
             _scopeLinks = null;
             var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(started);
             RunLog.Trace($"protection scope snapshot: {elapsed.TotalMilliseconds:F0} ms");
@@ -288,6 +306,8 @@ internal sealed class RunScope
                 Covered(basis.A, Side.A, links) || Covered(basis.B, Side.B, links);
             if (covered)
             {
+                Defer(basis.A, Side.A);
+                Defer(basis.B, Side.B);
                 visible ??= baselines.Take(index).ToList();
                 hiddenA.Add(basis.A.ObjectId);
                 hiddenB.Add(basis.B.ObjectId);
@@ -335,7 +355,11 @@ internal sealed class RunScope
             }
             var item = items[index];
             var covered = Covered(item, side, links);
-            if (covered) hidden?.Add(item.ObjectId);
+            if (covered)
+            {
+                hidden?.Add(item.ObjectId);
+                Defer(item, side);
+            }
             var flags = item.Flags;
             var refused = side == Side.A ? _refusedFoldersA : _refusedFoldersB;
             var download = _downloadChoices.Contains(item.Path) && item.Kind == ItemKind.File;
@@ -364,11 +388,47 @@ internal sealed class RunScope
         return visible is null ? items : visible;
     }
 
+    private void Defer(ItemState item, Side side)
+    {
+        if (_deferredPair is not { } pair || _store is not SqliteStateStore) return;
+        _deferred.Add(((side == Side.A ? pair.A : pair.B).RootId, item));
+        if (_deferred.Count == 256) FlushDeferred();
+    }
+
+    private void FlushDeferred()
+    {
+        if (_deferred.Count == 0) return;
+        if (_store is SqliteStateStore store && _deferredPair is { } pair)
+            store.DeferPlanning(pair.PairId, _deferred);
+        _deferred.Clear();
+    }
+
+    private static IEnumerable<IReadOnlyList<string>> ProtectionBatches(IReadOnlyList<ItemState> a,
+        IReadOnlyList<ItemState> b, IReadOnlyList<Baseline> baselines,
+        IReadOnlyList<ItemState> contextA, IReadOnlyList<ItemState> contextB)
+    {
+        foreach (var batch in Items(a)) yield return batch;
+        foreach (var batch in Items(b)) yield return batch;
+        for (var n = 0; n < baselines.Count; n += BaselineBatchSize)
+            yield return baselines.Skip(n).Take(BaselineBatchSize).SelectMany(basis => new[]
+            { basis.A.Path, DropboxNameMapping.MatchPath(basis.A), basis.B.Path, DropboxNameMapping.MatchPath(basis.B) }).ToArray();
+        foreach (var batch in Items(contextA)) yield return batch;
+        foreach (var batch in Items(contextB)) yield return batch;
+
+        static IEnumerable<IReadOnlyList<string>> Items(IReadOnlyList<ItemState> items)
+        {
+            for (var n = 0; n < items.Count; n += ItemBatchSize)
+                yield return items.Skip(n).Take(ItemBatchSize)
+                    .SelectMany(item => new[] { item.Path, DropboxNameMapping.MatchPath(item) }).ToArray();
+        }
+    }
+
     private static long Batches(int count, int size) => ((long)count + size - 1) / size;
 
     private void ProtectionBatchStarting()
     {
         var batch = ++_protectionBatches;
+        if (_streamingProtection) return;
         var message = $"Preparing protection scope {batch}/{_protectionTotal}";
         RunActivity.Preparation(message);
         if (batch == 1 || batch % 2048 == 0 || batch == _protectionTotal)

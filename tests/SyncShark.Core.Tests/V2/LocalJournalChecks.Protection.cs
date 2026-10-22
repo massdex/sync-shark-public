@@ -157,7 +157,8 @@ internal static partial class LocalJournalChecks
         var queries = store.ProtectionBatchQueries;
         var filtered = (IReadOnlyList<ItemState>)typeof(RunScope).GetMethod("Hide", hidden)!.Invoke(scope, [rows, Side.A, null])!;
         LocalChecks.Require(filtered.Count == 1024 && filtered.All(row => row.Path != "synthetic-0000001"), "production row filtering protects overflow holds");
-        LocalChecks.Require(store.ProtectionBatchQueries - queries == 5, "row consumer uses five bounded batches for1025 rows");
+        LocalChecks.Require(store.ProtectionBatchQueries - queries == 3,
+            "standalone row consumer uses three bounded 512-item batches for 1025 rows (at most 1024 mapped paths each)");
         var mapped = seed with { Path = "provider-spelling", IdentityJson = "{\"dropboxWindowsPath\":\"synthetic-0000001\"}" };
         var mappedResult = (IReadOnlyList<ItemState>)typeof(RunScope).GetMethod("Hide", hidden)!
             .Invoke(scope, [new[] { mapped }, Side.B, null])!;

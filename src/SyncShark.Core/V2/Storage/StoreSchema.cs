@@ -6,10 +6,11 @@ namespace Massdex.SyncShark.V2;
 internal static class StoreSchema
 {
     /// <summary>The schema version written to and required by <c>PRAGMA user_version</c>; any schema change bumps it.</summary>
+    // v22 adds entity-owned deferred planning work.
     // Coordinated additive slots: v12 retry, v13 quarantine, v14 gap verification,
     // v15 listing/pair pause, v16 local walk, v17 explicit conflict choices, v18 removal review,
     // v19 journal sizing, v20 run summaries and notice-family index, v21 staged gap metadata/protection frontier.
-    public const int Version = 21;
+    public const int Version = 22;
 
     /// <summary>The state database path relative to the app data root.</summary>
     public const string DatabaseRelativePath = @"v2\state.db";
@@ -217,6 +218,13 @@ internal static class StoreSchema
     private const string LegacyFoldDdl = """
         CREATE TABLE IF NOT EXISTS notice_legacy_fold(pair_no INTEGER NOT NULL, reason_key TEXT NOT NULL,
           PRIMARY KEY(pair_no,reason_key)) WITHOUT ROWID;
+        """;
+
+    private const string PlanningDeferredDdl = """
+        CREATE TABLE IF NOT EXISTS planning_deferred(root_no INTEGER NOT NULL, object_id TEXT NOT NULL,
+          pair_no INTEGER NOT NULL, path TEXT NOT NULL, version INTEGER NOT NULL, last_attempt INTEGER NOT NULL,
+          PRIMARY KEY(root_no,object_id,pair_no)) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS planning_deferred_due ON planning_deferred(pair_no,last_attempt,root_no,object_id);
         """;
 
     private const string RehashDdl = """
@@ -523,6 +531,7 @@ internal static class StoreSchema
         Step(19, tx => Execute(connection, tx, JournalDdl));
         Step(20, tx => MigrateRunSummary(connection, tx));
         Step(21, tx => EnsureGapSchema(connection, tx));
+        Step(22, tx => Execute(connection, tx, PlanningDeferredDdl));
 
         void Step(int version, Action<SqliteTransaction>? create)
         {
@@ -569,7 +578,7 @@ internal static class StoreSchema
 
     private static readonly string[] ExpectedNames =
     [
-        "journal_volume", "dir", "root", "pair", "generation", "file_state", "tombstone", "sync_point", "pending_effect", "sync_retry", "sync_retry_due", "sync_retry_kind", "sync_retry_delete_blocked", "sync_retry_delete_review", "sync_retry_review_path", "nt_groupable_delete", "pe_uncertain_delete", "recovery",
+        "planning_deferred", "planning_deferred_due", "journal_volume", "dir", "root", "pair", "generation", "file_state", "tombstone", "sync_point", "pending_effect", "sync_retry", "sync_retry_due", "sync_retry_kind", "sync_retry_delete_blocked", "sync_retry_delete_review", "sync_retry_review_path", "nt_groupable_delete", "pe_uncertain_delete", "recovery",
         "notice", "notice_legacy_fold", "local_gap", "local_gap_item", "gap_ready", "gap_failed", "gap_waiting", "gap_results", "gap_metadata", "local_rehash", "rehash_retry", "deletion_evidence", "dir_key", "dir_mapped_key", "fs_obj", "fs_flagged", "fs_refused", "sp_a_obj", "sp_b_obj", "sp_a_dir", "sp_b_dir",
 
         "removal_review", "pe_unresolved", "pe_intent_order", "rc_pair", "rc_page", "rc_path", "rc_path_missing", "nt_open", "nt_restore_page", "nt_restore_path", "nt_restore_path_ready",
@@ -653,6 +662,7 @@ internal static class StoreSchema
         Execute(connection, transaction, Ddl);
         Execute(connection, transaction, JournalDdl);
         Execute(connection, transaction, RehashDdl);
+        Execute(connection, transaction, PlanningDeferredDdl);
         Execute(connection, transaction, RetryDdl);
         EnsureGapSchema(connection, transaction);
         MigrateRunSummary(connection, transaction);

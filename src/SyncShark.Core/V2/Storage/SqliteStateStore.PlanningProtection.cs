@@ -34,6 +34,9 @@ public sealed partial class SqliteStateStore
             bool storageEnabled)
         { _connection = connection; _transaction = transaction; _a = a; _b = b; _storageEnabled = storageEnabled; }
 
+        internal ProtectionStream Stream(IEnumerable<IReadOnlyList<string>> batches) =>
+            new(_connection, _transaction, _a, _b, ItemFlags.NeedsRehash, _storageEnabled, batches);
+
         internal IReadOnlyList<ProtectionMatch> Read(IReadOnlyList<string> paths)
         {
             if (paths.Count > 1024) throw new ArgumentOutOfRangeException(nameof(paths));

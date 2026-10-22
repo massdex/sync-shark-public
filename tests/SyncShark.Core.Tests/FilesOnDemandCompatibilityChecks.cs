@@ -50,11 +50,12 @@ internal static class FilesOnDemandCompatibilityChecks
             var removedOpen = before.Except(integrated, StringComparer.Ordinal).ToArray();
             Require(removedOpen.All(row => TypeOf(row) == "table" && (NameOf(row) is "notice" or "recovery")),
                 "no-command open only redefines the notice and recovery tables");
-            Require(addedOpen.All(row => (TypeOf(row) == "table" && (NameOf(row) is "notice" or "recovery")) ||
-                (TypeOf(row) == "index" && RecoveryIndexes.Contains(NameOf(row), StringComparer.Ordinal))),
-                "no-command open adds only the approved recovery objects");
+            Require(addedOpen.All(row => (TypeOf(row) == "table" && (NameOf(row) is "notice" or "recovery" or "planning_deferred")) ||
+                (TypeOf(row) == "index" && (RecoveryIndexes.Contains(NameOf(row), StringComparer.Ordinal) || NameOf(row) == "planning_deferred_due"))),
+                "no-command open adds only recovery and entity-owned deferred planning objects");
             Require(addedOpen.Where(row => TypeOf(row) == "table").Select(NameOf).OrderBy(name => name, StringComparer.Ordinal)
-                .SequenceEqual(new[] { "notice", "recovery" }), "the only redefined tables are notice and recovery");
+                .SequenceEqual(new[] { "notice", "planning_deferred", "recovery" }),
+                "only notice/recovery are redefined and the deferred planning table is added");
             Require(!addedOpen.Any(row => FilesOnDemandSchema.Names.Contains(NameOf(row), StringComparer.Ordinal)),
                 "no-command open adds no Files On-Demand objects");
             var openedNoticeColumns = Columns("notice");
@@ -129,7 +130,8 @@ internal static class FilesOnDemandCompatibilityChecks
             Require(Directory.GetFiles(Path.Combine(recovery, "StateBackups"), "*.db").Length == 1, "repeated opt-in does not copy database again");
             Require(!integrated.SequenceEqual(Schema()), "first online-only command creates feature objects after backup");
             using var enabled = Open(root);
-            Require(Convert.ToInt64(StoreSchema.Scalar(enabled, null, "PRAGMA user_version;")) == 21, "opt-in keeps the final26.2 base version");
+            Require(Convert.ToInt64(StoreSchema.Scalar(enabled, null, "PRAGMA user_version;")) == StoreSchema.Version,
+                "opt-in keeps the current integrated base version");
             Require(StoreSchema.Scalar(enabled, null, "SELECT sql FROM sqlite_master WHERE name='fs_flagged';") is string sql && sql.EndsWith("WHERE flags != 0", StringComparison.Ordinal), "shared index unchanged");
             var enabledReads = new FileStateReader(enabled, new DirTable(enabled)) { StorageEnabled = true };
             foreach (var (mask, expected) in new[] { (ItemFlags.NeedsRehash, "fs_nonpointer"), (ItemFlags.OwnedPointer, "fs_owned"),

@@ -73,8 +73,11 @@ internal sealed class LinkExclusions
     internal LinkExclusions ForPaths(IEnumerable<string> paths) => !RequiresBatch ? this :
         new(_links, _stubs, _pending, _nonLocalLinks, _rehash?.ForPaths(paths), _retryProtection);
 
-    internal LinkExclusions Freeze(SqliteStateStore.PlanningProtection snapshot) =>
-        new(_links, _stubs, _pending, _nonLocalLinks, _rehash?.Freeze(snapshot.Read),
+    internal bool HasRehashProtection => _rehash is not null;
+
+    internal LinkExclusions Freeze(SqliteStateStore.PlanningProtection snapshot,
+        Func<IReadOnlyList<string>, IReadOnlyList<ProtectionMatch>>? read = null) =>
+        new(_links, _stubs, _pending, _nonLocalLinks, _rehash?.Freeze(read ?? snapshot.Read),
             _retryProtection, HeldCount);
 
     /// <summary>Nothing left alone.</summary>

@@ -29,8 +29,8 @@ internal static partial class LocalJournalChecks
             LocalChecks.Require(store.ProtectionIndex(root.RootId, ItemFlags.NeedsRehash) is null,
                 "gap uses lazy bounded protection without materializing unvisited root");
             var held = store.ProtectionBatch(root.RootId, ItemFlags.NeedsRehash, ["folder", rows[0].Path, "", "other"]);
-            LocalChecks.Require(held.All(hit => hit == new ProtectionMatch(true, true)),
-                "whole-root unpublished gap conservatively protects folders and absent paths too");
+            LocalChecks.Require(held[0].Contains && held[1].Covered && held[2].Contains && !held[3].Covered,
+                "unvisited gap rows protect ancestors root and self only");
             var io = new GapCheckIo(stamp, cursor);
             await using (var worker = new LocalGapWorker(gaps, io))
             {

@@ -62,9 +62,9 @@ public sealed partial class SqliteStateStore
         (directory.Length > candidate.Length && directory[candidate.Length] == '/' &&
             directory.StartsWith(candidate, StringComparison.Ordinal));
 
-    internal static IReadOnlyList<ProtectionMatch> ReadProtectionBatch(SqliteConnection connection,
+    private static IReadOnlyList<ProtectionMatch> ReadProtectionBatch(SqliteConnection connection,
         SqliteTransaction transaction, long? rootNumber, ItemFlags flags, IReadOnlyList<string> paths,
-        bool storageEnabled, Action? pathReadForTest = null)
+        bool storageEnabled)
     {
         var result = new ProtectionMatch[paths.Count];
         // The caller pins this snapshot at a store-call boundary before releasing _gate.
@@ -86,15 +86,6 @@ public sealed partial class SqliteStateStore
                 after = gapReader.GetString(1);
             }
         }
-        // An unpublished whole-root gap holds every file. Conservatively hold absent
-        // paths and folders too: scope hiding removes established triples on BOTH sides,
-        // never turning an unknown counterpart into a deletion or move candidate.
-        if (gap && !done && after.Length == 0)
-        {
-            Array.Fill(result, new ProtectionMatch(Covered: true, Contains: true));
-            return result;
-        }
-        pathReadForTest?.Invoke();
         var keys = paths.Select(RowCodec.Key).ToArray();
         var ancestors = new List<object>();
         for (var n = 0; n < keys.Length; n++)

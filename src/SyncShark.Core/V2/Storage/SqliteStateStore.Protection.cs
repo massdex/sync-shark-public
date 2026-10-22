@@ -76,7 +76,7 @@ public sealed partial class SqliteStateStore
             try
             {
                 connection.Open();
-                StoreSchema.Execute(connection, null, "PRAGMA cache_size=-2048;");
+                StoreSchema.Execute(connection, null, "PRAGMA cache_size=-2048; PRAGMA temp_store=FILE; PRAGMA temp.cache_size=-2048;");
                 transaction = connection.BeginTransaction(deferred: true);
                 // BeginTransaction alone does not pin a deferred snapshot. The first SELECT
                 // must also run under _gate, between store calls, never between commits of
