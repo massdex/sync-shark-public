@@ -102,6 +102,7 @@ internal static partial class RunChecks
         overlay.Save("range-fixture", "Tree/deleted", null);
         Require(overlay.Items("range-fixture", "tree").Count() == 600,
             "indexed subtree pages are case insensitive, exclude prefix siblings and tombstones");
+        await EngineCompositionChecks.RehearsalAsync();
         Console.WriteLine("PASS rehearsal virtual effects, full executor, two-run convergence and isolated-root guards");
     }
 }

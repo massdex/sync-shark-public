@@ -44,7 +44,30 @@ internal static class DirectoryLeaseChecks
         try { using var link = PilotDirectoryLease.OpenOrCreateChild(parent, "junction", pin: true); }
         catch (IOException) { rejected = true; }
         Require(rejected, "existing junction cannot be adopted as a shared directory");
-        Console.WriteLine("PASS directory lease concurrent create-or-open, exclusive create, file and junction rejection");
+        var selectedPath = Path.Combine(root, "selected");
+        Directory.CreateDirectory(selectedPath);
+        using (var selected = PilotDirectoryLease.Open(selectedPath))
+        {
+            var plan = SyncControlNamespace.PlanLocalAllocation(selected, "fixture-installation", "fixture-namespace");
+            Directory.CreateDirectory(plan.ControlPath);
+            var boundaries = new List<string>();
+            SyncControlNamespace.AllocationBoundaryForTest = boundary =>
+            {
+                boundaries.Add(boundary);
+                if (boundary == "before-control-directory-recheck") Directory.Delete(plan.ControlPath);
+            };
+            try
+            {
+                var binding = await SyncControlNamespace.InspectAuthorizedLocalAsync(selected, plan, sharedRead: true);
+                Require(binding is null, "vanished read-only namespace returns the same missing outcome as the initial guard");
+                Require(!Directory.Exists(plan.ControlPath) &&
+                    !File.Exists(Path.Combine(plan.ControlPath, SyncControlNamespace.MarkerName)) &&
+                    boundaries.SequenceEqual(new[] { "before-control-directory-recheck" }),
+                    "read-only race never creates, secures, marks or cleans up a control namespace");
+            }
+            finally { SyncControlNamespace.AllocationBoundaryForTest = null; }
+        }
+        Console.WriteLine("PASS directory lease concurrent create-or-open, exclusive create, file and junction rejection, read-only namespace disappearance");
         }
         finally
         {

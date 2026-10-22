@@ -5,7 +5,7 @@ internal static class EngineCompositionChecks
 {
     public static async Task RunAsync()
     {
-        var root = Path.Combine(Path.GetTempPath(), "engine-composition-" + Guid.NewGuid().ToString("N"));
+        var root = LocalChecks.FreshRoot("engine-composition-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         using var http = new HttpClient(new FailingHandler());
         var host = new EngineHostInputs(root, null, http);
@@ -479,6 +479,12 @@ internal static class EngineCompositionChecks
         Require(composition.Store.Live(a.RootId, [Path.GetFileName(copies[0])]).Count == 0,
             "no Recovery artifact is recorded as data");
     }
+    internal static async Task RehearsalAsync()
+    {
+        using var http = new HttpClient(new FailingHandler());
+        await RehearsalIsolatedAsync(LocalChecks.FreshRoot("rehearsal-production"), http);
+    }
+
     private static async Task RehearsalIsolatedAsync(string root, HttpClient http)
     {
         var product = Path.Combine(root, "source-product");
@@ -538,6 +544,20 @@ internal static class EngineCompositionChecks
         else Console.WriteLine("WARN rehearsal fixture: native journal sizing comparison unavailable on this runner.");
         Require(messages.Any(message => message.StartsWith("not simulated:", StringComparison.Ordinal)),
             "production rehearsal reports unsupported simulation paths");
+
+        using (var pausedStore = SqliteStateStore.OpenPauseControl(isolated))
+            pausedStore.SetPairPaused(pairId, true);
+        var pausedExport = Path.Combine(root, "paused-effects.csv");
+        string[] pausedArgs = ["--cli", "run", "--pair", pairId, "--rehearse",
+            "--data-root", isolated, "--export", pausedExport];
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var exit = await SyncCli.ExecuteAsync(pausedArgs, output, error,
+            () => V2CliRuntime.AcquireProduction(pausedArgs));
+        Require(exit != 0 && (output.ToString() + error.ToString()).Contains(
+                $"pair {pairId} is paused in this store; resume it in the copy to rehearse", StringComparison.Ordinal),
+            "paused rehearsal returns a non-zero CLI exit and instructions to resume only the copy");
+        Require(!File.Exists(pausedExport), "paused rehearsal refuses before creating its effect log");
     }
 
     private static string[] FixtureTree(string root) => Directory.EnumerateFileSystemEntries(root, "*", SearchOption.AllDirectories)

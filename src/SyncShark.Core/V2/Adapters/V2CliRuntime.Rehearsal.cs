@@ -13,6 +13,8 @@ public sealed partial class V2CliRuntime
         if (!_planOnlyIsolated) throw new SyncCliUnsupportedException("Rehearsal requires an isolated --data-root.");
         if (runs is < 1 or > 100) throw new SyncCliUsageException("--runs must be from 1 to 100.");
         var pair = RequirePair(pairId);
+        if (_store is SqliteStateStore sql && sql.PairPaused(pairId))
+            throw new SyncCliUsageException($"pair {pairId} is paused in this store; resume it in the copy to rehearse");
         RejectDataRootInsidePair(pair);
         var export = ValidatePlanExportPath(exportPath, _store.Pairs(), _productRoot);
         var provenanceExport = provenancePath is null ? null : ValidatePlanExportPath(provenancePath, _store.Pairs(), _productRoot);

@@ -109,10 +109,12 @@ public static class SyncControlNamespace
         if (File.Exists(plan.ControlPath))
             throw new IOException("The authorized private staging path is occupied by a non-directory object.");
 
+        if (sharedRead) AllocationBoundaryForTest?.Invoke("before-control-directory-recheck");
         PilotDirectoryLease control;
         var created = false;
         if (!Directory.Exists(plan.ControlPath))
         {
+            if (!createWhenMissing) return null;
             try
             {
                 control = PilotDirectoryLease.CreateChild(parent, plan.DeterministicName);
