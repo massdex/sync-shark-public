@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AssemblyName>SyncShark.Core.Tests</AssemblyName>
+    <!-- Standalone native/storage host: exclude only the Core.Tests-only observation regression
+         that would otherwise pull in the large RunChecks partial graph. -->
+    <DefineConstants>$(DefineConstants);SYNCSHARK_FOD_STANDALONE</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/SyncShark.Core/SyncShark.Core.csproj" />
+    <Compile Include="../SyncShark.Core.Tests/FilesOnDemandNativeChecks.cs" Link="FilesOnDemandNativeChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/FilesOnDemandStorageChecks.cs" Link="FilesOnDemandStorageChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/FilesOnDemandLegacyIndexChecks.cs" Link="FilesOnDemandLegacyIndexChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/FilesOnDemandNoticeAggregationChecks.cs" Link="FilesOnDemandNoticeAggregationChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/FilesOnDemandProtectionChecks.cs" Link="FilesOnDemandProtectionChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/FilesOnDemandSettlementChecks.cs" Link="FilesOnDemandSettlementChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/HydrationNoticeWriterChecks.cs" Link="HydrationNoticeWriterChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/FilesOnDemandNativePointerChecks.cs" Link="FilesOnDemandNativePointerChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/FilesOnDemandNativeEdgeChecks.cs" Link="FilesOnDemandNativeEdgeChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/FilesOnDemandNativePartialChecks.cs" Link="FilesOnDemandNativePartialChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/OwnedPointerProofChecks.cs" Link="OwnedPointerProofChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/V2/InMemoryStateStore.cs" Link="InMemoryStateStore.cs" />
+    <Compile Include="../SyncShark.Core.Tests/V2/NewPointerNativeChecks.cs" Link="NewPointerNativeChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/V2/NewPointerDownloadChecks.cs" Link="NewPointerDownloadChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/CloudFilesLifetimeChecks.cs" Link="CloudFilesLifetimeChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/CloudFilesOwnershipChecks.cs" Link="CloudFilesOwnershipChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/FilesOnDemandServiceChecks.cs" Link="FilesOnDemandServiceChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/StorageNoticeLaneChecks.cs" Link="StorageNoticeLaneChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/StorageQueuePlanChecks.cs" Link="StorageQueuePlanChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/FilesOnDemandCompatibilityChecks.cs" Link="FilesOnDemandCompatibilityChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/FilesOnDemandV20Fixture.cs" Link="FilesOnDemandV20Fixture.cs" />
+    <Compile Include="../SyncShark.Core.Tests/StorageExplicitRetryChecks.cs" Link="StorageExplicitRetryChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/V2/PointerUpdateCoordinationChecks.cs" Link="PointerUpdateCoordinationChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/V2/SettlementInventoryChecks.cs" Link="SettlementInventoryChecks.cs" />
+  </ItemGroup>
+</Project>
