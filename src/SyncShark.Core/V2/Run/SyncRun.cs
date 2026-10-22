@@ -721,7 +721,7 @@ public sealed partial class SyncRun : ISyncRun
         }
 
         RecordScanRetries(pair, scan);
-        var recoveryTouched = await RefreshRecoveryRestoresAsync(pair, ct);
+        var recoveryTouched = await RefreshRecoveryRestoresAsync(pair, scan, ct);
         CloseObservedRepairs(pair, scan);
         // Finding 1 (Astra): a link or stub that disappears in this run still protects its path for the whole run.
         // The restore refresh above may have frozen a new intent; take the run's hold snapshot after it.
@@ -1297,6 +1297,10 @@ public sealed partial class SyncRun : ISyncRun
             // listing with no checkpoint must not erase the previously committed cursor.
             var complete = (!side.Full || side.Complete || side.CursorAfter.Length > 0) && !side.IncompleteSubtrees.Contains(string.Empty) && side.PendingDeletionEvidence.Keys.All(side.ReleasedDeletionEvidence.Contains);
             _store.CompleteGeneration(side.Gen, side.CursorAfter, complete);
+            // Only a completed full-inventory side settles this obligation. A targeted
+            // quarantine refresh (or an ordinary delta) cannot account for the skipped range.
+            if (complete && side.Full && side.Complete && _store is SqliteStateStore gapStore)
+                gapStore.SettleGapInventory(side.Gen);
             // Observation coverage advances with effect replay, never merely with ingestion. A crash
             // between these writes can cause extra hydration, but cannot skip unfinished changes.
             if (complete && side.ObservedCoverage is { } coverage && _store is SqliteStateStore sql)

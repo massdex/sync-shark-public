@@ -71,7 +71,7 @@ public sealed partial class SyncRun
             record.VersionId, record.Size, record.Created, classification, destination, detail);
 
     private async Task<RecoveryRestoreItem> RestoreRecoveryRecordAsync(PairDef pair, RecoveryRecord record,
-        bool asCopy, bool dryRun, CancellationToken ct, bool retainDestination = false)
+        bool asCopy, bool dryRun, CancellationToken ct, bool retainDestination = false, long? activeGeneration = null)
     {
         if (record.PairId != pair.PairId) throw new IOException("Recovery entry belongs to a different pair.");
         var id = RecoveryRestoreId(record);
@@ -87,7 +87,7 @@ public sealed partial class SyncRun
         {
             if (!IsRecoveryRestoreIntent(pending) || pending.Target != record.Side)
                 throw new IOException("Recovery operation identity is occupied; no new destination was selected.");
-            var reconciled = await _executor.ReconcileAsync([pending], _store.BeginGeneration(targetRoot.RootId, RunKind),
+            var reconciled = await _executor.ReconcileAsync([pending], activeGeneration ?? _store.BeginGeneration(targetRoot.RootId, RunKind),
                 _endpoints.Writer(pair.A), _endpoints.Writer(pair.B), ct).ConfigureAwait(false);
             var result = reconciled.Single();
             if (result.Outcome == Outcome.Done) return RecoveryResult(record, "RESTORED", pending.Path);
@@ -230,7 +230,7 @@ public sealed partial class SyncRun
         }
         // Archive read/hash failure has no effect intent and must never hold a user's live path.
         _store.AddNotices([notice]); // Persist the attempt before baseline changes and provider effects.
-        var generation = _store.BeginGeneration(targetRoot.RootId, RunKind);
+        var generation = activeGeneration ?? _store.BeginGeneration(targetRoot.RootId, RunKind);
         ForgetRecoveryBaselines(pair, destination, generation);
         var retained = new RetainedBytesWriter(action.Source!, bytes);
         await foreach (var result in _executor.ApplyAsync(new Plan(pair.PairId, generation, [action], []),
@@ -307,7 +307,7 @@ public sealed partial class SyncRun
     }
 
     // Called AFTER inventory and BEFORE planning. Explicit observations, not a watcher event, discharge protection.
-    private async Task<IReadOnlyList<string>> RefreshRecoveryRestoresAsync(PairDef pair, CancellationToken ct)
+    private async Task<IReadOnlyList<string>> RefreshRecoveryRestoresAsync(PairDef pair, BothScan scan, CancellationToken ct)
     {
         var touched = new System.Collections.Concurrent.ConcurrentBag<string>();
         var page = _store.RecoveryRestoreNoticesPage(pair.PairId,
@@ -368,7 +368,8 @@ public sealed partial class SyncRun
                     // Automatic retry keeps the notice's selected destination too; only an explicit as-copy
                     // decision may derive a fresh copy name. This matches the user Retry path after a downgrade.
                     var copy = notice.ConflictOperation?.Completed.Contains("as-copy") == true;
-                    await RestoreRecoveryRecordAsync(pair, record, copy, false, token, retainDestination: true)
+                    await RestoreRecoveryRecordAsync(pair, record, copy, false, token, retainDestination: true,
+                        activeGeneration: record.Side == Side.A ? scan.A.Gen : scan.B.Gen)
                         .ConfigureAwait(false);
                     notice = _store.NoticeById(pair.PairId, notice.NoticeId!)?.Notice ?? notice;
                 }
@@ -377,13 +378,15 @@ public sealed partial class SyncRun
                 var guard = ActionPredicates(pair, LinkExclusions.Of(_store, pair, !_settings.ReplaceOnlineOnlyStubs));
                 if (GuardedActions([action with { Source = null }], guard).Any(entry => !Allowed(entry.Guard, entry.Action))) return;
                 var targetRoot = action.Target == Side.A ? pair.A : pair.B;
+                // Reuse the live inventory generations: BeginGeneration abandons an earlier open scan.
+                var activeGeneration = action.Target == Side.A ? scan.A.Gen : scan.B.Gen;
                 var target = _endpoints.Writer(targetRoot);
                 var observed = await target.ObserveAsync(action.Path, token).ConfigureAwait(false);
                 if (observed is null || observed.Kind != ItemKind.File || observed.Hash is null ||
                     !string.Equals(observed.Hash, source.Hash, StringComparison.OrdinalIgnoreCase) || observed.Size != source.Size) return;
                 if (_store.IntentById(pair.PairId, action.ActionId) is { } pending)
                 {
-                    var results = await _executor.ReconcileAsync([pending], _store.BeginGeneration(targetRoot.RootId, RunKind),
+                    var results = await _executor.ReconcileAsync([pending], activeGeneration,
                         _endpoints.Writer(pair.A), _endpoints.Writer(pair.B), token).ConfigureAwait(false);
                     if (results.Single().Outcome != Outcome.Done) return;
                 }
@@ -393,8 +396,7 @@ public sealed partial class SyncRun
                 if (other is not null && (other.Kind != ItemKind.File ||
                     !string.Equals(other.Hash, observed.Hash, StringComparison.OrdinalIgnoreCase) || other.Size != observed.Size))
                     throw new IOException(RecoveryOppositeChangedDetail(pair, action.Target, action.Path));
-                var generation = _store.BeginGeneration(targetRoot.RootId, RunKind);
-                ForgetRecoveryBaselines(pair, action.Path, generation);
+                ForgetRecoveryBaselines(pair, action.Path, activeGeneration);
                 foreach (var (root, side) in new[] { (pair.A, Side.A), (pair.B, Side.B) })
                 {
                     var live = side == action.Target ? observed :
@@ -405,7 +407,7 @@ public sealed partial class SyncRun
                         changes.Add(new Change(ChangeKind.Delete, stale.ObjectId, stale.Path, null, null));
                     if (live is not null) changes.Add(new Change(ChangeKind.Upsert, live.ObjectId, live.Path, live, null));
                     var cursor = _store.Cursor(root.RootId) ?? "";
-                    _store.WriteDelta(new Delta(root.RootId, side, _store.BeginGeneration(root.RootId, RunKind),
+                    _store.WriteDelta(new Delta(root.RootId, side, side == Side.A ? scan.A.Gen : scan.B.Gen,
                         cursor, cursor, changes, false, []));
                 }
                 // Never close before planning: this ready row keeps the path dirty across crashes and empty deltas.

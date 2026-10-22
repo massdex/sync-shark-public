@@ -22,7 +22,8 @@ internal static class SettlementInventoryChecks
             new("remote", SyncProviders.Dropbox, "account", "/Remote", "remote-root"), [], [], true);
         store.SavePair(pair);
         LocalInventory Inventory() => new(pair.A, Side.A, store,
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase), settings, TimeProvider.System, pairId: pair.PairId);
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase), settings, TimeProvider.System, pairId: pair.PairId)
+            { WalkCheckpointForTest = () => (new NtfsUsnCheckpoint(1, 0, 100, 0), false) };
         var initial = await Inventory().FullAsync(1, _ => true, null!, CancellationToken.None);
         var local = initial.Items.Single() with { Hash = DropboxContentHash.Compute(System.Text.Encoding.UTF8.GetBytes("data")) };
         var remote = local with { ObjectId = "id:file", VersionId = "revision-1" };

@@ -129,6 +129,7 @@ internal static partial class StorageChecks
         File.WriteAllText(Path.Combine(folder, "old"), "content");
         using var store = SqliteStateStore.Open(Fresh(root, "partial-move-store"), Fast, new TestClock());
         var inventory = LocalChecks.Inventory(folder, store, new TestClock());
+        inventory.WalkCheckpointForTest = () => (new NtfsUsnCheckpoint(1, 0, 100, 0), false);
         var initial = inventory.FullAsync(1, _ => true, null!, CancellationToken.None).GetAwaiter().GetResult();
         store.WriteSnapshot(initial with { Gen = store.BeginGeneration(initial.RootId, "full") });
         File.Move(Path.Combine(folder, "old"), Path.Combine(folder, "new"));

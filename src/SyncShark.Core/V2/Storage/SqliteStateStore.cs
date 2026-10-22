@@ -172,8 +172,6 @@ public sealed partial class SqliteStateStore : IStateStore
                 "SELECT root_no FROM generation WHERE gen=$g;", ("$g", gen))!;
             StoreSchema.Execute(_connection, transaction, "UPDATE root SET cursor=$cursor WHERE root_no=$r;",
                 ("$cursor", cursor), ("$r", rootNo));
-            StoreSchema.Execute(_connection, transaction,
-                "UPDATE local_gap SET inventory_pending=0 WHERE root_no=$r;", ("$r", rootNo));
         }
         transaction.Commit();
     });

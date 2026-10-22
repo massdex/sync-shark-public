@@ -52,11 +52,12 @@ internal static partial class StorageChecks
                     """);
                 StoreSchema.Execute(db, null, $"PRAGMA user_version={version};");
             }
+            var expectedCursor = "0000000000000001:100";
             for (var reopen = 0; reopen < 2; reopen++)
             {
                 using (var store = SqliteStateStore.Open(folder, Fast, new TestClock()))
                 {
-                    Require(store.Cursor("root-a") == "0000000000000001:100", "upgrade preserves root cursor");
+                    Require(store.Cursor("root-a") == expectedCursor, "upgrade preserves exact previously committed root cursor");
                     var retained = store.ByObject("root-a", "entity-a")!;
                     Require(retained.Hash == "aabb" && retained.Flags == ItemFlags.None &&
                         store.RehashWatermark("root-a") == 0 && !((ILocalGapStore)store).HasGapProtection("root-a"),
@@ -64,13 +65,13 @@ internal static partial class StorageChecks
                     // A metadata-only reconciliation after upgrade must reuse the retained hash,
                     // not convert every unchanged file into a foreground content read.
                     var generation = store.BeginGeneration("root-a", "full");
-                    store.WriteSnapshot(new("root-a", Side.A, generation, "0000000000000001:100",
+                    store.WriteSnapshot(new("root-a", Side.A, generation, expectedCursor,
                         [retained with { Hash = null }], []));
-                    store.CompleteGeneration(generation, "0000000000000001:100", true);
+                    store.CompleteGeneration(generation, expectedCursor, true);
                     Require(store.ByObject("root-a", "entity-a")!.Hash == retained.Hash &&
                         store.RehashWatermark("root-a") == 0,
                         "post-upgrade metadata snapshot retains unchanged hash and no rehash debt");
-                    if (version == 12)
+                    if (version == 12 && reopen == 0)
                     {
                         // Exact legacy shape: same journal, cursor older than retained history,
                         // reusable hash, and no pre-existing foreground verification obligation.
@@ -81,6 +82,9 @@ internal static partial class StorageChecks
                             SyncLocalEndpointStore.ObjectId(1, 1));
                         var inventory = new LocalInventory(local, Side.A, store, new HashSet<string>(), Fast, new TestClock());
                         inventory.BeginJournalGap(local.RootId, 1, 100, through);
+                        expectedCursor = through.Cursor;
+                        Require(store.Cursor(local.RootId) == expectedCursor && store.GapInventoryPending(local.RootId),
+                            "post-migration gap advances cursor with a durable inventory obligation");
                         inventory.BeginFullGap(local.RootId, through.Cursor, journalDeleted: false);
                         var gaps = (ILocalGapStore)store;
                         Require(gaps.GapEpoch(local.RootId) is { TrustFileUsn: true, Boundary: 100 } &&

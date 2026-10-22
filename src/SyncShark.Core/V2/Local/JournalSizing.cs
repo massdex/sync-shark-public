@@ -97,7 +97,12 @@ public static class JournalSizing
             var grew = (result is 0 or 183) && before is not null && after is not null &&
                 before[7] == pending.Serial && after[7] == pending.Serial && before[0] == after[0] &&
                 after[4] >= pending.State.Requested && after[5] >= pending.State.Allocation;
-            store.FinishSilentJournal(pending, grew, result == 112
+            var partial = before is not null && after is not null &&
+                before[7] == pending.Serial && after[7] == pending.Serial && before[0] == after[0] &&
+                (after[4] > before[4] || after[5] > before[5]);
+            store.FinishSilentJournal(pending, grew, partial
+                ? $"Windows' change history grew to {after![4]} bytes (allocation {after[5]} bytes); {pending.State.Requested} bytes (allocation {pending.State.Allocation} bytes) requested. Free space may limit further growth. Free up disk space and Retry, or Ignore."
+                : result == 112
                 ? $"Not enough free space to enlarge Windows' change history toward {pending.State.Requested / (double)Minimum:0.##} GB. Free up disk space and Retry, or Ignore."
                 : result == 0 ? "Windows' change history did not grow. Retry or Ignore."
                 : "Windows' change history is too small and automatic enlargement is unavailable or failed.");

@@ -700,8 +700,18 @@ public sealed partial class SyncRun
     private async Task<SideScan> CatchUpLocalWalkAsync(PairDef pair, Side side, IInventorySource inventory,
         Snapshot snapshot, Func<string, bool> include, RootDef root, ProgressThrottle throttle, CancellationToken ct)
     {
+        var gapReplayFrom = _store is SqliteStateStore gapSql && gapSql.GapInventoryPending(root.RootId)
+            ? _store.Cursor(root.RootId) : null;
+        // An interrupted gap run already advanced the root cursor before its walk. Replay
+        // from that checkpoint, not the newer walk start: metadata alone cannot see a
+        // same-size/same-mtime write in between. A resumed older walk still wins.
+        var replayFrom = snapshot.CursorAfter;
+        if (NtfsUsnCheckpoint.TryParseCursor(gapReplayFrom, out var gapJournal, out var gapNext) &&
+            NtfsUsnCheckpoint.TryParseCursor(replayFrom, out var walkJournal, out var walkNext) &&
+            gapJournal == walkJournal && gapNext < walkNext)
+            replayFrom = gapReplayFrom!;
         var gen = _store.BeginGeneration(root.RootId, "delta");
-        var delta = await inventory.ChangesSinceAsync(snapshot.CursorAfter, gen, include, ct);
+        var delta = await inventory.ChangesSinceAsync(replayFrom, gen, include, ct);
         if (delta.CursorInvalid)
         {
             Trace($"scan {side}: local walk catch-up unavailable; retrying one fresh walk");

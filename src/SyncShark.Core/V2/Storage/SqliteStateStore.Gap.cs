@@ -168,6 +168,12 @@ public sealed partial class SqliteStateStore : ILocalGapStore
             "SELECT 1 FROM local_gap g JOIN root r ON r.root_no=g.root_no WHERE r.root_id=$id AND g.inventory_pending=1;",
             ("$id", rootId)) is not null);
 
+    internal void SettleGapInventory(long completedGeneration) => InStore(() =>
+        StoreSchema.Execute(_connection, null,
+            "UPDATE local_gap SET inventory_pending=0 WHERE root_no IN " +
+            "(SELECT root_no FROM generation WHERE gen=$g AND complete=1 AND finished IS NOT NULL);",
+            ("$g", completedGeneration)));
+
     void ILocalGapStore.BeginGap(string rootId, string journalCursor, long boundary, bool trustFileUsn, string reason) => InStore(() =>
     {
         var root = RootNo(rootId);
@@ -194,7 +200,7 @@ public sealed partial class SqliteStateStore : ILocalGapStore
         // journal_cursor is the covered-until checkpoint captured BEFORE any walk, not
         // the oldest unresolved per-file proof boundary. Publish protection and replay
         // position atomically: later journal changes must still be read normally.
-        if (trustFileUsn && NtfsUsnCheckpoint.TryParseCursor(journalCursor, out _, out _))
+        if (NtfsUsnCheckpoint.TryParseCursor(journalCursor, out _, out _))
         {
             StoreSchema.Execute(_connection, tx,
                 "UPDATE local_gap SET inventory_pending=1 WHERE root_no=$r;" +

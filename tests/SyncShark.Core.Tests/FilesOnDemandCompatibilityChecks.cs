@@ -28,7 +28,7 @@ internal static class FilesOnDemandCompatibilityChecks
         }
         static string TypeOf(string row) => row.Split('|')[0];
         static string NameOf(string row) => row.Split('|')[1];
-        // The integrated v2 build legitimately migrates the final26.2 notice and recovery tables and adds
+        // The integrated v2 build legitimately migrates final26.2 notice, recovery and local_gap tables and adds
         // these recovery indexes on every compatible open. They are part of this build's own baseline; Files
         // On-Demand must still add nothing of its own until it is enabled.
         string[] RecoveryIndexes = ["rc_page", "rc_path", "rc_path_missing", "nt_restore_page",
@@ -36,6 +36,7 @@ internal static class FilesOnDemandCompatibilityChecks
         var before = Schema();
         var beforeNoticeColumns = Columns("notice");
         var beforeRecoveryColumns = Columns("recovery");
+        var beforeGapColumns = Columns("local_gap");
         using (var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System))
         {
             Require(store.ByObject("fixture-root", "fixture-item")?.Size == 17, "populated final26 fixture survives open");
@@ -43,18 +44,22 @@ internal static class FilesOnDemandCompatibilityChecks
                 store.StorageSettlementPage().Count == 0 && store.ChangedStoragePointers().Count == 0 && store.StorageHydrationPage().Count == 0,
                 "disabled feature APIs return defaults without creating schema");
             // The no-command open produces the integrated build's v2 schema: final26.2 plus the approved
-            // recovery additions. The assertion's purpose is unchanged: before FoD is enabled, the open adds
-            // only the approved recovery objects and no Files On-Demand object, and redefines nothing else.
+            // recovery additions and the forward-only v22 gap obligation. Neither is a FoD opt-in.
+            // The pre-FoD backup restores this integrated baseline, not the older core schema.
             var integrated = Schema();
             var addedOpen = integrated.Except(before, StringComparer.Ordinal).ToArray();
             var removedOpen = before.Except(integrated, StringComparer.Ordinal).ToArray();
-            Require(removedOpen.All(row => TypeOf(row) == "table" && (NameOf(row) is "notice" or "recovery")),
-                "no-command open only redefines the notice and recovery tables");
-            Require(addedOpen.All(row => (TypeOf(row) == "table" && (NameOf(row) is "notice" or "recovery")) ||
+            Require(removedOpen.All(row => TypeOf(row) == "table" && (NameOf(row) is "notice" or "recovery" or "local_gap")),
+                "no-command open only redefines the approved notice, recovery and local_gap tables");
+            Require(addedOpen.All(row => (TypeOf(row) == "table" && (NameOf(row) is "notice" or "recovery" or "local_gap")) ||
                 (TypeOf(row) == "index" && RecoveryIndexes.Contains(NameOf(row), StringComparer.Ordinal))),
-                "no-command open adds only the approved recovery objects");
+                "no-command open adds only approved core recovery and gap changes");
             Require(addedOpen.Where(row => TypeOf(row) == "table").Select(NameOf).OrderBy(name => name, StringComparer.Ordinal)
-                .SequenceEqual(new[] { "notice", "recovery" }), "the only redefined tables are notice and recovery");
+                .SequenceEqual(new[] { "local_gap", "notice", "recovery" }), "the only redefined tables are local_gap, notice and recovery");
+            var openedGapColumns = Columns("local_gap");
+            Require(openedGapColumns.Take(beforeGapColumns.Length).SequenceEqual(beforeGapColumns) &&
+                openedGapColumns.Skip(beforeGapColumns.Length).SequenceEqual(new[] { "inventory_pending" }),
+                "local_gap keeps every existing column and gains only the v22 inventory obligation");
             Require(!addedOpen.Any(row => FilesOnDemandSchema.Names.Contains(NameOf(row), StringComparer.Ordinal)),
                 "no-command open adds no Files On-Demand objects");
             var openedNoticeColumns = Columns("notice");
@@ -129,7 +134,7 @@ internal static class FilesOnDemandCompatibilityChecks
             Require(Directory.GetFiles(Path.Combine(recovery, "StateBackups"), "*.db").Length == 1, "repeated opt-in does not copy database again");
             Require(!integrated.SequenceEqual(Schema()), "first online-only command creates feature objects after backup");
             using var enabled = Open(root);
-            Require(Convert.ToInt64(StoreSchema.Scalar(enabled, null, "PRAGMA user_version;")) == 21, "opt-in keeps the final26.2 base version");
+            Require(Convert.ToInt64(StoreSchema.Scalar(enabled, null, "PRAGMA user_version;")) == StoreSchema.Version, "opt-in keeps the integrated core schema version");
             Require(StoreSchema.Scalar(enabled, null, "SELECT sql FROM sqlite_master WHERE name='fs_flagged';") is string sql && sql.EndsWith("WHERE flags != 0", StringComparison.Ordinal), "shared index unchanged");
             var enabledReads = new FileStateReader(enabled, new DirTable(enabled)) { StorageEnabled = true };
             foreach (var (mask, expected) in new[] { (ItemFlags.NeedsRehash, "fs_nonpointer"), (ItemFlags.OwnedPointer, "fs_owned"),

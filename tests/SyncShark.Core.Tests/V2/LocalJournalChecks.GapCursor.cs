@@ -4,7 +4,7 @@ namespace Massdex.SyncShark.V2;
 
 internal static partial class LocalJournalChecks
 {
-    private static void GapCursorChecks(string folder)
+    internal static void GapCursorChecks(string folder)
     {
         var product = Path.Combine(folder, "gap-cursor-" + Guid.NewGuid().ToString("N"));
         var root = new RootDef("cursor-root", SyncProviders.Local, null, folder, SyncLocalEndpointStore.ObjectId(1, 1));
@@ -71,7 +71,12 @@ internal static partial class LocalJournalChecks
             LocalChecks.Require(store.GapInventoryPending(root.RootId), "incomplete generation retains inventory obligation");
             gen = store.BeginGeneration(root.RootId, "full");
             store.CompleteGeneration(gen, covered.Cursor, true);
-            LocalChecks.Require(!store.GapInventoryPending(root.RootId), "completed generation settles inventory obligation");
+            LocalChecks.Require(store.GapInventoryPending(root.RootId), "generation completion alone cannot settle inventory obligation");
+            var refresh = store.BeginGeneration(root.RootId, "quarantine-refresh");
+            store.CompleteGeneration(refresh, covered.Cursor, true);
+            LocalChecks.Require(store.GapInventoryPending(root.RootId), "single-path quarantine refresh preserves the full-inventory obligation");
+            store.SettleGapInventory(gen);
+            LocalChecks.Require(!store.GapInventoryPending(root.RootId), "explicit completed full-side settlement clears inventory obligation");
             var staged = gaps.GapResults(root.RootId, gaps.GapResultWatermark(root.RootId), 128).Single();
             LocalChecks.Require(gaps.AcceptGapResult(root.RootId, staged) && !gaps.HasGapProtection(root.RootId) &&
                 store.RehashCandidates(root.RootId, 128).Any(item => item.Path == row.Path),

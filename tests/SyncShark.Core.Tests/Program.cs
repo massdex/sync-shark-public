@@ -1243,6 +1243,13 @@ if (args is ["--v2-interrupted-delete-checks", var interruptedDeleteRoot])
     return 0;
 }
 
+if (args is ["--v2-gap-recovery-checks", var recoveryRoot])
+{
+    Massdex.SyncShark.V2.LocalJournalChecks.GapCursorChecks(Path.Combine(recoveryRoot, "cursor"));
+    await Massdex.SyncShark.V2.RunChecks.GapRecoveryChecksAsync(Path.Combine(recoveryRoot, "runs"));
+    return 0;
+}
+
 if (args is ["--v2-gap-checks", var gapRoot])
 {
     await Massdex.SyncShark.V2.LocalJournalChecks.RegressionAsync("gap-store", Path.Combine(gapRoot, "store"));

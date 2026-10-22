@@ -152,6 +152,12 @@ internal static class JournalSizingChecks
             await JournalSizing.MaintainAsync(store, pending, rootIdentity, (_, _) => Task.FromResult<uint?>(0), Query);
             Require(store.PendingJournal(789) is not null && store.OpenNotices(null).Single().Detail.Contains("did not grow"),
                 "success reply without observed growth leaves a no-growth explanation");
+            await JournalSizing.MaintainAsync(store, pending, rootIdentity,
+                (_, _) => { size = gb / 2; return Task.FromResult<uint?>(0); }, Query);
+            Require(store.PendingJournal(789) is not null && store.OpenNotices(null).Single().Detail.Contains("grew to " + size) &&
+                store.OpenNotices(null).Single().Detail.Contains(pending.State.Requested + " bytes") &&
+                !store.OpenNotices(null).Single().Detail.Contains("did not grow"),
+                "partial growth reports observed and requested capacity without resolving the notice");
             await JournalSizing.MaintainAsync(store, pending, rootIdentity, (_, _) => Task.FromResult<uint?>(1), Query);
             var notice = store.OpenNotices(null).Single();
             Require(NoticeChoices.Options(notice).Count == 3 && notice.Detail.Contains("failed"), "failure retains UAC Not now Never choices");

@@ -6,6 +6,7 @@ internal static partial class LocalJournalChecks
     {
         GapSchemaUpgradeChecks(folder);
         GapCursorChecks(folder);
+        await RunChecks.GapRecoveryChecksAsync(Path.Combine(folder, "run-recovery"));
         await SavedCursorWrapAsync(folder);
         await GapDiscoveryReasonChecks(folder);
         ProtectionBatchChecks.Run(Path.Combine(folder, "protection-" + Guid.NewGuid().ToString("N")));

@@ -140,7 +140,10 @@ internal sealed class ActionRunner
                 ? await admission.AdmitFreeSpaceAsync(action, ct).ConfigureAwait(false)
                 : FreeSpaceAdmission.Granted;
             if (freeSpace.Refusal is { } refusal)
-                return await PendingForFreeSpaceAsync(action, refusal).ConfigureAwait(false);
+                // Frozen choice deletes interpret Skipped as changed/kept; retain their existing notice path.
+                return action.CallerOwnsNotice && action.Kind != ActionKind.Delete
+                    ? await CommitAsync(action, Skipped(action, refusal.Detail)).ConfigureAwait(false)
+                    : await PendingForFreeSpaceAsync(action, refusal).ConfigureAwait(false);
 
             if (_quota.Blocks(action))
                 return await CommitAsync(action, Failed(action, DropboxQuota.Detail) with { UploadQuotaBlocked = true });
