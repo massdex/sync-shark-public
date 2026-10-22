@@ -6,7 +6,12 @@ internal sealed class PlanOnlyEndpoints(IEndpointProvider inner) : IEndpointProv
 {
     internal static bool UnsupportedReconcile(SyncAction action) => action.ProviderEffect?.Kind is
         "whole-folder-group" or "whole-folder-member" or SyncDirectDownloadCheckpoint.Kind;
-    public IInventorySource Inventory(RootDef root) => inner.Inventory(root);
+    public IInventorySource Inventory(RootDef root)
+    {
+        var inventory = inner.Inventory(root);
+        if (inventory is LocalInventory local) local.ObserveOnly = true;
+        return inventory;
+    }
     private int _denied;
     internal bool MutationRequested => Volatile.Read(ref _denied) != 0;
     public IEndpointWriter Writer(RootDef root) => new Reader(inner.Writer(root), () => Interlocked.Increment(ref _denied));

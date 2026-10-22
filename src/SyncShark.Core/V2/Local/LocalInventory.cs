@@ -24,6 +24,14 @@ public sealed partial class LocalInventory : IInventorySource
     private readonly PilotDirectoryIdentity _rootIdentity;
     private readonly long _gapThrough;
     private readonly NtfsUsnCheckpoint? _gapRunStart;
+    // Set before inventory reads; previews may persist recommendations only in their isolated store.
+    internal bool ObserveOnly { get; set; }
+    internal Func<string, long[]?>? CapacityQueryForTest { get; set; }
+    internal Action<SqliteStateStore, SqliteStateStore.JournalPending, SyncDiscoveryRoot>? CapacityQueueForTest { get; set; }
+    private void ObserveCapacity(string? cursor, bool overflow = false) =>
+        JournalSizing.TryObserve(_known, _pairId!, _root.RootPath, _volume, _rootFileId, cursor,
+            _clock.GetUtcNow(), overflow, ObserveOnly, CapacityQueryForTest, CapacityQueueForTest);
+
     internal LocalGapWorker? GapWorker { get; set; }
     internal ILocalGapIo? GapIo { get; set; }
 
@@ -128,7 +136,7 @@ public sealed partial class LocalInventory : IInventorySource
     private async Task<Snapshot> FullCoreAsync(long gen, Func<string, bool> include, IProgress<string> p, CancellationToken ct)
     {
         var rootId = _root.RootId;
-        if (_pairId is not null && WalkCheckpointForTest is null) JournalSizing.TryObserve(_known, _pairId, _root.RootPath, _volume, _rootFileId, null, _clock.GetUtcNow());
+        if (_pairId is not null && (WalkCheckpointForTest is null || CapacityQueryForTest is not null)) ObserveCapacity(null);
         PairPause.Check();
         var (checkpoint, journalDeleted) = ReadWalkCheckpointState();
         var sql = _known as SqliteStateStore;
@@ -188,7 +196,7 @@ public sealed partial class LocalInventory : IInventorySource
         var rootId = _root.RootId;
         if (_known is SqliteStateStore sql && sql.HasLocalWalk(rootId))
             return Invalid(gen, rootId, cursor, "unfinished local full walk takes precedence");
-        if (_pairId is not null && WalkCheckpointForTest is null) JournalSizing.TryObserve(_known, _pairId, _root.RootPath, _volume, _rootFileId, cursor, _clock.GetUtcNow());
+        if (_pairId is not null && (WalkCheckpointForTest is null || CapacityQueryForTest is not null)) ObserveCapacity(cursor);
         if (!NtfsUsnCheckpoint.TryParseCursor(cursor, out var journalId, out var next)) return Invalid(gen, rootId, cursor, "saved cursor cannot be parsed");
         PilotDirectoryLease lease;
         try
@@ -320,7 +328,7 @@ public sealed partial class LocalInventory : IInventorySource
         {
             gaps.RetryGapFailures(_root.RootId);
             LocalGapWorker.Promote(gaps, _known, gapIo, _root, _gapThrough, _gapRunStart, include, touched, ct);
-            if (gaps.HasGapProtection(_root.RootId)) GapWorker?.Start(_root);
+            if (!ObserveOnly && gaps.HasGapProtection(_root.RootId)) GapWorker?.Start(_root);
         }
         if (through == 0) return;
         PilotDirectoryLease lease;
@@ -549,6 +557,9 @@ public sealed partial class LocalInventory : IInventorySource
         IReadOnlyList<string>? refreshPaths, IProgress<string>? p, LocalWalkCheckpoint? walk = null, IReadOnlySet<string>? exactPaths = null)
     {
         PairPause.Check();
+        // Empty is the root-coverage retry sentinel, not a child path. Passing it to
+        // explicit-child normalization rejects the retry before any directory is read.
+        if (refreshPaths?.Contains(string.Empty) == true) refreshPaths = null;
         return new PilotLocalScanner { MetadataOnly = true, CloudFilesAware = true,
             ReplaceOnlineOnlyStubs = _settings.ReplaceOnlineOnlyStubs, WalkCheckpoint = walk,
             BetweenDirectories = refreshPaths is null ? PairPause.Check : null,
@@ -676,9 +687,8 @@ public sealed partial class LocalInventory : IInventorySource
     // next UNPROCESSED USN: equality is a candidate, and journal sizing is not identity.
     internal void BeginJournalGap(string rootId, ulong journalId, long next, NtfsUsnCheckpoint through)
     {
-        if (_pairId is not null && WalkCheckpointForTest is null && journalId == through.JournalId && next < Math.Max(through.FirstUsn, through.LowestValidUsn))
-            JournalSizing.TryObserve(_known, _pairId, _root.RootPath, _volume, _rootFileId,
-                through.Cursor, _clock.GetUtcNow(), overflow: true);
+        if (_pairId is not null && (WalkCheckpointForTest is null || CapacityQueryForTest is not null) && journalId == through.JournalId && next < Math.Max(through.FirstUsn, through.LowestValidUsn))
+            ObserveCapacity(through.Cursor, overflow: true);
         (_known as ILocalGapStore)?.BeginGap(rootId, through.Cursor, next,
             journalId == through.JournalId && next <= through.NextUsn,
             journalId != through.JournalId ? "journal replaced" : next > through.NextUsn ? "cursor ahead of journal" : "journal wrapped past saved cursor");
@@ -697,8 +707,7 @@ public sealed partial class LocalInventory : IInventorySource
     {
         if (kind == NtfsUsnReadFailure.OverLimit)
         {
-            if (_pairId is not null && WalkCheckpointForTest is null) JournalSizing.TryObserve(_known, _pairId, _root.RootPath, _volume, _rootFileId,
-                cursor, _clock.GetUtcNow(), overflow: true);
+            if (_pairId is not null && (WalkCheckpointForTest is null || CapacityQueryForTest is not null)) ObserveCapacity(cursor, overflow: true);
             // This range will only grow: retrying the same cursor can never shrink it.
             (_known as ILocalGapStore)?.BeginGap(rootId, through.Cursor, next, trustFileUsn: true,
                 "journal read exceeded bounded range; journal intact, metadata rescan required");

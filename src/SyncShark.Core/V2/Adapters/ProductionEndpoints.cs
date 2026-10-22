@@ -261,7 +261,7 @@ public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatc
         }
         var recovery = checkedSide.Recovery!;
         var inventory = new LocalInventory(root, side, _store, OwnedInside(root, recovery), _settings, _time, new DefenderHistory(), pair.PairId)
-        { GapWorker = _gapWorker, GapIo = _gapIo };
+        { GapWorker = _gapWorker, GapIo = _gapIo, ObserveOnly = readOnlyOpen };
         // Direct downloads use a target-volume partial, with no product-spool demand.
         var writer = await OpenLocalWriterAsync(_store, root, side, pair, checkedSide.Installation!, recovery, ct,
             _settings, _paths.DatabasePath, _time, checkedSide.RecoveryUnavailable, readOnlyOpen).ConfigureAwait(false);

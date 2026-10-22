@@ -168,11 +168,11 @@ public sealed partial class SqliteStateStore : ILocalGapStore
             "SELECT 1 FROM local_gap g JOIN root r ON r.root_no=g.root_no WHERE r.root_id=$id AND g.inventory_pending=1;",
             ("$id", rootId)) is not null);
 
-    internal void SettleGapInventory(long completedGeneration) => InStore(() =>
+    internal void SettleGapInventory(long completedGeneration, bool cursorHeldForEvidence = false) => InStore(() =>
         StoreSchema.Execute(_connection, null,
             "UPDATE local_gap SET inventory_pending=0 WHERE root_no IN " +
-            "(SELECT root_no FROM generation WHERE gen=$g AND complete=1 AND finished IS NOT NULL);",
-            ("$g", completedGeneration)));
+            "(SELECT root_no FROM generation WHERE gen=$g AND (complete=1 OR $e=1) AND finished IS NOT NULL);",
+            ("$g", completedGeneration), ("$e", cursorHeldForEvidence ? 1 : 0)));
 
     void ILocalGapStore.BeginGap(string rootId, string journalCursor, long boundary, bool trustFileUsn, string reason) => InStore(() =>
     {

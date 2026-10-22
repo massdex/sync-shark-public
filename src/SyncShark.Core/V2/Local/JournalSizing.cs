@@ -46,21 +46,23 @@ public static class JournalSizing
     }
 
     /// <summary>No elevation, task wait or journal mutation on the inventory path. Failure leaves scanning intact.</summary>
-    internal static void TryObserve(IStateStore store, string pairId, string root, uint expectedSerial, ulong rootFileId, string? cursor, DateTimeOffset now, bool overflow = false)
+    internal static void TryObserve(IStateStore store, string pairId, string root, uint expectedSerial, ulong rootFileId, string? cursor, DateTimeOffset now, bool overflow = false, bool observeOnly = false,
+        Func<string, long[]?>? query = null, Action<SqliteStateStore, SqliteStateStore.JournalPending, SyncDiscoveryRoot>? queue = null)
     {
         if (store is not SqliteStateStore sqlite || !OperatingSystem.IsWindows()) return;
         try
         {
             var volume = Path.GetPathRoot(Path.GetFullPath(root))?.TrimEnd('\\').ToUpperInvariant();
             if (volume is null || volume.Length != 2) return;
-            var data = SyncSharkJournalNative.Query(volume);
+            var data = (query ?? SyncSharkJournalNative.Query)(volume);
             if (data is null || data[7] != expectedSerial) return; // Mounted folders must not resize their host drive.
             var gap = overflow || (NtfsUsnCheckpoint.TryParseCursor(cursor, out var id, out var next) &&
                 id == unchecked((ulong)data[0]) && next < Math.Max(data[1], data[3]));
-            sqlite.ObserveJournal(pairId, volume, data[7], unchecked((ulong)data[0]), data[2], data[4], data[6], gap, now, deferNotice: SyncDiscoveryClient.IsInstalled, allocation: data[5]);
+            sqlite.ObserveJournal(pairId, volume, data[7], unchecked((ulong)data[0]), data[2], data[4], data[6], gap, now, deferNotice: !observeOnly && SyncDiscoveryClient.IsInstalled, allocation: data[5]);
             var pending = sqlite.PendingJournal(data[7]);
-            if (pending is not null) QueueSilent(sqlite, pending, new SyncDiscoveryRoot(root, expectedSerial, rootFileId));
-            else RunLog.Trace($"local journal capacity: volume={volume}; maximum={data[4]}; allocation={data[5]}; no pending growth");
+            if (pending is not null && !observeOnly) (queue ?? QueueSilent)(sqlite, pending, new SyncDiscoveryRoot(root, expectedSerial, rootFileId));
+            else RunLog.Trace($"local journal capacity: volume={volume}; maximum={data[4]}; allocation={data[5]}; " +
+                (pending is null ? "no pending growth" : "preview recommendation only; journal growth disabled"));
         }
         catch (Exception error)
         { System.Diagnostics.Trace.TraceWarning("Journal capacity observation unavailable: {0}", error.GetType().Name); }

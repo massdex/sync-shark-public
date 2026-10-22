@@ -115,9 +115,13 @@ public sealed partial class SyncRun
             var reason = diagnostic is null && previous is { LastError.Length: > 0 } ? previous.LastError :
                 (diagnostic ?? "This subtree could not be completely read.") +
                 " Correct the reported access, placeholder or name issue, then Retry; Ignore excludes this scope from sync.";
-            var roots = new[] { (pair.A.RootId, scan.A), (pair.B.RootId, scan.B) }
-                .Where(entry => entry.Item2.IncompleteSubtrees.Contains(path, StringComparer.OrdinalIgnoreCase))
-                .Select(entry => entry.RootId).ToArray();
+            // A root outage blocked planning/effects on BOTH sides. The healthy side
+            // may already have advanced its cursor (including a completed gap inventory),
+            // so retry its scope too; otherwise its observed edits can leave the dirty set.
+            var roots = path.Length == 0 ? new[] { pair.A.RootId, pair.B.RootId } :
+                new[] { (pair.A.RootId, scan.A), (pair.B.RootId, scan.B) }
+                    .Where(entry => entry.Item2.IncompleteSubtrees.Contains(path, StringComparer.OrdinalIgnoreCase))
+                    .Select(entry => entry.RootId).ToArray();
             if (previous is { Kind: not "scan" })
             {
                 _store.SaveSyncRetry(pair.PairId, previous with { ReadRoots = roots });

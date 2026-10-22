@@ -920,7 +920,7 @@ public sealed partial class SyncRun : ISyncRun
             var report = WithReconciliation(BuildReport(pairId, plan, tally, ct.IsCancellationRequested), reconcile)
                 with { Deferred = _store.CountSyncRetries(pairId) };
             var evidencePendingPaths = pendingEvidence.Keys.Concat(unresolvedEvidence).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-            return evidencePendingPaths.Length == 0 ? report : report with
+            return evidencePendingPaths.Length == 0 && report.Deferred == 0 ? report : report with
             {
                 Outcome = string.Equals(report.Outcome, RunOutcomes.Complete, StringComparison.Ordinal)
                     ? RunOutcomes.Partial : report.Outcome,
@@ -1339,7 +1339,7 @@ public sealed partial class SyncRun : ISyncRun
         return plan with { Actions = kept, Notices = notices, SkippedActions = skipped };
     }
 
-    private void AdvanceCursors(BothScan scan)
+    internal void AdvanceCursors(BothScan scan)
     {
         Advance(scan.A);
         Advance(scan.B);
@@ -1351,8 +1351,11 @@ public sealed partial class SyncRun : ISyncRun
             _store.CompleteGeneration(side.Gen, side.CursorAfter, complete);
             // Only a completed full-inventory side settles this obligation. A targeted
             // quarantine refresh (or an ordinary delta) cannot account for the skipped range.
-            if (complete && side.Full && side.Complete && _store is SqliteStateStore gapStore)
-                gapStore.SettleGapInventory(side.Gen);
+            // Pending evidence retains its cursor/replay and per-item protection, not a full walk.
+            // Root/subtree read failures still retain the inventory obligation.
+            if (side.Full && side.Complete && side.IncompleteSubtrees.Count == 0 && _store is SqliteStateStore gapStore)
+                gapStore.SettleGapInventory(side.Gen,
+                    cursorHeldForEvidence: !side.PendingDeletionEvidence.Keys.All(side.ReleasedDeletionEvidence.Contains));
             // Observation coverage advances with effect replay, never merely with ingestion. A crash
             // between these writes can cause extra hydration, but cannot skip unfinished changes.
             if (complete && side.ObservedCoverage is { } coverage && _store is SqliteStateStore sql)

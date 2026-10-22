@@ -253,6 +253,35 @@ internal static class JournalSizingChecks
             Require(store.OpenNotices(null).Single().Detail.Contains("a=" + gb),
                 "repair command preserves larger observed allocation rather than shrinking it");
         }
+        using (var store = SqliteStateStore.Open(folder + "-preview", StorageChecks.Fast, clock))
+        {
+            var pair = Pair("preview") with { A = new RootDef("ra", SyncProviders.Local, null,
+                @"C:\Parent", SyncLocalEndpointStore.ObjectId(123, 456)) };
+            store.SavePair(pair);
+            var queries = 0;
+            var growthQueued = 0;
+            var local = new LocalInventory(pair.A, Side.A, store, new HashSet<string>(), StorageChecks.Fast,
+                clock, pairId: pair.PairId)
+            {
+                CapacityQueryForTest = _ => { queries++; return [1, 0, 200, 0, gb, SyncSharkJournalNative.Delta, 1000 * gb, 123]; },
+                CapacityQueueForTest = (_, _, _) => growthQueued++
+            };
+            var provider = new FakeEndpointProvider().Add(pair.A, new FakeEndpoint(Side.A, pair.A.RootId))
+                .AddInventory(pair.A, local);
+            var preview = new PlanOnlyEndpoints(provider);
+            var previewLocal = (LocalInventory)preview.Inventory(pair.A);
+            previewLocal.JournalReadFailed(0, pair.A.RootId, "0000000000000001:100",
+                new NtfsUsnCheckpoint(1, 0, 200, 0), 100, "synthetic overflow", NtfsUsnReadFailure.OverLimit);
+            Require(queries == 1 && previewLocal.ObserveOnly && growthQueued == 0,
+                "preview overflow observes fake capacity but never queues the growth helper");
+            Require(store.PendingJournal(123)?.State.Requested == 2 * gb && store.OpenNotices(pair.PairId).Count == 1,
+                "preview keeps an actionable capacity recommendation in the isolated store");
+            // Positive control: the same observation outside preview reaches the injected boundary.
+            local.ObserveOnly = false;
+            local.JournalReadFailed(0, pair.A.RootId, "0000000000000001:100",
+                new NtfsUsnCheckpoint(1, 0, 200, 0), 100, "synthetic overflow", NtfsUsnReadFailure.OverLimit);
+            Require(growthQueued == 1, "ordinary overflow still queues maintenance");
+        }
         Console.WriteLine("Adaptive journal sizing checks passed (fake OS only).");
     }
     private static PairDef Pair(string id) => new(id, id,
