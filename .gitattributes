@@ -1,0 +1,4 @@
+# Preserve these existing CRLF files verbatim; core.autocrlf must not normalize
+# their historical blobs and turn a small CLI change into a whole-file diff.
+/CLI-CAPABILITIES.md -text whitespace=cr-at-eol
+/src/SyncShark.Core/SyncCliRegistry.cs -text whitespace=cr-at-eol
