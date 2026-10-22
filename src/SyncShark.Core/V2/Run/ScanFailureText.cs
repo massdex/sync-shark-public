@@ -6,7 +6,7 @@ namespace Massdex.SyncShark.V2;
 /// run's forensics; a notice shows this explanation instead. Every explanation states a cause and a
 /// fix. Reasons that are already written for the user (a Defender or quarantine description, a name
 /// refusal, or the online-only observation message whose exact prefix closes its notices) are passed
-/// through; unrecognised ones get the generic fix appended.
+/// through; unrecognised ones get the generic fix appended unless they already name a remedy.
 /// </summary>
 internal static class ScanFailureText
 {
@@ -14,8 +14,9 @@ internal static class ScanFailureText
     internal const string Unknown =
         "This folder could not be completely read. Check that it still exists and that your account can read it.";
 
-    // Appended to a diagnostic that is already written for the user but names no remedy.
-    internal const string Fix = " Correct the reported access, name or placeholder issue, then choose Retry.";
+    // Appended to a diagnostic that is already written for the user but names no remedy. Kept neutral:
+    // it deliberately does not guess at the cause, unlike the targeted texts above.
+    internal const string Fix = " Resolve the cause above, then choose Retry.";
 
     /// <summary>The plain-language explanation for a raw scan diagnostic (never empty, always with a fix).</summary>
     internal static string Describe(string? diagnostic)
@@ -48,7 +49,11 @@ internal static class ScanFailureText
             return "Too many changes happened at once to check this folder in one pass. " +
                 "Exclude a folder you do not need to sync, or retry later.";
         // Most other reasons are already phrased for the user (quarantine, name, placeholder rules).
-        // Append the generic remedy so no notice is left with a cause but no fix.
+        // Append the generic remedy so no notice is left with a cause but no fix -- but only when the
+        // reason names no remedy of its own. A reason that already says "then choose Retry" (or
+        // "Retry") must not gain a second, competing remedy. [review-gapscope-2 A1]
+        if (Has(diagnostic, "then choose Retry") || Has(diagnostic, "Retry"))
+            return diagnostic;
         return diagnostic + Fix;
     }
 

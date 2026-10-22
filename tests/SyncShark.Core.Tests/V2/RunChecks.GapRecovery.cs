@@ -597,8 +597,21 @@ internal static partial class RunChecks
             "the journal notice points at the change-log capacity notice for enlargement");
         var passthrough = ScanFailureText.Describe("A Defender history check was incomplete.");
         Require(passthrough.StartsWith("A Defender history check was incomplete.", StringComparison.Ordinal) &&
+            passthrough.Contains("resolve the cause above", StringComparison.OrdinalIgnoreCase) &&
             passthrough.Contains("then choose retry", StringComparison.OrdinalIgnoreCase),
-            "an unrecognised user-facing reason keeps its cause and gains a generic fix");
+            "an unrecognised user-facing reason keeps its cause and gains a neutral generic fix");
+        // [review-gapscope-2 A1] A reason that already names a remedy keeps its own wording; the
+        // generic fix is not appended a second time.
+        foreach (var diagnostic in new[]
+        {
+            "A Defender history check was incomplete. Check Windows Security, then choose Retry.",
+            "The folder is locked by another app. Close it and Retry.",
+        })
+        {
+            var text = ScanFailureText.Describe(diagnostic);
+            Require(text == diagnostic,
+                "a reason that already names a remedy is passed through unchanged: " + text);
+        }
     }
 
     // Follow-up 2b: an already-existing retry must survive a SECOND catch-up run (the first run
