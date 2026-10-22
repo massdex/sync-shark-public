@@ -416,6 +416,78 @@ internal static partial class RunChecks
         Console.WriteLine("PASS DeleteSourceAbsencePause");
     }
 
+    // A pause raised by a Dropbox source read during a copy effect must surface as Paused, never as a Failed or
+    // Uncertain result or a false failure notice. The intent is already durable, so the next run reconciles it and
+    // replans the copy instead of leaving the item stuck.
+    private static async Task SourceReadPauseAsync(string root)
+    {
+        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System);
+        var fx = Build(suppliedStore: sql, accountId: PauseAccount);
+        fx.A.Seed("anchor.txt", "anchor");
+        var run = fx.Run();
+        Require((await FirstSyncAsync(run, fx)).Outcome == RunOutcomes.Complete,
+            "source-read pause fixture completes its first sync");
+        fx.B.Seed("remote.txt", "payload");
+        // The copy targets side A, so side B is the source: its OpenReadAsync models the Dropbox read that pauses.
+        var probe = new SignalingWriter(fx.WriterB) { PauseRead = true };
+        fx.Provider.AddWriter(fx.Pair.B, probe);
+        var paused = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        Require(paused.Outcome == RunOutcomes.Paused,
+            "a pause raised by a Dropbox source read reports Paused, not Failed");
+        Require(paused.FailureCount == 0 && paused.Skipped == 0,
+            "a paused source read commits no Failed, Uncertain or Skipped result");
+        Require(!sql.OpenNotices(fx.Pair.PairId).Any(notice => notice.Path == "remote.txt"),
+            "a paused source read raises no failure notice for the item");
+        Require(await fx.A.ObserveAsync("remote.txt", CancellationToken.None) is null,
+            "a paused source read leaves the target unchanged");
+        probe.PauseRead = false;
+        var resumed = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        var copied = (await MapAsync(fx.A)).TryGetValue("remote.txt", out var hash) && hash == Hash("payload");
+        Require(resumed.Outcome == RunOutcomes.Complete && fx.WriterA.Puts == 1 && copied,
+            "the next run reconciles the paused intent and completes the copy");
+        Console.WriteLine("PASS SourceReadPause");
+    }
+
+    // A pause raised while a rule-4 move-completion delete admits its paired Move must surface as Paused, never as a
+    // committed Skipped delete ("Retry replans the move"). The pause is raised by the source observation the paired
+    // Move admission performs, before the delete records any intent or result.
+    private static async Task PairedDeleteAdmissionPauseAsync(string root)
+    {
+        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System);
+        var fx = Build(suppliedStore: sql, accountId: PauseAccount);
+        var incoming = fx.A.Seed("new", "incoming");
+        var occupant = fx.B.Seed("new", "loser");
+        var old = fx.B.Seed("old", "incoming");
+        // A Done effect needs its object key, exactly as the planner supplies it for the Move and its vacating delete.
+        var delete = new SyncAction("paired-delete", 4, ActionKind.Delete, Side.B, "new", null, incoming, occupant,
+            true, "k-new");
+        var move = new SyncAction("paired-move", 4, ActionKind.Move, Side.B, "new", "old", incoming, old, false,
+            "k-new");
+        var plan = new Plan(fx.Pair.PairId, 1, [delete, move], Array.Empty<Notice>());
+        // The vacating delete admits the paired Move by observing the move source (side A) and old path (side B).
+        var probe = new SignalingWriter(fx.WriterA) { PauseMetadata = true };
+        fx.Provider.AddWriter(fx.Pair.A, probe);
+        var run = fx.Run();
+        var paused = await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), CancellationToken.None);
+        Require(paused.Outcome == RunOutcomes.Paused,
+            "a pause in the paired-move admission reports Paused, not a skipped move-completion delete");
+        Require(paused.Skipped == 0 && paused.FailureCount == 0 && fx.WriterB.Deletes == 0 &&
+            fx.WriterB.Preserves == 0 && await fx.B.ObserveAsync("new", CancellationToken.None) is not null,
+            "a paused paired-move admission commits no Skipped delete and removes nothing");
+        Require(!sql.OpenNotices(fx.Pair.PairId).Any(notice => notice.Path == "new" &&
+                notice.Detail.Contains("Retry replans the move", StringComparison.Ordinal)),
+            "a paused paired-move admission records no replan-the-move deletion result");
+        probe.PauseMetadata = false;
+        var resumed = await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), CancellationToken.None);
+        var moved = (await MapAsync(fx.B)).TryGetValue("new", out var hash) && hash == Hash("incoming");
+        Require(resumed.Outcome == RunOutcomes.Complete && fx.WriterB.Deletes == 1 && fx.WriterB.Preserves == 1 &&
+            moved, "resume admits the paired move, preserves the occupant and completes the move " +
+            $"(outcome={resumed.Outcome}, done={resumed.Done}, failed={resumed.Failed}, uncertain={resumed.Uncertain}, " +
+            $"skipped={resumed.Skipped}, deletes={fx.WriterB.Deletes}, preserves={fx.WriterB.Preserves}, " +
+            $"moves={fx.WriterB.Moves}, moved={moved})");
+        Console.WriteLine("PASS PairedDeleteAdmissionPause");
+    }
+
     internal static async Task PauseChecksAsync(string root)
     {
         using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System);
@@ -461,6 +533,8 @@ internal static partial class RunChecks
             new StateDamagedException("Pause state is damaged."));
         await DeferredEvidencePauseAsync(Path.Combine(root, "evidence"));
         await DeleteSourceAbsencePauseAsync(Path.Combine(root, "absence"));
+        await SourceReadPauseAsync(Path.Combine(root, "source-read"));
+        await PairedDeleteAdmissionPauseAsync(Path.Combine(root, "paired-admission"));
         await HashPauseAsync(Path.Combine(root, "hash-pause"));
         Console.WriteLine("pause: apply safe-point drain, local hash checkpoint, admission, resume, AutoSync and " +
             "batch scope-pause checks passed");

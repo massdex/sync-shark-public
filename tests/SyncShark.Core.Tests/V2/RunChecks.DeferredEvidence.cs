@@ -612,6 +612,11 @@ internal static partial class RunChecks
         // The guard must propagate it, never treat it as inconclusive evidence against deletion.
         public bool PauseAbsence { get; set; }
 
+        // A pause raised while the paired-move admission observes the source or move path, or while a copy
+        // effect reads the source (the action runner must propagate it, never commit a false failure).
+        public bool PauseMetadata { get; set; }
+        public bool PauseRead { get; set; }
+
         public async Task<bool?> IsSourceAbsentAsync(ItemState? historical, string path, CancellationToken ct)
         {
             if (PauseAbsence) throw new PairPausedException("p1");
@@ -625,6 +630,7 @@ internal static partial class RunChecks
         }
         public async Task<ItemState?> ObserveSourceMetadataAsync(string path, CancellationToken ct)
         {
+            if (PauseMetadata) throw new PairPausedException("p1");
             ObservedPaths.Add(path);
             if (BeforeObserve is not null) await BeforeObserve(path, ct);
             var observed = await ((ISourceAbsenceProbe)inner).ObserveSourceMetadataAsync(path, ct);
@@ -657,6 +663,7 @@ internal static partial class RunChecks
             var observed = await inner.ObserveAsync(path, ct);
             return AfterObserve is null ? observed : AfterObserve(observed);
         }
-        public Task<Stream> OpenReadAsync(ItemState state, CancellationToken ct) => inner.OpenReadAsync(state, ct);
+        public Task<Stream> OpenReadAsync(ItemState state, CancellationToken ct) =>
+            PauseRead ? Task.FromException<Stream>(new PairPausedException("p1")) : inner.OpenReadAsync(state, ct);
     }
 }

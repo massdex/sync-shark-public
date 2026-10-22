@@ -356,7 +356,9 @@ internal sealed class ActionRunner
             NativeIoDiagnostic.LogOnce($"pair={_pairId}; relative={action.Path}", e);
             throw;
         }
-        catch (Exception e) when (e is not EndpointAccessException)
+        // A user pause is not an effect failure: propagate it so the run reports Paused and the durable intent is
+        // reconciled (never replayed blind) on the next run, instead of committing a false Failed/Uncertain result.
+        catch (Exception e) when (e is not (EndpointAccessException or PairPausedException))
         {
             NativeIoDiagnostic.LogOnce($"pair={_pairId}; relative={action.Path}", e);
             // An access failure is not committed: the intent stays unresolved and the next run observes it. After a

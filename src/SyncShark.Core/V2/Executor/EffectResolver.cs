@@ -42,7 +42,8 @@ internal static class EffectResolver
                 if (applied is null) providerReportsInProgress = true;
             }
             catch (Exception e) when (Unverifiable(e, ct) || x.Kind == ActionKind.Delete &&
-                e is not OutOfMemoryException && !(e is OperationCanceledException && ct.IsCancellationRequested))
+                e is not (OutOfMemoryException or PairPausedException) &&
+                !(e is OperationCanceledException && ct.IsCancellationRequested))
             {
                 // A transient lookup failure is not proof that the job expired. Positive
                 // observation may still prove completion, but do not expire a live job on an outage.
@@ -200,7 +201,7 @@ internal static class EffectResolver
                 { RetryAfterSeconds = ProviderTransientFailure.VerificationRetrySeconds };
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-        catch (Exception error) when (error is not OutOfMemoryException)
+        catch (Exception error) when (error is not (OutOfMemoryException or PairPausedException))
         {
             return Unverified(action, "Interrupted deletion source check: " + Describe(error)) with
                 { RetryAfterSeconds = ProviderTransientFailure.VerificationRetrySeconds };
@@ -278,10 +279,12 @@ internal static class EffectResolver
         }
     }
 
-    // A failure that only leaves the effect unverified. A requested cancellation (the caller's token) and an access
-    // failure (the next run observes it) are not swallowed.
+    // A failure that only leaves the effect unverified. A requested cancellation (the caller's token), a user pause
+    // (the run reports Paused and the intent is reconciled next run) and an access failure (the next run observes it)
+    // are not swallowed.
     private static bool Unverifiable(Exception e, CancellationToken ct) =>
-        e is not EndpointAccessException && !(e is OperationCanceledException && ct.IsCancellationRequested);
+        e is not (EndpointAccessException or PairPausedException) &&
+        !(e is OperationCanceledException && ct.IsCancellationRequested);
 
     private static ActionResult Unverified(SyncAction x, string detail) =>
         new(x.ActionId, Outcome.Uncertain, null, null, null, string.Format(ExecutionReasons.Unverified.Detail, detail));

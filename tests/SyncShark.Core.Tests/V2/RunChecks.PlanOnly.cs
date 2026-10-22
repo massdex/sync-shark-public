@@ -190,11 +190,20 @@ internal static partial class RunChecks
                 fx.WriterA.Calls + fx.WriterB.Calls == writes,
                 "incomplete root cannot verify a ready restore from stale equal rows");
             // The failed scan left durable root retry debt with a backoff. Until it is due the next run
-            // still treats the root as incomplete (correctly), so make the retry due to model the
-            // later run the assertion is about: a complete inventory with no read debt.
-            if (fx.Store.SyncRetryAt(fx.Pair.PairId, string.Empty) is { } scanRetry)
-                fx.Store.SaveSyncRetry(fx.Pair.PairId, scanRetry with { RetryAfter = DateTimeOffset.MinValue });
+            // still treats the root as incomplete (correctly), so first prove that a sleeping retry keeps
+            // the ready notice open even when the provider reads succeed again.
+            var scanRetry = fx.Store.SyncRetryAt(fx.Pair.PairId, string.Empty);
+            Require(scanRetry is { Kind: "scan" }, "the outage run retains its root scan retry row");
             inventory.ChangesError = inventory.FullError = null;
+            await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            Require(fx.Store.NoticeById(fx.Pair.PairId, id) is { Closed: false },
+                "a sleeping root retry keeps the ready restore notice open");
+            var asleep = fx.Store.SyncRetryAt(fx.Pair.PairId, string.Empty);
+            Require(asleep is { Kind: "scan" }, "the sleeping root retry row survives a run made before it is due");
+            // Make that retry due to model the later run the assertion is about: a complete inventory with
+            // no read debt. Setting RetryAfter is equivalent to advancing the clock (the fixture uses
+            // TimeProvider.System).
+            fx.Store.SaveSyncRetry(fx.Pair.PairId, asleep! with { RetryAfter = DateTimeOffset.MinValue });
             await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
             Require(fx.Store.NoticeById(fx.Pair.PairId, id) is { Closed: true },
                 "complete inventory allows restore verification on a later run");
