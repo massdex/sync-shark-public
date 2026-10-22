@@ -83,7 +83,7 @@ public sealed partial class SqliteStateStore
                     // Only the <=20 remaining intents need individual rows, including after a
                     // larger group shrinks. Never materialize the interrupted-intent backlog.
                     StoreSchema.Execute(_connection, transaction,
-                        "UPDATE notice SET state='closed',choice='resolved' WHERE pair_no=$p AND reason_key=$reason AND state IN ('open','aggregated');",
+                        "UPDATE notice SET state='closed',choice='resolved' WHERE pair_no=$p AND reason_key=$reason AND " + NoticeTable.ActionableSql("state") + ";",
                         ("$p", pairNo), ("$reason", reason));
                     using var command = StoreSchema.Command(_connection, transaction,
                         "SELECT action_json FROM pending_effect WHERE " + UncertainDeleteWhere + " ORDER BY action_id LIMIT 20;");

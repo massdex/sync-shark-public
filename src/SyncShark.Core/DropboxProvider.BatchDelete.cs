@@ -107,7 +107,13 @@ public sealed partial class DropboxPilotClient
                 // its own entry and is never deleted. The pre-check repeated that guarantee at one Dropbox read per
                 // file (1,000 per batch), which made batched deletes rate-limit bound (~1 file/s live, 2026-10-17).
                 batch = candidates.Where(item => !item.Result.Task.IsCompleted).ToArray();
+                // Recheck after batch/job/commit admission waits, before any submit checkpoint.
+                // Guard callbacks coalesce these requests through the existing 128-item absence probe.
+                foreach (var page in batch.Chunk(128))
+                    await Task.WhenAll(page.Select(RevalidateDeleteAsync)).ConfigureAwait(false);
+                batch = batch.Where(item => !item.Result.Task.IsCompleted).ToArray();
                 if (batch.Count == 0) return;
+                // Token resolution and request pacing after this checkpoint remain a residual window.
                 var submissionId = Guid.NewGuid().ToString("N");
                 await Task.WhenAll(batch.Select(item => item.Context?.RecordAsync("delete-submit", submissionId)
                     ?? Task.CompletedTask));
@@ -134,6 +140,21 @@ public sealed partial class DropboxPilotClient
                     ? new DropboxEffectUncertainException("The conditional delete batch outcome is unknown.", exception)
                     : exception);
             }
+        }
+    }
+
+    private static async Task RevalidateDeleteAsync(PendingDropboxDelete item)
+    {
+        if (item.Context?.RevalidateDelete is not { } revalidate) return;
+        try
+        {
+            if (await revalidate().ConfigureAwait(false) is { } blocked)
+                throw new DeleteSourceUnconfirmedException(blocked);
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            item.WaitTiming?.Dispose();
+            item.Result.TrySetException(error);
         }
     }
 

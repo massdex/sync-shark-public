@@ -133,7 +133,9 @@ internal sealed class ActionRunner
         try
         {
             if (await GrantHoldAsync(action).ConfigureAwait(false) is { } held) return held;
-            if (await DeleteSourceGuard.CheckAsync(action, source, _committer, _pairId, ct,
+            // Rule 12 checks its surviving bytes once, after the intent/admission waits below.
+            if ((action.Kind != ActionKind.Delete || action.Rule != 12) &&
+                await DeleteSourceGuard.CheckAsync(action, source, _committer, _pairId, ct,
                 DeleteSourceGuard.Replacement(action, _replacementActions),
                 pairedAdmitted: await PairedDeleteAdmittedAsync(action, ct).ConfigureAwait(false),
                 admissionBatch: _absenceBatch).ConfigureAwait(false) is { } blocked)
@@ -149,7 +151,11 @@ internal sealed class ActionRunner
 
             if (_quota.Blocks(action))
                 return await CommitAsync(action, Failed(action, DropboxQuota.Detail) with { UploadQuotaBlocked = true });
-            ProviderEffectContext.Current.Value = _committer.CreateProviderContext(action);
+            var providerContext = _committer.CreateProviderContext(action);
+            if (DeleteSourceGuard.RequiresAbsence(action))
+                providerContext.RevalidateDelete = () => DeleteSourceGuard.CheckAsync(action, source,
+                    _committer, _pairId, ct, admissionBatch: _absenceBatch);
+            ProviderEffectContext.Current.Value = providerContext;
             // Step 4: the intent is durable before any effect is attempted (group-committed with its neighbours').
             await _committer.RecordIntentAsync(action, ct).ConfigureAwait(false);
 
@@ -351,6 +357,10 @@ internal sealed class ActionRunner
         {
             await _committer.DeferPointerUpdateAsync(action, error).ConfigureAwait(false);
             return await CommitAsync(action, Skipped(action, error.Message)).ConfigureAwait(false);
+        }
+        catch (DeleteSourceUnconfirmedException blocked)
+        {
+            return await CommitAsync(action, blocked.Result).ConfigureAwait(false);
         }
         catch (ProviderWriteThrottledException e)
         {

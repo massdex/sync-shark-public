@@ -106,7 +106,23 @@ public sealed partial class Executor
             if (group.Length == 0) continue;
             var target = side == Side.A ? a : b;
             var byTree = new Dictionary<FolderTree, WholeFolder>(ReferenceEqualityComparer.Instance);
-            foreach (var whole in group) byTree[new FolderTree(whole.Folder.ExpectedTarget!, whole.Victims)] = whole;
+            foreach (var whole in group)
+                byTree[new FolderTree(whole.Folder.ExpectedTarget!, whole.Victims)
+                {
+                    RevalidateDelete = async () =>
+                    {
+                        var batch = new AdmissionAbsenceBatch();
+                        foreach (var page in whole.Actions.Chunk(128))
+                        {
+                            var checks = await Task.WhenAll(page.Select(action => DeleteSourceGuard.CheckAsync(
+                                action, source, committer, plan.PairId, ct,
+                                DeleteSourceGuard.Replacement(action, replacements), admissionBatch: batch)))
+                                .ConfigureAwait(false);
+                            if (checks.Any(result => result is not null)) return false;
+                        }
+                        return true;
+                    }
+                }] = whole;
             // Freeze ordinary intents before the pre-read; the one group checkpoint is the only store wait
             // between the provider's pre-read and submission. No destructive effect exists before that checkpoint.
             await Task.WhenAll(group.SelectMany(tree => tree.Actions)

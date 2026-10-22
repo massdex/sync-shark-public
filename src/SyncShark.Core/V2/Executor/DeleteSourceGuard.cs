@@ -43,6 +43,12 @@ public interface ISourceAbsenceProbe
     Task<bool?> IsHistoricalSourcePresentAsync(ItemState historical, CancellationToken ct) => Task.FromResult<bool?>(null);
 }
 
+// A definite pre-submit refusal, carrying the guard owner's existing result across the provider queue.
+internal sealed class DeleteSourceUnconfirmedException(ActionResult result) : Exception(result.Reason)
+{
+    internal ActionResult Result { get; } = result;
+}
+
 /// <summary>Checks the missing side before any absence-propagating delete or Recovery move.</summary>
 internal static class DeleteSourceGuard
 {
@@ -91,7 +97,9 @@ internal static class DeleteSourceGuard
             if (action.Rule is 4 or 12)
             {
                 if (pairedAdmitted) return null;
-                detail = "The move-completion delete has no admitted or successful matching effect in this plan. Nothing was deleted; Retry replans the move.";
+                detail = action.Rule == 12
+                    ? "The move-completion delete has no verified surviving destination: the destination changed or disappeared, could not be read, or the matching Adopt did not complete. Nothing was deleted; Retry replans the move."
+                    : "The move-completion delete has no admitted or successful matching effect in this plan. Nothing was deleted; Retry replans the move.";
             }
             else if (action.Rule is 26 or 32)
             {

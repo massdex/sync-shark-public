@@ -495,10 +495,13 @@ internal sealed class RecordingStore : IStateStore
     /// <summary>The last committed outcome of each action.</summary>
     public System.Collections.Concurrent.ConcurrentDictionary<string, Outcome> Outcomes { get; } = new(StringComparer.Ordinal);
 
+    internal Action<SyncAction>? AfterIntent { get; set; }
+
     public void RecordIntent(string pairId, SyncAction a)
     {
         _intents++;
         _inner.RecordIntent(pairId, a);
+        AfterIntent?.Invoke(a);
         if (_intents == CrashAfterIntent) throw new SimulatedCrash();
     }
 

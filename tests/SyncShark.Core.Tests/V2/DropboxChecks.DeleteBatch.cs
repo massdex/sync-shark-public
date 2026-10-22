@@ -69,6 +69,7 @@ internal static partial class DropboxChecks
         Require(recovery.VersionId == raced.VersionId && recovery.Hash == raced.Hash,
             "batching does not replace the original recovery reference");
         await SavedDeleteJobAsync(h, raced, deleted);
+        await DispatchAbsenceAsync();
         await DeleteWriteRetryAsync();
         await DeleteQueueSerializationAsync();
         await DeleteJobCancellationAsync();

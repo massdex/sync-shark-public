@@ -42,7 +42,7 @@ internal static partial class ExecutorChecks
     internal static async Task AdoptCleanupSurvivorChecksAsync()
     {
         foreach (var side in new[] { Side.A, Side.B })
-        foreach (var change in new[] { "missing", "replaced", "unchanged" })
+        foreach (var change in new[] { "missing", "replaced", "unchanged", "during-intent", "edited" })
         {
             var folder = Path.Combine(Environment.GetEnvironmentVariable("SYNCSHARK_TEST_ROOT") ?? Path.GetTempPath(),
                 "adopt-cleanup-" + Guid.NewGuid().ToString("N"));
@@ -58,16 +58,30 @@ internal static partial class ExecutorChecks
                 source: side == Side.A ? occupant : incoming,
                 expected: side == Side.A ? incoming : occupant, key: "adopt-key", rule: 12);
             var delete = Act(ActionKind.Delete, side, "old", source: incoming, expected: old, rf: true, rule: 12);
-            if (change != "unchanged") await RemoveSourceAsync(endpoint, "new");
+            if (change is "missing" or "replaced") await RemoveSourceAsync(endpoint, "new");
             if (change == "replaced") endpoint.Seed("new", "changed");
+            if (change == "edited")
+                Require(endpoint.Seed("new", "changed").ObjectId == occupant.ObjectId,
+                    "edited survivor fixture preserves identity while changing bytes");
             using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
             {
                 store.SavePair(Pair());
                 var target = new RecordingWriter(endpoint);
-                var results = await Apply(new Executor(store, Settings(2), Admission()), Plan(adopt, delete),
+                var recording = new RecordingStore(store)
+                {
+                    AfterIntent = action =>
+                    {
+                        if (change == "during-intent" && action.ActionId == delete.ActionId)
+                            RemoveSourceAsync(endpoint, "new").GetAwaiter().GetResult();
+                    }
+                };
+                var results = await Apply(new Executor(recording, Settings(2), Admission()), Plan(adopt, delete),
                     side == Side.A ? target : a, side == Side.B ? target : b);
                 Require(results.Single(r => r.ActionId == adopt.ActionId).Outcome == Outcome.Done,
                     "ordinary Adopt remains metadata-only: " + results.Single(r => r.ActionId == adopt.ActionId).Reason);
+                if (change == "edited")
+                    Require(results.Single(r => r.ActionId == delete.ActionId).Reason?.Contains("destination changed", StringComparison.Ordinal) == true,
+                        "edited survivor explains destination change, not merely a missing effect");
                 Require(target.Deletes == (change == "unchanged" ? 1 : 0) &&
                     target.Preserves == (change == "unchanged" ? 1 : 0),
                     "cleanup requires the exact surviving destination before destructive preservation");

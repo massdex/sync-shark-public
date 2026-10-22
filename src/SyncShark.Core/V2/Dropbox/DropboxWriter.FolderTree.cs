@@ -48,6 +48,16 @@ public sealed partial class DropboxWriter
                                 "The folder changed after the scan or exceeds the single batch limit."));
                         else submit.Add(tree);
                     if (submit.Count == 0) return Array.Empty<PilotRemoteEntry>();
+                    // Owner-approved prepare slot: fresh source proof after the pre-feed and before
+                    // the sole durable group checkpoint. A refusal takes existing guarded per-item fallback.
+                    foreach (var tree in submit)
+                        if (tree.RevalidateDelete is { } revalidate && !await revalidate().ConfigureAwait(false))
+                        {
+                            outcomes.AddRange(submit.Select(candidate => FolderTreeOutcome.Of(candidate,
+                                FolderTreeStatus.NotSubmitted, "Source presence or absence is unconfirmed before submit.")));
+                            submit.Clear();
+                            return Array.Empty<PilotRemoteEntry>();
+                        }
                     recovery = new FolderRecovery(before.Where(change => submit.Any(tree =>
                         PairPath.IsSelfOrUnder(change.Path, tree.Folder.Path))).ToList(), middle,
                         SubmittedAt: DateTimeOffset.UtcNow);
