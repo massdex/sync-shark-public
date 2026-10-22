@@ -31,7 +31,7 @@ public interface ISourceAbsenceProbe
         {
             try { results[index] = new(await IsSourceAbsentAsync(requests[index].Historical, requests[index].Path, token).ConfigureAwait(false), null); }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-            catch (Exception error) when (error is not OutOfMemoryException) { results[index] = new(null, AbsenceObservation.Cause(error)); }
+            catch (Exception error) when (error is not (OutOfMemoryException or PairPausedException)) { results[index] = new(null, AbsenceObservation.Cause(error)); }
         }).ConfigureAwait(false);
         return results;
     }
@@ -136,7 +136,7 @@ internal static class DeleteSourceGuard
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-        catch (Exception error) when (error is not OutOfMemoryException)
+        catch (Exception error) when (error is not (OutOfMemoryException or PairPausedException))
         {
             retryLater = true;
             detail = "Deletion was expected, but checking the source failed. Nothing was deleted; Retry checks it again next run. " + error.Message;

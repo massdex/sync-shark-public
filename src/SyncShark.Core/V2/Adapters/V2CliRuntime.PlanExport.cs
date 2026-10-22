@@ -78,15 +78,18 @@ public sealed partial class V2CliRuntime
             // A plan that could not be completed is never written as a complete export.
             if (plan.RunUnavailable is { } unavailable)
                 throw new SyncRunPendingVerificationException(unavailable, 30);
+            var pendingRestores = PendingRestorePreviewNotices(pairId).Count();
             var rows = WritePlanCsv(export, pair, plan, unsupported, cancellationToken, preview.Unapproved);
+            if (pendingRestores > 0)
+                progress($"Pending recovery restores: {pendingRestores}. Restore retries are not performed read-only; inspect RESTORE rows.");
             progress("Each preview consumes its isolated copy. Stop the app and make a fresh copy of the database together with its -wal and -shm files before every preview.");
             progress($"Unsupported read-only reconciliation: {unsupported.Length}." +
                 (unsupported.Length == 0 ? "" : " Export is not an exact execution plan; inspect UNSUPPORTED-RECONCILE rows."));
             return new SyncCliPlanExportData(pair.PairId, pair.Name, export, plan.Gen, plan.Actions.Count,
                 plan.DeferredPlanningActions.Count, plan.SkippedActions.Count,
-                plan.HeldDeletions.Count + plan.UnreviewedHeldDeletions.Count + preview.Unapproved.Count, plan.RecoveryPending.Count,
+                plan.HeldDeletions.Count + plan.UnreviewedHeldDeletions.Count + preview.Unapproved.Count, plan.RecoveryPending.Count + pendingRestores,
                 plan.Notices.Count, _store.CountUnresolvedIntents(pairId), rows)
-            { UnsupportedReconciles = unsupported.Length };
+            { UnsupportedReconciles = unsupported.Length + pendingRestores };
         }
         finally
         {
@@ -382,6 +385,8 @@ public sealed partial class V2CliRuntime
     internal int WritePlanCsv(string path, PairDef pair, Plan plan, IReadOnlyList<SyncAction> unsupported,
         CancellationToken cancellationToken, IReadOnlyList<string>? unapproved = null)
     {
+        if (plan.RunUnavailable is { } unavailable)
+            throw new SyncRunPendingVerificationException(unavailable, 30);
         var partial = path + "." + Guid.NewGuid().ToString("N") + ".partial";
         var rows = 0;
         var created = false;
@@ -450,6 +455,14 @@ public sealed partial class V2CliRuntime
                         notice.ReasonKey + ": " + notice.Detail);
                     rows++;
                 }
+                foreach (var restore in PendingRestorePreviewNotices(pair.PairId))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    WriteMarkerRow(writer, "recovery-restore", "pending", null, restore.Path, null,
+                        "Restore retry and verification are deferred in a read-only preview; the path remains protected. " + restore.Detail,
+                        "RESTORE");
+                    rows++;
+                }
                 foreach (var intent in unsupported)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
@@ -477,6 +490,20 @@ public sealed partial class V2CliRuntime
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
             throw;
+        }
+    }
+
+    private IEnumerable<Notice> PendingRestorePreviewNotices(string pairId)
+    {
+        string? after = null;
+        while (true)
+        {
+            var page = _store.RecoveryRestoreNoticesPage(pairId, after, 256);
+            foreach (var notice in page)
+                if (notice.ConflictOperation?.Completed.Contains("ignored") != true)
+                    yield return notice;
+            if (page.Count < 256) yield break;
+            after = page[^1].NoticeId;
         }
     }
 

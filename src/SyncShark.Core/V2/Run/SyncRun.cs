@@ -756,7 +756,15 @@ public sealed partial class SyncRun : ISyncRun
         }
 
         RecordScanRetries(pair, scan);
-        var recoveryTouched = await RefreshRecoveryRestoresAsync(pair, ct);
+        var rootsComplete = !scan.A.IncompleteSubtrees.Contains(string.Empty) &&
+            !scan.B.IncompleteSubtrees.Contains(string.Empty);
+        if (_endpoints is PlanOnlyEndpoints && !rootsComplete)
+            return new(new Plan(pairId, 0, [], [])
+            { RunUnavailable = "A side could not be read in full. This preview is unavailable; retry after the read outage." }, null, null);
+        // Restore verification reads both sides (including SidesEqual's stored inventory). Neither
+        // incomplete coverage nor a read-only preview can authorize a retry or retire its protection.
+        IReadOnlyList<string> recoveryTouched = rootsComplete && _endpoints is not PlanOnlyEndpoints
+            ? await RefreshRecoveryRestoresAsync(pair, ct) : [];
         CloseObservedRepairs(pair, scan);
         // Finding 1 (Astra): a link or stub that disappears in this run still protects its path for the whole run.
         // The restore refresh above may have frozen a new intent; take the run's hold snapshot after it.

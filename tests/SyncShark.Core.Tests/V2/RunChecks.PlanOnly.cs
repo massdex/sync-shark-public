@@ -8,6 +8,9 @@ internal static partial class RunChecks
     {
         PlanOnlyPathChecks();
         await PlanOnlyRecoveryAsync();
+        await PlanOnlyOutageAsync();
+        await PlanOnlyRestoreRetryAsync();
+        await IncrementalRestoreOutageAsync();
         await PlanOnlyUnapprovedCountAsync();
         var preview = Build();
         var ordinary = Build();
@@ -89,6 +92,106 @@ internal static partial class RunChecks
             { ProviderEffect = new ProviderEffectCheckpoint("delete-job", "{}", DateTimeOffset.UtcNow) }),
             "read-only delete-job verification remains supported");
         Console.WriteLine("PASS ordinary plan-only parity and zero endpoint writes");
+    }
+
+    private static async Task PlanOnlyOutageAsync()
+    {
+        foreach (var side in new[] { Side.A, Side.B })
+        foreach (var full in new[] { false, true })
+        {
+            var fx = Build();
+            fx.A.Seed("retained.txt", "same");
+            await FirstSyncAsync(fx.Run(), fx);
+            var root = side == Side.A ? fx.Pair.A : fx.Pair.B;
+            fx.Provider.AddInventory(root, new ScriptedInventory(side == Side.A ? fx.A : fx.B)
+            {
+                ChangesError = new HttpRequestException("network unavailable"),
+                FullError = new ProviderTransportTimeoutException("response body stalled")
+            });
+            if (full) await fx.Run().RequestRescanAsync([root.RootId], default);
+            var directory = LocalChecks.FreshRoot("plan-outage-" + Guid.NewGuid().ToString("N"));
+            var export = Path.Combine(directory, "plan.csv");
+            var runtime = new V2CliRuntime(null, fx.Store, fx.Run(), new EndpointRootProbe(fx.Provider), directory);
+            var writes = fx.WriterA.Calls + fx.WriterB.Calls;
+            for (var attempt = 0; attempt < 2; attempt++)
+            {
+                var preview = await fx.Run().PreviewIncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+                Require(preview.Plan.RunUnavailable is not null, "root outage makes plan-only unavailable on either side");
+                try
+                {
+                    runtime.WritePlanCsv(export, fx.Pair, preview.Plan, [], default);
+                    throw new Exception("Incomplete preview was exported");
+                }
+                catch (SyncRunPendingVerificationException) { }
+                Require(!File.Exists(export) && !Directory.EnumerateFiles(directory, "*.partial").Any(),
+                    "unavailable preview never creates even a partial export");
+            }
+            Require(fx.Store.OpenNotices(fx.Pair.PairId).Count(n => n.ReasonKey == "sync-retry") == 1 &&
+                fx.Store.SyncRetryAt(fx.Pair.PairId, "") is { Kind: "scan" }, "preview outage keeps one deduped read retry");
+            Require(fx.WriterA.Calls + fx.WriterB.Calls == writes, "outage preview has no effects");
+        }
+    }
+
+    private static async Task PlanOnlyRestoreRetryAsync()
+    {
+        var fx = Build();
+        fx.A.DropboxHashes = fx.B.DropboxHashes = true;
+        await FirstSyncAsync(fx.Run(), fx);
+        var bytes = System.Text.Encoding.UTF8.GetBytes("retained bytes");
+        var source = new ItemState("restore.txt", ItemKind.File, "archive", "revision", DropboxContentHash.Compute(bytes),
+            bytes.Length, DateTimeOffset.UnixEpoch, ItemFlags.None);
+        var record = RetainRecoveryFixture(fx, source, "preview-archive");
+        var action = new SyncAction("rrs-preview", 0, ActionKind.CopyNew, Side.A, source.Path,
+            null, source, null, false, null) { SuppressReconciledBaseline = true };
+        var id = ShortId.Make("rrs", fx.Pair.PairId, record.RecoveryId);
+        fx.Store.AddNotices([new Notice(fx.Pair.PairId, 0, NoticeKind.UserDecision, source.Path, "pending",
+            SyncRun.RecoveryRestorePending, id,
+            ConflictOperation: new ConflictNoticeOperation(record.RecoveryId, source.Path, [action], []))]);
+        var archive = new RecoveryFixtureWriter(fx.WriterA, source, bytes);
+        fx.Provider.AddWriter(fx.Pair.A, archive);
+        var writes = fx.WriterA.Calls + fx.WriterB.Calls;
+        var preview = await fx.Run().PreviewIncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        Require(preview.Plan.RunUnavailable is null && archive.Opens == 0 &&
+            fx.WriterA.Calls + fx.WriterB.Calls == writes, "pending restore does not fail preview or retry an effect");
+        Require(fx.Store.NoticeById(fx.Pair.PairId, id) is { Closed: false } &&
+            fx.Store.RecoveryRestoreProtected(fx.Pair.PairId, source.Path), "preview retains restore notice and protection");
+        var directory = LocalChecks.FreshRoot("plan-restore-" + Guid.NewGuid().ToString("N"));
+        var export = Path.Combine(directory, "plan.csv");
+        var runtime = new V2CliRuntime(null, fx.Store, fx.Run(), new EndpointRootProbe(fx.Provider), directory);
+        runtime.WritePlanCsv(export, fx.Pair, preview.Plan, [], default);
+        var csv = File.ReadAllLines(export);
+        Require(csv.Count(line => line.Contains("recovery-restore,,pending,RESTORE", StringComparison.Ordinal) &&
+            line.Contains("restore.txt", StringComparison.Ordinal) && line.Contains("read-only preview", StringComparison.Ordinal)) == 1,
+            "pending restore is exported once with its read-only explanation");
+    }
+
+    private static async Task IncrementalRestoreOutageAsync()
+    {
+        foreach (var side in new[] { Side.A, Side.B })
+        {
+            var fx = Build();
+            fx.A.Seed("restored.txt", "same");
+            await FirstSyncAsync(fx.Run(), fx);
+            var source = (await fx.A.ObserveAsync("restored.txt", default))!;
+            var action = new SyncAction("rrs-ready", 0, ActionKind.CopyNew, Side.A, source.Path,
+                null, source, null, false, null) { SuppressReconciledBaseline = true };
+            const string id = "ready-restore";
+            fx.Store.AddNotices([new Notice(fx.Pair.PairId, 0, NoticeKind.Info, source.Path, "verified",
+                SyncRun.RecoveryRestoreReady, id,
+                ConflictOperation: new ConflictNoticeOperation("archive", source.Path, [action], []))]);
+            var inventory = new ScriptedInventory(side == Side.A ? fx.A : fx.B)
+            { ChangesError = new HttpRequestException("network unavailable"), FullError = new HttpRequestException("network unavailable") };
+            fx.Provider.AddInventory(side == Side.A ? fx.Pair.A : fx.Pair.B, inventory);
+            var writes = fx.WriterA.Calls + fx.WriterB.Calls;
+            await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            Require(fx.Store.NoticeById(fx.Pair.PairId, id) is { Closed: false } &&
+                fx.WriterA.Calls + fx.WriterB.Calls == writes,
+                "incomplete root cannot verify a ready restore from stale equal rows");
+            inventory.ChangesError = inventory.FullError = null;
+            await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            Require(fx.Store.NoticeById(fx.Pair.PairId, id) is { Closed: true },
+                "complete inventory allows restore verification on a later run");
+        }
     }
 
     private static async Task PlanOnlyUnapprovedCountAsync()
