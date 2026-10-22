@@ -69,6 +69,7 @@ internal static partial class RunChecks
         await Incremental_LocalLocalDeleteCreatesRecoveryAsync();
         await Incremental_NoChanges_WritesNothingAsync();
         await Incremental_SleepingRetryIsPartialAsync();
+        await Incremental_SleepingRootRetryAvoidsWholePairLoadAsync();
         await RecoveryRestore_NoNoticeRunsWithoutLookupsAsync();
         await Incremental_FullRescanAfterForgetCursorAsync();
         await RequestRescan_WaitsForRunningScanAsync();
@@ -813,6 +814,57 @@ internal static partial class RunChecks
         Require(fx.Store.ReadRunHistory(fx.Pair.PairId, 1).Single().Outcome == RunOutcomes.Partial,
             "run history records Partial, not Complete");
         Console.WriteLine("PASS Incremental_SleepingRetryIsPartial");
+    }
+
+    // Follow-up 1 (memory): while a whole-root retry sleeps, the pair is still protected (an empty
+    // scan-failure path covers every row via links pending) but the run must NOT load and join the
+    // whole pair. It loads only the changed paths; the whole-pair planning load happens only in the
+    // run where the root debt actually settles. Real planning/store call-count helpers prove both.
+    private static async Task Incremental_SleepingRootRetryAvoidsWholePairLoadAsync()
+    {
+        var fx = Build(record: true);
+        fx.A.Seed("seed.txt", "1");
+        var run = fx.Run();
+        await FirstSyncAsync(run, fx);
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        // A real root outage on the Dropbox side leaves durable whole-root scan debt with a backoff.
+        var cloud = new ScriptedInventory(fx.B)
+        {
+            FullError = new HttpRequestException("network unavailable"),
+            ChangesError = new HttpRequestException("network unavailable")
+        };
+        fx.Provider.AddInventory(fx.Pair.B, cloud);
+        var outage = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        Require(outage.Outcome == RunOutcomes.Partial && fx.Store.SyncRetryAt(fx.Pair.PairId, "") is { Kind: "scan" },
+            "a root outage leaves a whole-root scan retry and reports Partial");
+        cloud.FullError = cloud.ChangesError = null;
+        var sleeping = fx.Store.SyncRetryAt(fx.Pair.PairId, "")!;
+        Require(sleeping.RetryAfter > DateTimeOffset.UtcNow, "the root retry is still sleeping on its backoff");
+        // A change on the healthy side forces planning, so a whole-pair load would be visibly wasteful.
+        fx.A.Seed("after.txt", "new");
+        var baselinesBefore = fx.Recorder!.AllBaselineReads;
+        var prefixesBefore = fx.Recorder.BaselinePrefixReads.Count;
+        var measured = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        Require(measured.Outcome == RunOutcomes.Partial && measured.Deferred >= 1,
+            "the sleeping whole-root retry keeps the run Partial");
+        Require(fx.Recorder.AllBaselineReads == baselinesBefore,
+            "a sleeping whole-root retry does not trigger a full pair load (LoadFull)");
+        Require(!fx.Recorder.BaselinePrefixReads.Skip(prefixesBefore)
+                .Any(read => read.Prefixes.Contains(string.Empty)),
+            "touched planning never expands to the whole root while the retry sleeps");
+        Require(await fx.B.ObserveAsync("after.txt", CancellationToken.None) is null,
+            "the healthy side's change stays protected while the whole-root debt sleeps");
+        Require(fx.Store.SyncRetryAt(fx.Pair.PairId, "") is { Kind: "scan" } &&
+            fx.Store.OpenNotices(fx.Pair.PairId).Any(notice => notice.ReasonKey == "sync-retry" && notice.Path.Length == 0),
+            "the sleeping whole-root retry and its notice stay open");
+        // The run where the debt actually settles is the one that plans the whole pair from stored rows.
+        fx.Store.SaveSyncRetry(fx.Pair.PairId, sleeping with { RetryAfter = DateTimeOffset.MinValue });
+        var recovered = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        Require(recovered.Failed == 0 && fx.Store.SyncRetryAt(fx.Pair.PairId, "") is null,
+            "the due retry settles after a complete root read");
+        Require(await fx.B.ObserveAsync("after.txt", CancellationToken.None) is not null,
+            "the run that settles the whole-root debt syncs the healthy side's earlier change");
+        Console.WriteLine("PASS Incremental_SleepingRootRetryAvoidsWholePairLoad");
     }
 
     // Finding 4: a real first sync and a real incremental run against the SQLite store take the indexed
