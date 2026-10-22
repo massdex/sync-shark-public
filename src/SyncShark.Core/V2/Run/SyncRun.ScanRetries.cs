@@ -7,7 +7,7 @@ public sealed partial class SyncRun
 
     private async Task<(IReadOnlyList<string> Touched, IReadOnlyList<string> Incomplete)> RetryScanScopesAsync(
         PairDef pair, RootDef root, Side side, IInventorySource inventory, string cursor, long gen,
-        Func<string, bool> include, ProgressThrottle throttle, CancellationToken ct)
+        Func<string, bool> include, Action<string> changed, ProgressThrottle throttle, CancellationToken ct)
     {
         var touched = new List<string>();
         var incomplete = new List<string>();
@@ -29,7 +29,11 @@ public sealed partial class SyncRun
             {
                 var reread = await local.ChangesForPathsAsync(scopes, cursor, gen, include, ct);
                 if (reread.CursorInvalid) { incomplete.AddRange(scopes); continue; }
-                _store.WriteDelta(reread);
+                _store.WriteDelta(reread with { ChangedObject = changed });
+                // WriteDelta's callback covers deletions; re-read identities widen the dirty set too, exactly
+                // as the main scan's delta does, so a hidden change is never merely touched.
+                foreach (var change in reread.Changes)
+                    if (change.ObjectId.Length > 0) changed(change.ObjectId);
                 incomplete.AddRange(reread.IncompleteSubtrees);
                 touched.AddRange(reread.Changes.Select(change => change.Path));
             }
@@ -45,7 +49,7 @@ public sealed partial class SyncRun
                         sql.StagePrefixHydration(root.RootId, rows, include);
                         return Task.CompletedTask;
                     }, ct);
-                    sql.InstallPrefixHydration(root, side, gen, scopes, include, cursor, ct);
+                    sql.InstallPrefixHydration(root, side, gen, scopes, include, cursor, ct, changed);
                 }
                 catch (Exception error) when (ScopeFailure(error, ct))
                 {
@@ -60,7 +64,11 @@ public sealed partial class SyncRun
                 bool within(string path) => scopes.Any(scope => scope.Length == 0 || PairPath.IsSelfOrUnder(path, scope));
                 bool traverse(string path) => include(path) && (within(path) || scopes.Any(scope => PairPath.IsSelfOrUnder(scope, path)));
                 var reread = await ReadFullAsync(inventory, gen, traverse, root, throttle, ct);
-                _store.WriteSnapshot(reread with { IncludesPath = path => include(path) && within(path) && (reread.IncludesPath?.Invoke(path) ?? true) });
+                _store.WriteSnapshot(reread with
+                {
+                    IncludesPath = path => include(path) && within(path) && (reread.IncludesPath?.Invoke(path) ?? true),
+                    ChangedObject = changed
+                });
                 incomplete.AddRange(reread.IncompleteSubtrees);
                 touched.AddRange(reread.Items.Select(item => item.Path));
             }

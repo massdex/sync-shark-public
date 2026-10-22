@@ -610,6 +610,8 @@ public sealed partial class SyncRun
         }
         Trace($"scan {side}: resuming {(inventoryCursors is null ? "committed" : "pending")} inventory cursor");
         var deltaGen = _store.BeginGeneration(root.RootId, "delta");
+        // Identities observed below (hydrated prefixes, the delta, targeted re-reads) are the run's dirty set.
+        var ids = new List<string>();
         var hydrationInvalid = false;
         if (hydrate.Length > 0 && inventory is DropboxInventory hydrating && observationStore is not null)
         {
@@ -621,7 +623,7 @@ public sealed partial class SyncRun
                     observationStore.StagePrefixHydration(root.RootId, rows, include);
                     return Task.CompletedTask;
                 }, ct);
-                observationStore.InstallPrefixHydration(root, side, deltaGen, hydrate, include, cursor, ct);
+                observationStore.InstallPrefixHydration(root, side, deltaGen, hydrate, include, cursor, ct, ids.Add);
             }
             catch (Exception error) when (error is InvalidDataException ||
                 error is DropboxApiException { StatusCode: System.Net.HttpStatusCode.Conflict })
@@ -666,7 +668,6 @@ public sealed partial class SyncRun
                 NoDeletions, []) { AllItemsChanged = allChanged, ScopedFullCoverage = rescan.IncompleteSubtrees.Count > 0 && !rescan.IncompleteSubtrees.Contains(string.Empty), PendingDeletionEvidence = rescan.PendingDeletionEvidence, IncompleteSubtrees = rescan.IncompleteSubtrees, IncompleteReasons = rescan.IncompleteReasons, ObservedCoverage = observationStore is null ? null : coverage, RehashThrough = _store.RehashWatermark(root.RootId) };
         }
         var paths = new List<string>();
-        var ids = new List<string>();
         var deleted = new Dictionary<string, DateTimeOffset?>(StringComparer.OrdinalIgnoreCase);
         var previous = new List<string>();
         foreach (var change in delta.Changes)
@@ -687,7 +688,7 @@ public sealed partial class SyncRun
             if (before is not null && !string.Equals(before, change.Path, StringComparison.Ordinal)) previous.Add(before);
         }
         _store.WriteDelta(delta with { IncludesPath = include, ChangedObject = firstSync ? null : ids.Add });
-        var retryReads = await RetryScanScopesAsync(pair, root, side, inventory, delta.CursorAfter, deltaGen, include, throttle, ct);
+        var retryReads = await RetryScanScopesAsync(pair, root, side, inventory, delta.CursorAfter, deltaGen, include, ids.Add, throttle, ct);
         paths.AddRange(retryReads.Touched);
         delta = delta with { IncompleteSubtrees = delta.IncompleteSubtrees.Concat(retryReads.Incomplete).Distinct(StringComparer.OrdinalIgnoreCase).ToArray() };
         await inventory.VerifyPendingAsync(include, paths.Add, ct);
@@ -1195,12 +1196,12 @@ public sealed partial class SyncRun
             foreach (var page in deferredPlanning.Chunk(256))
             {
                 ct.ThrowIfCancellationRequested();
-                deferredStore.AcknowledgeDeferredPlanning(pair.PairId, page, path =>
-                    Settled(path) || (scan.A.Complete && scan.B.Complete && includeA(path) && includeB(path) &&
-                        !evaluated(path) && !unsettled.Any(p => PairPath.IsSelfOrUnder(path, p) || PairPath.IsSelfOrUnder(p, path)) &&
-                        _store.Live(pair.A.RootId, [path]).Count == 0 && _store.Live(pair.B.RootId, [path]).Count == 0 &&
-                        !_store.BaselinesAt(pair.PairId, Side.A, [path]).Any() &&
-                        !_store.BaselinesAt(pair.PairId, Side.B, [path]).Any()));
+                deferredStore.AcknowledgeDeferredPlanning(pair.PairId, page, Settled, path =>
+                    scan.A.Complete && scan.B.Complete && includeA(path) && includeB(path) &&
+                    !evaluated(path) && !unsettled.Any(p => PairPath.IsSelfOrUnder(path, p) || PairPath.IsSelfOrUnder(p, path)) &&
+                    _store.Live(pair.A.RootId, [path]).Count == 0 && _store.Live(pair.B.RootId, [path]).Count == 0 &&
+                    !_store.BaselinesAt(pair.PairId, Side.A, [path]).Any() &&
+                    !_store.BaselinesAt(pair.PairId, Side.B, [path]).Any());
             }
         _store.AcknowledgeRehash(pair.A.RootId, scan.A.RehashThrough, path => Settled(path) && includeA(path), ct);
         _store.AcknowledgeRehash(pair.B.RootId, scan.B.RehashThrough, path => Settled(path) && includeB(path), ct);

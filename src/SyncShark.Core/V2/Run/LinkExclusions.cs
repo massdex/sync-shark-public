@@ -145,9 +145,6 @@ internal sealed class LinkExclusions
     internal IReadOnlyCollection<string> Links => _links;
 
 
-    /// <summary>True when the path is protected or lies under a protected path (checks the path and each ancestor).</summary>
-    internal bool CoversRetry(string path) => _retryProtection?.Invoke(path, false) == true;
-
     internal bool TouchesRehash(string path) => _rehash?.Touches(path, descendants: false) == true;
 
     internal bool Covers(string path)

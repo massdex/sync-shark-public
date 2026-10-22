@@ -95,13 +95,17 @@ public sealed partial class SqliteStateStore
     });
 
     internal void AcknowledgeDeferredPlanning(string pairId, IReadOnlyList<DeferredPlanning> page,
-        Func<string, bool> settled) => InStore(() =>
+        Func<string, bool> settled, Func<string, bool>? emptyPath = null) => InStore(() =>
     {
         var pair = PairNo(pairId);
         if (pair is null) return;
         // Settlement may read current inventory/baselines through the store. Evaluate under
         // its gate before opening the write transaction; newer work is still version-guarded.
-        var rows = page.Where(row => row.AllAliases && row.Paths.All(settled))
+        // An empty-path retirement is structural: it may only retire work for an entity that has
+        // no current row on its root, because the alias list was captured before this run's scan.
+        var rows = page.Where(row => row.AllAliases &&
+                (row.Paths.All(settled) ||
+                    (emptyPath is not null && row.Paths.All(emptyPath) && _reads.ByObject(row.Root, row.ObjectId) is null)))
             .Select(row => new { root = row.Root, id = row.ObjectId, version = row.Version }).ToArray();
         using var tx = _connection.BeginTransaction();
         StoreSchema.Execute(_connection, tx, """

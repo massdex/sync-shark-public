@@ -432,7 +432,6 @@ internal sealed class RunScope
         if (!_persistDeferred || _deferredPair is not { } pair || _store is not SqliteStateStore ||
             (!(side == Side.A ? _allChangedA : _allChangedB) && !(side == Side.A ? _dirtyA : _dirtyB).Contains(item.ObjectId)) ||
             !new[] { item.Path, DropboxNameMapping.MatchPath(item) }.Any(links.TouchesRehash) ||
-            new[] { item.Path, DropboxNameMapping.MatchPath(item) }.Any(links.CoversRetry) ||
             (side == Side.A ? _permanentA : _permanentB).Contains(item.ObjectId) || PermanentHold(item, links) ||
             _store.SyncRetryAt(pair.PairId, item.Path) is not null) return;
         _deferred.Add(((side == Side.A ? pair.A : pair.B).RootId, item));

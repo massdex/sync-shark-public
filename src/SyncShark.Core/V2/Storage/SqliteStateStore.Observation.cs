@@ -64,7 +64,8 @@ public sealed partial class SqliteStateStore
     // Staging is disposable, not a new observation framework. Publish no expanded coverage until
     // this bounded reconciliation and the root race feed have both completed.
     internal void InstallPrefixHydration(RootDef root, Side side, long gen, IReadOnlyList<string> prefixes,
-        Func<string, bool> include, string oldCursor, CancellationToken ct = default)
+        Func<string, bool> include, string oldCursor, CancellationToken ct = default,
+        Action<string>? changedObject = null)
     {
         ct.ThrowIfCancellationRequested();
         // A scoped repair cannot turn an interrupted/missing root classification into complete authority.
@@ -135,7 +136,12 @@ public sealed partial class SqliteStateStore
             key = rows[^1].Key;
             var changes = rows.Where(row => row.Json is not null).Select(row => JsonSerializer.Deserialize<ItemState>(row.Json!)!)
                 .Select(item => new Change(ChangeKind.Upsert, item.ObjectId, item.Path, item, null)).ToArray();
-            WriteDelta(new Delta(root.RootId, side, gen, oldCursor, oldCursor, changes, false, []) { IncludesPath = include });
+            // Every installed identity is part of this observation; the caller's dirty set only widens.
+            if (changedObject is not null)
+                foreach (var change in changes)
+                    if (include(change.Path) && change.ObjectId.Length > 0) changedObject(change.ObjectId);
+            WriteDelta(new Delta(root.RootId, side, gen, oldCursor, oldCursor, changes, false, [])
+                { IncludesPath = include, ChangedObject = changedObject });
             WriteClassificationRows(number, rows.Where(row => row.Deleted).Select(row => (row.Path, row.Json is null)), true);
         }
         ct.ThrowIfCancellationRequested();

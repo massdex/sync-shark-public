@@ -74,16 +74,13 @@ internal static class PlanningDeferredChecks
                 .LoadTouched(pair, [cloud.Path], [], [cloud.ObjectId]);
             LocalChecks.Require(store.CountDeferredPlanning(pair.PairId) == 0,
                 "ongoing decision holds never create planning deferrals");
-            foreach (var hold in new[] { "ancestor retry", "recovery restore" })
-            {
-                var retryLinks = LinkExclusions.Of(store, pair, false).WithRetryProtection(
-                    (path, descendants) => PairPath.IsSelfOrUnder(path, "Held"));
-                var retryScope = new RunScope(store, _ => true, _ => true, retryLinks,
-                    restoreProtection: RecoveryRestoreProtection.None, persistDeferred: true)
-                    .LoadTouched(pair, [cloud.Path], [], [cloud.ObjectId]);
-                LocalChecks.Require(retryScope.A.Count == 0 && retryScope.B.Count == 0 && store.CountDeferredPlanning(pair.PairId) == 0,
-                    hold + " does not create a misleading verification row");
-            }
+            var retryLinks = LinkExclusions.Of(store, pair, false).WithRetryProtection(
+                (path, descendants) => PairPath.IsSelfOrUnder(path, "Held"));
+            var retryScope = new RunScope(store, _ => true, _ => true, retryLinks,
+                restoreProtection: RecoveryRestoreProtection.None, persistDeferred: true)
+                .LoadTouched(pair, [cloud.Path], [], [cloud.ObjectId]);
+            LocalChecks.Require(retryScope.A.Count == 0 && retryScope.B.Count == 0 && store.CountDeferredPlanning(pair.PairId) == 0,
+                "a retry-only hold without a gap does not create a misleading verification row");
             store.RequireRehash(pair.A.RootId, local, "preview hold");
             new RunScope(store, _ => true, _ => true, LinkExclusions.Of(store, pair, false))
                 .LoadTouched(pair, [cloud.Path], [], [cloud.ObjectId]);
@@ -121,6 +118,28 @@ internal static class PlanningDeferredChecks
                 .LoadTouched(pair, [cloud.Path], [], [cloud.ObjectId]);
             LocalChecks.Require(store.OpenNotices(pair.PairId).Count(notice => notice.ReasonKey == "run-unavailable") == 1,
                 "when both persistence paths fail one existing actionable notice is retained and preparation completes");
+        }
+
+        // Review 4 finding 3: retirement through the empty-path branch is structural, not an alias guess.
+        using (var store = SqliteStateStore.Open(Path.Combine(folder, "moved-empty-path"), StorageChecks.Fast, TimeProvider.System))
+        {
+            store.SavePair(pair);
+            Snapshot(store, pair.A, Side.A, [local]);
+            Snapshot(store, pair.B, Side.B, [cloud]);
+            var moved = local with { Path = "Hidden/Moved", ObjectId = "moved-object" };
+            store.DeferPlanning(pair.PairId, new[] { (pair.A.RootId, moved) });
+            var stale = store.DeferredPlanningPage(pair.PairId).Single(row => row.ObjectId == "moved-object");
+            LocalChecks.Require(stale.Paths.SequenceEqual(new[] { "Hidden/Moved" }),
+                "the queued row captures its alias-free path before a later move");
+            // The entity appears on its root at a path this run never evaluated, after the aliases were read.
+            Snapshot(store, pair.A, Side.A, [local, moved]);
+            store.AcknowledgeDeferredPlanning(pair.PairId, [stale], _ => false, _ => true);
+            LocalChecks.Require(store.CountDeferredPlanning(pair.PairId) == 1,
+                "an empty-path sighting never retires work while the entity still has a row on its root");
+            Snapshot(store, pair.A, Side.A, [local]);
+            store.AcknowledgeDeferredPlanning(pair.PairId, [stale], _ => false, _ => true);
+            LocalChecks.Require(store.CountDeferredPlanning(pair.PairId) == 0,
+                "a genuinely absent entity retires its empty-path work");
         }
 
         var migratedFolder = Path.Combine(folder, "migrated-v21");
