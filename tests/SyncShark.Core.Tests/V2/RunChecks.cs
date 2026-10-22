@@ -68,6 +68,7 @@ internal static partial class RunChecks
         await Incremental_DeletedIdenticalSkipsRecoveryAsync();
         await Incremental_LocalLocalDeleteCreatesRecoveryAsync();
         await Incremental_NoChanges_WritesNothingAsync();
+        await Incremental_SleepingRetryIsPartialAsync();
         await RecoveryRestore_NoNoticeRunsWithoutLookupsAsync();
         await Incremental_FullRescanAfterForgetCursorAsync();
         await RequestRescan_WaitsForRunningScanAsync();
@@ -786,6 +787,32 @@ internal static partial class RunChecks
         Require(report.Done == 0 && report.Outcome == RunOutcomes.Complete, "a steady-state run has nothing to do");
         Require(fx.Recorder.ChangeRows == 0, "a steady-state run writes no sync-state rows (its run summary is history)");
         Console.WriteLine("PASS Incremental_NoChanges_WritesNothing");
+    }
+
+    // Finding 1: a run with no changes at all still has unfinished work when a retry is sleeping on its
+    // backoff. It must report Partial (and record Partial in history), never Complete, and keep the
+    // notice open so the user's core rule holds: incomplete state survives for the next run.
+    private static async Task Incremental_SleepingRetryIsPartialAsync()
+    {
+        var fx = Build();
+        fx.A.Seed("a.txt", "1");
+        var run = fx.Run();
+        await FirstSyncAsync(run, fx);
+        // The first run after the apply re-reads the apply's own writes; the next one has an empty delta.
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        fx.Store.SaveSyncRetry(fx.Pair.PairId,
+            new SyncRetry("held.txt", "scan", 1, "synthetic read debt", DateTimeOffset.UtcNow.AddMinutes(5)));
+        fx.Store.AddNotices([new Notice(fx.Pair.PairId, 40, NoticeKind.Info, "held.txt",
+            "synthetic retry notice", "sync-retry")]);
+        var report = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        Require(report.Done == 0 && report.Outcome == RunOutcomes.Partial && report.Deferred == 1,
+            "an empty delta with a retry in backoff reports Partial, never Complete");
+        Require(fx.Store.SyncRetryAt(fx.Pair.PairId, "held.txt") is { Kind: "scan" } &&
+            fx.Store.OpenNotices(fx.Pair.PairId).Any(notice => notice.ReasonKey == "sync-retry" && notice.Path == "held.txt"),
+            "the sleeping retry and its notice stay open");
+        Require(fx.Store.ReadRunHistory(fx.Pair.PairId, 1).Single().Outcome == RunOutcomes.Partial,
+            "run history records Partial, not Complete");
+        Console.WriteLine("PASS Incremental_SleepingRetryIsPartial");
     }
 
     // Finding 4: a real first sync and a real incremental run against the SQLite store take the indexed

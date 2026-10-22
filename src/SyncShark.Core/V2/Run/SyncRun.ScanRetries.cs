@@ -12,16 +12,28 @@ public sealed partial class SyncRun
         var touched = new List<string>();
         var incomplete = new List<string>();
         var remaining = 256;
+        var rootPlanned = false;
         foreach (var batch in _store.ReadSyncRetries(pair.PairId)
             .Where(retry => (retry.Kind == "scan" || retry.ReadRoots is { Count: > 0 }) &&
                 (retry.ReadRoots is null ? root.Provider == SyncProviders.Local : retry.ReadRoots.Contains(root.RootId)))
             .Chunk(64))
         {
             ct.ThrowIfCancellationRequested();
-            // A completed Dropbox feed already replays every change since the UNADVANCED
-            // cursor. Root debt must not trigger an uncheckpointed recursive prefix listing,
-            // nor stay asleep after that replay has succeeded. Full bootstraps use FullAsync.
-            var scopes = batch.Where(retry => !(rootFeedComplete && inventory is DropboxInventory && retry.Path.Length == 0))
+            // Finding 3 (F4 memory): a root retry's job is planning coverage, not a second read. Plan
+            // the whole pair from the stored rows (LoadTouched expands the empty path to every stored
+            // directory) instead of re-enumerating a root as a delta-shaped change list.
+            if (!rootPlanned && batch.Any(retry => retry.Path.Length == 0 && retry.Kind == "scan"))
+            {
+                rootPlanned = true;
+                touched.Add(string.Empty);
+            }
+            // Read-resilience F-R (approved in review-read-resilience-2): a provider replay from the
+            // UNADVANCED cursor already covers the whole root, so root debt must not stay asleep after
+            // it succeeds. A completed Dropbox feed and a local journal replay are authoritative;
+            // other inventories keep the conservative read (a due retry re-reads, a sleeping one stays
+            // debt) so a ready restore keeps its protection until the scheduled retry.
+            var authoritativeReplay = inventory is LocalInventory || inventory is DropboxInventory && rootFeedComplete;
+            var scopes = batch.Where(retry => !(authoritativeReplay && retry.Path.Length == 0 && retry.Kind == "scan"))
                 .Where(retry => include(retry.Path)).Where(retry =>
             {
                 if (remaining > 0 && retry.RetryAfter <= _time.GetUtcNow()) { remaining--; return true; }
@@ -115,13 +127,13 @@ public sealed partial class SyncRun
             var reason = diagnostic is null && previous is { LastError.Length: > 0 } ? previous.LastError :
                 (diagnostic ?? "This subtree could not be completely read.") +
                 " Correct the reported access, placeholder or name issue, then Retry; Ignore excludes this scope from sync.";
-            // A root outage blocked planning/effects on BOTH sides. The healthy side
-            // may already have advanced its cursor (including a completed gap inventory),
-            // so retry its scope too; otherwise its observed edits can leave the dirty set.
-            var roots = path.Length == 0 ? new[] { pair.A.RootId, pair.B.RootId } :
-                new[] { (pair.A.RootId, scan.A), (pair.B.RootId, scan.B) }
-                    .Where(entry => entry.Item2.IncompleteSubtrees.Contains(path, StringComparer.OrdinalIgnoreCase))
-                    .Select(entry => entry.RootId).ToArray();
+            // Name only the side(s) that actually failed to read. The healthy side's planning
+            // coverage comes from the empty touched path (see RetryScanScopesAsync), not from
+            // pretending it is unread: naming it here would keep whole-root debt alive on a side
+            // whose replay already succeeded.
+            var roots = new[] { (pair.A.RootId, scan.A), (pair.B.RootId, scan.B) }
+                .Where(entry => entry.Item2.IncompleteSubtrees.Contains(path, StringComparer.OrdinalIgnoreCase))
+                .Select(entry => entry.RootId).ToArray();
             if (previous is { Kind: not "scan" })
             {
                 _store.SaveSyncRetry(pair.PairId, previous with { ReadRoots = roots });

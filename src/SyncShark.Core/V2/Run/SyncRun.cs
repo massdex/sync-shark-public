@@ -836,8 +836,11 @@ public sealed partial class SyncRun : ISyncRun
             AddProviderNameRefusalNotice(pair);
             AdvanceCursors(scan);
             throttle.Flush();
-            return new(new Plan(pairId, 0, [], []), WithReconciliation(new RunReport(pairId, RunOutcomes.Complete, 0, 0, 0, 0, 0, 0, 0, 0, [])
-                { Deferred = retryCount }, reconcile), null);
+            // Finding 1: an empty delta is still unfinished while retry debt exists (including a retry
+            // sleeping on its backoff), so the early return goes through the same outcome rule as execution.
+            return new(new Plan(pairId, 0, [], []), IncrementalOutcome(
+                WithReconciliation(new RunReport(pairId, RunOutcomes.Complete, 0, 0, 0, 0, 0, 0, 0, 0, [])
+                    { Deferred = retryCount }, reconcile), []), null);
         }
 
         void refresh(HashRequest request) => inventory = scanner.RefreshHashes(pair, loadScope(), request);
@@ -920,12 +923,7 @@ public sealed partial class SyncRun : ISyncRun
             var report = WithReconciliation(BuildReport(pairId, plan, tally, ct.IsCancellationRequested), reconcile)
                 with { Deferred = _store.CountSyncRetries(pairId) };
             var evidencePendingPaths = pendingEvidence.Keys.Concat(unresolvedEvidence).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-            return evidencePendingPaths.Length == 0 && report.Deferred == 0 ? report : report with
-            {
-                Outcome = string.Equals(report.Outcome, RunOutcomes.Complete, StringComparison.Ordinal)
-                    ? RunOutcomes.Partial : report.Outcome,
-                DeletionEvidencePending = evidencePendingPaths
-            };
+            return IncrementalOutcome(report, evidencePendingPaths);
         }
     }
 
@@ -1338,6 +1336,17 @@ public sealed partial class SyncRun : ISyncRun
                 PlanNotices.PairExcluded.Detail + ": " + string.Join(", ", pair.Excluded), PlanNotices.PairExcluded.Key));
         return plan with { Actions = kept, Notices = notices, SkippedActions = skipped };
     }
+
+    // Finding 1: a run never reports Complete while retry debt or unreleased deletion evidence
+    // remains. A retry sleeping on its backoff is still unfinished work that keeps its notice, so
+    // every incremental return path passes through this one rule and RunHistory records it honestly.
+    private static RunReport IncrementalOutcome(RunReport report, IReadOnlyList<string> evidencePendingPaths) =>
+        evidencePendingPaths.Count == 0 && report.Deferred == 0 ? report : report with
+        {
+            Outcome = string.Equals(report.Outcome, RunOutcomes.Complete, StringComparison.Ordinal)
+                ? RunOutcomes.Partial : report.Outcome,
+            DeletionEvidencePending = evidencePendingPaths
+        };
 
     internal void AdvanceCursors(BothScan scan)
     {

@@ -401,9 +401,29 @@ public sealed partial class LocalInventory : IInventorySource
     internal async Task<Delta> ChangesForPathsAsync(IReadOnlyList<string> paths, string cursor, long gen,
         Func<string, bool> include, CancellationToken ct)
     {
-        using var lease = PilotDirectoryLease.Open(_root.RootPath, _rootIdentity);
-        return await RefreshAsync(lease, gen, cursor, cursor, include, paths, ct).ConfigureAwait(false);
+        PilotDirectoryLease lease;
+        try
+        {
+            // The seam models the lease open itself, so it stays inside the guarded region.
+            BeforeTargetedRefreshLeaseForTest?.Invoke();
+            lease = PilotDirectoryLease.Open(_root.RootPath, _rootIdentity);
+        }
+        catch (Exception error) when (IsRootUnavailable(error))
+        {
+            // Finding 4: a root that cannot be opened for a targeted re-read is read debt, exactly like a
+            // failed listing: report the scopes incomplete so the caller keeps their retry and notice
+            // instead of failing the whole run.
+            return Invalid(gen, _root.RootId, cursor,
+                "root unavailable during targeted refresh (" + error.GetType().Name + ")");
+        }
+        using (lease)
+            return await RefreshAsync(lease, gen, cursor, cursor, include, paths, ct).ConfigureAwait(false);
     }
+
+    /// <summary>Check seam: runs in <see cref="ChangesForPathsAsync"/> immediately before the root lease is
+    /// opened, so a check can model a root that becomes unavailable after the run's scan succeeded. Null in
+    /// production.</summary>
+    internal Action? BeforeTargetedRefreshLeaseForTest { get; set; }
 
     private async Task<Delta> RefreshAsync(PilotDirectoryLease lease, long gen, string cursor, string throughCursor,
         Func<string, bool> include, IReadOnlyList<string> paths, CancellationToken ct, IReadOnlySet<string>? exactPaths = null)

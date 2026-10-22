@@ -795,17 +795,38 @@ public sealed partial class SyncRun
             var fresh = await ReadFullAsync(inventory, freshGen, include, root, throttle, ct);
             _store.WriteSnapshot(fresh with { IncludesPath = path => include(path) && (fresh.IncludesPath?.Invoke(path) ?? true) });
             await inventory.VerifyPendingAsync(include, _ => { }, ct);
+            if (fresh.IncompleteSubtrees.Count == 0) CloseHydrationFallback(pair, root);
+            // Finding 2 (F12): the fresh walk's unread scope, reasons and pending deletion evidence
+            // must reach the result exactly as the ordinary full-walk branches carry them. Dropping
+            // them retires a subtree retry/notice and plans against scope that was never read.
             return new SideScan(freshGen, fresh.CursorAfter, fresh.IncompleteSubtrees.Count == 0, true, [], [],
-                NoDeletions, []) { RehashThrough = _store.RehashWatermark(root.RootId) };
+                NoDeletions, []) { RehashThrough = _store.RehashWatermark(root.RootId),
+                    ScopedFullCoverage = fresh.IncompleteSubtrees.Count > 0 && !fresh.IncompleteSubtrees.Contains(string.Empty),
+                    PendingDeletionEvidence = fresh.PendingDeletionEvidence,
+                    IncompleteSubtrees = fresh.IncompleteSubtrees, IncompleteReasons = fresh.IncompleteReasons };
         }
         _store.WriteDelta(delta with { IncludesPath = include });
         await inventory.VerifyPendingAsync(include, _ => { }, ct);
-        var complete = snapshot.IncompleteSubtrees.Count == 0 && delta.IncompleteSubtrees.Count == 0;
+        // Finding 2 (F12): both the paused snapshot and the catch-up replay contribute unread scope,
+        // reasons and pending deletion evidence. Carry both through, exactly as the non-catch-up
+        // full-walk branches do, so the retry/notice survive and planning never treats an unread
+        // subtree as authoritative.
+        var incomplete = snapshot.IncompleteSubtrees.Concat(delta.IncompleteSubtrees)
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var reasons = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in snapshot.IncompleteReasons) reasons[entry.Key] = entry.Value;
+        foreach (var entry in delta.IncompleteReasons) reasons[entry.Key] = entry.Value;
+        var evidence = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in snapshot.PendingDeletionEvidence) evidence[entry.Key] = entry.Value;
+        foreach (var entry in delta.PendingDeletionEvidence) evidence[entry.Key] = entry.Value;
+        var complete = incomplete.Length == 0;
         if (complete) CloseHydrationFallback(pair, root);
         return new SideScan(gen, delta.CursorAfter, complete, true,
             delta.Changes.Select(c => c.Path).ToArray(), delta.Changes.Select(c => c.ObjectId).ToArray(),
             NoDeletions, []) { RehashThrough = _store.RehashWatermark(root.RootId),
-                PendingDeletionEvidence = delta.PendingDeletionEvidence, ReleasedDeletionEvidence = delta.ReleasedDeletionEvidence };
+                ScopedFullCoverage = incomplete.Length > 0 && !incomplete.Contains(string.Empty),
+                PendingDeletionEvidence = evidence, ReleasedDeletionEvidence = delta.ReleasedDeletionEvidence,
+                IncompleteSubtrees = incomplete, IncompleteReasons = reasons };
     }
 
     private const string HydrationFallbackNoticeKey = "inventory-hydration-fallback";
