@@ -106,8 +106,9 @@ public sealed partial class SyncRun
         public List<ActionResult> Failures { get; } = [];
         // Membership is also used by first-sync completion and notice closure, not just counts.
         // Share one byte of state per id instead of three independently growing hash collections.
+        // NameRefused is a settled provider-name refusal, unlike Outcome.Refused (not done, kept for retry).
         [Flags]
-        private enum ActionState : byte { None = 0, Planned = 1, Counted = 2, Done = 4, Refused = 8, Skipped = 16, Quota = 32, DeleteSource = 64 }
+        private enum ActionState : byte { None = 0, Planned = 1, Counted = 2, Done = 4, NameRefused = 8, Skipped = 16, Quota = 32, DeleteSource = 64 }
         private readonly Dictionary<string, ActionState> _actions = new(StringComparer.Ordinal);
         private readonly object _actionGate = new();
 
@@ -130,7 +131,7 @@ public sealed partial class SyncRun
         public bool WasSettled(string actionId)
         {
             lock (_actionGate)
-                return (_actions.GetValueOrDefault(actionId) & (ActionState.Done | ActionState.Refused)) != 0;
+                return (_actions.GetValueOrDefault(actionId) & (ActionState.Done | ActionState.NameRefused)) != 0;
         }
 
         public bool WasSkipped(string actionId)
@@ -142,7 +143,7 @@ public sealed partial class SyncRun
         public bool WasRefused(string actionId)
         {
             lock (_actionGate)
-                return (_actions.GetValueOrDefault(actionId) & ActionState.Refused) != 0;
+                return (_actions.GetValueOrDefault(actionId) & ActionState.NameRefused) != 0;
         }
 
         // Progress counts only the actions a plan asked for, each one terminal outcome once. The Executor's own
@@ -241,7 +242,7 @@ public sealed partial class SyncRun
                         else ExtraDone++;
                     }
                     _actions[result.ActionId] = state | ActionState.Counted |
-                        (refused ? ActionState.Refused : result.Outcome == Outcome.Done ? ActionState.Done :
+                        (refused ? ActionState.NameRefused : result.Outcome == Outcome.Done ? ActionState.Done :
                             result.Outcome == Outcome.Skipped ? ActionState.Skipped : ActionState.None);
                 }
             }
