@@ -218,9 +218,9 @@ public sealed partial class SyncRun
             }
             else if (result.Outcome == Outcome.Failed) Failed++;
             else if (result.Outcome == Outcome.Uncertain) Uncertain++;
-            else if (result.Outcome == Outcome.Skipped) Skipped++;
+            else if (result.Outcome is Outcome.Skipped or Outcome.Refused) Skipped++;
             // One terminal outcome per action: a child result shares the plan count only when it is a planned action.
-            if (result.Outcome is Outcome.Done or Outcome.Failed or Outcome.Uncertain or Outcome.Skipped)
+            if (result.Outcome is Outcome.Done or Outcome.Failed or Outcome.Uncertain or Outcome.Skipped or Outcome.Refused)
             {
                 lock (_actionGate)
                 {
@@ -251,7 +251,7 @@ public sealed partial class SyncRun
             // separate skip histogram so deferred work is explained without inflating the failure counts.
             if (result.Outcome is Outcome.Failed or Outcome.Uncertain)
                 RunInstrumentation.Current?.RecordFailure(result.Reason);
-            else if (result.Outcome == Outcome.Skipped)
+            else if (result.Outcome is Outcome.Skipped or Outcome.Refused)
                 RunInstrumentation.Current?.RecordSkip(result.Reason);
         }
     }
@@ -403,7 +403,7 @@ public sealed partial class SyncRun
                 SaveFailedRetry(pair, action.Path, result.Reason, retry);
             else if (result.Outcome == Outcome.Done)
                 _store.ClearSyncRetry(pair.PairId, action.Path);
-            else if (result.Outcome == Outcome.Skipped)
+            else if (result.Outcome is Outcome.Skipped or Outcome.Refused)
             {
                 if (retry is not null) _store.SaveSyncRetry(pair.PairId, retry with { RetryAfter = DateTimeOffset.MinValue });
                 touched.Add(action.Path);

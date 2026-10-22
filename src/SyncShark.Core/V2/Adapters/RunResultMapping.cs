@@ -39,7 +39,7 @@ internal static class RunResultMapping
         row.Outcome switch
         {
             Outcome.Done => DoneDecision(row, pairDef),
-            Outcome.Skipped => new SyncDecision(row.Path, SyncDecisionKind.Skipped, row.Reason ?? string.Empty),
+            Outcome.Skipped or Outcome.Refused => new SyncDecision(row.Path, SyncDecisionKind.Skipped, row.Reason ?? string.Empty),
             Outcome.Failed => new SyncDecision(row.Path, SyncDecisionKind.Blocked, row.Reason ?? string.Empty),
             Outcome.Uncertain => new SyncDecision(row.Path, SyncDecisionKind.ResponseUnknown,
                 row.Reason ?? string.Empty),

@@ -28,12 +28,12 @@ internal sealed class IntentTable
             ("$now", now));
     }
 
-    /// <summary>Deletes a resolved intent (Done, Skipped); keeps any other outcome and bumps its attempt count.</summary>
+    /// <summary>Deletes a settled attempt (Done, Skipped, or no-effect Refused); keeps any other outcome and bumps its attempt count.</summary>
     /// <remarks>per-file history comes from the history rows, not from resolved intents.</remarks>
     public void Commit(SqliteTransaction transaction, long pairNo, SyncAction action, Outcome outcome, long now)
     {
         RequireOwner(transaction, action.ActionId, pairNo);
-        if (outcome is Outcome.Done or Outcome.Skipped)
+        if (outcome is Outcome.Done or Outcome.Skipped or Outcome.Refused)
         {
             StoreSchema.Execute(_connection, transaction, "DELETE FROM pending_effect WHERE action_id=$id;",
                 ("$id", action.ActionId));

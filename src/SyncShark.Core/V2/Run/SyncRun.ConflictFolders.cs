@@ -82,7 +82,7 @@ public sealed partial class SyncRun
                 var intent = _store.IntentById(pair.PairId, action.ActionId);
                 var result = intent is null ? null
                     : await EffectResolver.ResolveAsync(intent, target, other, ct).ConfigureAwait(false);
-                return (victim, Action: intent ?? action, Result: result);
+                return (victim, Action: (intent ?? action) with { CallerOwnsNotice = true }, Result: result);
             })).ConfigureAwait(false);
             foreach (var (victim, action, result) in observed)
             {
@@ -455,7 +455,8 @@ public sealed partial class SyncRun
                 }
                 _store.MarkChoiceVictims(removal.ActionId, marks);
                 if (stop is not null)
-                    return Result(Outcome.Skipped, (stop.Reason ?? "A restore step did not complete.") +
+                    return Result(stop.Outcome == Outcome.Refused ? Outcome.Refused : Outcome.Skipped,
+                        (stop.Reason ?? "A restore step did not complete.") +
                         " Restored items so far stay; retry restore to continue. Nothing was overwritten.");
             }
         }

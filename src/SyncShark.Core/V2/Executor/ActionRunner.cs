@@ -140,13 +140,9 @@ internal sealed class ActionRunner
                 ? await admission.AdmitFreeSpaceAsync(action, ct).ConfigureAwait(false)
                 : FreeSpaceAdmission.Granted;
             if (freeSpace.Refusal is { } refusal)
-                // A caller-owned action raises its own notice, so the executor must not add a second path notice.
-                // The one exception is a frozen choice delete: ConflictFolders maps any Skipped delete to
-                // "item changed, kept", so it keeps the path-notice route and its space cause. A Recovery-restore
-                // intent is not a choice victim; its restore receipt carries the cause like every other restore step.
-                return action.CallerOwnsNotice &&
-                    (action.Kind != ActionKind.Delete || RecoveryRestoreHold.IsFrozenIntent(action))
-                    ? await CommitAsync(action, Skipped(action, refusal.Detail)).ConfigureAwait(false)
+                // Refusal is retryable, not a conditional mismatch ("changed, kept").
+                return action.CallerOwnsNotice
+                    ? await CommitAsync(action, Refused(action, refusal.Detail)).ConfigureAwait(false)
                     : await PendingForFreeSpaceAsync(action, refusal).ConfigureAwait(false);
 
             if (_quota.Blocks(action))
@@ -315,9 +311,9 @@ internal sealed class ActionRunner
             // A notice-owned action has its own receipt: its caller raises the single notice for this
             // failure, so adding a path notice here would duplicate it (and that path notice could close on a later
             // sync without the restore ever running). Commit the pending outcome alone and let the restore report it.
-            // The refusal precedes any effect, so a checkpoint-bearing action must not be recorded as cleanly Skipped.
+            // The refusal precedes any effect, so a checkpoint-bearing action must never be retired as Refused or Skipped.
             return action.CallerOwnsNotice
-                ? await CommitAsync(action, Skipped(action, refused.Refusal.Detail)).ConfigureAwait(false)
+                ? await CommitAsync(action, Refused(action, refused.Refusal.Detail)).ConfigureAwait(false)
                 : await PendingForFreeSpaceAsync(action, refused.Refusal).ConfigureAwait(false);
         }
         catch (OwnedPointerDeferredException deferred) when (OwnedPointerUpdates.IsMetadataUpdate(action))
@@ -464,6 +460,10 @@ internal sealed class ActionRunner
             return (null, new ActionResult(action.ActionId, Outcome.Skipped, null, null, null,
                 QuarantineFailure.Describe(action.Path, e)) { Quarantined = true });
         }
+        catch (FreeSpaceRefusedException refused) when (action.CallerOwnsNotice)
+        {
+            return (null, Refused(action, refused.Refusal.Detail));
+        }
         catch (Exception e) when (e is not (OperationCanceledException or EndpointAccessException))
         {
             NativeIoDiagnostic.LogOnce($"pair={_pairId}; relative={action.Path}", e);
@@ -550,6 +550,9 @@ internal sealed class ActionRunner
 
     private static ActionResult Skipped(SyncAction action, string reason) =>
         new(action.ActionId, Outcome.Skipped, null, null, null, reason);
+
+    private static ActionResult Refused(SyncAction action, string reason) =>
+        new(action.ActionId, Outcome.Refused, null, null, null, reason);
 
     private static ActionResult Failed(SyncAction action, string reason) =>
         new(action.ActionId, Outcome.Failed, null, null, null, reason);

@@ -374,7 +374,11 @@ public sealed partial class SyncRun
         {
             if (!operation.Actions.Any(original => original.ActionId == retry[index].ActionId && FolderDelete.Expands(original))) continue;
             if (await RemoveFrozenContentsAsync(pair, retry[index], gen, a, b, ct).ConfigureAwait(false) is { } stopped)
+            {
+                if (stopped.Reason is { } reason && _store.NoticeById(pair.PairId, noticeId) is { } saved)
+                    _store.RecordNoticeChoiceFailure(saved.Notice, reason);
                 return stopped;
+            }
             retry[index] = retry[index] with { DescendantsPlanned = true, ContentsSettled = true, FrozenChoiceId = retry[index].ActionId };
         }
         ActionResult? failure = null;

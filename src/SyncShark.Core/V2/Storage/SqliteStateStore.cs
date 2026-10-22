@@ -357,7 +357,7 @@ public sealed partial class SqliteStateStore : IStateStore
     // The outcome that will actually be stored, after the quarantine and provider-refusal rules below.
     private static bool Resolves(SyncAction action, ActionResult result) =>
         !(result.Quarantined && action.ProviderEffect is not null) &&
-        (result.ProviderNameRefused || result.Outcome is Outcome.Done or Outcome.Skipped);
+        (result.ProviderNameRefused || result.Outcome is Outcome.Done or Outcome.Skipped or Outcome.Refused);
 
     /// <summary>Commits the results in order in one transaction; any failure rolls back all of them.</summary>
     public void CommitResults(string pairId, long gen, IReadOnlyList<(SyncAction Action, ActionResult Result)> results) =>
@@ -408,7 +408,7 @@ public sealed partial class SqliteStateStore : IStateStore
             // M1: a resolved or retired intent must not leave a parked verification retry behind. Clear only the
             // parked shape this run owns (Kind sync, no held evidence, deadline at MaxValue); decision, deletion
             // evidence and restored-held rows are different owners.
-            if (committed is Outcome.Done or Outcome.Skipped)
+            if (committed is Outcome.Done or Outcome.Skipped or Outcome.Refused)
             {
                 if (parkedKeys.Remove(RowCodec.Key(action.Path)))
                     DeleteParkedSyncRetry(transaction, pairNo, pairId, action.Path);

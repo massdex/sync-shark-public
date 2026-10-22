@@ -546,6 +546,8 @@ internal static partial class RunChecks
             "a low-space restore raises exactly one open notice (its restore receipt), never a duplicate path notice");
         Require(notices.All(notice => notice.ReasonKey != FreeSpaceRefusal.InsufficientReasonKey),
             "neither up-front nor in-effect refusal adds a free-space path notice on the restore route");
+        Require(store.UnresolvedIntents(fx.Pair.PairId).Count == 0 && store.Baselines(fx.Pair.PairId).Count == 0,
+            "no-effect refusal retires only its attempt, never recording a baseline or replaying an uncertain effect");
         if (upFront) Require(recording.Puts == 0, "up-front refusal prevents the restore write");
         var receipt = notices[0].NoticeId!;
         // Space is still short, so an ordinary sync retries the restore and fails again. It must neither close nor

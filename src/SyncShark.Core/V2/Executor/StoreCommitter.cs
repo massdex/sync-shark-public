@@ -135,7 +135,7 @@ internal sealed class StoreCommitter
                 finally { _storeGate.Release(); }
             }
         }
-        if (result.Outcome is Outcome.Done or Outcome.Skipped)
+        if (result.Outcome is Outcome.Done or Outcome.Skipped or Outcome.Refused)
             _providerActions.TryRemove(action.ActionId, out _);
     }
 

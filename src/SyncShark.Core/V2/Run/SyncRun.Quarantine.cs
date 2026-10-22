@@ -392,6 +392,8 @@ public sealed partial class SyncRun
                     // Persist it with the intent so crash reconciliation retains the same authority.
                     { RemovalReviewChoice = true };
                 var deleted = await ExecuteQuarantineAction(pair, delete, token).ConfigureAwait(false);
+                if (deleted.Outcome != Outcome.Done && deleted.Reason is { } deleteReason)
+                    _store.RecordNoticeChoiceFailure(notice, deleteReason);
                 if (deleted.Outcome == Outcome.Done)
                 {
                     ClearQuarantineHold(pair, hold);

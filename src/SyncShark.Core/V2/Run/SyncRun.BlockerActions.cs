@@ -67,7 +67,11 @@ public sealed partial class SyncRun
             var plan = new Plan(pair.PairId, _store.BeginGeneration(root.RootId, RunKind), [action], []);
             await foreach (var result in _executor.ApplyAsync(plan, a, b, ct))
                 if (result.Outcome != Outcome.Done)
+                {
+                    if (result.Outcome == Outcome.Refused && result.Reason is { } reason)
+                        _store.RecordNoticeChoiceFailure(notice, reason);
                     return "Rename was not verified: " + result.Reason + ". The notice stays open; retry Rename to verify or resume.";
+                }
         }
         return ScheduleRenamedItem(pair, notice, destination);
     }

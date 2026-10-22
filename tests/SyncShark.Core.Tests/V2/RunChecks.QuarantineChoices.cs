@@ -216,6 +216,7 @@ internal static partial class RunChecks
 
     private static async Task QuarantineChoicesAsync(string root)
     {
+        await QuarantineDeleteLowSpaceAsync(root);
         await QuarantineDeleteChoiceAuthorityAsync(root);
         QuarantineHashFailureBatch(root);
         await QuarantineLegacyHashAsync(root);

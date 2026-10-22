@@ -400,7 +400,8 @@ public sealed record HeldDeletion(string Path, Side Local, string Rule = HeldDel
 }
 
 /// <summary>How an applied action ended.</summary>
-public enum Outcome { Done, Skipped, Failed, Uncertain }
+// Refused means no effect occurred; the owning notice retains the cause and retry authority.
+public enum Outcome { Done, Skipped, Failed, Uncertain, Refused }
 
 /// <summary>A recoverable copy of a displaced version.</summary>
 public sealed record RecoveryRef(Side Side, string Location, string? VersionId, string Hash, long Size);

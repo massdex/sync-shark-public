@@ -238,7 +238,7 @@ internal static partial class RunChecks
                 fx.WriterA.PutFailure = action => action.ConflictRestore
                     ? new FreeSpaceRefusedException(refusal) : null;
             var restored = await Choose(fx, notice, NoticeChoices.RestoreExisting);
-            Require(restored.Outcome == Outcome.Skipped && restored.Reason!.Contains("Not enough free space", StringComparison.Ordinal),
+            Require(restored.Outcome == Outcome.Refused && restored.Reason!.Contains("Not enough free space", StringComparison.Ordinal),
                 "conflict restore returns the refusal detail");
             if (upFront) Require(fx.WriterA.Puts == putsBefore, "up-front refusal prevents the restore write");
             void OneConflictNotice()
