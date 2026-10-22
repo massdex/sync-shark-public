@@ -510,6 +510,12 @@ internal static partial class RunChecks
     // ever running (the user's rule: we do not duplicate notices).
     private static async Task RecoveryLowSpaceKeepsOneRestoreNoticeAsync()
     {
+        await RecoveryLowSpaceKeepsOneRestoreNoticeAsync(upFront: false);
+        await RecoveryLowSpaceKeepsOneRestoreNoticeAsync(upFront: true);
+    }
+
+    private static async Task RecoveryLowSpaceKeepsOneRestoreNoticeAsync(bool upFront)
+    {
         var root = LocalChecks.FreshRoot("recovery-low-space-" + Guid.NewGuid().ToString("N"));
         using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System);
         var fx = Build(suppliedStore: store);
@@ -522,7 +528,12 @@ internal static partial class RunChecks
             "Not enough free space on C:: needs 2.0 MiB, free 1.0 MiB, reserve 512.0 MiB. " +
             "Options: free space and retry; exclude this folder",
             FreeSpaceRefusal.InsufficientReasonKey, @"C:\", 2L << 20, 1L << 20, 512L << 20);
-        fx.Provider.AddWriter(fx.Pair.A, new RecoveryFixtureWriter(fx.WriterA, source, bytes) { RefusePut = refusal });
+        var recording = new RecordingWriter(fx.A)
+        {
+            FreeSpaceAdmissionFor = _ => new FreeSpaceAdmission(null, refusal)
+        };
+        fx.Provider.AddWriter(fx.Pair.A, new RecoveryFixtureWriter(upFront ? recording : fx.WriterA, source, bytes)
+            { RefusePut = upFront ? null : refusal });
         var run = fx.Run();
         var result = (await run.RestoreRecoveryPageAsync(fx.Pair.PairId,
             new RecoveryQuery(Id: record.RecoveryId), false, false, default)).Single();
@@ -534,7 +545,8 @@ internal static partial class RunChecks
             notices[0].Detail.Contains("Not enough free space", StringComparison.Ordinal),
             "a low-space restore raises exactly one open notice (its restore receipt), never a duplicate path notice");
         Require(notices.All(notice => notice.ReasonKey != FreeSpaceRefusal.InsufficientReasonKey),
-            "the in-effect refusal adds no free-space path notice on the restore route");
+            "neither up-front nor in-effect refusal adds a free-space path notice on the restore route");
+        if (upFront) Require(recording.Puts == 0, "up-front refusal prevents the restore write");
         var receipt = notices[0].NoticeId!;
         // Space is still short, so an ordinary sync retries the restore and fails again. It must neither close nor
         // duplicate the one receipt: a restore notice lasts until the restore itself succeeds.
@@ -545,6 +557,9 @@ internal static partial class RunChecks
             after.Count(item => PairPath.Same(item.Path, "file.txt")) == 1 &&
             after.All(item => item.ReasonKey != FreeSpaceRefusal.InsufficientReasonKey),
             "a following ordinary sync keeps the single restore notice open while space is still short");
+        if (upFront)
+            Require(after.Count == 1 && after[0].Detail.Contains("Not enough free space", StringComparison.Ordinal) && recording.Puts == 0,
+                "ordinary sync preserves exactly one receipt with the admission cause and performs no restore write");
     }
 
     private static void RecoveryDeletionEvidenceAttributionCheck()
@@ -647,8 +662,11 @@ internal static partial class RunChecks
         public Task PrepareRecoveryReadAsync(PairDef pair, CancellationToken ct) { ReadPreparations++; return Task.CompletedTask; }
     }
 
-    private sealed class RecoveryFixtureWriter(IEndpointWriter inner, ItemState source, byte[] bytes) : IEndpointWriter, IRecoveryRecordReader
+    private sealed class RecoveryFixtureWriter(IEndpointWriter inner, ItemState source, byte[] bytes) : IEndpointWriter, IRecoveryRecordReader, ILocalFreeSpaceAdmission
     {
+        public Task<FreeSpaceAdmission> AdmitFreeSpaceAsync(SyncAction action, CancellationToken ct) =>
+            inner is ILocalFreeSpaceAdmission admission ? admission.AdmitFreeSpaceAsync(action, ct)
+                : Task.FromResult(FreeSpaceAdmission.Granted);
         public bool FailOpen { get; set; }
         public bool Missing { get; init; }
         /// <summary>When set, the restore's write refuses like a writer's own byte admission after a metadata-only reservation.</summary>
