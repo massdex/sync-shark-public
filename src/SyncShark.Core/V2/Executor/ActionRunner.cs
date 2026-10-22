@@ -305,11 +305,11 @@ internal sealed class ActionRunner
             // The up-front admission reserved metadata only (an online-only new file), so the writer re-admitted its
             // real bytes and refused. Report the same pending free-space notice as an up-front refusal: the reason
             // key and volume facts aggregate per volume, and the Skipped result leaves the item unsynced and retryable.
-            // A recovery restore is its own receipt: its restore code raises the single restore notice for this
+            // A notice-owned action has its own receipt: its caller raises the single notice for this
             // failure, so adding a path notice here would duplicate it (and that path notice could close on a later
             // sync without the restore ever running). Commit the pending outcome alone and let the restore report it.
             // The refusal precedes any effect, so a checkpoint-bearing action must not be recorded as cleanly Skipped.
-            return RecoveryRestoreHold.IsFrozenIntent(action)
+            return action.CallerOwnsNotice
                 ? await CommitAsync(action, Skipped(action, refused.Refusal.Detail)).ConfigureAwait(false)
                 : await PendingForFreeSpaceAsync(action, refused.Refusal).ConfigureAwait(false);
         }

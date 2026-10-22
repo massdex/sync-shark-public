@@ -104,6 +104,7 @@ public sealed partial class SyncRun
             {
                 SuppressReconciledBaseline = true,
                 ResolvedNoticeId = noticeId,
+                CallerOwnsNotice = true,
             };
             // Archived bytes are not a live opposite-side source. Guard the actual destination, the notice path and
             // each identity-linked counterpart's actual paths; never an unrelated entity's synthetic spelling.
@@ -142,7 +143,11 @@ public sealed partial class SyncRun
             var plan = new Plan(pairId, _store.BeginGeneration(targetRoot.RootId, RunKind), [action], []);
             await foreach (var result in _executor.ApplyAsync(plan,
                 retained.Side == Side.A ? target : reader, retained.Side == Side.B ? target : reader, token))
+            {
+                if (result.Outcome != Outcome.Done && result.Reason is { } reason)
+                    _store.RecordNoticeChoiceFailure(notice, reason);
                 return result;
+            }
             return Skipped("The retained-version operation stopped before completion. Retry to check its outcome.");
         }, ct);
 

@@ -166,7 +166,10 @@ public sealed partial class SyncRun
                 if (choice is NoticeChoices.RestoreExisting or NoticeChoices.RestoreAsCopy)
                 {
                     await _endpoints.PrepareAsync(pair, token).ConfigureAwait(false);
-                    return await RestoreReplacedAsync(pair, notice, choice == NoticeChoices.RestoreAsCopy, token).ConfigureAwait(false);
+                    var restored = await RestoreReplacedAsync(pair, notice, choice == NoticeChoices.RestoreAsCopy, token).ConfigureAwait(false);
+                    if (restored.Outcome != Outcome.Done && restored.Reason is { } reason)
+                        _store.RecordNoticeChoiceFailure(notice, reason);
+                    return restored;
                 }
                 AbandonRestoreIntents(pair, checkpoint);
                 CloseConflictNotice(pair.PairId, noticeId, checkpoint, choice);
@@ -222,7 +225,7 @@ public sealed partial class SyncRun
         SyncAction Action(ActionKind kind, Side side, string path, ItemState? source, ItemState? victim) =>
             new(ShortId.Make("nch", pairId, noticeId, side.ToString(), path, kind.ToString()), notice.Rule,
                 kind, side, path, null, source, victim, victim?.Kind == ItemKind.File, null)
-            { SuppressReconciledBaseline = true };
+            { SuppressReconciledBaseline = true, CallerOwnsNotice = true };
         if (choice == NoticeChoices.Merge)
         {
             var compare = await ReadComparisonAsync(pair, notice, token).ConfigureAwait(false);
@@ -352,7 +355,7 @@ public sealed partial class SyncRun
                     await (item.Action.Target == Side.A ? a : b).ObserveAsync(folder.Path, ct).ConfigureAwait(false) is { } now &&
                     !string.Equals(now.ObjectId, folder.ObjectId, StringComparison.Ordinal))
                     return Result(Outcome.Skipped, "A different folder now occupies " + folder.Path + ". Nothing further was removed; earlier removals remain recoverable.");
-                retry.Add(item.Action with { ProviderEffect = null });
+                retry.Add(item.Action with { ProviderEffect = null, CallerOwnsNotice = true });
             }
             else return item.Result;
         }
@@ -388,7 +391,12 @@ public sealed partial class SyncRun
             if (result.Outcome != Outcome.Done) failure ??= result;
             else if (owned.Contains(result.ActionId)) { completed.Add(result.ActionId); Save(); }
         }
-        if (failure is not null) return failure;
+        if (failure is not null)
+        {
+            if (failure.Reason is { } reason && _store.NoticeById(pair.PairId, noticeId) is { } saved)
+                _store.RecordNoticeChoiceFailure(saved.Notice, reason);
+            return failure;
+        }
         if (!owned.All(completed.Contains))
             return Result(Outcome.Skipped, "The saved choice is unfinished. Retry the same choice to resume safely.");
         // Decision 88 / owner: a removed occupant is only "replaced" once the incoming item has arrived. Until then

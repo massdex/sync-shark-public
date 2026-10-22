@@ -179,6 +179,8 @@ public sealed partial class SyncRun
         }
         var action = frozen ?? new SyncAction(actionId, 0, ActionKind.CopyNew, record.Side, destination,
             null, source, null, false, null) { SuppressReconciledBaseline = true };
+        // Upgrade saved receipts too: older frozen actions predate explicit notice ownership.
+        action = action with { CallerOwnsNotice = true };
         var other = await opposite.ObserveAsync(destination, ct).ConfigureAwait(false);
         if (other is not null && !RecoveryContentMatches(other, record))
         {

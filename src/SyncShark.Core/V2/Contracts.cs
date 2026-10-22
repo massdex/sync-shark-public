@@ -128,6 +128,9 @@ public sealed record SyncAction(string ActionId, int Rule, ActionKind Kind, Side
     /// <summary>Re-include retired this intent's old history. Verify its effect, but never restore a baseline from it.</summary>
     public bool SuppressReconciledBaseline { get; init; }
 
+    /// <summary>The caller reports failures on its own notice or receipt; do not add a free-space path notice.</summary>
+    public bool CallerOwnsNotice { get; init; }
+
     /// <summary>Explicit blocker repair requires the observed revision as well as the stable identity.</summary>
     public bool RequireMoveRevision { get; init; }
 

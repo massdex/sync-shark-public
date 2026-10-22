@@ -459,6 +459,7 @@ public sealed partial class Executor : IExecutor
                 RemovalReviewChoice = folder.RemovalReviewChoice,
                 FrozenChoiceId = folder.FrozenChoiceId,
                 SuppressReconciledBaseline = folder.SuppressReconciledBaseline,
+                CallerOwnsNotice = folder.CallerOwnsNotice,
                 FirstSyncChoice = folder.FirstSyncChoice
             }).ToList();
         children.Add(folder with { RecoveryFirst = false });

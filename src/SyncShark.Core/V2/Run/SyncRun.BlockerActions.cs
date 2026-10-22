@@ -25,7 +25,7 @@ public sealed partial class SyncRun
         var actionId = ShortId.Make("rnm", pair.PairId, notice.NoticeId!, destination);
         var action = new SyncAction(actionId, notice.Rule, ActionKind.Move, repair.Side, destination,
             repair.Item.Path, null, repair.Item, false, null)
-        { SuppressReconciledBaseline = true, RequireMoveRevision = true };
+        { SuppressReconciledBaseline = true, RequireMoveRevision = true, CallerOwnsNotice = true };
         // Use normal scope guards, including nested pairs, product-owned paths, links and placeholders.
         // A refused-name flag itself is not exclusion permission for a different entity.
         var guards = ActionPredicates(pair, LinkExclusions.None);

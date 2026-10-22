@@ -18,6 +18,7 @@ public sealed partial class SyncRun
         {
             SuppressReconciledBaseline = true,
             FrozenChoiceId = folder.ActionId,
+            CallerOwnsNotice = true,
             // Each frozen folder is removed only after its own frozen contents; it is never expanded again, and its
             // contents were settled one by one, so no subtree-wide carried-ignored snapshot is taken for it.
             DescendantsPlanned = item.Kind == ItemKind.Folder,
@@ -425,7 +426,7 @@ public sealed partial class SyncRun
                     var restoreId = ShortId.Make("nrx", pair.PairId, RestoreKey(childId));
                     var action = new SyncAction(restoreId, 87, item.Kind == ItemKind.Folder ? ActionKind.MkDir : ActionKind.CopyNew,
                         removal.Target, AtDestination(item).Path, null, item, null, false, null)
-                        { SuppressReconciledBaseline = true, ConflictRestore = true };
+                        { SuppressReconciledBaseline = true, ConflictRestore = true, CallerOwnsNotice = true };
                     var check = await CheckRestoreStepAsync(pair, root, writer, action, gen, ct, observations).ConfigureAwait(false);
                     if (check.Block is not null) { stop ??= check.Block; continue; }
                     if (check.Done) { marks.Add((ord, copying ? ChoiceVictimState.RestoredCopy : ChoiceVictimState.Restored)); continue; }
@@ -517,7 +518,7 @@ public sealed partial class SyncRun
     {
         var restoreId = ShortId.Make("nrx", pair.PairId, restoreKey ?? removalId);
         var probe = new SyncAction(restoreId, 87, ActionKind.CopyNew, side, destination ?? item.Path, null, item, null, false, null)
-            { SuppressReconciledBaseline = true, ConflictRestore = true };
+            { SuppressReconciledBaseline = true, ConflictRestore = true, CallerOwnsNotice = true };
         var check = await CheckRestoreStepAsync(pair, root, writer, probe, gen, ct).ConfigureAwait(false);
         if (check.Done || check.Block is not null) return check.Block;
         var recovery = _store.RecoveryForAction(pair.PairId, removalId);
@@ -609,7 +610,7 @@ public sealed partial class SyncRun
         ItemState folder, long gen, CancellationToken ct, Action? started = null, IReadOnlyDictionary<string, ItemState?>? observations = null)
     {
         var action = new SyncAction(ShortId.Make("nrx", pair.PairId, removalId), 87, ActionKind.MkDir, side,
-            folder.Path, null, folder, null, false, null) { SuppressReconciledBaseline = true, ConflictRestore = true };
+            folder.Path, null, folder, null, false, null) { SuppressReconciledBaseline = true, ConflictRestore = true, CallerOwnsNotice = true };
         var check = await CheckRestoreStepAsync(pair, side == Side.A ? pair.A : pair.B, writer, action, gen, ct, observations).ConfigureAwait(false);
         if (check.Done || check.Block is not null) return check.Block;
         started?.Invoke();

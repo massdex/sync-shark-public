@@ -459,6 +459,8 @@ public sealed partial class SyncRun
                 { QuarantineStage = targetSide == localSide && string.Equals(hold.GrantedStagePath, AttendedElevatedAction.DownloadStagePath(
                     AttendedElevatedAction.ValidatePath(localRoot.RootPath, targetPath)), StringComparison.OrdinalIgnoreCase) };
             var result = await ExecuteQuarantineAction(pair, retry, token).ConfigureAwait(false);
+            if (result.Outcome != Outcome.Done && result.Reason is { } reason)
+                _store.RecordNoticeChoiceFailure(notice, reason);
             if (result.Outcome == Outcome.Done)
             {
                 _store.ClearQuarantine(hold.Target == Side.A ? pair.B.RootId : pair.A.RootId, source);
@@ -518,6 +520,7 @@ public sealed partial class SyncRun
 
     private async Task<ActionResult> ExecuteQuarantineAction(PairDef pair, SyncAction action, CancellationToken ct)
     {
+        action = action with { CallerOwnsNotice = true };
         var competing = _store.UnresolvedIntents(pair.PairId).FirstOrDefault(p =>
             p.ActionId != action.ActionId && (PairPath.IsSelfOrUnder(p.Path, action.Path) || PairPath.IsSelfOrUnder(action.Path, p.Path)));
         if (competing is not null)
