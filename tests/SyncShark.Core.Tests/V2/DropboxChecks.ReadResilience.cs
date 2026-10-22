@@ -393,7 +393,11 @@ internal static partial class DropboxChecks
     {
         using var h = new Harness();
         var (pair, local) = ReadResiliencePair(state);
+        // SeedFile does not create ancestors. The real inventory discovers nested files
+        // through its top-level folder listing, so both endpoints need the parent too.
+        local.Seed("Docs", "", ItemKind.Folder);
         local.Seed("Docs/A.txt", "same");
+        h.Wire.SeedFolder("Docs");
         h.Wire.SeedFile("Docs/A.txt", "same");
         var spool = state + "-spool";
         var writerA = new CountingWriter(local);
@@ -406,6 +410,10 @@ internal static partial class DropboxChecks
             Require((await FirstSyncAsync(run, pair.PairId)).Failed == 0, "membership fixture completes first sync");
             var cursor = sql.Cursor(RootId) ?? "";
             var item = (await h.Client.FindEntryAtPathAsync("Docs/A.txt", default))!;
+            var stored = sql.Live(RootId, ["Docs/A.txt"]);
+            Require(stored.Count == 1 && stored[0].ObjectId == item.Id && stored[0].Path == "Docs/A.txt",
+                "membership fixture stores the remote identity and display spelling before the failed read");
+            var metadataReadsBefore = h.Wire.MetadataPaths.Count(path => path == item.Id);
 
             h.Wire.SeedChangePage(cursor, [h.Wire.ChangeDeletedLower("/pilot/docs/a.txt")], false,
                 "membership-run-next");
@@ -421,8 +429,12 @@ internal static partial class DropboxChecks
                 "failed membership advances the delta cursor (deletion event is not replayed)");
             Require(sql.ReadSyncRetries(pair.PairId).Any(row => PairPath.Same(row.Path, "Docs/A.txt")),
                 "the affected item keeps its durable targeted retry");
+            Require(h.Wire.MetadataPaths.Count(path => path == item.Id) > metadataReadsBefore,
+                "the delta exercises the failed object-membership read");
             Require(sql.Live(RootId, ["Docs/A.txt"]).Count == 1,
                 "the stored item row is preserved, never treated as absence");
+            Require(sql.Live(RootId, ["Docs/A.txt"]).Single() == stored[0],
+                "the failed membership read preserves the exact stored item state");
             Require(h.Wire.Calls.Count(call => call is "/2/files/delete_v2" or "/2/files/delete") == deletesBefore,
                 "a failed membership read issues no delete request");
         }
