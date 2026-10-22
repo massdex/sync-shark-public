@@ -1,0 +1,14 @@
+{
+  "roles": {
+    "publisher": {
+      "subject": "CN=Massdex, O=Massdex",
+      "thumbprints": ["CB6F453160451567EC3902F2006FF43616F799CA", "0788C3CB08917F003ECE5E0CF8FCF7288249D83E"],
+      "spki": ["1706cb48355e1441d7e6b389e5606ece2d84416984afee77c29eaa0b28bcc211", "4d74ee24923f5453f76aa885cacb936005f133ea5016dd1ae733c4130d0817bb"]
+    },
+    "package": {
+      "subject": "CN=Massdex Sync Shark Code Signing v1, O=Massdex",
+      "thumbprints": ["2274E4508318BECBDBDC1CC3473CD63729117BB5", "2F4762A30CFD85AEB0F3EFC253325208140DBA03"],
+      "spki": ["1706cb48355e1441d7e6b389e5606ece2d84416984afee77c29eaa0b28bcc211", "e56a9bba2a0857850f0c427d2a1923aeb62b6f4339be5d54fc51fcb9c1cee6df"]
+    }
+  }
+}
