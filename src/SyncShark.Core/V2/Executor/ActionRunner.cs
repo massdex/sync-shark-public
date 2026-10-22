@@ -140,8 +140,12 @@ internal sealed class ActionRunner
                 ? await admission.AdmitFreeSpaceAsync(action, ct).ConfigureAwait(false)
                 : FreeSpaceAdmission.Granted;
             if (freeSpace.Refusal is { } refusal)
-                // Frozen choice deletes interpret Skipped as changed/kept; retain their existing notice path.
-                return action.CallerOwnsNotice && action.Kind != ActionKind.Delete
+                // A caller-owned action raises its own notice, so the executor must not add a second path notice.
+                // The one exception is a frozen choice delete: ConflictFolders maps any Skipped delete to
+                // "item changed, kept", so it keeps the path-notice route and its space cause. A Recovery-restore
+                // intent is not a choice victim; its restore receipt carries the cause like every other restore step.
+                return action.CallerOwnsNotice &&
+                    (action.Kind != ActionKind.Delete || RecoveryRestoreHold.IsFrozenIntent(action))
                     ? await CommitAsync(action, Skipped(action, refusal.Detail)).ConfigureAwait(false)
                     : await PendingForFreeSpaceAsync(action, refusal).ConfigureAwait(false);
 

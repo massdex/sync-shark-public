@@ -183,8 +183,13 @@ internal static partial class RunChecks
         Console.WriteLine("PASS NoticeRestoreLinkedExclusions");
     }
 
-    private sealed class NoticeArchiveWriter(IEndpointWriter inner, string directory) : IEndpointWriter, ILocalRetainedNoticeReader, ISourceAbsenceProbe
+    private sealed class NoticeArchiveWriter(IEndpointWriter inner, string directory) : IEndpointWriter, ILocalRetainedNoticeReader, ISourceAbsenceProbe, ILocalFreeSpaceAdmission
     {
+        // Forward the up-front free-space admission so a test can exercise the executor's refusal branch on this
+        // wrapper; the default is the inner writer's verdict, which is Granted unless a test configures one.
+        public Task<FreeSpaceAdmission> AdmitFreeSpaceAsync(SyncAction action, CancellationToken ct) =>
+            inner is ILocalFreeSpaceAdmission admission ? admission.AdmitFreeSpaceAsync(action, ct)
+                : Task.FromResult(FreeSpaceAdmission.Granted);
         public Task<bool?> IsSourceAbsentAsync(ItemState? historical, string path, CancellationToken ct) =>
             ((ISourceAbsenceProbe)inner).IsSourceAbsentAsync(historical, path, ct);
         public Task<bool?> IsHistoricalSourcePresentAsync(ItemState historical, CancellationToken ct) =>

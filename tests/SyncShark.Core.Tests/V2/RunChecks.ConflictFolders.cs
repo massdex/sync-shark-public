@@ -218,18 +218,29 @@ internal static partial class RunChecks
                 "restore never touches the incoming item");
             Require(store.NoticeById(fx.Pair.PairId, notice.NoticeId!)!.Value.Closed, "restore closes this notice");
         }
-        // A caller-owned restore failure must not create a second sync-owned free-space notice.
+        // A caller-owned restore failure must not create a second sync-owned free-space notice. The shared
+        // executor branch is keyed on CallerOwnsNotice, so cover both refusal points on this route too: the
+        // writer's own byte admission after a metadata-only reservation (in-effect), and the up-front volume
+        // admission before any intent is recorded.
+        foreach (var upFront in new[] { false, true })
         {
-            var (store, fx, notice) = await FolderReplaceAsync("restore-low-space", side => side.Seed("new/old.txt", "existing"));
+            var (store, fx, notice) = await FolderReplaceAsync("restore-low-space-" + (upFront ? "up-front" : "in-effect"),
+                side => side.Seed("new/old.txt", "existing"));
             using var _ = store;
+            var refusal = new FreeSpaceRefusal("Not enough free space; free space and retry.",
+                FreeSpaceRefusal.InsufficientReasonKey, @"C:\", 2L << 20, 1L << 20, 512L << 20);
             Require((await Choose(fx, notice, NoticeChoices.ReplaceExisting)).Outcome == Outcome.Done, "replace before low-space restore");
-            fx.WriterA.PutFailure = action => action.ConflictRestore
-                ? new FreeSpaceRefusedException(new FreeSpaceRefusal("Not enough free space; free space and retry.",
-                    FreeSpaceRefusal.InsufficientReasonKey, @"C:\", 2L << 20, 1L << 20, 512L << 20))
-                : null;
+            var putsBefore = fx.WriterA.Puts;
+            if (upFront)
+                fx.WriterA.FreeSpaceAdmissionFor = action => action.ConflictRestore
+                    ? new FreeSpaceAdmission(null, refusal) : FreeSpaceAdmission.Granted;
+            else
+                fx.WriterA.PutFailure = action => action.ConflictRestore
+                    ? new FreeSpaceRefusedException(refusal) : null;
             var restored = await Choose(fx, notice, NoticeChoices.RestoreExisting);
             Require(restored.Outcome == Outcome.Skipped && restored.Reason!.Contains("Not enough free space", StringComparison.Ordinal),
                 "conflict restore returns the refusal detail");
+            if (upFront) Require(fx.WriterA.Puts == putsBefore, "up-front refusal prevents the restore write");
             void OneConflictNotice()
             {
                 var open = store.OpenNotices(fx.Pair.PairId);

@@ -88,13 +88,23 @@ internal sealed class GatedObserveProvider : IEndpointProvider, IEndpointWriter
 }
 
 /// <summary>Counts writer calls while delegating to a fake endpoint.</summary>
-internal sealed class CountingWriter : IEndpointWriter, IRecoveryAvailability, ISourceAbsenceProbe
+internal sealed class CountingWriter : IEndpointWriter, IRecoveryAvailability, ISourceAbsenceProbe, ILocalFreeSpaceAdmission
 {
     public string? RecoveryUnavailable { get; set; }
     private readonly FakeEndpoint _inner;
     private int _effects;
 
     public CountingWriter(FakeEndpoint inner) => _inner = inner;
+
+    // Null keeps the pre-admission behaviour (Granted), so existing checks are unaffected. A test that
+    // exercises the executor's up-front refusal supplies a verdict here.
+    public Func<SyncAction, FreeSpaceAdmission>? FreeSpaceAdmissionFor { get; set; }
+
+    public Task<FreeSpaceAdmission> AdmitFreeSpaceAsync(SyncAction action, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        return Task.FromResult(FreeSpaceAdmissionFor?.Invoke(action) ?? FreeSpaceAdmission.Granted);
+    }
 
     private int _puts;
     public int Puts => Volatile.Read(ref _puts);

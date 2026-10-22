@@ -557,9 +557,11 @@ internal static partial class RunChecks
             after.Count(item => PairPath.Same(item.Path, "file.txt")) == 1 &&
             after.All(item => item.ReasonKey != FreeSpaceRefusal.InsufficientReasonKey),
             "a following ordinary sync keeps the single restore notice open while space is still short");
-        if (upFront)
-            Require(after.Count == 1 && after[0].Detail.Contains("Not enough free space", StringComparison.Ordinal) && recording.Puts == 0,
-                "ordinary sync preserves exactly one receipt with the admission cause and performs no restore write");
+        // Both refusal points must hold the total count, not only the path-filtered one: an unrelated
+        // run-unavailable notice here hid a generation regression in this same check.
+        Require(after.Count == 1 && after[0].Detail.Contains("Not enough free space", StringComparison.Ordinal),
+            "ordinary sync preserves exactly one receipt with the admission cause");
+        if (upFront) Require(recording.Puts == 0, "the ordinary sync performs no restore write");
     }
 
     private static void RecoveryDeletionEvidenceAttributionCheck()
