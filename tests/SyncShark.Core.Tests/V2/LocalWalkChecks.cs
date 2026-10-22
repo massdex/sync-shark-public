@@ -189,7 +189,7 @@ internal static class LocalWalkChecks
         sql.WriteSnapshot(snapshot);
         LocalChecks.Require(sql.Live("root-local").Any(i => i.ObjectId == old.ObjectId), "incomplete coverage retains old child in SQLite");
         var rows = Planner.Join([new Baseline("pair", "child", old, remote, 1)], sql.Live("root-local"), [remote],
-            new HashSet<string>(), new HashSet<string>(), new Completeness(true, true,
+            new Dictionary<string, DateTimeOffset?>(), new Dictionary<string, DateTimeOffset?>(), new Completeness(true, true,
                 snapshot.IncompleteSubtrees.ToHashSet(StringComparer.OrdinalIgnoreCase), new HashSet<string>()), false);
         var plan = Planner.Decide("pair", 2, rows, new PlanOptions(TimeSpan.Zero, false,
             new LabelRule("{name} [{side}]{ext}", "yyyyMMdd", TimeSpan.Zero, "A", "B"), 10));
