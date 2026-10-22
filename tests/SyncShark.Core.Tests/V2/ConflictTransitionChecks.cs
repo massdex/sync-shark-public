@@ -138,9 +138,9 @@ internal static class ConflictTransitionChecks
         {
             var gen = SeedBaseline(store, rig);
             (plan, forget, successors) = await ConflictPlanAsync(store, rig, gen, CancellationToken.None);
-            var blocked = successors[0];
-            var blockedEndpoint = blocked.Target == Side.A ? rig.A : rig.B;
-            occupant = blockedEndpoint.Seed(blocked.Path, "occupied destination", versionId: "occupant");
+            var initiallyBlocked = successors[0];
+            var initialEndpoint = initiallyBlocked.Target == Side.A ? rig.A : rig.B;
+            occupant = initialEndpoint.Seed(initiallyBlocked.Path, "occupied destination", versionId: "occupant");
 
             rig.WriterA.PutFailure = FailConflictCopy;
             rig.WriterB.PutFailure = FailConflictCopy;
