@@ -23,6 +23,7 @@ internal static partial class RunChecks
         {
             ("catch-up-unreadable-subtree", CatchUpUnreadableSubtreeAsync),
             ("catch-up-fresh-fallback", CatchUpFreshFallbackUnreadableSubtreeAsync),
+            ("catch-up-synced-folder-in-gap", GapRetainsEarlierSyncedUnreadableFolderAsync),
             ("catch-up-second-run", CatchUpRetrySurvivesSecondCatchUpAsync),
             ("sleeping-root-retry-replay", SleepingLocalRootRetryClearsAfterReplayAsync),
             ("other-root-outage-sleeping-retry", OtherRootOutageSkipsPairLoadFromSleepingRetryAsync),
@@ -35,6 +36,8 @@ internal static partial class RunChecks
         }
         try { CatchUpEvidenceMergeTest(); }
         catch (Exception error) { failures.Add(new InvalidOperationException("catch-up-evidence-merge: " + error.Message, error)); }
+        try { ScanFailureTextChecksTest(); }
+        catch (Exception error) { failures.Add(new InvalidOperationException("scan-failure-text: " + error.Message, error)); }
         if (failures.Count > 0) throw new AggregateException(failures);
     }
 
@@ -297,6 +300,18 @@ internal static partial class RunChecks
                 "the catch-up path keeps the unread folder's durable retry");
             Require(store.OpenNotices(pair.PairId).Any(n => n.ReasonKey == "sync-retry" && n.Path == "locked"),
                 "the catch-up path keeps the unread folder's notice");
+            // F2: one notice per path, in plain language with a concrete fix. The raw scanner
+            // diagnostic ("could not be enumerated safely") must not reach the user.
+            var lockedNotice = store.OpenNotices(pair.PairId)
+                .Single(n => n.ReasonKey == "sync-retry" && n.Path == "locked");
+            Require(lockedNotice.Detail.Contains("could not open this folder", StringComparison.OrdinalIgnoreCase) &&
+                lockedNotice.Detail.Contains("restore read access", StringComparison.OrdinalIgnoreCase) &&
+                lockedNotice.Detail.Contains("choose retry", StringComparison.OrdinalIgnoreCase) &&
+                !lockedNotice.Detail.Contains("enumerated safely", StringComparison.Ordinal),
+                "the unreadable-subfolder notice is a plain cause plus fix, not the raw scanner text");
+            Require(store.SyncRetryAt(pair.PairId, "locked") is { LastError: var lockedCause } &&
+                lockedCause.Contains("could not be enumerated", StringComparison.OrdinalIgnoreCase),
+                "the durable retry keeps the raw scanner cause for support and the next run");
             Require(fx.WriterA.Deletes + fx.WriterB.Deletes == 0,
                 "nothing inside the unread folder is deleted");
             Require(await fx.B.ObserveAsync("locked", default) is null &&
@@ -382,6 +397,9 @@ internal static partial class RunChecks
             var epoch = gaps.GapEpoch(root.RootId)!;
             var sibling = store.Live(root.RootId, ["a.txt"]).Single();
             var siblingId = LocalItems.ParseObjectId(sibling.ObjectId);
+            // F7: this drives the gap discharge through the store seams. It stands in for the
+            // background worker's proved-unchanged result; it does not exercise the worker's real
+            // journal proof or its per-file hash, though the promotion below is the real store path.
             gaps.GapDiscovered(root.RootId, epoch, sibling, requiresHash: false);
             gaps.GapDiscoveryDone(root.RootId, epoch);
             gaps.PromoteGapDiscovery(root.RootId);
@@ -434,6 +452,153 @@ internal static partial class RunChecks
             try { RemoveDirectoryRule(locked, deny); }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
         }
+    }
+
+    // F1 (review-gapscope-1): the core claim of the settle change is a folder that was SYNCED EARLIER
+    // (stored rows and a baseline), then receives a same-size, same-mtime content edit and becomes
+    // unreadable (an ACL deny) during a journal gap. The whole-root gap obligation must still settle
+    // because the fresh walk covered every readable path, while the folder keeps gap protection, its
+    // durable retry and its notice and nothing inside it is deleted or uploaded. Once access returns,
+    // the gap's per-file check must observe the new content - the same-size, same-mtime write a
+    // metadata-only re-read cannot see - sync it and close the notice. Real ACLs, scanner, store and
+    // LocalWriter; journal reads are injected. This lives on a fresh fixture root.
+    [SupportedOSPlatform("windows")]
+    private static async Task GapRetainsEarlierSyncedUnreadableFolderAsync(string folder)
+    {
+        var directory = Path.Combine(folder, "root");
+        Directory.CreateDirectory(directory);
+        LocalChecks.Seed(directory, "a.txt", "alpha");
+        LocalChecks.Seed(directory, "locked/hidden.txt", "old");
+        var locked = Path.Combine(directory, "locked");
+        var deny = new FileSystemAccessRule(WindowsIdentity.GetCurrent().User!, FileSystemRights.ListDirectory,
+            AccessControlType.Deny);
+        try
+        {
+            using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+            var fx = Build(suppliedStore: store);
+            var root = LocalChecks.RootOf(directory, "ra");
+            var pair = fx.Pair with { A = root };
+            store.SavePair(pair);
+            store.MarkFirstSyncDone(pair.PairId);
+            var checkpoint = new NtfsUsnCheckpoint(1, 0, 200, 0);
+            var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings,
+                TimeProvider.System, pairId: pair.PairId) { WalkCheckpointForTest = () => (checkpoint, false) };
+            inventory.JournalReadForTest = NoJournalChanges;
+            fx.Provider.AddInventory(root, inventory);
+            // The local inventory's content hash is the Dropbox content hash; make the fake endpoints
+            // agree so a later upload can be compared with the local scan's hash.
+            fx.A.DropboxHashes = fx.B.DropboxHashes = true;
+            fx.Provider.AddWriter(root, await LocalWriter.OpenAsync(root, Side.A, pair.PairId,
+                LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default));
+            var first = await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+            Require(first.Failed == 0, "the fixture syncs the folder before the gap (failed=" + first.Failed +
+                (first.Failures.Count > 0 ? ": " + first.Failures[0].Reason : "") + ")");
+            var held = store.Live(root.RootId, ["locked/hidden.txt"]).Single();
+            var oldHash = LocalChecks.BlockHash(LocalChecks.Bytes("old"));
+            Require(held.Hash == oldHash &&
+                store.BaselinesTouching(pair.PairId, Side.A, [held.ObjectId], []).Count == 1 &&
+                await fx.B.ObserveAsync("locked/hidden.txt", default) is { } uploaded && uploaded.Hash == oldHash,
+                "the folder was synced earlier: it has a stored row, a baseline and the old content in the cloud");
+            // Same length and mtime as the stored row, different content: only a content hash can see it.
+            LocalChecks.Seed(directory, "locked/hidden.txt", "new");
+            File.SetLastWriteTimeUtc(Path.Combine(locked, "hidden.txt"), held.Mtime.UtcDateTime);
+            AddDirectoryRule(locked, deny);
+            // The catch-up replay overflows, which starts a journal gap followed by a fresh full walk.
+            inventory.JournalReadForTest = OverLimitJournal;
+            var gapRun = await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+            Require(gapRun.Failed == 0 && gapRun.Outcome == RunOutcomes.Partial,
+                "the gap run with an unreadable synced folder is Partial, never a failure (failed=" + gapRun.Failed +
+                (gapRun.Failures.Count > 0 ? ": " + gapRun.Failures[0].Reason : "") + ")");
+            Require(!store.GapInventoryPending(root.RootId),
+                "the whole-root gap obligation clears once the fresh walk covers every readable path");
+            var gaps = (ILocalGapStore)store;
+            var epoch = gaps.GapEpoch(root.RootId);
+            Require(epoch is not null && gaps.HasGapProtection(root.RootId),
+                "the unreadable, previously synced folder keeps gap protection");
+            Require(store.SyncRetryAt(pair.PairId, "locked") is { Kind: "scan" },
+                "the unreadable folder keeps its durable retry");
+            Require(store.OpenNotices(pair.PairId).Count(n => n.ReasonKey == "sync-retry" && n.Path == "locked") == 1,
+                "the unreadable folder keeps exactly one notice");
+            Require(fx.WriterA.Deletes + fx.WriterB.Deletes == 0 &&
+                await fx.B.ObserveAsync("locked/hidden.txt", default) is { } blocked && blocked.Hash == oldHash,
+                "nothing inside the unreadable folder is deleted or uploaded while it is held");
+            // Drive the gap's metadata verification through the store seams. This stands in for the
+            // background worker (this fixture has no real journal to probe); the promotion is the real
+            // store path. The readable sibling is proved unchanged; the unreadable file still needs a hash.
+            var discovered = gaps.GapDiscoveryPage(root.RootId, epoch!, 128)
+                .Select(item => (item, requiresHash: item.Path == "locked/hidden.txt")).ToArray();
+            gaps.GapDiscoveredBatch(root.RootId, epoch!, discovered);
+            gaps.GapDiscoveryDone(root.RootId, epoch!);
+            gaps.PromoteGapDiscovery(root.RootId);
+            Require(gaps.HasGapProtection(root.RootId),
+                "after metadata discovery the unverified file still protects the folder while the readable sibling retires");
+            var pending = gaps.GapHashPage(root.RootId, epoch!, 16);
+            Require(pending.Count == 1 && pending[0].Path == "locked/hidden.txt",
+                "only the unreadable folder's file still needs the gap's per-file check");
+            // Access returns. The worker would now hash the file because metadata discovery could not
+            // prove it unchanged; stage that result through the same store seams.
+            RemoveDirectoryRule(locked, deny);
+            var file = Path.Combine(locked, "hidden.txt");
+            var newHash = DropboxContentHash.Compute(File.ReadAllBytes(file));
+            var checkedItem = gaps.GapHashPage(root.RootId, epoch!, 16).Single();
+            gaps.StageGapHash(root.RootId, epoch!, checkedItem, newHash,
+                new LocalGapProof(epoch!.JournalCursor, new NtfsFileUsn(1,
+                    LocalItems.ParseObjectId(checkedItem.ObjectId).FileId, 150, checkedItem.Size,
+                    checkedItem.Mtime.UtcDateTime.ToFileTimeUtc())));
+            var verified = gaps.GapResults(root.RootId, gaps.GapResultWatermark(root.RootId), 128).Single();
+            Require(gaps.AcceptGapResult(root.RootId, verified) &&
+                store.Live(root.RootId, ["locked/hidden.txt"]).Single().Hash == newHash,
+                "the gap's per-file check publishes the new content hash for the same-size, same-mtime write");
+            store.SaveSyncRetry(pair.PairId,
+                store.SyncRetryAt(pair.PairId, "locked")! with { RetryAfter = DateTimeOffset.MinValue });
+            inventory.JournalReadForTest = NoJournalChanges;
+            var recovered = await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+            Require(recovered.Failed == 0 && store.SyncRetryAt(pair.PairId, "locked") is null &&
+                !store.OpenNotices(pair.PairId).Any(n => n.ReasonKey == "sync-retry" && n.Path == "locked"),
+                "restored access reads the folder, retires its retry and closes its notice");
+            Require(await fx.B.ObserveAsync("locked/hidden.txt", default) is { } synced && synced.Hash == newHash,
+                "the new content is synced once the gap's per-file check has observed it");
+            Require(fx.WriterA.Deletes + fx.WriterB.Deletes == 0,
+                "the recovery never deletes anything");
+        }
+        finally
+        {
+            try { RemoveDirectoryRule(locked, deny); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        }
+    }
+
+    // F2/F4 (review-gapscope-1): every notice text carries a cause and a fix; the online-only
+    // observation message's exact prefix is unchanged because notice closing and retry matching depend
+    // on it; the journal text points at the separate capacity notice instead of promising an
+    // enlargement this notice cannot offer.
+    private static void ScanFailureTextChecksTest()
+    {
+        Require(ScanFailureText.Describe(OwnedPointerProof.ObservationMessage) == OwnedPointerProof.ObservationMessage,
+            "the online-only observation message keeps its exact prefix");
+        foreach (var diagnostic in new[]
+        {
+            "A local folder could not be enumerated safely.",
+            "The selected local root could not be enumerated.",
+            "parent listing failed at sub: Access is denied.",
+        })
+        {
+            var text = ScanFailureText.Describe(diagnostic);
+            Require(text.Contains("could not open this folder", StringComparison.OrdinalIgnoreCase) &&
+                text.Contains("restore read access", StringComparison.OrdinalIgnoreCase) &&
+                text.Contains("choose retry", StringComparison.OrdinalIgnoreCase) &&
+                !text.Contains("enumerated", StringComparison.OrdinalIgnoreCase) &&
+                !text.Contains("parent listing failed", StringComparison.OrdinalIgnoreCase),
+                "a folder enumeration/listing diagnostic is a plain cause plus fix, never the raw text: " + text);
+        }
+        var journal = ScanFailureText.Describe("journal overflow while replaying the saved cursor");
+        Require(!journal.Contains("let Sync Shark enlarge it", StringComparison.OrdinalIgnoreCase) &&
+            journal.Contains("change-log capacity notice", StringComparison.OrdinalIgnoreCase),
+            "the journal notice points at the change-log capacity notice for enlargement");
+        var passthrough = ScanFailureText.Describe("A Defender history check was incomplete.");
+        Require(passthrough.StartsWith("A Defender history check was incomplete.", StringComparison.Ordinal) &&
+            passthrough.Contains("then choose retry", StringComparison.OrdinalIgnoreCase),
+            "an unrecognised user-facing reason keeps its cause and gains a generic fix");
     }
 
     // Follow-up 2b: an already-existing retry must survive a SECOND catch-up run (the first run
