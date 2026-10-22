@@ -34,7 +34,7 @@ public sealed partial class DropboxPilotClient
                 parents.Add(Parent(requests[index].Path));
                 parents.Add(Parent(requests[index].HistoricalPath));
             }
-            catch (Exception error) when (error is not (OutOfMemoryException or PairPausedException))
+            catch (Exception error) when (error is not (OutOfMemoryException or V2.PairPausedException))
             { pathFailures[index] = AbsenceObservation.Cause(error); }
         }
         await Parallel.ForEachAsync(parents.Distinct(StringComparer.Ordinal).Where(ClaimParent).ToArray(),
@@ -44,7 +44,7 @@ public sealed partial class DropboxPilotClient
                 await reads.WaitAsync(token).ConfigureAwait(false);
                 try { await ReadPresentIdsAsync(parent, wantedIds, present, token).ConfigureAwait(false); }
                 catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-                catch (Exception error) when (error is not (OutOfMemoryException or PairPausedException))
+                catch (Exception error) when (error is not (OutOfMemoryException or V2.PairPausedException))
                 { /* Optional presence shortcut only; exact identity/path probes remain authoritative. */ }
                 finally { reads.Release(); }
             }).ConfigureAwait(false);
@@ -79,7 +79,7 @@ public sealed partial class DropboxPilotClient
                     finally { reads.Release(); }
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-                catch (Exception error) when (error is not (OutOfMemoryException or PairPausedException))
+                catch (Exception error) when (error is not (OutOfMemoryException or V2.PairPausedException))
                 { result[index] = new(null, AbsenceObservation.Cause(error)); }
             }).ConfigureAwait(false);
         // Only root verification fails the page; item failures stay inconclusive for that item.

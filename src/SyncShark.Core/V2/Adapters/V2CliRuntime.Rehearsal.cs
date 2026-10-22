@@ -59,6 +59,8 @@ public sealed partial class V2CliRuntime
             progress("Only the isolated store and explicit diagnostic files are written. Simulated content is metadata-only.");
             const string notSimulated = "online-only pointer updates/publication; real transfer bytes and hash verification; " +
                 "provider batch-job/change-feed race and restoration machinery; retained checkpoint reconciliation; " +
+                "dispatch-time source revalidation (safety2 A1/A2; may conservatively over-count deletes that live would skip); " +
+                "whole-folder restore classification / send-boundary (safety3); " +
                 "provider resource-budget timing; cumulative endpoint disk/quota consumption and native crash durability";
             progress("not simulated: " + notSimulated);
             progress("Phase timings are diagnostic only: overlay writes are serialized and no payload bytes are transferred.");

@@ -3298,7 +3298,7 @@ public sealed partial class DropboxPilotClient(
             Interlocked.Increment(ref _providerCallCount);
             if (attempt > 0) V2.RunInstrumentation.Current?.RecordRetry();
             try { response = await SendResourceRequestAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken, beforeSending: onSending); }
-            catch (PairPausedException) { throw; } // The pre-send checkpoint callback has not transmitted a request.
+            catch (V2.PairPausedException) { throw; } // The pre-send checkpoint callback has not transmitted a request.
             catch (Exception exception) when (exception is HttpRequestException or OperationCanceledException)
             {
                 throw new DropboxEffectUncertainException("The Dropbox effect acknowledgement was interrupted after request transmission.", exception);
