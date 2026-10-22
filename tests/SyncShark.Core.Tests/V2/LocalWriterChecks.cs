@@ -9,6 +9,7 @@ internal static class LocalWriterChecks
     {
         await PutCreateAndParentsAsync().ConfigureAwait(false);
         await OnlineOnlyRecoveryRestoreAdmitsItsBytesAsync().ConfigureAwait(false);
+        await OnlineOnlyDirectDownloadRefusesItsBytesAsync().ConfigureAwait(false);
         await RecoveryUnavailableCreateOnlyAsync().ConfigureAwait(false);
         await PutCreateOccupiedMismatchAsync().ConfigureAwait(false);
         await PutUpdateMatchesAsync().ConfigureAwait(false);
@@ -90,6 +91,45 @@ internal static class LocalWriterChecks
         await writer.PutAsync(restore, new MemoryStream(content), CancellationToken.None);
         LocalChecks.Require(File.ReadAllBytes(Path.Combine(root, "restored.txt")).SequenceEqual(content),
             "a normal-space restore through the online-only stream route writes the retained bytes");
+    }
+
+    // The direct-download route re-admits a real file's bytes after a metadata-only pre-reservation exactly as the
+    // stream route does. On an online-only policy the pre-admission grants a low-space volume, so PutDownloadedAsync
+    // itself must raise the structured refusal the executor maps to the pending free-space notice.
+    private static async Task OnlineOnlyDirectDownloadRefusesItsBytesAsync()
+    {
+        const long MiB = 1L << 20;
+        var root = LocalChecks.FreshRoot("download-online-only-refusal");
+        var recovery = Path.Combine(Path.GetDirectoryName(root)!, "recovery-download-online-only");
+        var probe = new FreeSpaceAdmissionChecks.FakeProbe();
+        // Room above the 4 MiB floor for the metadata-only reservation, not for the file's own bytes.
+        probe.Free[root] = 5 * MiB;
+        var writer = await LocalWriter.OpenAsync(LocalChecks.RootOf(root, "root-download-online-only"), Side.A,
+            LocalChecks.PairId, LocalChecks.InstallationId, recovery, CancellationToken.None,
+            V2Settings.Default with { FreeSpaceFloorBytes = 4 * MiB }, probe);
+        // Online-only policy is off, so no pointer is created; the new file's real bytes need admission.
+        writer.NewPointers = new NewPointerDownload(_ => false, null,
+            _ => throw new InvalidOperationException("the bytes route never acquires a provider"),
+            (_, _, _, _) => throw new InvalidOperationException("the bytes route never creates a pointer"));
+        var content = new byte[8 * MiB];
+        Array.Fill(content, (byte)'d');
+        var action = new SyncAction("download-online-only", 0, ActionKind.CopyNew, Side.A, "downloaded.txt", null,
+            LocalWriterChecks.Source(content), null, false, null);
+        var metadataOnly = await writer.AdmitFreeSpaceAsync(action, CancellationToken.None);
+        using (metadataOnly.Reservation)
+            LocalChecks.Require(metadataOnly.Refusal is null,
+                "an online-only download reserves metadata only, so its pre-admission grants a low-space volume");
+        await ExpectFreeSpaceRefusalAsync(() => writer.PutDownloadedAsync(action,
+            new RefusedDirectDownloadSource(), null, CancellationToken.None));
+        LocalChecks.Require(!File.Exists(Path.Combine(root, "downloaded.txt")),
+            "a download into low free space is refused by byte admission before any bytes are opened");
+    }
+
+    /// <summary>A direct-download source that must never be reached when byte admission refuses first.</summary>
+    private sealed class RefusedDirectDownloadSource : ISyncDirectDownloadSource
+    {
+        public Task<SyncDownloadResult> DownloadToAsync(ItemState s, Stream destination, CancellationToken ct) =>
+            throw new InvalidOperationException("a refused download must not open bytes");
     }
 
     private static async Task PutCreateAndParentsAsync()

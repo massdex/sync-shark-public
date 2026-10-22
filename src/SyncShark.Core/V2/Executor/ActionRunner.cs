@@ -300,13 +300,18 @@ internal sealed class ActionRunner
                 await _committer.AddNoticeAsync(DropboxQuota.Notice(_pairId, action.Target, action.Source?.Size));
             return await CommitAsync(action, Failed(action, DropboxQuota.Detail) with { UploadQuotaBlocked = true });
         }
-        catch (FreeSpaceRefusedException refused)
+        catch (FreeSpaceRefusedException refused) when (!recoveryHolder.CheckpointRecorded)
         {
             // The up-front admission reserved metadata only (an online-only new file), so the writer re-admitted its
             // real bytes and refused. Report the same pending free-space notice as an up-front refusal: the reason
             // key and volume facts aggregate per volume, and the Skipped result leaves the item unsynced and retryable.
-            // This refusal precedes any effect, so no provider checkpoint can exist on this route.
-            return await PendingForFreeSpaceAsync(action, refused.Refusal).ConfigureAwait(false);
+            // A recovery restore is its own receipt: its restore code raises the single restore notice for this
+            // failure, so adding a path notice here would duplicate it (and that path notice could close on a later
+            // sync without the restore ever running). Commit the pending outcome alone and let the restore report it.
+            // The refusal precedes any effect, so a checkpoint-bearing action must not be recorded as cleanly Skipped.
+            return RecoveryRestoreHold.IsFrozenIntent(action)
+                ? await CommitAsync(action, Skipped(action, refused.Refusal.Detail)).ConfigureAwait(false)
+                : await PendingForFreeSpaceAsync(action, refused.Refusal).ConfigureAwait(false);
         }
         catch (OwnedPointerDeferredException deferred) when (OwnedPointerUpdates.IsMetadataUpdate(action))
         {

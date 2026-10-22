@@ -156,6 +156,7 @@ internal static partial class RunChecks
         await RecoveryLateOppositeChangeCheckAsync();
         await RecoveryAbsentEffectCheckAsync();
         await RecoveryHashCasingCheckAsync();
+        await RecoveryLowSpaceKeepsOneRestoreNoticeAsync();
         RecoveryPlanningSnapshotCheck();
         RecoveryDeletionEvidenceAttributionCheck();
         Require(SyncRun.RecoveryCopyPath("Folder/report.txt", new DateTimeOffset(2026, 1, 2, 0, 0, 0, TimeSpan.Zero), 2) ==
@@ -504,6 +505,48 @@ internal static partial class RunChecks
             "a hash that differs only by letter case is the same bytes, not a late opposite change");
     }
 
+    // A recovery restore refused for space is one failure: the restore receipt is its single notice. The executor
+    // must not add a second free-space path notice, which would also close on a later sync without the restore
+    // ever running (the user's rule: we do not duplicate notices).
+    private static async Task RecoveryLowSpaceKeepsOneRestoreNoticeAsync()
+    {
+        var root = LocalChecks.FreshRoot("recovery-low-space-" + Guid.NewGuid().ToString("N"));
+        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System);
+        var fx = Build(suppliedStore: store);
+        fx.A.DropboxHashes = fx.B.DropboxHashes = true;
+        var bytes = Encoding.UTF8.GetBytes("retained bytes");
+        var source = new ItemState("file.txt", ItemKind.File, "archive", "revision", DropboxContentHash.Compute(bytes),
+            bytes.Length, DateTimeOffset.UtcNow.AddDays(-1), ItemFlags.None);
+        var record = RetainRecoveryFixture(fx, source, "low-space-archive");
+        var refusal = new FreeSpaceRefusal(
+            "Not enough free space on C:: needs 2.0 MiB, free 1.0 MiB, reserve 512.0 MiB. " +
+            "Options: free space and retry; exclude this folder",
+            FreeSpaceRefusal.InsufficientReasonKey, @"C:\", 2L << 20, 1L << 20, 512L << 20);
+        fx.Provider.AddWriter(fx.Pair.A, new RecoveryFixtureWriter(fx.WriterA, source, bytes) { RefusePut = refusal });
+        var run = fx.Run();
+        var result = (await run.RestoreRecoveryPageAsync(fx.Pair.PairId,
+            new RecoveryQuery(Id: record.RecoveryId), false, false, default)).Single();
+        Require(result.Classification == "FAILED" &&
+            result.Detail?.Contains("Not enough free space", StringComparison.Ordinal) == true,
+            "a low-space restore fails with the free-space cause on its restore receipt");
+        var notices = store.OpenNotices(fx.Pair.PairId);
+        Require(notices.Count == 1 && notices[0].ReasonKey == SyncRun.RecoveryRestorePending &&
+            notices[0].Detail.Contains("Not enough free space", StringComparison.Ordinal),
+            "a low-space restore raises exactly one open notice (its restore receipt), never a duplicate path notice");
+        Require(notices.All(notice => notice.ReasonKey != FreeSpaceRefusal.InsufficientReasonKey),
+            "the in-effect refusal adds no free-space path notice on the restore route");
+        var receipt = notices[0].NoticeId!;
+        // Space is still short, so an ordinary sync retries the restore and fails again. It must neither close nor
+        // duplicate the one receipt: a restore notice lasts until the restore itself succeeds.
+        store.MarkFirstSyncDone(fx.Pair.PairId);
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        var after = store.OpenNotices(fx.Pair.PairId);
+        Require(store.NoticeById(fx.Pair.PairId, receipt) is { Closed: false } &&
+            after.Count(item => PairPath.Same(item.Path, "file.txt")) == 1 &&
+            after.All(item => item.ReasonKey != FreeSpaceRefusal.InsufficientReasonKey),
+            "a following ordinary sync keeps the single restore notice open while space is still short");
+    }
+
     private static void RecoveryDeletionEvidenceAttributionCheck()
     {
         foreach (var restoredSide in new[] { Side.A, Side.B })
@@ -608,6 +651,8 @@ internal static partial class RunChecks
     {
         public bool FailOpen { get; set; }
         public bool Missing { get; init; }
+        /// <summary>When set, the restore's write refuses like a writer's own byte admission after a metadata-only reservation.</summary>
+        public FreeSpaceRefusal? RefusePut { get; set; }
         public int Opens { get; private set; }
         public Task<ItemState> DescribeRecoveryAsync(RecoveryRecord record, CancellationToken ct) => Missing
             ? throw new FileNotFoundException("fixture unavailable") : Task.FromResult(source with { Path = record.Path });
@@ -624,6 +669,7 @@ internal static partial class RunChecks
             if (SyncRun.IsRecoveryRestoreIntent(action))
                 Require(action.Kind == ActionKind.CopyNew && action.ExpectedTarget is null && action.SuppressReconciledBaseline,
                     "restore effect is create-only and cannot claim an archived opposite-side baseline");
+            if (RefusePut is { } refusal) throw new FreeSpaceRefusedException(refusal);
             return inner.PutAsync(action, content, ct);
         }
         public Task<ItemState> MoveAsync(SyncAction action, CancellationToken ct) => inner.MoveAsync(action, ct);
