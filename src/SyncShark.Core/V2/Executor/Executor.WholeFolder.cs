@@ -18,6 +18,19 @@ public sealed partial class Executor
     private sealed record WholeFolderRecovery(string PairId, string ScanCursor, WholeFolderSnapshot[] Trees,
         string ProviderState);
 
+    internal static void RequestFolderRestoreAgain(IStateStore store, string pairId, Notice notice)
+    {
+        var anchor = notice.FolderRecoveryAnchor is { } id ? store.IntentById(pairId, id) : null;
+        if (anchor?.ProviderEffect?.Kind != WholeFolderGroupKind)
+            throw new SyncRunRefusedException("Recovery evidence is no longer pending. Verify or inspect Dropbox history; nothing was changed.");
+        var recovery = JsonSerializer.Deserialize<WholeFolderRecovery>(anchor.ProviderEffect.Id)
+            ?? throw new InvalidDataException("Missing folder recovery checkpoint.");
+        if (recovery.PairId != pairId || !recovery.Trees.Any(tree => PairPath.Same(tree.Actions[^1].Path, notice.Path)))
+            throw new SyncRunRefusedException("The notice no longer matches its recovery episode.");
+        recovery = recovery with { ProviderState = DropboxWriter.AuthorizeRestoreAgain(recovery.ProviderState, notice.Path) };
+        store.RecordIntent(pairId, anchor with { ProviderEffect = anchor.ProviderEffect with { Id = JsonSerializer.Serialize(recovery) } });
+    }
+
     private static FolderTree RecoveryTree(WholeFolderSnapshot snapshot) => new(
         snapshot.Actions[^1].ExpectedTarget!, snapshot.Actions[..^1].Select(action => action.ExpectedTarget!).ToArray());
 
@@ -162,6 +175,8 @@ public sealed partial class Executor
                 var whole = byTree[outcome.Tree];
                 if (outcome.Status == FolderTreeStatus.NotSubmitted)
                 {
+                    await StoreAsync(() => CloseUnsubmittedFolderHistory(plan.PairId, whole.Folder),
+                        CancellationToken.None).ConfigureAwait(false);
                     remaining.AddRange(whole.Actions);
                     continue;
                 }
@@ -179,7 +194,7 @@ public sealed partial class Executor
                     notices.Add(FolderNotice(plan, whole.Folder, ExecutionReasons.FolderDeleteRestored, outcome.Restored));
                 if (outcome.Unrestored.Count > 0)
                     notices.Add(FolderNotice(plan, whole.Folder, ExecutionReasons.FolderDeleteUnrestored,
-                        outcome.Unrestored));
+                        outcome.Unrestored) with { FolderRecoveryAnchor = outcome.Status == FolderTreeStatus.Uncertain ? anchor?.ActionId : null });
             }
             if (notices.Count > 0)
                 await StoreAsync(() => _store.AddNotices(notices), CancellationToken.None).ConfigureAwait(false);
@@ -292,7 +307,10 @@ public sealed partial class Executor
                     ?? FolderTreeOutcome.Of(tree, FolderTreeStatus.Uncertain, "The group check returned no result.");
                 var snapshot = recovery.Trees[i];
                 var folder = snapshot.Actions[^1];
-                notices.Add(FolderHistoryNotice(recovery.PairId, folder));
+                if (outcome.Status == FolderTreeStatus.NotSubmitted)
+                    await StoreAsync(() => CloseUnsubmittedFolderHistory(recovery.PairId, folder),
+                        CancellationToken.None).ConfigureAwait(false);
+                else notices.Add(FolderHistoryNotice(recovery.PairId, folder));
                 if (outcome.Status == FolderTreeStatus.Completed && outcome.Reason is not null)
                     notices.Add(new Notice(recovery.PairId, folder.Rule, NoticeKind.Info, folder.Path,
                         outcome.Reason, "folder-delete-refused"));
@@ -308,7 +326,16 @@ public sealed partial class Executor
                 if (outcome.Restored.Count > 0)
                     notices.Add(FolderNotice(recovery.PairId, folder, ExecutionReasons.FolderDeleteRestored, outcome.Restored));
                 if (outcome.Unrestored.Count > 0)
-                    notices.Add(FolderNotice(recovery.PairId, folder, ExecutionReasons.FolderDeleteUnrestored, outcome.Unrestored));
+                    notices.Add(FolderNotice(recovery.PairId, folder, ExecutionReasons.FolderDeleteUnrestored, outcome.Unrestored)
+                        with { FolderRecoveryAnchor = outcome.Status == FolderTreeStatus.Uncertain ? anchor.ActionId : null });
+                else if (outcome.Status == FolderTreeStatus.Completed)
+                    await StoreAsync(() =>
+                    {
+                        foreach (var notice in _store.OpenNotices(recovery.PairId).Where(n =>
+                            n.ReasonKey == "folder-delete-unrestored" && n.FolderRecoveryAnchor == anchor.ActionId &&
+                            PairPath.Same(n.Path, folder.Path)))
+                            _store.CloseNotice(notice.NoticeId!, "restored");
+                    }, CancellationToken.None).ConfigureAwait(false);
             }
             if (notices.Count > 0)
                 await StoreAsync(() => _store.AddNotices(notices), CancellationToken.None).ConfigureAwait(false);
@@ -366,6 +393,13 @@ public sealed partial class Executor
     private static ActionResult Uncertain(SyncAction action, string detail) =>
         new(action.ActionId, Outcome.Uncertain, null, null, null, string.Format(ExecutionReasons.Unverified.Detail, detail));
 
+    private void CloseUnsubmittedFolderHistory(string pairId, SyncAction folder)
+    {
+        foreach (var notice in _store.OpenNotices(pairId).Where(notice => notice.ReasonKey == "folder-delete-history" &&
+                     notice.Rule == folder.Rule && PairPath.Same(notice.Path, folder.Path)))
+            _store.CloseNotice(notice.NoticeId!, "not-submitted");
+    }
+
     private static Notice FolderHistoryNotice(string pairId, SyncAction folder) =>
         new(pairId, folder.Rule, NoticeKind.Info, folder.Path,
             "Prepared folder deletion (submission may still be pending or refused): " + folder.Path +
@@ -380,6 +414,6 @@ public sealed partial class Executor
         var named = string.Join(", ", paths.Take(NoticePathLimit));
         if (paths.Count > NoticePathLimit) named += $" and {paths.Count - NoticePathLimit} more";
         return new Notice(pairId, folder.Rule, NoticeKind.Info, folder.Path,
-            string.Format(reason.Detail, folder.Path, paths.Count, named), reason.Key);
+            string.Format(reason.Detail, folder.Path, paths.Count, named), reason.Key, FolderDeleteEpisode: folder.ActionId);
     }
 }

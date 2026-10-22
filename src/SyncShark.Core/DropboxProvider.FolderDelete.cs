@@ -118,29 +118,28 @@ public sealed partial class DropboxPilotClient
         throw new DropboxEffectUncertainException("The folder delete job is still pending.");
     }
 
-    internal async Task RestoreDeletedFolderAsync(string path, CancellationToken ct)
+    internal async Task RestoreDeletedFolderAsync(string path, CancellationToken ct, Func<Task> recordStarted)
     {
         var sent = false;
-        try { await CreateDirectoryAsync(path, ct, () => sent = true, () => sent = false).ConfigureAwait(false); }
-        catch (Exception error) when (error is not (PairPausedException or OutOfMemoryException) &&
-            (!sent || error is DropboxApiException))
+        try { await CreateDirectoryAsync(path, ct, async () =>
+            { PairPause.Check(); sent = true; await recordStarted().ConfigureAwait(false); }, () => sent = false).ConfigureAwait(false); }
+        catch (Exception error) when (error is not OutOfMemoryException && !sent)
         { throw new FolderRestoreNotAppliedException(error); }
     }
 
     /// <summary>Restores one deleted file to a revision, first recreating any parent folder the delete removed.</summary>
     internal async Task<PilotRemoteEntry> RestoreDeletedFileAsync(string relativePath, string revision,
-        CancellationToken ct)
+        CancellationToken ct, Func<Task> recordStarted)
     {
         var sent = false;
         try
         {
             var path = PilotPath.NormalizeDropboxRelative(relativePath);
             await EnsureRemoteParentFoldersAsync(path, ct).ConfigureAwait(false);
-            return await RestoreRevisionAsync(path, revision, ct, () => sent = true, () => sent = false)
-                .ConfigureAwait(false);
+            return await RestoreRevisionAsync(path, revision, ct, async () =>
+                { PairPause.Check(); sent = true; await recordStarted().ConfigureAwait(false); }, () => sent = false).ConfigureAwait(false);
         }
-        catch (Exception error) when (error is not (PairPausedException or OutOfMemoryException) &&
-            (!sent || error is DropboxApiException))
+        catch (Exception error) when (error is not OutOfMemoryException && !sent)
         {
             // Parent creation can have effects, but the selected file restore did not. Only this
             // transport owner knows whether the restore crossed the send boundary.

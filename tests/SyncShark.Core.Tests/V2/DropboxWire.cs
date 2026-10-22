@@ -326,10 +326,12 @@ internal sealed partial class DropboxWire : HttpMessageHandler
     }
 
     public string? MetadataFailurePath { get; set; }
+    public Action<string>? BeforeMetadataResponse { get; set; }
 
     private async Task<HttpResponseMessage> GetMetadataAsync(string path, CancellationToken token, bool includeDeleted = false)
     {
         lock (MetadataPaths) MetadataPaths.Add(path);
+        BeforeMetadataResponse?.Invoke(path);
         if (path == MetadataFailurePath) throw new IOException("Scripted transient metadata failure.");
         // A test may hold a root-id read to prove the post-commit re-read is hard-bounded.
         if (path == RootId && ++_rootMetadataReads > RootMetadataHoldAfter && RootMetadataGate is { } gate)

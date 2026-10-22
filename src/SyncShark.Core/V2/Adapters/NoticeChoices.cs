@@ -144,7 +144,8 @@ public static class NoticeChoices
 
     // RestoreAsCopy is a retry-family choice: it re-runs the same frozen Recovery selection with a copy destination,
     // so it must route through the notice-choice path rather than the ordinary conflict resolver.
-    public static bool IsRetryChoice(string choice) => choice is ShowTarget or SyncTargetSeparately or CopyLink or CopyLinkOutsideRoot or CopyLinkAgain or RemoveLinkStaging or ConfirmLargeDownload or PreviewMatches or ChooseFolder or RemoveRule or KeepRule or ExportHtml or CheckHistoryAgain or ReviewDeletion or OpenStorage or ReviewReserve or ExportDocx or ExportMarkdown or ExportPdf or MakeAvailableOffline or Rename or ShowRemaining or OpenDropbox or RepairHelp or RetryNow or Exclude or Ignore or DeleteReviewed or KeepRestore or OpenFolderSettings or OpenRecoverySettings or Dismiss or RestoreAsCopy or ReviewRemoval or ReviewRemovalA or ReviewRemovalB or ConfirmRemoval or RemovalNextPage or RemovalPreviousPage;
+    public static bool IsRetryChoice(string choice) => choice is RestoreAgain or ShowTarget or SyncTargetSeparately or CopyLink or CopyLinkOutsideRoot or CopyLinkAgain or RemoveLinkStaging or ConfirmLargeDownload or PreviewMatches or ChooseFolder or RemoveRule or KeepRule or ExportHtml or CheckHistoryAgain or ReviewDeletion or OpenStorage or ReviewReserve or ExportDocx or ExportMarkdown or ExportPdf or MakeAvailableOffline or Rename or ShowRemaining or OpenDropbox or RepairHelp or RetryNow or Exclude or Ignore or DeleteReviewed or KeepRestore or OpenFolderSettings or OpenRecoverySettings or Dismiss or RestoreAsCopy or ReviewRemoval or ReviewRemovalA or ReviewRemovalB or ConfirmRemoval or RemovalNextPage or RemovalPreviousPage;
+    public const string RestoreAgain = "restore-again";
     public const string QuarantineRetry = "quarantine-retry";
     public const string QuarantineIgnore = "quarantine-ignore";
     public const string QuarantineExclude = "quarantine-exclude";
@@ -214,15 +215,23 @@ public static class NoticeChoices
         return options;
     }
 
+    private static IReadOnlyList<SyncNoticeOption> FolderRestoreOptions(Notice notice)
+    {
+        var options = new List<SyncNoticeOption> { new(RetryNow, "Verify again (unknown restores are not replayed)") };
+        if (notice.FolderRecoveryAnchor is not null)
+            options.Add(new(RestoreAgain, "Restore again (authorise the same revision restore)"));
+        options.Add(new(OpenDropbox, "Open Dropbox to review deleted files / version history"));
+        options.Add(new(Ignore, "Ignore this notice (keep unresolved recovery protected)"));
+        return options;
+    }
+
     public static IReadOnlyList<SyncNoticeOption> Options(Notice notice) =>
         (notice.ReasonKey is SqliteStateStore.BlockedDeleteSummary or SqliteStateStore.UncertainDeleteSummary or SqliteStateStore.DeleteReviewSummary)
             ? [new(ShowRemaining, "Show remaining blocked deletions (50 per page)")]
             : IsRecoveryRestoreNotice(notice)
             ? RecoveryRestoreOptions(notice)
             : notice.ReasonKey == "folder-delete-unrestored"
-            ? [new(RetryNow, "Verify again (unknown restores are not replayed)"),
-               new(OpenDropbox, "Open Dropbox to review deleted files / version history"),
-               new(Ignore, "Ignore this notice (keep unresolved recovery protected)")]
+            ? FolderRestoreOptions(notice)
             : notice.ReasonKey == "held-intents"
             ? [new(ShowRemaining, "Show remaining changes (50 per page)")]
             : notice.ReasonKey == RehashProtection.Reason

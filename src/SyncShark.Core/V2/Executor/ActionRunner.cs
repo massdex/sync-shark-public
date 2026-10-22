@@ -465,7 +465,7 @@ internal sealed class ActionRunner
             return (null, new ActionResult(action.ActionId, Outcome.Skipped, null, null, null,
                 QuarantineFailure.Describe(action.Path, e)) { Quarantined = true });
         }
-        catch (Exception e) when (e is not (OperationCanceledException or EndpointAccessException or PairPausedException))
+        catch (Exception e) when (e is not (OperationCanceledException or EndpointAccessException))
         {
             NativeIoDiagnostic.LogOnce($"pair={_pairId}; relative={action.Path}", e);
             return (null, Failed(action, RecoveryFailed + Describe(e)) with { FailureHResult = e.HResult });

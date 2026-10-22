@@ -244,6 +244,11 @@ public sealed partial class SyncRun
             if (choice == NoticeChoices.RepairHelp) return NoticeChoices.Result(choice, notice);
             if (notice.ReasonKey == "folder-delete-unrestored")
             {
+                if (choice == NoticeChoices.RestoreAgain)
+                {
+                    Executor.RequestFolderRestoreAgain(_store, pairId, notice);
+                    return "Restore again requested for the same submitted revisions. The notice stays until recovery is verified; occupied paths remain protected.";
+                }
                 if (choice == NoticeChoices.Ignore) _store.CloseNotice(noticeId, choice);
                 // The anchor owns recovery work. Never create a replacement action or exclude the folder.
                 return "Recovery remains protected. The next run verifies unknown submissions without replaying them; known no-effect failures retain their bounded retry.";

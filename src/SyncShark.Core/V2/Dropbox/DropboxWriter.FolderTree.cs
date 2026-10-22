@@ -14,12 +14,29 @@ public sealed partial class DropboxWriter
     private enum FeedState { Live, DeletedEarlier, DeletedByJob }
 
     // One durable provider state for the whole group, not one copy of the feed per victim.
+    // RestorePending is read-only compatibility for checkpoints predating RestoreStarted; new states never populate it.
     private sealed record FolderRecovery(List<DropboxChange> Before, string Middle,
         string? JobId = null, bool[]? Completed = null, string[]? RestorePending = null,
         DateTimeOffset? SubmittedAt = null, List<DropboxChange>? After = null,
         string[]? Restored = null, bool ExpiredUnknown = false,
         Dictionary<string, string>? SettledUnrestored = null, string[]? Unobserved = null,
-        Dictionary<string, string?>? RestoreStarted = null, Dictionary<string, DateTimeOffset>? RestoreRetryAfter = null);
+        Dictionary<string, string?>? RestoreStarted = null, Dictionary<string, DateTimeOffset>? RestoreRetryAfter = null,
+        Dictionary<string, string?>? RestoreRequested = null);
+
+    // Explicit user authority only: retain the exact submitted revision, not a fresh latest revision.
+    internal static string AuthorizeRestoreAgain(string state, string folderPath)
+    {
+        var recovery = JsonSerializer.Deserialize<FolderRecovery>(state)
+            ?? throw new InvalidDataException("Missing folder recovery checkpoint.");
+        var started = new Dictionary<string, string?>(recovery.RestoreStarted ?? [], StringComparer.OrdinalIgnoreCase);
+        var requested = new Dictionary<string, string?>(recovery.RestoreRequested ?? [], StringComparer.OrdinalIgnoreCase);
+        foreach (var path in started.Keys.Where(path => PairPath.IsSelfOrUnder(path, folderPath)).ToArray())
+        {
+            requested[path] = started[path];
+            started.Remove(path);
+        }
+        return JsonSerializer.Serialize(recovery with { RestoreStarted = started, RestoreRequested = requested });
+    }
 
     /// <inheritdoc />
     public async Task<IReadOnlyList<FolderTreeOutcome>> DeleteFolderTreesAsync(string scanCursor,
@@ -151,6 +168,7 @@ public sealed partial class DropboxWriter
             var settled = new Dictionary<string, string>(recovery.SettledUnrestored ?? [], StringComparer.OrdinalIgnoreCase);
             var started = new Dictionary<string, string?>(recovery.RestoreStarted ?? [], StringComparer.OrdinalIgnoreCase);
             var retryAfter = new Dictionary<string, DateTimeOffset>(recovery.RestoreRetryAfter ?? [], StringComparer.OrdinalIgnoreCase);
+            var requested = new Dictionary<string, string?>(recovery.RestoreRequested ?? [], StringComparer.OrdinalIgnoreCase);
             var unobserved = recovery.Unobserved?.ToHashSet(StringComparer.OrdinalIgnoreCase);
             async Task SaveRecoveryAsync()
             {
@@ -164,23 +182,22 @@ public sealed partial class DropboxWriter
                 var resumePending = (recovery.RestoreStarted is null ? pending : started.Keys.AsEnumerable())
                     .ToHashSet(StringComparer.OrdinalIgnoreCase);
                 var result = await CheckTreeAsync(tree, recovery.Before, after, resumePending, restored, settled,
-                    started, retryAfter, unobserved, recovery.Completed?[i] == false, async paths =>
+                    started, retryAfter, requested, unobserved, recovery.Completed?[i] == false, async paths =>
                 {
                     var candidates = paths.ToArray();
                     if (candidates.Length == 0) return;
-                    recovery = recovery with { RestorePending = candidates, RestoreStarted = started };
+                    recovery = recovery with { RestorePending = null, RestoreStarted = started };
                     await SaveRecoveryAsync();
                 }, async (path, revision) =>
                 {
                     started[path] = revision;
-                    recovery = recovery with { RestoreStarted = started, RestorePending = null };
+                    recovery = recovery with { RestoreStarted = started, RestorePending = null, RestoreRequested = requested };
                     await SaveRecoveryAsync();
                 }, async path =>
                 {
                     started.Remove(path);
-                    pending.Add(path);
                     retryAfter[path] = DateTimeOffset.UtcNow + _settings.AutoRetryDelay;
-                    recovery = recovery with { RestoreStarted = started, RestorePending = pending.ToArray(),
+                    recovery = recovery with { RestoreStarted = started, RestorePending = null,
                         RestoreRetryAfter = retryAfter };
                     await SaveRecoveryAsync();
                 }, async (path, reason) =>
@@ -190,8 +207,9 @@ public sealed partial class DropboxWriter
                     started.Remove(path);
                     pending.Remove(path);
                     retryAfter.Remove(path);
+                    requested.Remove(path);
                     recovery = recovery with { Restored = restored.ToArray(), SettledUnrestored = settled,
-                        RestoreStarted = started, RestorePending = null, RestoreRetryAfter = retryAfter };
+                        RestoreStarted = started, RestorePending = null, RestoreRetryAfter = retryAfter, RestoreRequested = requested };
                     await SaveRecoveryAsync();
                 });
                 if (recovery.ExpiredUnknown && result.Status == FolderTreeStatus.Completed)
@@ -217,7 +235,7 @@ public sealed partial class DropboxWriter
         IReadOnlyList<DropboxChange> after, IReadOnlySet<string> restorePending,
         IReadOnlySet<string> completedRestores, Dictionary<string, string> settledUnrestored,
         IReadOnlyDictionary<string, string?> started, IReadOnlyDictionary<string, DateTimeOffset> retryAfter,
-        IReadOnlySet<string>? unobserved, bool refused,
+        IReadOnlyDictionary<string, string?> requested, IReadOnlySet<string>? unobserved, bool refused,
         Func<IEnumerable<string>, Task> recordRestores, Func<string, string?, Task> recordStarted,
         Func<string, Task> recordNotApplied, Func<string, string?, Task> recordSettled)
     {
@@ -344,15 +362,29 @@ public sealed partial class DropboxWriter
                 { retryableFailure = true; unrestored.Add(path); failure ??= "Restore retry is not due yet."; continue; }
                 try
                 {
-                    await recordStarted(path, null);
-                    await _client.RestoreDeletedFolderAsync(path, CancellationToken.None);
+                    if (await ObserveAsync(path, CancellationToken.None) is { } current)
+                    {
+                        if (current.Kind == ItemKind.Folder)
+                        { await recordSettled(path, null); restored.Add(path); }
+                        else await SettledAsync(path, path + " (path now in use)");
+                        continue;
+                    }
+                    await _client.RestoreDeletedFolderAsync(path, CancellationToken.None, () => recordStarted(path, null));
                     await recordSettled(path, null);
                     restored.Add(path);
                 }
                 catch (Exception e) when (e is not (RecoveryCheckpointException or PairPausedException))
                 {
+                    var rejection = (e as FolderRestoreNotAppliedException)?.InnerException ?? e;
+                    if ((e is FolderRestoreNotAppliedException || !started.ContainsKey(path)) && PermanentRestoreRejection(rejection))
+                    {
+                        await SettledAsync(path, path + " (restore rejected: " + rejection.Message +
+                            "; resolve the provider restriction or occupied path, then restore from Dropbox history)");
+                        continue;
+                    }
                     if (e is FolderRestoreNotAppliedException || !started.ContainsKey(path))
                         await recordNotApplied(path);
+                    if (e is FolderRestoreNotAppliedException { InnerException: PairPausedException pause }) throw pause;
                     unrestored.Add(path);
                     retryableFailure = true;
                     failure ??= Describe(e);
@@ -367,8 +399,9 @@ public sealed partial class DropboxWriter
                 { retryableFailure = true; unrestored.Add(path); failure ??= "Restore retry is not due yet."; continue; }
                 try
                 {
-                    var revisions = await _client.ListFolderDeleteRevisionsAsync(path, kind is null, CancellationToken.None);
-                    if (revisions.Count == 0)
+                    var revision = requested.TryGetValue(path, out var selected) ? selected :
+                        (await _client.ListFolderDeleteRevisionsAsync(path, kind is null, CancellationToken.None)).FirstOrDefault()?.Revision;
+                    if (revision is null)
                     {
                         // DeletedMetadata carries no kind. An empty history cannot prove an empty folder rather
                         // than an expired file; never fabricate a directory. This cannot improve on another run.
@@ -382,9 +415,9 @@ public sealed partial class DropboxWriter
                         await SettledAsync(path, path + " (path now in use)");
                         continue;
                     }
-                    await recordStarted(path, revisions[0].Revision);
-                    var returned = await _client.RestoreDeletedFileAsync(path, revisions[0].Revision, CancellationToken.None);
-                    if (!string.Equals(returned.Revision, revisions[0].Revision, StringComparison.Ordinal))
+                    var returned = await _client.RestoreDeletedFileAsync(path, revision, CancellationToken.None,
+                        () => recordStarted(path, revision));
+                    if (!string.Equals(returned.Revision, revision, StringComparison.Ordinal))
                     {
                         await SettledAsync(path, path + " (restore revision differs; inspect Dropbox version history)");
                     }
@@ -396,8 +429,16 @@ public sealed partial class DropboxWriter
                 }
                 catch (Exception e) when (e is not (RecoveryCheckpointException or PairPausedException))
                 {
+                    var rejection = (e as FolderRestoreNotAppliedException)?.InnerException ?? e;
+                    if ((e is FolderRestoreNotAppliedException || !started.ContainsKey(path)) && PermanentRestoreRejection(rejection))
+                    {
+                        await SettledAsync(path, path + " (restore rejected: " + rejection.Message +
+                            "; resolve the provider restriction or occupied path, then restore from Dropbox history)");
+                        continue;
+                    }
                     if (e is FolderRestoreNotAppliedException || !started.ContainsKey(path))
                         await recordNotApplied(path);
+                    if (e is FolderRestoreNotAppliedException { InnerException: PairPausedException pause }) throw pause;
                     unrestored.Add(path);
                     retryableFailure = true;
                     failure ??= Describe(e);
@@ -424,6 +465,10 @@ public sealed partial class DropboxWriter
                 "The whole-folder delete could not be checked: " + Describe(e));
         }
     }
+
+    private static bool PermanentRestoreRejection(Exception error) =>
+        error is DropboxApiException { StatusCode: { } status } && (int)status is >= 400 and < 500 &&
+        status is not (System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.TooManyRequests or System.Net.HttpStatusCode.RequestTimeout);
 
     private sealed class RecoveryCheckpointException(Exception inner) : Exception("Recovery checkpoint failed.", inner);
 

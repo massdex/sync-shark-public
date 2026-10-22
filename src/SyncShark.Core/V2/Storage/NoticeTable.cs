@@ -115,11 +115,14 @@ internal sealed partial class NoticeTable
                 : notice with { Repair = captured };
         // A moved repair can keep identical detail (including a captured destination); its display path
         // must still follow the current observation, including immediately after folding a legacy row.
+        var newFolderEpisode = notice.ReasonKey == "folder-delete-unrestored" &&
+            notice.FolderDeleteEpisode is { } episode &&
+            ById(pairNo, noticeId, transaction)?.Notice.FolderDeleteEpisode != episode;
         StoreSchema.Execute(_connection, transaction,
             "UPDATE notice SET state='open', choice=NULL, rule=$rule, kind=$kind, path=$path, path_key=$path_key, reason_key=$reason, detail=$detail, restore_hold=$hold " +
             "WHERE notice_id=$id AND NOT ($retry=1 AND COALESCE(choice,'')='ignore') " +
             "AND (state <> 'open' OR restore_hold <> $hold OR ($refresh=1 AND (detail <> $detail OR path <> $path OR path_key <> $path_key OR reason_key <> $reason OR rule <> $rule)));",
-            ("$retry", NoticeChoices.IsRetryNotice(notice) && notice.UploadSuspended is null ? 1 : 0),
+            ("$retry", NoticeChoices.IsRetryNotice(notice) && notice.UploadSuspended is null && !newFolderEpisode ? 1 : 0),
             ("$refresh", notice.Storage is not null || JournalSizing.IsNotice(notice) || notice.Quarantine is not null || notice.DefenderHistory is not null || NoticeChoices.IsRetryNotice(notice) || notice.FreeSpace is not null || (notice.Kind == NoticeKind.UserDecision && notice.Detail.Contains(ProviderNameRefusedException.Detail, StringComparison.Ordinal)) || notice.ReasonKey == ProviderNameRefusedException.NoticeKey ? 1 : 0),
             ("$id", noticeId), ("$rule", notice.Rule), ("$kind", notice.Kind.ToString()), ("$path", notice.Path),
             ("$path_key", PathKey.Of(notice.Path)), ("$reason", notice.ReasonKey), ("$detail", NoticeDetailCodec.Encode(notice)),

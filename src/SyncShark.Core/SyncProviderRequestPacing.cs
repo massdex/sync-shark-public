@@ -12,12 +12,13 @@ internal static class SyncProviderRequestPacing
 
     internal static async Task<HttpResponseMessage> SendAsync(SyncTransferRateLimiter limiter,
         SyncProviderBudgetKey key, bool google, HttpClient client, HttpRequestMessage request,
-        HttpCompletionOption option, CancellationToken token, Action? onSending = null)
+        HttpCompletionOption option, CancellationToken token, Action? onSending = null, Func<Task>? beforeSending = null)
     {
         var route = RouteOf(request);
         // The account's cooldown wait is announced by the single cooldown path (SyncTransferResourceController), which
         // owns the actual sleep loop, so this seam only waits.
         await limiter.Resources.WaitForRequestAsync(key, token, route).ConfigureAwait(false);
+        if (beforeSending is not null) await beforeSending().ConfigureAwait(false);
         onSending?.Invoke();
         // The request joins the run's in-flight table, so its own sweeper names the route if it waits too long (RQ-090).
         using var inFlight = V2.RunOperations.Begin(V2.RunOperationKind.Http, route);

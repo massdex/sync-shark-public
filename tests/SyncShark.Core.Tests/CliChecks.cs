@@ -1360,7 +1360,10 @@ internal static partial class CliChecks
             "Restore as a copy is a shared explicit notice choice advertised by CLI help");
 
         var folderRecovery = new Massdex.SyncShark.V2.Notice("pair", 32,
-            Massdex.SyncShark.V2.NoticeKind.Info, "folder", "Recovery pending", "folder-delete-unrestored");
+            Massdex.SyncShark.V2.NoticeKind.Info, "folder", "Recovery pending", "folder-delete-unrestored",
+            FolderRecoveryAnchor: "anchor");
+        Require(Massdex.SyncShark.V2.NoticeChoices.Options(folderRecovery).Any(option => option.Choice == "restore-again") &&
+            help.StandardOutput.Contains("restore-again", StringComparison.Ordinal), "Restore again is advertised by shared CLI help");
         Require(Massdex.SyncShark.V2.NoticeChoices.Options(folderRecovery).All(option =>
                 Massdex.SyncShark.V2.NoticeChoices.IsExplicitNoticeChoice(option.Choice)) &&
             Massdex.SyncShark.V2.NoticeChoices.IsRetryNotice(folderRecovery),

@@ -36,6 +36,7 @@ internal sealed partial class DropboxWire
     public Action? BeforeRestore { get; set; }
     public string? LoseCreatedFolderResponse { get; set; }
     public bool RejectRestore { get; set; }
+    public HttpStatusCode RestoreRejectionStatus { get; set; } = HttpStatusCode.Unauthorized;
     public bool LoseRestoreResponse { get; set; }
     public Action? AfterRestore { get; set; }
     public void DeleteRestoredFile(string path) => _items.Remove(path);
@@ -92,7 +93,12 @@ internal sealed partial class DropboxWire
         if (parent.Length > 0 && !(_items.TryGetValue(parent, out var folder) && folder.Folder))
             return NotFound();
         BeforeRestore?.Invoke();
-        if (RejectRestore) return Conflict();
+        if (RejectRestore)
+        {
+            var rejection = Conflict();
+            rejection.StatusCode = RestoreRejectionStatus;
+            return rejection;
+        }
         if (RestoreDifferentRevision) node = node with { Rev = node.Rev + "-different" };
         _items[relative] = node;
         _folderJournal.Add(Metadata(node));

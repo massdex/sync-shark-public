@@ -6,9 +6,54 @@ internal static partial class DropboxChecks
 {
     private static async Task FolderRestoreSafetyChecksAsync()
     {
-        foreach (var mode in new[] { "rejected", "pre-send", "lost-response", "lost-response-live", "confirmed-then-deleted" })
+        foreach (var mode in new[] { "rejected", "pre-send", "lost-response", "lost-response-again", "lost-response-live", "confirmed-then-deleted" })
             await FolderRestoreColdReopenAsync(mode);
         await UnknownFolderRestoreProtectsChildrenAsync();
+        await PermanentRestoreRejectionAsync();
+        await OccupiedFolderRestoreAsync();
+    }
+
+    private static async Task OccupiedFolderRestoreAsync()
+    {
+        foreach (var folderOccupant in new[] { false, true })
+        {
+            using var rig = await TreeRigAsync(60);
+            rig.H.Wire.SeedFolder("big/late");
+            rig.H.Wire.SeedChangePage(rig.Cursor, [rig.H.Wire.ChangeOf("big/late")], false, "occupied-middle");
+            rig.H.Wire.FolderDeleteFeedCursor = "occupied-middle";
+            rig.H.Wire.BeforeMetadataResponse = path =>
+            {
+                if (rig.H.Wire.WholeFolderDeletes == 0 || path != DropboxWire.RootId + "/big/late") return;
+                if (folderOccupant) rig.H.Wire.SeedFolder("big/late");
+                else rig.H.Wire.SeedFile("big/late", "occupant stays");
+            };
+            var creates = rig.H.Wire.Calls.Count(c => c == "/2/files/create_folder_v2");
+            var results = await rig.ApplyAsync(rig.Plan());
+            Require(results.All(r => r.Outcome != Outcome.Uncertain) && rig.Store.UnresolvedIntents("p1").Count == 0 &&
+                rig.H.Wire.Calls.Count(c => c == "/2/files/create_folder_v2") == creates,
+                "occupied folder restore target settles without recreating or replacing it");
+            Require(folderOccupant || rig.Store.OpenNotices("p1").Any(n => n.ReasonKey == "folder-delete-unrestored" &&
+                n.Detail.Contains("path now in use", StringComparison.Ordinal)), "file occupant gets an unrestored notice");
+        }
+    }
+
+    private static async Task PermanentRestoreRejectionAsync()
+    {
+        foreach (var status in new[] { System.Net.HttpStatusCode.Conflict, System.Net.HttpStatusCode.Forbidden,
+                     System.Net.HttpStatusCode.BadRequest })
+        {
+            using var rig = await TreeRigAsync(60);
+            rig.H.Wire.SeedFile("big/late.txt", "late");
+            rig.H.Wire.RejectRestore = true;
+            rig.H.Wire.RestoreRejectionStatus = status;
+            var results = await rig.ApplyAsync(rig.Plan());
+            Require(results.All(r => r.Outcome != Outcome.Uncertain) &&
+                rig.Store.UnresolvedIntents("p1").Count == 0 && rig.H.Wire.Restores.Count == 0,
+                "permanent restore rejection settles without replay or loss of history");
+            Require(rig.Store.OpenNotices("p1").Any(n => n.ReasonKey == "folder-delete-unrestored" &&
+                n.Detail.Contains("restore rejected", StringComparison.Ordinal)),
+                "permanent rejection leaves an actionable unrestored notice");
+        }
     }
 
     private static async Task UnknownFolderRestoreProtectsChildrenAsync()
@@ -71,7 +116,7 @@ internal static partial class DropboxChecks
             if (mode.StartsWith("lost-response", StringComparison.Ordinal))
             {
                 rig.H.Wire.LoseRestoreResponse = true;
-                if (mode == "lost-response")
+                if (mode is "lost-response" or "lost-response-again")
                     rig.H.Wire.AfterRestore = () => rig.H.Wire.DeleteRestoredFile("big/late-a.txt");
             }
             if (mode == "confirmed-then-deleted") rig.H.Wire.AfterRestore = () =>
@@ -79,10 +124,29 @@ internal static partial class DropboxChecks
                 rig.H.Wire.DeleteRestoredFile("big/late-a.txt");
                 rig.H.Wire.RejectRestore = true;
             };
+            var pauseRequested = false;
+            if (mode == "parent-read-pause")
+                rig.H.Wire.AfterBuriedRevisionRead = () => rig.H.Wire.BeforeMetadataResponse = path =>
+                {
+                    // The occupied-target read completes normally. The NEXT read is the production
+                    // parent-folder preflight, whose PairPause.Check throws before transport.
+                    if (path == DropboxWire.RootId + "/big/late-a.txt") pauseRequested = true;
+                };
             var first = new List<ActionResult>();
-            await foreach (var result in executor.ApplyAsync(rig.Plan() with { Gen = gen }, rig.A, writer, default))
-                first.Add(result);
-            Require(first.All(result => result.Outcome == Outcome.Uncertain), mode + " retains unresolved group");
+            var paused = false;
+            using (PairPause.Begin(store, "p1", () => pauseRequested))
+            {
+                try
+                {
+                    await foreach (var result in executor.ApplyAsync(rig.Plan() with { Gen = gen }, rig.A, writer, default))
+                        first.Add(result);
+                }
+                catch (PairPausedException) { paused = true; }
+            }
+            Require(mode == "parent-read-pause" ? paused && first.Count == 0 :
+                first.All(result => result.Outcome == Outcome.Uncertain), mode + " retains unresolved group");
+            Require(mode != "parent-read-pause" || !rig.H.Wire.Calls.Contains("/2/files/restore"),
+                "parent preflight pause never sends a restore");
             Require(mode != "pre-send" || !rig.H.Wire.Calls.Contains("/2/files/restore"),
                 "pre-send failure never reaches files/restore");
             var saved = ProviderState(store);
@@ -101,6 +165,7 @@ internal static partial class DropboxChecks
             rig.H.Wire.AfterRestore = null;
             rig.H.Wire.AfterBuriedRevisionRead = null;
             rig.H.Wire.MetadataFailurePath = null;
+            rig.H.Wire.BeforeMetadataResponse = null;
             executor = new Executor(store, settings, ExecutorChecks.Admission());
             var calls = rig.H.Wire.Calls.Count(call => call == "/2/files/restore");
             var waiting = await executor.ReconcileAsync(store.UnresolvedIntents("p1"), gen, rig.A, writer, default);
@@ -118,8 +183,25 @@ internal static partial class DropboxChecks
                 "repeated verification updates one deduplicated recovery notice");
             var notice = store.OpenNotices("p1").Single(n => n.ReasonKey == "folder-delete-unrestored");
             Require(NoticeChoices.IsRetryNotice(notice) && NoticeChoices.Options(notice).Select(o => o.Choice)
-                .Order().SequenceEqual(new[] { NoticeChoices.RetryNow, NoticeChoices.Ignore, NoticeChoices.OpenDropbox }.Order()),
+                .Order().SequenceEqual(new[] { NoticeChoices.RetryNow, NoticeChoices.RestoreAgain, NoticeChoices.Ignore, NoticeChoices.OpenDropbox }.Order()),
                 "shared GUI/CLI choices provide verification, history and protected ignore");
+            if (mode == "lost-response-again")
+            {
+                var revisionReads = rig.H.Wire.Calls.Count(call => call == "/2/files/list_revisions");
+                var run = new SyncRun(store, executor, new FakeEndpointProvider(), settings, TimeProvider.System);
+                await run.ApplyRetryNoticeChoiceAsync("p1", notice.NoticeId!, NoticeChoices.RestoreAgain, default);
+                Require(store.OpenNotices("p1").Any(n => n.NoticeId == notice.NoticeId),
+                    "explicit authorization does not prematurely close the notice");
+                store.Dispose();
+                store = SqliteStateStore.Open(folder, settings, TimeProvider.System);
+                executor = new Executor(store, settings, ExecutorChecks.Admission());
+                var explicitResult = await executor.ReconcileAsync(store.UnresolvedIntents("p1"), gen, rig.A, writer, default);
+                Require(explicitResult.All(r => r.Outcome != Outcome.Uncertain) && rig.H.Wire.Restores.Count == 2 &&
+                    rig.H.Wire.WholeFolderDeletes == 1 && rig.H.Wire.Calls.Count(call => call == "/2/files/list_revisions") == revisionReads &&
+                    !store.OpenNotices("p1").Any(n => n.ReasonKey == "folder-delete-unrestored"),
+                    "shared Restore again survives cold reopen, restores once and closes the resolved notice");
+                return;
+            }
             if (mode == "lost-response")
             {
                 Require(await writer.ObserveAsync("big/late-a.txt", default) is null &&
@@ -136,6 +218,10 @@ internal static partial class DropboxChecks
                     !store.OpenNotices("p1").Any(n => n.ReasonKey == "folder-delete-unrestored") &&
                     rig.H.Wire.Calls.Count(call => call == "/2/files/restore") == calls,
                     "ignored unknown restore stays protected and silent after another cold reopen");
+                store.AddNotices([notice with { FolderDeleteEpisode = "next-folder-delete", FolderRecoveryAnchor = null }]);
+                Require(store.OpenNotices("p1").Any(n => n.NoticeId == notice.NoticeId &&
+                    n.FolderDeleteEpisode == "next-folder-delete"),
+                    "a later whole-folder deletion reopens the same ignored path notice");
                 return;
             }
             // Advance only this fixture's durable due timestamp, without sleeping or changing production time.

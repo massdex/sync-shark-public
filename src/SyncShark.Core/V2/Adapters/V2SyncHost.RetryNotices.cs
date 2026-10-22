@@ -22,7 +22,7 @@ public sealed partial class V2SyncHost
         {
             if (delivery is not null) await delivery.CompleteAsync(_settings.ProgressDrainTimeout);
         }
-        if (choice is NoticeChoices.Rename or NoticeChoices.RetryNow or NoticeChoices.DeleteReviewed or NoticeChoices.KeepRestore) KickAutoSync(notice.PairId);
+        if (choice is NoticeChoices.RestoreAgain or NoticeChoices.Rename or NoticeChoices.RetryNow or NoticeChoices.DeleteReviewed or NoticeChoices.KeepRestore) KickAutoSync(notice.PairId);
         return message;
     }
 

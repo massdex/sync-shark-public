@@ -157,29 +157,7 @@ internal static partial class DropboxChecks
             "a differing restored revision has one inspection notice and still protects its parent");
     }
 
-    private static async Task FolderTreePauseAsync()
-    {
-        using var rig = await TreeRigAsync(60);
-        rig.H.Wire.SeedFile("big/late.txt", "late");
-        rig.H.Wire.BeforeRestore = () => throw new PairPausedException("p1");
-        var paused = false;
-        try { await rig.ApplyAsync(rig.Plan()); }
-        catch (PairPausedException) { paused = true; }
-        Require(paused && rig.Store.UnresolvedIntents("p1").Any(action =>
-                action.ProviderEffect?.Kind == "whole-folder-group"),
-            "nested restore pause propagates through writer and executor with the anchor retained");
-        rig.H.Wire.BeforeRestore = null;
-        rig.H.Wire.AfterBuriedRevisionRead = () => throw new PairPausedException("p1");
-        // A fresh pre-effect group exercises the nested read catch, rather than replaying an unknown restore.
-        using var second = await TreeRigAsync(60);
-        second.H.Wire.SeedFile("big/late.txt", "late");
-        second.H.Wire.AfterBuriedRevisionRead = () => throw new PairPausedException("p1");
-        paused = false;
-        try { await second.ApplyAsync(second.Plan()); }
-        catch (PairPausedException) { paused = true; }
-        Require(paused && second.H.Wire.Restores.Count == 0,
-            "pause during revision observation is not converted to an item failure");
-    }
+    private static Task FolderTreePauseAsync() => FolderRestoreColdReopenAsync("parent-read-pause");
 
     private static async Task FolderTreeFallbackHistoryAsync()
     {
@@ -188,7 +166,7 @@ internal static partial class DropboxChecks
             [rig.H.Wire.ChangeDeleted("/Pilot/big")], false, "replaced-middle");
         await rig.ApplyAsync(rig.Plan());
         Require(rig.H.Wire.WholeFolderDeletes == 0 &&
-            rig.Store.OpenNotices("p1").Count(notice => notice.ReasonKey == "folder-delete-history") == 1,
-            "a candidate rejected by the pre-read retains its truthful pre-submit warning");
+            !rig.Store.OpenNotices("p1").Any(notice => notice.ReasonKey == "folder-delete-history"),
+            "a candidate rejected by the pre-read closes its unsubmitted history warning");
     }
 }

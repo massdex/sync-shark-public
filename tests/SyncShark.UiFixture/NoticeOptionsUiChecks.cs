@@ -94,6 +94,11 @@ internal static class NoticeOptionsUiChecks
                       [NoticeChoices.ReviewRebind, NoticeChoices.PausePair, NoticeChoices.LeaveAsIs]),
                 "The production notice mapping supplies the three named choices the row renders");
 
+            var restoreOptions = NoticeChoices.Options(new Notice("pair-restore", 32, NoticeKind.Info,
+                "Folder", "Recovery pending", "folder-delete-unrestored", FolderRecoveryAnchor: "anchor"));
+            Check(restoreOptions.Any(option => option.Choice == NoticeChoices.RestoreAgain),
+                "Pending folder recovery exposes Restore again through the shared UI vocabulary");
+
             // (3) A regular notice maps to no choices, exactly as NoticeMapping attaches an empty list.
             var regularNotice = new Notice("pair-regular", 4, NoticeKind.AutoConflict,
                 "Docs/ordinary.txt", "Both versions are retained.", "auto-conflict");

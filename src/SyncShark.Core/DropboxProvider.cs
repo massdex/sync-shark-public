@@ -237,8 +237,8 @@ public sealed partial class DropboxPilotClient(
     private string TransferResourceKey => "dropbox:" + expectedConnection.Normalize().ConnectionId;
     private Task<HttpResponseMessage> SendResourceRequestAsync(HttpRequestMessage request,
         HttpCompletionOption option, CancellationToken token, Action? onSending = null,
-        SyncProviderOperation operation = SyncProviderOperation.Write) =>
-        SyncProviderRequestPacing.SendAsync(_transferLimiter, new(TransferResourceKey, operation), false, httpClient, request, option, token, onSending);
+        SyncProviderOperation operation = SyncProviderOperation.Write, Func<Task>? beforeSending = null) =>
+        SyncProviderRequestPacing.SendAsync(_transferLimiter, new(TransferResourceKey, operation), false, httpClient, request, option, token, onSending, beforeSending);
 
     internal static string? RecoverySpoolRootForTest { get; set; }
 
@@ -657,7 +657,7 @@ public sealed partial class DropboxPilotClient(
         await RestoreRevisionAsync(relativePath, revision, cancellationToken, null, null);
 
     private async Task<PilotRemoteEntry> RestoreRevisionAsync(string relativePath, string revision,
-        CancellationToken cancellationToken, Action? onSending, Action? onRejected)
+        CancellationToken cancellationToken, Func<Task>? onSending, Action? onRejected)
     {
         var path = PilotPath.NormalizeDropboxRelative(relativePath);
         if (string.IsNullOrWhiteSpace(revision)) throw new ArgumentException("A Dropbox revision is required.", nameof(revision));
@@ -1383,7 +1383,7 @@ public sealed partial class DropboxPilotClient(
         => await CreateDirectoryAsync(relativePath, cancellationToken, null, null);
 
     private async Task<PilotRemoteEntry> CreateDirectoryAsync(string relativePath,
-        CancellationToken cancellationToken, Action? onSending, Action? onRejected)
+        CancellationToken cancellationToken, Func<Task>? onSending, Action? onRejected)
     {
         var normalized = PilotPath.NormalizeDropboxRelative(relativePath);
         await EnsureRemoteParentFoldersAsync(normalized, cancellationToken);
@@ -3288,7 +3288,7 @@ public sealed partial class DropboxPilotClient(
     }
 
     private async Task<JsonDocument> PostEffectJsonAsync(string uri, object? payload, CancellationToken cancellationToken,
-        Action? onSending = null, Action? onRejected = null)
+        Func<Task>? onSending = null, Action? onRejected = null)
     {
         for (var attempt = 0; ; attempt++)
         {
@@ -3297,7 +3297,8 @@ public sealed partial class DropboxPilotClient(
             HttpResponseMessage response;
             Interlocked.Increment(ref _providerCallCount);
             if (attempt > 0) V2.RunInstrumentation.Current?.RecordRetry();
-            try { response = await SendResourceRequestAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken, onSending); }
+            try { response = await SendResourceRequestAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken, beforeSending: onSending); }
+            catch (PairPausedException) { throw; } // The pre-send checkpoint callback has not transmitted a request.
             catch (Exception exception) when (exception is HttpRequestException or OperationCanceledException)
             {
                 throw new DropboxEffectUncertainException("The Dropbox effect acknowledgement was interrupted after request transmission.", exception);

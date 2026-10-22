@@ -88,7 +88,7 @@ public sealed partial class V2CliRuntime
                 Console.Error.WriteLine(message);
                 if (NoticeChoices.IsPairRetryNotice(notice))
                     return new SyncCliRunData(pairId, pair.Name, 0, 0, 0, 0, 0, false);
-                if (choice is not (NoticeChoices.Rename or NoticeChoices.RetryNow or NoticeChoices.DeleteReviewed or NoticeChoices.KeepRestore) || !_store.FirstSyncDone(pairId))
+                if (choice is not (NoticeChoices.RestoreAgain or NoticeChoices.Rename or NoticeChoices.RetryNow or NoticeChoices.DeleteReviewed or NoticeChoices.KeepRestore) || !_store.FirstSyncDone(pairId))
                     return new SyncCliRunData(pairId, pair.Name, 0, 0, 0, 0, 0, false)
                     { Deleted = removed, Failed = removalFailures, NeedsVerification = removalUncertain };
                 var retryReport = await _run.IncrementalAsync(pairId, new RunProgressForwarder(Console.Error.WriteLine), cancellationToken);
