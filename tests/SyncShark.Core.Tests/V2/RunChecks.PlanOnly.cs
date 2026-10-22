@@ -175,7 +175,9 @@ internal static partial class RunChecks
             var source = (await fx.A.ObserveAsync("restored.txt", default))!;
             var action = new SyncAction("rrs-ready", 0, ActionKind.CopyNew, Side.A, source.Path,
                 null, source, null, false, null) { SuppressReconciledBaseline = true };
-            const string id = "ready-restore";
+            // A recovery-restore notice's durable id is derived from the pair and the frozen choice, not the
+            // value passed to the Notice constructor: AddNotices replaces it with ShortId.Make("rrs", pair, choice).
+            var id = ShortId.Make("rrs", fx.Pair.PairId, "archive");
             fx.Store.AddNotices([new Notice(fx.Pair.PairId, 0, NoticeKind.Info, source.Path, "verified",
                 SyncRun.RecoveryRestoreReady, id,
                 ConflictOperation: new ConflictNoticeOperation("archive", source.Path, [action], []))]);
@@ -187,6 +189,11 @@ internal static partial class RunChecks
             Require(fx.Store.NoticeById(fx.Pair.PairId, id) is { Closed: false } &&
                 fx.WriterA.Calls + fx.WriterB.Calls == writes,
                 "incomplete root cannot verify a ready restore from stale equal rows");
+            // The failed scan left durable root retry debt with a backoff. Until it is due the next run
+            // still treats the root as incomplete (correctly), so make the retry due to model the
+            // later run the assertion is about: a complete inventory with no read debt.
+            if (fx.Store.SyncRetryAt(fx.Pair.PairId, string.Empty) is { } scanRetry)
+                fx.Store.SaveSyncRetry(fx.Pair.PairId, scanRetry with { RetryAfter = DateTimeOffset.MinValue });
             inventory.ChangesError = inventory.FullError = null;
             await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
             Require(fx.Store.NoticeById(fx.Pair.PairId, id) is { Closed: true },

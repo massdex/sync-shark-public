@@ -608,8 +608,13 @@ internal static partial class RunChecks
 
     private sealed class SignalingWriter(IEndpointWriter inner) : IEndpointWriter, ISourceAbsenceProbe
     {
+        // A pause raised by the delete's source-absence check (F4), like DeferredInventory.Pause above.
+        // The guard must propagate it, never treat it as inconclusive evidence against deletion.
+        public bool PauseAbsence { get; set; }
+
         public async Task<bool?> IsSourceAbsentAsync(ItemState? historical, string path, CancellationToken ct)
         {
+            if (PauseAbsence) throw new PairPausedException("p1");
             if (await ObserveSourceMetadataAsync(path, ct) is not null) return false;
             return await ((ISourceAbsenceProbe)inner).IsSourceAbsentAsync(historical, path, ct);
         }

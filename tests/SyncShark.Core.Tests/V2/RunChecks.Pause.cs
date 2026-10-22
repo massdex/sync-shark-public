@@ -384,6 +384,38 @@ internal static partial class RunChecks
             "deferred evidence pause propagates as paused, not pending or a completed apply");
     }
 
+    // F4 regression: a pause raised by the delete's source-absence check must surface as Paused, delete
+    // nothing, commit no blocked-delete result or notice, and leave the delete for the next run to replan.
+    private static async Task DeleteSourceAbsencePauseAsync(string root)
+    {
+        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System);
+        var fx = Build(suppliedStore: sql, accountId: PauseAccount);
+        fx.A.Seed("gone.txt", "same");
+        var run = fx.Run();
+        await FirstSyncAsync(run, fx);
+        var source = await fx.A.ObserveAsync("gone.txt", CancellationToken.None);
+        await fx.A.DeleteAsync(new SyncAction("remove-source", 6, ActionKind.Delete, Side.A, "gone.txt", null, null,
+            source, false, null), CancellationToken.None);
+        // The delete targets side B, so its absence probe runs against side A's writer.
+        var probe = new SignalingWriter(fx.WriterA) { PauseAbsence = true };
+        fx.Provider.AddWriter(fx.Pair.A, probe);
+        var paused = await run.IncrementalAsync("p1", new RecordingProgress(), CancellationToken.None);
+        Require(paused.Outcome == RunOutcomes.Paused,
+            "a pause during the delete absence check reports Paused");
+        Require(fx.WriterB.Deletes == 0 && await fx.B.ObserveAsync("gone.txt", CancellationToken.None) is not null,
+            "a paused delete absence check deletes nothing");
+        Require(paused.Skipped == 0 && sql.SyncRetryAt("p1", "gone.txt") is null &&
+            !sql.OpenNotices("p1").Any(notice => notice.Path == "gone.txt" &&
+                notice.ReasonKey is DeleteSourceGuard.ReasonKey or SqliteStateStore.BlockedDeleteSummary),
+            "a paused delete absence check commits no Skipped delete and no blocked-delete notice");
+        probe.PauseAbsence = false;
+        var resumed = await run.IncrementalAsync("p1", new RecordingProgress(), CancellationToken.None);
+        Require(resumed.Outcome == RunOutcomes.Complete && resumed.Deleted == 1 && fx.WriterB.Deletes == 1 &&
+            await fx.B.ObserveAsync("gone.txt", CancellationToken.None) is null,
+            "resume replans and completes the paused delete");
+        Console.WriteLine("PASS DeleteSourceAbsencePause");
+    }
+
     internal static async Task PauseChecksAsync(string root)
     {
         using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System);
@@ -428,6 +460,7 @@ internal static partial class RunChecks
         await ScopePauseMidPairAsync(Path.Combine(root, "pause-state-damaged"), PauseAccount,
             new StateDamagedException("Pause state is damaged."));
         await DeferredEvidencePauseAsync(Path.Combine(root, "evidence"));
+        await DeleteSourceAbsencePauseAsync(Path.Combine(root, "absence"));
         await HashPauseAsync(Path.Combine(root, "hash-pause"));
         Console.WriteLine("pause: apply safe-point drain, local hash checkpoint, admission, resume, AutoSync and " +
             "batch scope-pause checks passed");

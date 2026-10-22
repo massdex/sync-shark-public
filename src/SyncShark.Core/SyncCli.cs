@@ -719,7 +719,7 @@ public static class SyncCli
                 text.AppendLine("CSV: " + export.ExportPath);
                 text.AppendLine($"Unsupported read-only reconciliation: {export.UnsupportedReconciles}. " +
                     (export.ExactInitialPlan ? "This is the initial execution plan; deferred evidence may revise it." :
-                        "This export is not an exact execution plan; inspect HOLD and UNSUPPORTED-RECONCILE rows."));
+                        "This export is not an exact execution plan; inspect HOLD, RESTORE and UNSUPPORTED-RECONCILE rows."));
                 text.AppendLine("Nothing was executed and no endpoint content was changed. Planning bookkeeping " +
                                 "(scan cursors and retries) was retained only in the isolated data folder. Make a fresh copy for each preview, " +
                                 "with the app stopped and the database plus its -wal/-shm copied together.");

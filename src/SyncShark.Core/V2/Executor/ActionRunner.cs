@@ -246,7 +246,8 @@ internal sealed class ActionRunner
                     return true;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-            catch (Exception error) when (error is not OutOfMemoryException) { /* Unknown is not admission. */ }
+            // A pause is not inconclusive evidence: propagate it instead of treating the pair as not admitted.
+            catch (Exception error) when (error is not (OutOfMemoryException or PairPausedException)) { /* Unknown is not admission. */ }
         }
         return false;
     }
