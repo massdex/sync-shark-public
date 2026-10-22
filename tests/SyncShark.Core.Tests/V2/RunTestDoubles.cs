@@ -457,8 +457,13 @@ internal sealed class RecordingStore : IStateStore
 
     public IReadOnlyList<ItemState> Live(string rootId, IEnumerable<string>? paths = null) => _inner.Live(rootId, paths);
 
-    public IReadOnlyList<ItemState> LiveUnder(string rootId, IEnumerable<string> pathPrefixes) =>
-        _inner.LiveUnder(rootId, pathPrefixes);
+    public int RootIntakeReads { get; set; }
+    public IReadOnlyList<ItemState> LiveUnder(string rootId, IEnumerable<string> pathPrefixes)
+    {
+        var paths = pathPrefixes.ToArray();
+        if (paths.Contains(string.Empty)) RootIntakeReads++;
+        return _inner.LiveUnder(rootId, paths);
+    }
 
     public List<string> ChildDirectories { get; } = [];
     public IReadOnlyList<ItemState> LiveChildren(string rootId, string directory)
@@ -504,10 +509,12 @@ internal sealed class RecordingStore : IStateStore
     /// <summary>The last committed outcome of each action.</summary>
     public System.Collections.Concurrent.ConcurrentDictionary<string, Outcome> Outcomes { get; } = new(StringComparer.Ordinal);
 
+    public Action<SyncAction>? IntentRecorded { get; set; }
     public void RecordIntent(string pairId, SyncAction a)
     {
         _intents++;
         _inner.RecordIntent(pairId, a);
+        IntentRecorded?.Invoke(a);
         if (_intents == CrashAfterIntent) throw new SimulatedCrash();
     }
 

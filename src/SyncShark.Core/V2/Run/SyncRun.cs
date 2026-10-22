@@ -300,7 +300,7 @@ public sealed partial class SyncRun : ISyncRun
     {
         try
         {
-            if (report.ProviderReached || report.Outcome is RunOutcomes.Complete or RunOutcomes.Partial)
+            if (report.HaltedBy is null && (report.ProviderReached || report.Outcome is RunOutcomes.Complete or RunOutcomes.Partial))
                 _store.CloseNoticeFamily(report.PairId, "autosync-failed");
         }
         catch (Exception error) { RunOutput.Observe(error); }
@@ -786,7 +786,8 @@ public sealed partial class SyncRun : ISyncRun
         ResetRecoveryProtection();
         var current = LeftAlone(pair);
         var retryCount = _store.CountSyncRetries(pairId);
-        var retries = _store.DueSyncRetries(pairId, _time.GetUtcNow(), 256);
+        var retries = _store.DueSyncRetries(pairId, _time.GetUtcNow(), 256)
+            .Where(retry => retry.Path.Length != 0 || retry.Kind != "run").ToArray();
         var deferredBefore = DateTime.UtcNow.Ticks;
         // One intake read; reuse its versioned rows for paths, IDs and acknowledgement.
         IReadOnlyList<SqliteStateStore.DeferredPlanning> deferredPlanning = _store is SqliteStateStore deferredStore
@@ -1398,7 +1399,10 @@ public sealed partial class SyncRun : ISyncRun
         {
             Outcome = string.Equals(report.Outcome, RunOutcomes.Complete, StringComparison.Ordinal)
                 ? RunOutcomes.Partial : report.Outcome,
-            DeletionEvidencePending = evidencePendingPaths
+            DeletionEvidencePending = evidencePendingPaths,
+            // Preserve the effect outcome: retirement of bookkeeping debt must not
+            // manufacture success for failed/skipped/held effects.
+            OutcomeBeforeRetryDebt = report.OutcomeBeforeRetryDebt ?? report.Outcome
         };
 
     private void SettleGapInventory(SideScan side)

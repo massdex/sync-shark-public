@@ -4,12 +4,19 @@ internal static partial class LocalJournalChecks
 {
     internal static async Task HotfixChecksAsync(string folder)
     {
+        try
+        {
+        await ScopeOverflowAsync(Path.Combine(folder, "overflow"));
+        await DeletedAliasAsync(Path.Combine(folder, "deleted-alias"));
+        await AncestorRetryAsync(Path.Combine(folder, "ancestor"));
         await HardLinkReplaySliceAsync(Path.Combine(folder, "hardlink"));
         await VerificationSliceAsync(Path.Combine(folder, "verification"));
         await FairAdmissionAsync();
         await WorkerForegroundAsync(Path.Combine(folder, "worker"));
         await ReplayBudgetAsync(Path.Combine(folder, "replay"));
         Console.WriteLine("PASS bounded journal replay, hard-link scopes, verification slice/progress and fair store admission");
+        }
+        finally { RemoveFixture(folder); }
     }
 
     private static async Task HardLinkReplaySliceAsync(string folder)
@@ -36,6 +43,11 @@ internal static partial class LocalJournalChecks
                 new(LocalItems.ParseObjectId(good.ObjectId).FileId, parent, 120, 0x100, FileAttributes.Normal, "")];
             failure = null; kind = NtfsUsnReadFailure.Transient; return true;
         };
+        var record = new NtfsUsnChange(LocalItems.ParseObjectId(one.ObjectId).FileId, parent, 110, 0x10000, FileAttributes.Normal, "");
+        var names = new LocalJournalNames(def, store, [record], 100);
+        var cached = names.FindAmbiguous(record, "", default);
+        LocalChecks.Require(cached is { Count: 3 } && ReferenceEquals(cached, names.FindAmbiguous(record, "", default)),
+            "ambiguous names reuse one parent batch instead of relisting per record");
         var delta = await inventory.ChangesSinceAsync(snapshot.CursorAfter, store.BeginGeneration(def.RootId, "delta"), _ => true, default);
         LocalChecks.Require(!delta.CursorInvalid && delta.CursorAfter == "0000000000000001:200" &&
             delta.Changes.Any(change => change.Path == "healthy.txt") &&

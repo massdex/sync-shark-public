@@ -7,6 +7,8 @@ internal static class DirectoryLeaseChecks
         if (!OperatingSystem.IsWindows()) return;
         var root = Path.Combine(Path.GetTempPath(), "directory-lease-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
+        try
+        {
         using var parent = PilotDirectoryLease.Open(root);
         using var start = new ManualResetEventSlim();
         var tasks = Enumerable.Range(0, 16).Select(_ => Task.Run(() =>
@@ -43,6 +45,13 @@ internal static class DirectoryLeaseChecks
         catch (IOException) { rejected = true; }
         Require(rejected, "existing junction cannot be adopted as a shared directory");
         Console.WriteLine("PASS directory lease concurrent create-or-open, exclusive create, file and junction rejection");
+        }
+        finally
+        {
+            var junction = Path.Combine(root, "junction");
+            if (Directory.Exists(junction)) Directory.Delete(junction, recursive: false);
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
     }
 
     private static void Require(bool condition, string label)

@@ -61,6 +61,16 @@ internal static partial class AutoSyncChecks
         Require(notice.ReasonKey == "autosync-failed" && notice.Detail.Contains("Reconnect", StringComparison.Ordinal),
             "first auth failure immediately explains the reconnect fix");
         Pass("ImmediateAccessNotice");
+        foreach (var error in new Exception[] { new EndpointAccessException("completion access lost"), new StateDamagedException("completion store damaged") })
+        {
+            await using var completion = new Rig(["p1"]);
+            completion.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Partial, 0) with { Done = 1, Uploaded = 1,
+                CompletionFailed = true, HaltedBy = error });
+            await completion.StartAsync();
+            await completion.ParkedAsync(AutoStatus.Held);
+            Require(completion._store.OpenNotices("p1").Single().Detail.Contains(error is EndpointAccessException ? "Reconnect" : "verified backup"),
+                "counted Partial holds pair and raises correct authority notice in same run");
+        }
     }
 
     internal static async Task ImmediateDiskFullReportAsync()

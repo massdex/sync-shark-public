@@ -124,7 +124,7 @@ public static class NoticeChoices
     /// </summary>
     public const int DeletionReviewRestoreOnlyRule = 41;
 
-    public static bool IsPairRetryNotice(Notice notice) => notice.ReasonKey is "run-history-unavailable" or "run-unavailable" || IsAutoSyncFailure(notice);
+    public static bool IsPairRetryNotice(Notice notice) => notice.ReasonKey is "run-history-unavailable" or "run-unavailable" or "store-maintenance" || IsAutoSyncFailure(notice);
 
     public static bool IsAutoSyncFailure(Notice notice) => notice.ReasonKey?.StartsWith("autosync-failed", StringComparison.Ordinal) == true;
 

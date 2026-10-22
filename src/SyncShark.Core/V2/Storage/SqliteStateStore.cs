@@ -510,7 +510,7 @@ public sealed partial class SqliteStateStore : IStateStore
         if (results.Any(row => row.Action.Kind == ActionKind.Delete))
             RefreshDeleteReviewNotices(transaction, pairNo, pairId, now, exact: false);
         transaction.Commit();
-        CleanupStorageItems();
+        TryResultMaintenance(pairId);
     });
 
     public void RecordIntent(string pairId, SyncAction action) => RecordIntents(pairId, [action]);
@@ -865,6 +865,8 @@ public sealed partial class SqliteStateStore : IStateStore
 
     public void Prune() => InStore(() =>
     {
+        TryResultMaintenance();
+        if (Volatile.Read(ref _resultMaintenanceHalt) is not null) return;
         var cutoff = NowMs() - (long)_settings.HistoryRetention.TotalMilliseconds;
         using var transaction = _connection.BeginTransaction();
         var pin = Pin(transaction);

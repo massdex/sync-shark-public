@@ -4,7 +4,7 @@ namespace Massdex.SyncShark.V2;
 internal sealed record ResolveContext(ulong RootFileId, uint Volume, Func<ulong, ItemState?> KnownById,
     int MaxPaths, Func<NtfsUsnChange, string, CancellationToken, IReadOnlyList<string>?> FindNames,
     Func<ulong, ItemState?, bool>? Ambiguous = null, Action<string>? Fallback = null,
-    Action<NtfsUsnChange, ItemState?, string?, string>? Defer = null);
+    Action<NtfsUsnChange, ItemState?, string?, string>? Defer = null, Func<bool>? ScopeOverflow = null);
 
 /// <summary>Resolves NTFS journal changes into the exact pair-relative paths to re-scan; bounded parent-name and identity reads.</summary>
 internal static class LocalDeltaResolver
@@ -35,6 +35,7 @@ internal static class LocalDeltaResolver
         foreach (var change in changes)
         {
             ct.ThrowIfCancellationRequested();
+            if (context.ScopeOverflow?.Invoke() == true) return Reject("ambiguous scope limit exceeded");
             if (change.FileId == context.RootFileId)
             {
                 if ((change.Reason & RootFatal) != 0) return Reject("root renamed, deleted or reparse identity changed");

@@ -673,6 +673,8 @@ public sealed record RunReport(string PairId, string Outcome, int Done, int Fail
     int Downloaded, int Deleted, int Moved, int KeptBoth, IReadOnlyList<ActionResult> Failures)
 {
     internal bool CompletionFailed { get; init; }
+    internal Exception? HaltedBy { get; init; }
+    internal string? OutcomeBeforeRetryDebt { get; init; }
 
     /// <summary>Inventory/planning reached the provider; individual effect failures have their own notices.</summary>
     public bool ProviderReached { get; init; }

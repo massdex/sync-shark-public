@@ -56,8 +56,7 @@ public static class PilotPath
     // become proof of absence. NEVER use this method to authorize a filesystem effect.
     internal static string NormalizeInventoryPath(string value)
     {
-        ArgumentNullException.ThrowIfNull(value);
-        if (value.Length == 0) return string.Empty; // Inventory/provider root sentinel; never filesystem authority.
+        ArgumentException.ThrowIfNullOrEmpty(value);
         if (value.StartsWith('/') || value.Contains('\\') ||
             value.Any(char.IsControl) || value.Split('/').Any(part => part.Length == 0 || part is "." or ".."))
             throw new ArgumentException("Inventory metadata requires a contained relative provider path.", nameof(value));

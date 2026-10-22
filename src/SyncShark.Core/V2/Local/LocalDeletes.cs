@@ -11,7 +11,8 @@ internal static class LocalDeletes
 {
     /// <param name="decidable">Whether this refresh may decide on a path (selection, artifacts, incomplete subtrees).</param>
     public static IReadOnlyList<Change> Build(IStateStore known, string rootId, IReadOnlyList<string> paths,
-        PilotLocalScan scan, Func<string, bool> decidable, DateTimeOffset scanTime, Func<ItemState, bool>? confirmAbsence = null)
+        PilotLocalScan scan, Func<string, bool> decidable, DateTimeOffset scanTime, Func<ItemState, bool>? confirmAbsence = null,
+        IReadOnlySet<string>? observedObjects = null)
     {
         var present = new HashSet<string>(scan.Entries.Keys, StringComparer.OrdinalIgnoreCase);
         var folders = scan.Entries.Values.Where(entry => entry.Kind == PilotEntryKind.Directory)
@@ -49,7 +50,7 @@ internal static class LocalDeletes
                     (state == DefenderConsent.Keep || state == DefenderConsent.Pending && !ReleasedByFolder(path)))
                     gone.Remove(path);
         }
-        return Emit(stored, gone, scanTime);
+        return Emit(stored, gone, scanTime, observedObjects);
 
         void Add(ItemState row, bool isGone)
         {
@@ -62,7 +63,7 @@ internal static class LocalDeletes
             scan.DefenderHistoryClearFolders is { } cleared && LocalInventory.UnderAny(path, cleared);
     }
 
-    private static List<Change> Emit(Dictionary<string, ItemState> stored, HashSet<string> gone, DateTimeOffset scanTime)
+    private static List<Change> Emit(Dictionary<string, ItemState> stored, HashSet<string> gone, DateTimeOffset scanTime, IReadOnlySet<string>? observedObjects)
     {
         var kept = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var path in stored.Keys.Where(path => !gone.Contains(path)))
@@ -73,7 +74,10 @@ internal static class LocalDeletes
         var changes = new List<Change>();
         foreach (var path in gone.Order(StringComparer.Ordinal))
         {
-            if (PairPath.Ancestors(path).Any(Cascades)) continue;
+            // Explicit alias retirement is path-bound even when a parent also disappeared.
+            // Storage must not infer alias absence merely from another name's upsert.
+            if (PairPath.Ancestors(path).Any(Cascades) &&
+                !(stored[path].Kind == ItemKind.File && stored[path].ObjectId.StartsWith("id:local:", StringComparison.Ordinal) && observedObjects?.Contains(stored[path].ObjectId) == true)) continue;
             if (stored[path].Kind == ItemKind.Folder && kept.Contains(path)) continue;
             changes.Add(new Change(ChangeKind.Delete, stored[path].ObjectId, path, null, scanTime));
         }

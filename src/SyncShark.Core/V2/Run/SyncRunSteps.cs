@@ -1230,9 +1230,8 @@ public sealed partial class SyncRun
     private static ActionResult SafetySkipped(SyncAction action) =>
         new(action.ActionId, Outcome.Skipped, null, null, null, PlanNotices.OutsidePairArea.Detail);
 
-    private async Task<Tally> ExecuteAsync(Plan plan, PairDef pair, ProgressThrottle throttle, CancellationToken ct)
+    private async Task<Tally> ExecuteAsync(Plan plan, PairDef pair, ProgressThrottle throttle, CancellationToken ct, Tally tally)
     {
-        var tally = new Tally(_settings);
         var byId = plan.Actions.ToDictionary(action => action.ActionId, StringComparer.Ordinal);
         tally.Plan(plan.Actions);
         tally.Plan(plan.SkippedActions);
@@ -1304,7 +1303,7 @@ public sealed partial class SyncRun
         }
         foreach (var notice in open)
         {
-            if (notice.ReasonKey is RecoveryRestorePending or RecoveryRestoreReady) continue;
+            if (notice.ReasonKey is RecoveryRestorePending or RecoveryRestoreReady or "store-maintenance") continue;
             if (notice.Repair is not null)
             {
                 if (notice.NoticeId is not null && RepairSynced(notice, plan, evaluated, unsettled))

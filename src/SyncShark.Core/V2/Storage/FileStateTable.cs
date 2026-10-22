@@ -249,12 +249,13 @@ internal sealed class FileStateTable
                 (delta.IncludesPath?.Invoke(change.Path) ?? true))
             .Select(change => change.ObjectId).ToHashSet(StringComparer.Ordinal);
         using var batch = new StoreBatch(_connection, _settings.StoreBatchRows);
+        var retainedAliases = new HashSet<string>(StringComparer.Ordinal);
         foreach (var change in delta.Changes)
-            if (change.Kind == ChangeKind.Delete) Delete(change, rootNo, suppressed, batch, delta.IncludesPath, delta.ChangedObject);
+            if (change.Kind == ChangeKind.Delete) Delete(change, rootNo, suppressed, batch, delta.IncludesPath, delta.ChangedObject, retainedAliases);
         var now = _clock.GetUtcNow();
         foreach (var change in delta.Changes)
             if (change.Kind == ChangeKind.Upsert && (delta.IncludesPath?.Invoke(change.Path) ?? true))
-                Step(batch, Upsert(change, rootNo, suppressed, now, batch, delta.IncludesPath, confirmDisplacement));
+                Step(batch, Upsert(change, rootNo, suppressed, now, batch, delta.IncludesPath, confirmDisplacement, retainedAliases));
         batch.Flush();
     }
 
@@ -336,16 +337,30 @@ internal sealed class FileStateTable
     // object is upserted later in the delta is a move written as Delete(old) + Upsert(new) and is left for that
     // Upsert, which removes it in the same step as the insertion. One step per removed row.
     private void Delete(Change change, long rootNo, HashSet<string> suppressed, StoreBatch batch,
-        Func<string, bool>? include, Action<string>? changedObject)
+        Func<string, bool>? include, Action<string>? changedObject, HashSet<string> retainedAliases)
     {
         var deletedAt = change.DeletedUtc ?? _clock.GetUtcNow();
         foreach (var row in ExactRows(rootNo, change, batch.Transaction))
-            if (!suppressed.Contains(row.ObjectId) && (include?.Invoke(RowCodec.Join(row.Path, row.Name)) ?? true))
-                {
-                var removed = RemoveAt(rootNo, row.DirNo, row.Name, deletedAt, suppressed, batch);
+        {
+            var path = RowCodec.Join(row.Path, row.Name);
+            // Retire only the explicitly observed missing spelling. Another live local
+            // alias suppresses the entity tombstone, not this path's inventory removal.
+            var alias = row.ObjectId.StartsWith("id:local:", StringComparison.Ordinal) &&
+                StoreSchema.Scalar(_connection, batch.Transaction,
+                    "SELECT 1 FROM file_state INDEXED BY fs_obj WHERE root_no=$r AND object_id=$o LIMIT 1 OFFSET 1;",
+                    ("$r", rootNo), ("$o", row.ObjectId)) is not null &&
+                _reader.AtKey(rootNo, path, batch.Transaction).Any(entry => entry.Item.Kind == ItemKind.File &&
+                    entry.Item.ObjectId == row.ObjectId && string.Equals(entry.Item.Path, path, StringComparison.Ordinal));
+            if ((!suppressed.Contains(row.ObjectId) || alias && string.Equals(path, change.Path, StringComparison.Ordinal)) &&
+                (include?.Invoke(path) ?? true))
+            {
+                if (alias && suppressed.Contains(row.ObjectId)) retainedAliases.Add(row.ObjectId);
+                var removed = RemoveAt(rootNo, row.DirNo, row.Name, deletedAt,
+                    id => suppressed.Contains(id) || alias, batch);
                 if (removed) changedObject?.Invoke(row.ObjectId);
                 Step(batch, removed);
             }
+        }
     }
 
     private List<RowRef> ExactRows(long rootNo, Change change, SqliteTransaction transaction)
@@ -384,7 +399,7 @@ internal sealed class FileStateTable
     // single other-spelling row of another object is a replacement that changed case (Docs/file.txt by
     // docs/File.txt) and is displaced with its evidence; a known clash (two or more spellings) is kept (RQ-039).
     private bool Upsert(Change change, long rootNo, HashSet<string> suppressed, DateTimeOffset now, StoreBatch batch,
-        Func<string, bool>? include, Func<ItemState, bool>? confirmDisplacement)
+        Func<string, bool>? include, Func<ItemState, bool>? confirmDisplacement, IReadOnlySet<string> retainedAliases)
     {
         var state = change.State
             ?? throw new ArgumentException("An upsert change must carry its state.", nameof(change));
@@ -404,7 +419,7 @@ internal sealed class FileStateTable
         var objectRows = _reader.ReadObject(rootNo, state.ObjectId, batch.Transaction);
         // Multiple local file names may be hard-link aliases, not successive positions of a move.
         // Provider objects and folders still use the existing move cleanup semantics.
-        var aliases = objectRows.Count > 1 && state.Kind == ItemKind.File &&
+        var aliases = (objectRows.Count > 1 || retainedAliases.Contains(state.ObjectId)) && state.Kind == ItemKind.File &&
             state.ObjectId.StartsWith("id:local:", StringComparison.Ordinal);
         foreach (var moved in objectRows)
             if (!aliases && !IsExact(moved.DirNo, moved.Name, target, name) && (include?.Invoke(moved.Path) ?? true))
