@@ -956,6 +956,12 @@ if (args is ["--v2-conflict-transition-checks"])
     return 0;
 }
 
+if (args is ["--v2-conflict-retirement-checks"])
+{
+    await Massdex.SyncShark.V2.ConflictRetirementChecks.RunAsync();
+    return 0;
+}
+
 if (args is ["--v2-planner-checks"])
 {
     await Massdex.SyncShark.V2.PlannerChecks.RunAsync();

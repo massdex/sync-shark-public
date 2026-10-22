@@ -99,6 +99,12 @@ public sealed partial class SyncRun
             .Select(notice => notice.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var uncertain = OutstandingFootprints(pair.PairId).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var reasons = FailureReasons(plan, tally);
+        // An unresolved tagged conflict successor keeps its frozen explanation even when this pass fails it in
+        // the apply phase rather than in reconciliation.
+        var conflictSuccessors = plan.Actions
+            .Where(action => action.ConflictTransitionKey is not null && !action.SuppressReconciledBaseline)
+            .GroupBy(action => action.Path, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
         var notices = _store.OpenNotices(pair.PairId).Where(PlanNotices.HasPathScope).Where(notice => notice.ReasonKey is "sync-retry" or "deletion-history-unavailable")
             .ToLookup(notice => notice.Path, StringComparer.OrdinalIgnoreCase);
         var sourceBlocked = plan.Actions.Where(action => tally.WasDeleteSourceBlocked(action.ActionId))
@@ -177,13 +183,15 @@ public sealed partial class SyncRun
                 if (old is not null) _store.SaveSyncRetry(pair.PairId, old);
                 continue;
             }
-            SaveFailedRetry(pair, path, reasons.GetValueOrDefault(path), old);
+            SaveFailedRetry(pair, path, reasons.GetValueOrDefault(path), old,
+                conflictSuccessors.GetValueOrDefault(path));
         }
         _store.RefreshInterruptedDeleteNotice(pair.PairId);
         _store.RefreshBlockedDeleteNotice(pair.PairId);
     }
 
-    private void SaveFailedRetry(PairDef pair, string path, string? reason, SyncRetry? old)
+    private void SaveFailedRetry(PairDef pair, string path, string? reason, SyncRetry? old,
+        SyncAction? conflictSuccessor = null)
     {
         if (old?.Kind == "decision") return;
         // The evidence probe owns the attempt counter for restored (reprobe) rows; counting again here
@@ -198,11 +206,27 @@ public sealed partial class SyncRun
             RetryAfter = _time.GetUtcNow().AddSeconds(Math.Min(300, 10 * Math.Pow(2, Math.Min(attempts - 1, 5))))
         };
         _store.SaveSyncRetry(pair.PairId, retry);
-        if (retry.DeleteBlockedDetail is null && !retry.ReprobeEvidence && retry.LastError != DropboxQuota.Detail && attempts >= 1 && retry.Kind is not ("planning" or "recovery"))
+        // A frozen conflict successor owns its dedicated Retry-only explanation from its first failure, however
+        // that failure arrives: the generic sync-retry notice (with Ignore) must never stand in for it. The
+        // existing notice fold keeps an already-open, more specific explanation (for example an occupied copy
+        // name) and closes any generic notice at this path.
+        if (conflictSuccessor is { ConflictTransitionKey: not null, SuppressReconciledBaseline: false } tagged)
+            WriteNotices([ConflictCopyBlockedNotice(pair.PairId, tagged, retry.LastError)]);
+        else if (retry.DeleteBlockedDetail is null && !retry.ReprobeEvidence && retry.LastError != DropboxQuota.Detail && attempts >= 1 && retry.Kind is not ("planning" or "recovery"))
             WriteNotices([new Notice(pair.PairId, 40, NoticeKind.Info, path,
                 $"Sync will retry this item later ({attempts} attempts): {retry.LastError}. Options: retry now / exclude / ignore.", "sync-retry",
                 FolderInspection: _store.Live(pair.A.RootId, [path]).Concat(_store.Live(pair.B.RootId, [path]))
                     .Any(item => item.Kind == ItemKind.Folder))]);
+    }
+
+    /// <summary>The one Retry-only notice a tagged conflict successor carries until it is verified or retired.</summary>
+    private static Notice ConflictCopyBlockedNotice(string pairId, SyncAction successor, string? reason)
+    {
+        var cause = string.IsNullOrWhiteSpace(reason) ? "the copy could not be completed" : reason;
+        return new Notice(pairId, successor.Rule, NoticeKind.Info, successor.Path,
+            $"The keep-both copy could not be placed yet: {cause} " +
+            "Both original versions remain protected; Retry checks this copy again and never overwrites.",
+            ExecutionReasons.ConflictCopyBlocked, ExecutionReasons.ConflictCopyNoticeId(pairId, successor));
     }
 
     private static Dictionary<string, string> FailureReasons(Plan plan, Tally tally)
@@ -246,14 +270,20 @@ public sealed partial class SyncRun
             }
             var reason = reasons.GetValueOrDefault(path) ?? _store.SyncRetryAt(pair.PairId, path)?.LastError ??
                 "The reviewed effect could not be completed in this run.";
+            var conflictSuccessor = reviewed[path].FirstOrDefault(action =>
+                action.ConflictTransitionKey is not null && !action.SuppressReconciledBaseline);
             _store.SaveSyncRetry(pair.PairId, new(path, "first-sync", 1, reason, DateTimeOffset.MinValue,
                 Held: held.GetValueOrDefault(path), ReviewedActions: reviewed[path].ToArray(),
                 HeldReviewed: held.ContainsKey(path), HeldExpected: held.TryGetValue(path, out var heldItem)
                     ? _store.Live(heldItem.Local == Side.A ? pair.A.RootId : pair.B.RootId, [path]).FirstOrDefault() : null,
                 PendingNotice: _store.SyncRetryAt(pair.PairId, path)?.PendingNotice));
-            if (reason == DropboxQuota.Detail) continue;
-            WriteNotices([new Notice(pair.PairId, 40, NoticeKind.Info, path,
-                reason + " This item is not synced yet and will be retried. Other items can continue. Options: retry now / exclude / ignore.", "sync-retry")]);
+            // A tagged conflict successor gets only its dedicated Retry-only explanation, even for a pair-wide
+            // quota condition: the generic notice's Ignore cannot resolve the frozen original authority.
+            if (conflictSuccessor is not null)
+                WriteNotices([ConflictCopyBlockedNotice(pair.PairId, conflictSuccessor, reason)]);
+            else if (reason != DropboxQuota.Detail)
+                WriteNotices([new Notice(pair.PairId, 40, NoticeKind.Info, path,
+                    reason + " This item is not synced yet and will be retried. Other items can continue. Options: retry now / exclude / ignore.", "sync-retry")]);
         }
     }
 }

@@ -185,8 +185,17 @@ public sealed partial class Executor : IExecutor
             intent.Source is not { Hash: not null })
             return (observed with { Outcome = Outcome.Uncertain,
                 Reason = "The retained conflict successor could not be verified; Retry checks it again." }, false);
-        if (observed.Reason == EffectResolver.NotApplied && intent.ProviderEffect is null)
+        if (observed.Reason == EffectResolver.NotApplied &&
+            intent.ProviderEffect is null or { Kind: "upload-rejected" or "upload-commit" })
         {
+            // The resolver has already withheld NotApplied for a live/unknown submit within grace.
+            // D86 keeps both current versions: a post-crash source edit is not a reason to retry stale bytes forever.
+            var source = intent.Target == Side.A ? b : a;
+            var current = await source.ObserveAsync(intent.Source.Path, ct).ConfigureAwait(false);
+            if (current is not { Kind: ItemKind.File, Hash: not null })
+                return (observed with { Outcome = Outcome.Uncertain,
+                    Reason = $"The conflict source '{intent.Source.Path}' is absent or its content cannot be verified. Restore access to that file, then Retry." }, false);
+            intent = intent with { Source = current, ProviderEffect = null };
             var committer = new StoreCommitter(_store, _storeGate, pairId, gen);
             var runner = new ActionRunner(committer, _settings, _admission, pairId, a, b, [], new(),
                 new DropboxQuota(_store.Pair(pairId),
@@ -200,7 +209,7 @@ public sealed partial class Executor : IExecutor
         {
             var target = intent.Target == Side.A ? a : b;
             var occupant = await target.ObserveAsync(intent.Path, ct).ConfigureAwait(false);
-            if (occupant is not null)
+            if (occupant is not null && Content.SameContent(occupant, intent.Source) == false)
             {
                 var notice = new Notice(pairId, 27, NoticeKind.Info, intent.Path,
                     $"Keep-both copy could not be placed: the conflict-copy name '{intent.Path}' is already taken. " +

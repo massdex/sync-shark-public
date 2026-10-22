@@ -484,11 +484,17 @@ internal sealed class InMemoryStateStore : IStateStore
             if (a.ConflictTransitionKey is not null && !a.SuppressReconciledBaseline &&
                 r.Outcome is Outcome.Skipped or Outcome.Refused)
                 r = r with { Outcome = Outcome.Failed };
-            if (a.ConflictTransitionKey is not null && r.Outcome == Outcome.Done)
+            // Mirror the real store: a tagged successor's dedicated notice closes on any actual retirement
+            // (Done, or an explicitly suppressed Skipped/Refused), in the same result path as its intent.
+            if (a.ConflictTransitionKey is not null && r.Outcome is Outcome.Done or Outcome.Skipped or Outcome.Refused)
                 CloseNotice(ExecutionReasons.ConflictCopyNoticeId(pairId, a), "resolved");
             var intents = IntentsFor(pairId);
             var intentRow = intents.TryGetValue(a.ActionId, out var knownIntent) ? knownIntent.RowId : ++_nextIntentRowId;
-            if (r.Outcome is Outcome.Done or Outcome.Skipped)
+            // Production deletes a resolved intent for Done, Skipped and Refused. For an untagged Refused this
+            // double keeps its old shape; a tagged actual retirement must mirror production instead of closing
+            // the notice while leaving the intent row behind.
+            if (r.Outcome is Outcome.Done or Outcome.Skipped ||
+                (a.ConflictTransitionKey is not null && r.Outcome == Outcome.Refused))
             {
                 intents.Remove(a.ActionId);
                 // M1: a resolved or retired intent never leaves a parked verification retry behind.

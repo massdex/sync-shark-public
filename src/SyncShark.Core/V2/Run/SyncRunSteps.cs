@@ -428,13 +428,19 @@ public sealed partial class SyncRun
                 if (!byId.TryGetValue(result.ActionId, out var action)) continue;
                 var retry = reconcileRetries.TryGetValue(result.ActionId, out var known)
                     ? known : _store.SyncRetryAt(pair.PairId, action.Path);
+                // A frozen conflict successor owns a dedicated Retry-only notice from its first failure onward,
+                // whether the failure is Uncertain, Failed, or an unresolved skip; never the generic Ignore path.
+                var conflictSuccessor = action.ConflictTransitionKey is not null && !action.SuppressReconciledBaseline
+                    ? action : null;
                 if (result.Outcome is Outcome.Uncertain or Outcome.Failed)
-                    SaveFailedRetry(pair, action.Path, result.Reason, retry);
+                    SaveFailedRetry(pair, action.Path, result.Reason, retry, conflictSuccessor);
                 else if (result.Outcome == Outcome.Done)
                     _store.ClearSyncRetry(pair.PairId, action.Path);
                 else if (result.Outcome is Outcome.Skipped or Outcome.Refused)
                 {
-                    if (retry is not null) _store.SaveSyncRetry(pair.PairId, retry with { RetryAfter = DateTimeOffset.MinValue });
+                    if (conflictSuccessor is not null)
+                        SaveFailedRetry(pair, action.Path, result.Reason, retry, conflictSuccessor);
+                    else if (retry is not null) _store.SaveSyncRetry(pair.PairId, retry with { RetryAfter = DateTimeOffset.MinValue });
                     touched.Add(action.Path);
                     if (action.FromPath is not null) touched.Add(action.FromPath);
                 }

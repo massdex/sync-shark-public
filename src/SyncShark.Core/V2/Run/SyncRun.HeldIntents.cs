@@ -32,7 +32,11 @@ public sealed partial class SyncRun
             "This path belongs to a nested pair or a product-owned folder. Its pending effect was retired without applying it or marking the item synced. " +
             "Sync it through the owning pair, or change the pair boundaries explicitly if ownership is wrong. Ignore dismisses this information; the boundary stays protected.",
             "permanent-boundary")]);
-        _store.CommitResult(pair.PairId, generation, action,
+        // A tagged conflict successor needs the explicit-retirement mark so the store does not re-coerce its
+        // retirement into Failed and retain it forever. Untagged intents keep their existing contract.
+        // No effect and no baseline is written either way.
+        var retiring = action.ConflictTransitionKey is null ? action : action with { SuppressReconciledBaseline = true };
+        _store.CommitResult(pair.PairId, generation, retiring,
             new ActionResult(action.ActionId, Outcome.Skipped, null, null, null, "Permanent ownership boundary; not applied."));
         if (_store.SyncRetryAt(pair.PairId, action.Path) is { Kind: "sync", Held: null })
             _store.ClearSyncRetry(pair.PairId, action.Path);
@@ -42,7 +46,11 @@ public sealed partial class SyncRun
     // link/stub summary already explains the cause, so no new notice is raised; only the pending effect is retired.
     private void RetireProtectedIntent(PairDef pair, SyncAction action, long generation, string reason)
     {
-        _store.CommitResult(pair.PairId, generation, action,
+        // A tagged conflict successor needs the explicit-retirement mark so it is truly retired (and its
+        // dedicated notice closes) instead of coerced back to Failed and replayed forever. Untagged intents
+        // keep their existing contract.
+        var retiring = action.ConflictTransitionKey is null ? action : action with { SuppressReconciledBaseline = true };
+        _store.CommitResult(pair.PairId, generation, retiring,
             new ActionResult(action.ActionId, Outcome.Skipped, null, null, null, reason));
         if (_store.SyncRetryAt(pair.PairId, action.Path) is { Kind: "sync", Held: null })
             _store.ClearSyncRetry(pair.PairId, action.Path);

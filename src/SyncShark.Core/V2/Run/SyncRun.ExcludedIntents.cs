@@ -57,8 +57,13 @@ public sealed partial class SyncRun
             {
                 // Notice first: interruption can leave an extra warning, never a silently settled intent.
                 RaiseExcludedIntentNotice(pair, [intent]);
-                _store.CommitResult(pair.PairId, gen, intent,
-                    intent.ProviderEffect?.Kind == SyncDirectDownloadCheckpoint.Kind ? observed :
+                // The user's exclusion explicitly retires this pending authority. Only a tagged conflict successor
+                // needs the mark, so the store does not coerce its retirement into Failed and retain it (and its
+                // notice) forever; untagged intents keep their existing contract.
+                var retired = intent.ConflictTransitionKey is null
+                    ? intent : intent with { SuppressReconciledBaseline = true };
+                _store.CommitResult(pair.PairId, gen, retired,
+                    retired.ProviderEffect?.Kind == SyncDirectDownloadCheckpoint.Kind ? observed :
                     new ActionResult(intent.ActionId, Outcome.Skipped, null, null, null, ExcludedIntentReason));
             }
         }

@@ -426,7 +426,11 @@ public sealed partial class SqliteStateStore : IStateStore
                 committed is Outcome.Skipped or Outcome.Refused)
                 committed = Outcome.Failed;
             _intents.Commit(transaction, pairNo, retainedAction, committed, now);
-            if (action.ConflictTransitionKey is not null && committed == Outcome.Done)
+            // A tagged successor closes its dedicated Retry-only notice whenever it actually retires: its copy
+            // succeeded, or the frozen intent was explicitly retired (re-inclusion, exclusion, ownership boundary,
+            // link or stub) and committed Skipped/Refused. Any other Skipped/Refused is coerced to Failed above,
+            // so the notice stays open with its retained intent. Closure shares this result transaction.
+            if (action.ConflictTransitionKey is not null && committed is Outcome.Done or Outcome.Skipped or Outcome.Refused)
                 _notices.CloseResolved(transaction, pairNo, ExecutionReasons.ConflictCopyNoticeId(pairId, action), "resolved");
             // M1: a resolved or retired intent must not leave a parked verification retry behind. Clear only the
             // parked shape this run owns (Kind sync, no held evidence, deadline at MaxValue); decision, deletion

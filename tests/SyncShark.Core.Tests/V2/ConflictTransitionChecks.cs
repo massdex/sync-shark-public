@@ -23,8 +23,15 @@ internal static class ConflictTransitionChecks
         await BeforeEitherCopyAsync();
         await AfterOneCopyAsync();
         await OccupiedTargetAsync();
+        await ResumedFailureIsRetryOnlyAsync();
         await OrdinaryNotAppliedStaysSkippedAsync();
-        Console.WriteLine("Conflict transition checks passed: cold-reopen resume, one-copy observation, occupancy and ordinary intent.");
+        await ChangedSourceAndCheckpointAsync(null);
+        await ChangedSourceAndCheckpointAsync("upload-rejected");
+        await ChangedSourceAndCheckpointAsync("upload-commit");
+        await PendingCheckpointDoesNotReplayAsync();
+        await UnknownCopyContentStaysUncertainAsync();
+        await TransitionRollbackAsync();
+        Console.WriteLine("Conflict transition checks passed: cold-reopen resume, one-copy observation, occupancy, Retry-only failure and ordinary intent.");
     }
 
     /// <summary>Forget committed, neither copy attempted; a cold restart resumes both exactly once.</summary>
@@ -206,6 +213,60 @@ internal static class ConflictTransitionChecks
             "both originals still keep their own content after the retried copy");
     }
 
+    /// <summary>A tagged successor's first resumed failure is Retry-only: never the generic sync-retry notice with Ignore.</summary>
+    private static async Task ResumedFailureIsRetryOnlyAsync()
+    {
+        var rig = NewRig("conflict-transition-resumed-failure");
+        SyncAction[] successors;
+        using (var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System))
+        {
+            var gen = SeedBaseline(store, rig);
+            Plan plan;
+            (plan, _, successors) = await ConflictPlanAsync(store, rig, gen, CancellationToken.None);
+            rig.WriterA.PutFailure = FailConflictCopy;
+            rig.WriterB.PutFailure = FailConflictCopy;
+            try { await ApplyAsync(new Executor(store, Settings, Admission()), plan, rig.WriterA, rig.WriterB); }
+            finally
+            {
+                rig.WriterA.PutFailure = null;
+                rig.WriterB.PutFailure = null;
+            }
+            Require(store.UnresolvedIntents(PairId).Count == 2,
+                "both successors stay unresolved after their initial apply failure");
+        }
+        // The approved replay refreshes the current source, so fail the resumed write itself. The first failure
+        // of the resumed create-only attempt must still carry the dedicated Retry-only notice.
+        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
+        var run = NewRun(reopened, rig);
+        rig.WriterA.PutFailure = FailConflictCopy;
+        rig.WriterB.PutFailure = FailConflictCopy;
+        try
+        {
+            var report = await run.IncrementalAsync(PairId, new RecordingProgress(), CancellationToken.None);
+            Require(report.KeptBoth == 0, "the failed resumed copy never turns into a newest-wins original");
+        }
+        finally
+        {
+            rig.WriterA.PutFailure = null;
+            rig.WriterB.PutFailure = null;
+        }
+        Require(reopened.UnresolvedIntents(PairId).Count == 2 &&
+            reopened.UnresolvedIntents(PairId).All(intent => intent.ConflictTransitionKey is not null),
+            "the failed copies stay unresolved and tagged for the next verification");
+        var notices = reopened.OpenNotices(PairId)
+            .Where(notice => successors.Any(successor => successor.Path == notice.Path)).ToArray();
+        Require(notices.Length == 2 && notices.All(notice => notice.ReasonKey == ExecutionReasons.ConflictCopyBlocked),
+            "each tagged successor's first resumed failure raises its dedicated keep-both-copy-blocked notice");
+        Require(notices.All(notice => NoticeChoices.IsRetryNotice(notice) &&
+                NoticeChoices.Options(notice).Select(option => option.Choice).SequenceEqual(new[] { NoticeChoices.RetryNow })),
+            "the failed-copy notice offers Retry only, never Ignore");
+        Require(notices.All(notice => notice.Detail.Contains("original versions remain protected", StringComparison.Ordinal)),
+            "the Retry-only notice keeps the protection explanation");
+        Require(!reopened.OpenNotices(PairId).Any(notice => notice.ReasonKey == "sync-retry" &&
+                successors.Any(successor => successor.Path == notice.Path)),
+            "no generic sync-retry notice (whose Ignore would abandon the conflict) stands at the copy path");
+    }
+
     /// <summary>An ordinary not-applied intent is still skipped, never resumed through the transition path.</summary>
     private static async Task OrdinaryNotAppliedStaysSkippedAsync()
     {
@@ -231,6 +292,118 @@ internal static class ConflictTransitionChecks
             "ordinary reconciliation still performs no effect");
         Require(reopened.UnresolvedIntents(PairId).Count == 0,
             "the ordinary intent retires exactly as before, without the conflict-transition exception");
+    }
+
+    private static async Task TransitionRollbackAsync()
+    {
+        var rig = NewRig("conflict-transition-rollback");
+        using (var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System))
+        {
+            var gen = SeedBaseline(store, rig);
+            var (_, forget, successors) = await ConflictPlanAsync(store, rig, gen, CancellationToken.None);
+            store.SavePair(rig.Pair with { PairId = "other-pair" });
+            // The first successor inserts; ownership validation of the second throws inside the same transaction.
+            store.RecordIntent("other-pair", successors[1]);
+            var failed = false;
+            try { store.CommitConflictTransition(PairId, gen, forget, new(forget.ActionId, Outcome.Done, null, null, null, null), successors); }
+            catch (InvalidOperationException) { failed = true; }
+            Require(failed, "transition failure is injected after the first successor insert");
+        }
+        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
+        Require(reopened.Baselines(PairId, [SharedKey]).Count == 1 && reopened.UnresolvedIntents(PairId).Count == 0,
+            "cold reopen after transaction rollback retains correspondence and neither successor");
+    }
+
+    private static async Task UnknownCopyContentStaysUncertainAsync()
+    {
+        var rig = NewRig("conflict-transition-unknown-copy");
+        SyncAction successor;
+        using (var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System))
+        {
+            var gen = SeedBaseline(store, rig);
+            var (_, forget, successors) = await ConflictPlanAsync(store, rig, gen, CancellationToken.None);
+            store.CommitConflictTransition(PairId, gen, forget, new(forget.ActionId, Outcome.Done, null, null, null, null), successors);
+            successor = successors.Single(action => action.Target == Side.B);
+            rig.B.Seed(successor.Path, "edit-a", versionId: "landed-copy");
+        }
+        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
+        var result = (await new Executor(reopened, Settings, Admission()).ReconcileAsync([successor],
+            reopened.BeginGeneration(rig.Pair.A.RootId, "test"), rig.WriterA, new HashlessWriter(rig.WriterB), CancellationToken.None)).Single();
+        Require(result.Outcome == Outcome.Uncertain && rig.WriterB.Puts == 0,
+            "hash-unknown possible completed copy stays verify-only, never Done or replayed");
+        Require(!reopened.OpenNotices(PairId).Any(notice => notice.Detail.Contains("already taken", StringComparison.Ordinal)),
+            "unknown copy content never tells the user to rename a possibly completed copy");
+    }
+
+    private sealed class HashlessWriter(IEndpointWriter inner) : IEndpointWriter
+    {
+        public async Task<ItemState?> ObserveAsync(string path, CancellationToken ct) =>
+            await inner.ObserveAsync(path, ct) is { } item ? item with { Hash = null } : null;
+        public Task<Stream> OpenReadAsync(ItemState item, CancellationToken ct) => inner.OpenReadAsync(item, ct);
+        public Task<ItemState> PutAsync(SyncAction action, Stream content, CancellationToken ct) => inner.PutAsync(action, content, ct);
+        public Task<ItemState> MoveAsync(SyncAction action, CancellationToken ct) => inner.MoveAsync(action, ct);
+        public Task DeleteAsync(SyncAction action, CancellationToken ct) => inner.DeleteAsync(action, ct);
+        public Task<ItemState> MkDirAsync(string path, CancellationToken ct) => inner.MkDirAsync(path, ct);
+        public Task<RecoveryRef> PreserveAsync(ItemState victim, string actionId, CancellationToken ct) => inner.PreserveAsync(victim, actionId, ct);
+    }
+
+    private static async Task PendingCheckpointDoesNotReplayAsync()
+    {
+        var rig = NewRig("conflict-transition-pending-checkpoint");
+        using (var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System))
+        {
+            var gen = SeedBaseline(store, rig);
+            var (_, forget, successors) = await ConflictPlanAsync(store, rig, gen, CancellationToken.None);
+            store.CommitConflictTransition(PairId, gen, forget, new(forget.ActionId, Outcome.Done, null, null, null, null), successors);
+            foreach (var successor in successors)
+                store.RecordIntent(PairId, successor with { ProviderEffect = new("upload-commit", "session", DateTimeOffset.UtcNow) });
+        }
+        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
+        var results = await new Executor(reopened, Settings, Admission()).ReconcileAsync(reopened.UnresolvedIntents(PairId),
+            reopened.BeginGeneration(rig.Pair.A.RootId, "test"), rig.WriterA, rig.WriterB, CancellationToken.None);
+        Require(results.All(result => result.Outcome == Outcome.Uncertain) && rig.WriterA.Puts + rig.WriterB.Puts == 0,
+            "a checkpoint within the unknown-commit grace remains verify-only with no replay");
+    }
+
+    private static async Task ChangedSourceAndCheckpointAsync(string? checkpointKind)
+    {
+        var rig = NewRig("conflict-transition-source-" + (checkpointKind ?? "none"));
+        SyncAction[] successors;
+        using (var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System))
+        {
+            var gen = SeedBaseline(store, rig);
+            var (_, forget, frozen) = await ConflictPlanAsync(store, rig, gen, CancellationToken.None);
+            successors = frozen;
+            store.CommitConflictTransition(PairId, gen, forget,
+                new(forget.ActionId, Outcome.Done, null, null, null, null), successors);
+            if (checkpointKind is not null)
+                foreach (var successor in successors)
+                    store.RecordIntent(PairId, successor with { ProviderEffect = new(checkpointKind, "session",
+                        DateTimeOffset.UtcNow - Settings.UnknownCommitGracePeriod - TimeSpan.FromMinutes(1)) });
+        }
+        var admitted = 0;
+        Exception? CheckAdmission(SyncAction action)
+        {
+            Require(SyncTransferResourceController.Lease.Current.Value is not null,
+                "resumed conflict effect holds the shared transfer admission lease");
+            Interlocked.Increment(ref admitted);
+            return null;
+        }
+        rig.WriterA.PutFailure = CheckAdmission;
+        rig.WriterB.PutFailure = CheckAdmission;
+        rig.A.Seed(OriginalPath, "edit-after-crash", versionId: "changed-after-crash", mtime: T0.AddHours(1));
+        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
+        var results = await new Executor(reopened, Settings, Admission()).ReconcileAsync(reopened.UnresolvedIntents(PairId),
+            reopened.BeginGeneration(rig.Pair.A.RootId, "test"), rig.WriterA, rig.WriterB, CancellationToken.None);
+        Require(results.All(result => result.Outcome == Outcome.Done) && admitted == 2,
+            "changed-source successors resume through admission after " + (checkpointKind ?? "no checkpoint"));
+        var target = successors.Single(action => action.Target == Side.B);
+        Require((await rig.B.ObserveAsync(target.Path, CancellationToken.None))?.Hash == Hash("edit-after-crash"),
+            "keep-both copies the currently observed source, not the stale pre-crash version");
+        Require(reopened.Baselines(PairId, [target.ObjectKey!]).Single().A.Hash == Hash("edit-after-crash"),
+            "the successor result transaction records the current source identity and content");
+        Require((await rig.B.ObserveAsync(OriginalPath, CancellationToken.None))?.Hash == Hash("edit-b"),
+            "the other original is never overwritten by successor replay");
     }
 
     // ---- fixture ------------------------------------------------------------
