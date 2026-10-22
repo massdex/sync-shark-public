@@ -50,6 +50,19 @@ internal static partial class RunChecks
                 "one-sided visibility distinguishes actual absence from hidden counterparts");
             Require(text.Split('\n').Count(line => line.Contains(",CopyNew,", StringComparison.Ordinal)) == 1,
                 "provenance emits one row per final action, not hash or occupancy planning passes");
+            provenance.BeginRun(3);
+            var sample = (await fx.A.ObserveAsync("same.txt", default))!;
+            for (var index = 0; index < 6000; index++)
+            {
+                var item = sample with { Path = "batch/" + index };
+                provenance.Visibility(Side.A, item, false, "visible");
+                provenance.Visibility(Side.B, item, true, "other-protection");
+            }
+            counts.Clear();
+            provenance.Summary(counts.Add);
+            Require(counts.Any(line => line.Contains("raw-same-path-pairs=6000", StringComparison.Ordinal)) &&
+                counts.Any(line => line.Contains("one-visible-total=6000", StringComparison.Ordinal)),
+                "provenance preserves counts across bounded transaction flushes and a partial final batch");
         }
         finally { PlanProvenance.Current.Value = null; }
         Console.WriteLine("PASS opt-in production provenance fixture");

@@ -9,6 +9,8 @@ internal sealed class PlanProvenance : IDisposable
     private readonly SqliteConnection _db;
     private readonly TextWriter _output;
     private readonly object _gate = new();
+    private SqliteTransaction? _transaction;
+    private int _pending;
     private int _run;
     private string _scope = "Touched";
     internal PlanProvenance(string database, TextWriter output)
@@ -20,11 +22,23 @@ internal sealed class PlanProvenance : IDisposable
         Execute("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; CREATE TABLE visibility(side TEXT,path TEXT,hidden INTEGER,reason TEXT,PRIMARY KEY(side,path)) WITHOUT ROWID; CREATE TABLE claims(kind TEXT,path TEXT,PRIMARY KEY(kind,path)) WITHOUT ROWID; CREATE TABLE rejected(kind TEXT,path TEXT,side TEXT,PRIMARY KEY(kind,path,side)) WITHOUT ROWID; CREATE TABLE emitted(id TEXT PRIMARY KEY) WITHOUT ROWID; CREATE TABLE decided(id TEXT PRIMARY KEY,baseline INTEGER,scope TEXT,ha TEXT,ra TEXT,hb TEXT,rb TEXT) WITHOUT ROWID;");
         Row("run", "kind", "rule", "targetSide", "baselinePresent", "sourcePath", "destinationPath", "scope", "hiddenA", "reasonA", "hiddenB", "reasonB");
     }
-    private void Execute(string sql, params (string Name, object Value)[] parameters)
+    private int Execute(string sql, params (string Name, object Value)[] parameters)
     {
+        var batch = !sql.StartsWith("PRAGMA", StringComparison.Ordinal);
+        if (batch) _transaction ??= _db.BeginTransaction();
         using var command = _db.CreateCommand(); command.CommandText = sql;
+        command.Transaction = _transaction;
         foreach (var entry in parameters) command.Parameters.AddWithValue(entry.Name, entry.Value);
-        command.ExecuteNonQuery();
+        var changed = command.ExecuteNonQuery();
+        if (batch && ++_pending >= 5000) Flush();
+        return changed;
+    }
+    private void Flush()
+    {
+        _transaction?.Commit();
+        _transaction?.Dispose();
+        _transaction = null;
+        _pending = 0;
     }
     internal void BeginRun(int run)
     {
@@ -51,6 +65,7 @@ internal sealed class PlanProvenance : IDisposable
     private (string Hidden, string Reason) VisibilityAt(Side side, string path)
     {
         using var command = _db.CreateCommand(); command.CommandText = "SELECT hidden,reason FROM visibility WHERE side=$s AND path=$p";
+        command.Transaction = _transaction;
         command.Parameters.AddWithValue("$s", side.ToString()); command.Parameters.AddWithValue("$p", PathKey.Of(path));
         using var reader = command.ExecuteReader();
         return reader.Read() ? (reader.GetInt32(0) == 0 ? "n" : "y", reader.GetString(1)) : ("n", "not-in-scope");
@@ -73,16 +88,14 @@ internal sealed class PlanProvenance : IDisposable
         {
             foreach (var action in plan.Actions)
             {
-                using var emitted = _db.CreateCommand();
-                emitted.CommandText = "INSERT OR IGNORE INTO emitted VALUES($id)";
-                emitted.Parameters.AddWithValue("$id", action.ActionId);
-                if (emitted.ExecuteNonQuery() == 0) continue;
+                if (Execute("INSERT OR IGNORE INTO emitted VALUES($id)", ("$id", action.ActionId)) == 0) continue;
                 var source = action.Source?.Path ?? action.FromPath ?? action.Path;
                 var a = VisibilityAt(Side.A, action.Target == Side.A ? action.Path : source);
                 var b = VisibilityAt(Side.B, action.Target == Side.B ? action.Path : source);
                 var baseline = false;
                 var scope = _scope;
                 using var details = _db.CreateCommand();
+                details.Transaction = _transaction;
                 details.CommandText = "SELECT baseline,scope,ha,ra,hb,rb FROM decided WHERE id=$id";
                 details.Parameters.AddWithValue("$id", action.ActionId);
                 using (var reader = details.ExecuteReader())
@@ -97,6 +110,7 @@ internal sealed class PlanProvenance : IDisposable
                 Row(_run.ToString(), action.Kind.ToString(), action.Rule.ToString(), action.Target.ToString(), baseline ? "y" : "n",
                     source, action.Path, scope, a.Hidden, a.Reason, b.Hidden, b.Reason);
             }
+            Flush();
             _output.Flush();
         }
     }
@@ -104,6 +118,7 @@ internal sealed class PlanProvenance : IDisposable
     {
         lock (_gate)
         {
+            Flush();
             using var command = _db.CreateCommand();
             command.CommandText = "SELECT 'raw-same-path-pairs',COUNT(*) FROM visibility a JOIN visibility b ON a.path=b.path AND a.side='A' AND b.side='B' UNION ALL SELECT 'both-hidden',COUNT(*) FROM visibility a JOIN visibility b ON a.path=b.path AND a.side='A' AND b.side='B' WHERE a.hidden=1 AND b.hidden=1 UNION ALL SELECT 'one-visible:A:opposite-'||COALESCE(b.reason,'absent-in-raw-scope'),COUNT(*) FROM visibility a LEFT JOIN visibility b ON a.path=b.path AND b.side='B' WHERE a.side='A' AND a.hidden=0 AND (b.path IS NULL OR b.hidden=1) GROUP BY 1 UNION ALL SELECT 'one-visible:B:opposite-'||COALESCE(a.reason,'absent-in-raw-scope'),COUNT(*) FROM visibility b LEFT JOIN visibility a ON a.path=b.path AND a.side='A' WHERE b.side='B' AND b.hidden=0 AND (a.path IS NULL OR a.hidden=1) GROUP BY 1 UNION ALL SELECT 'claims:'||kind,COUNT(*) FROM claims GROUP BY kind UNION ALL SELECT 'CopyNew-rejected:'||kind,COUNT(*) FROM rejected GROUP BY kind";
             using var reader = command.ExecuteReader();
@@ -120,5 +135,12 @@ internal sealed class PlanProvenance : IDisposable
         }
     }
     private void Row(params string[] values) => _output.WriteLine(string.Join(",", values.Select(V2CliRuntime.CsvField)));
-    public void Dispose() => _db.Dispose();
+    public void Dispose()
+    {
+        lock (_gate)
+        {
+            try { Flush(); }
+            finally { _transaction?.Dispose(); _db.Dispose(); }
+        }
+    }
 }

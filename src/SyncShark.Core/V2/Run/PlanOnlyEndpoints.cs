@@ -20,12 +20,14 @@ internal sealed class PlanOnlyEndpoints(IEndpointProvider inner) : IEndpointProv
     public Task PrepareAsync(PairDef pair, CancellationToken ct) => inner is ProductionEndpoints production
         ? production.OpenPlanOnlyAsync(pair, ct) : inner.PrepareAsync(pair, ct);
 
-    private sealed class Reader(IEndpointWriter inner, Action denied) : IEndpointWriter, IProviderEffectReconciler, ISourceAbsenceProbe, IRecoveryAvailability, IRecoveryRecordReader
+    private sealed class Reader(IEndpointWriter inner, Action denied) : IEndpointWriter, IProviderEffectReconciler, ISourceAbsenceProbe, IRecoveryAvailability, IRecoveryRecordReader, ILocalFreeSpaceAdmission
     {
         public string? RecoveryUnavailable => (inner as IRecoveryAvailability)?.RecoveryUnavailable;
+        public Task<FreeSpaceAdmission> AdmitFreeSpaceAsync(SyncAction action, CancellationToken ct) =>
+            inner is ILocalFreeSpaceAdmission admission ? admission.AdmitFreeSpaceAsync(action, ct) : Task.FromResult(FreeSpaceAdmission.Granted);
         public Task<ItemState> DescribeRecoveryAsync(RecoveryRecord recovery, CancellationToken ct) =>
             inner is LocalWriter local ? Task.FromResult(local.DescribeRecoveryReadOnly(recovery, ct)) :
-            inner is IRecoveryRecordReader reader ? reader.DescribeRecoveryAsync(recovery, ct) :
+            inner is DropboxWriter cloud ? ((IRecoveryRecordReader)cloud).DescribeRecoveryAsync(recovery, ct) :
             throw new NotSupportedException("This endpoint cannot describe retained recovery metadata.");
         public Task<Stream> OpenRecoveryRecordAsync(RecoveryRecord recovery, CancellationToken ct) => throw Denied();
         private InvalidOperationException Denied() { denied(); return new("Plan-only cannot modify an endpoint."); }

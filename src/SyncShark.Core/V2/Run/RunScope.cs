@@ -440,7 +440,7 @@ internal sealed class RunScope
         if (paths.Any(links.CoversStub)) return "placeholder";
         if (paths.Any(links.CoversPending)) return "pending-decision-or-evidence";
         if (paths.Any(links.TouchesRehash)) return "rehash-or-gap";
-        return "retry-or-recovery-restore";
+        return "other-protection";
     }
 
     private static bool PermanentHold(ItemState item, LinkExclusions links) =>

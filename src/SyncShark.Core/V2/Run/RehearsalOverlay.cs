@@ -48,8 +48,9 @@ internal sealed class RehearsalOverlay : IDisposable
             command.ExecuteNonQuery();
         }
     }
-    internal IEnumerable<ItemState> Items(string root)
+    internal IEnumerable<ItemState> Items(string root, string? subtree = null)
     {
+        var prefix = subtree is null ? null : PathKey.Of(subtree);
         string? after = null;
         while (true)
         {
@@ -57,7 +58,15 @@ internal sealed class RehearsalOverlay : IDisposable
             lock (_gate)
             {
                 using var command = _connection.CreateCommand();
-                command.CommandText = "SELECT path,state FROM overlay WHERE root=$root AND ($after IS NULL OR path>$after COLLATE NOCASE) ORDER BY path COLLATE NOCASE LIMIT 256";
+                command.CommandText = prefix is null or ""
+                    ? "SELECT path,state FROM overlay WHERE root=$root AND ($after IS NULL OR path>$after COLLATE NOCASE) ORDER BY path COLLATE NOCASE LIMIT 256"
+                    : "SELECT path,state FROM overlay WHERE root=$root AND path >= $prefix COLLATE NOCASE AND path < $upper COLLATE NOCASE AND (path=$prefix COLLATE NOCASE OR path >= $lower COLLATE NOCASE) AND ($after IS NULL OR path>$after COLLATE NOCASE) ORDER BY path COLLATE NOCASE LIMIT 256";
+                if (prefix is not null and not "")
+                {
+                    command.Parameters.AddWithValue("$prefix", prefix);
+                    command.Parameters.AddWithValue("$lower", prefix + "/");
+                    command.Parameters.AddWithValue("$upper", prefix + "0");
+                }
                 command.Parameters.AddWithValue("$root", root);
                 command.Parameters.AddWithValue("$after", (object?)after ?? DBNull.Value);
                 using var reader = command.ExecuteReader();

@@ -16,9 +16,8 @@ public sealed partial class V2CliRuntime
         RejectDataRootInsidePair(pair);
         var export = ValidatePlanExportPath(exportPath, _store.Pairs(), _productRoot);
         var provenanceExport = provenancePath is null ? null : ValidatePlanExportPath(provenancePath, _store.Pairs(), _productRoot);
-        if (provenanceExport is not null && (!string.Equals(Path.GetPathRoot(provenanceExport), @"F:\", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(export, provenanceExport, StringComparison.OrdinalIgnoreCase)))
-            throw new SyncCliUsageException("--plan-provenance requires a separate new CSV file on F:.");
+        if (provenanceExport is not null && string.Equals(export, provenanceExport, StringComparison.OrdinalIgnoreCase))
+            throw new SyncCliUsageException("--plan-provenance requires a separate new CSV file.");
         var priorProvenance = PlanProvenance.Current.Value;
         await WaitForDataLockAsync(_runGate, progress, ct);
         try
@@ -52,8 +51,17 @@ public sealed partial class V2CliRuntime
             var run = _run.Rehearsal(endpoints);
             var summaries = new List<object>();
             var failed = false;
-            progress("REHEARSAL: nothing was changed on your disk or Dropbox");
-            progress("Only the isolated store and the explicit effect log are written. Simulated content is metadata-only.");
+            var pendingIntents = _store.CountUnresolvedIntents(pairId);
+            var unsupportedReconciles = _store.StreamUnresolvedIntents(pairId).Count(PlanOnlyEndpoints.UnsupportedReconcile)
+                + PendingRestorePreviewNotices(pairId).Count();
+            progress($"Copied store: {pendingIntents} unfinished intents; {unsupportedReconciles} unsupported reconciles/restores (not an exact replay).");
+            progress("REHEARSAL: no endpoint writes are performed on your disk or Dropbox");
+            progress("Only the isolated store and explicit diagnostic files are written. Simulated content is metadata-only.");
+            const string notSimulated = "online-only pointer updates/publication; real transfer bytes and hash verification; " +
+                "provider batch-job/change-feed race and restoration machinery; retained checkpoint reconciliation; " +
+                "provider resource-budget timing; cumulative endpoint disk/quota consumption and native crash durability";
+            progress("not simulated: " + notSimulated);
+            progress("Phase timings are diagnostic only: overlay writes are serialized and no payload bytes are transferred.");
             for (current = 1; current <= runs; current++)
             {
                 counts.Clear();
@@ -69,7 +77,8 @@ public sealed partial class V2CliRuntime
                         Counts = new Dictionary<string, long>(counts), PhaseMilliseconds = phases.Times,
                         ElapsedMilliseconds = elapsed.ElapsedMilliseconds });
                     throw new SyncCliOperationException("Rehearsal threw; the partial effect log and isolated state are retained.",
-                        error, new { PairId = pairId, EffectLog = export, PlanProvenance = provenanceExport, Runs = summaries });
+                        error, new { PairId = pairId, EffectLog = export, PlanProvenance = provenanceExport, PendingIntents = pendingIntents,
+                UnsupportedReconciles = unsupportedReconciles, NotSimulated = notSimulated, Runs = summaries });
                 }
                 phases.Finish();
                 elapsed.Stop();
@@ -81,7 +90,8 @@ public sealed partial class V2CliRuntime
                 progress("Effects by kind/direction: " + string.Join(", ", counts.OrderBy(row => row.Key).Select(row => row.Key + "=" + row.Value)));
                 progress("Phase milliseconds: " + string.Join(", ", phases.Times.Select(row => row.Key + "=" + row.Value)));
             }
-            var result = new { PairId = pairId, EffectLog = export, PlanProvenance = provenanceExport, Runs = summaries };
+            var result = new { PairId = pairId, EffectLog = export, PlanProvenance = provenanceExport, PendingIntents = pendingIntents,
+                UnsupportedReconciles = unsupportedReconciles, NotSimulated = notSimulated, Runs = summaries };
             if (failed) throw new SyncCliReviewException("At least one rehearsal run failed; inspect its notices and effect log.", result);
             return result;
         }

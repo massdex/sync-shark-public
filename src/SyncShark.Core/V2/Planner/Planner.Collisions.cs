@@ -64,7 +64,6 @@ public static partial class Planner
             dropped.Add(i);                                                               // folder onto folder
             return;
         }
-        PlanProvenance.Current.Value?.Rejected(action, "occupancy");
         var incoming = Incoming(row, action);
         if (incoming is { Kind: ItemKind.File } && occupant.Kind == ItemKind.File &&
             Content.SameContent(occupant, incoming) is null)
@@ -76,6 +75,7 @@ public static partial class Planner
         var plainFiles = incoming is { Kind: ItemKind.File } && occupant.Kind == ItemKind.File && !Flagged(occupant) &&
             !OccupantBusy(ctx, draft, dropped, i, occRow, action);
         var same = plainFiles && Content.SameContent(occupant, incoming!) == true;
+        if (!same) PlanProvenance.Current.Value?.Rejected(action, "occupancy");
         var newerWins = ctx.Options.FirstSync && (action.Kind == ActionKind.Move || ReferenceEquals(occRow, row) ||
             ctx.RebasedBy.ContainsKey(action.ActionId));
         if (same)

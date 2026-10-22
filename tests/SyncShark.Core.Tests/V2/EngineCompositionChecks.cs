@@ -63,6 +63,7 @@ internal static class EngineCompositionChecks
         LongpollTimeout(root, http);
         await DataFolderOverlapAsync(Path.Combine(root, "overlap"), http);
         await RecoveryRootedPairAsync(Path.Combine(root, "recovery-pair"), http);
+        await RehearsalIsolatedAsync(Path.Combine(root, "rehearsal-copy"), http);
 
         var damagedRoot = Path.Combine(root, "damaged");
         var damagedDb = SqliteStateStore.DatabasePath(damagedRoot);
@@ -478,6 +479,72 @@ internal static class EngineCompositionChecks
         Require(composition.Store.Live(a.RootId, [Path.GetFileName(copies[0])]).Count == 0,
             "no Recovery artifact is recorded as data");
     }
+    private static async Task RehearsalIsolatedAsync(string root, HttpClient http)
+    {
+        var product = Path.Combine(root, "source-product");
+        var isolated = Path.Combine(root, "isolated-product");
+        var left = Path.Combine(root, "left");
+        var right = Path.Combine(root, "right");
+        var recovery = Path.Combine(root, "recovery");
+        foreach (var directory in new[] { product, isolated, left, right, recovery }) Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(left, "initial.txt"), "initial fixture bytes");
+        const string pairId = "rehearsal-composition";
+        using (var instance = PilotInstanceLock.Acquire(Path.Combine(product, "state", "instance.lock")))
+        {
+            await new SyncPairStore(instance.StateAuthority).GetOrCreateInstallationIdAsync();
+            await new SyncTransferSettingsStore(instance.StateAuthority).SaveAsync(new SyncTransferSettings(LocalRecoveryRoot: recovery));
+            using var composition = EngineComposition.Open(new EngineHostInputs(product, instance.StateAuthority, http,
+                new Credentials(), new FailingHandler()), V2Settings.Default, TimeProvider.System);
+            var a = new RootDef("rehearsal-left", SyncProviders.Local, null, left,
+                await composition.Roots.ObjectIdAsync(SyncProviders.Local, null, left, default));
+            var b = new RootDef("rehearsal-right", SyncProviders.Local, null, right,
+                await composition.Roots.ObjectIdAsync(SyncProviders.Local, null, right, default));
+            composition.Store.SavePair(new PairDef(pairId, "Fixture pair", a, b, [], [], true));
+            var progress = new Progress<RunProgress>();
+            var plan = await composition.Run.PreviewFirstSyncAsync(pairId, progress, default);
+            var applied = await composition.Run.ApplyAsync(pairId, plan, progress, default);
+            Require(applied.Failed == 0 && File.Exists(Path.Combine(right, "initial.txt")),
+                "production fixture establishes first-sync state and local control namespaces");
+        }
+        // Copy only this closed fixture, never a running/user store. Copy its configuration too.
+        foreach (var directory in Directory.EnumerateDirectories(product, "*", SearchOption.AllDirectories))
+            Directory.CreateDirectory(Path.Combine(isolated, Path.GetRelativePath(product, directory)));
+        foreach (var file in Directory.EnumerateFiles(product, "*", SearchOption.AllDirectories))
+            File.Copy(file, Path.Combine(isolated, Path.GetRelativePath(product, file)));
+        File.WriteAllText(Path.Combine(left, "new.txt"), "new fixture bytes");
+        var beforeLeft = FixtureTree(left);
+        var beforeRight = FixtureTree(right);
+        var beforeProduct = FixtureTree(product);
+        var beforeRecovery = FixtureTree(recovery);
+        var volume = Path.GetPathRoot(left)!.TrimEnd('\\').ToUpperInvariant();
+        var journalBefore = SyncSharkJournalNative.Query(volume);
+        var export = Path.Combine(root, "effects.csv");
+        var messages = new List<string>();
+        var runtime = V2CliRuntime.AcquireProduction(["run", "--pair", pairId, "--rehearse",
+            "--data-root", isolated, "--export", export, "--runs", "2"]);
+        try { await runtime.RehearseAsync(pairId, export, 2, message => { lock (messages) messages.Add(message); }, default); }
+        finally { await runtime.DisposeAsync(); }
+        var rows = File.ReadAllLines(export).Skip(1).ToArray();
+        Require(rows.Any(row => row.StartsWith("1,CopyNew,", StringComparison.Ordinal)) &&
+            !rows.Any(row => row.StartsWith("2,", StringComparison.Ordinal)),
+            "isolated production SQLite rehearsal applies fixture changes once and converges on run two: " + string.Join(" | ", rows));
+        Require(beforeLeft.SequenceEqual(FixtureTree(left)) && beforeRight.SequenceEqual(FixtureTree(right)) &&
+            beforeProduct.SequenceEqual(FixtureTree(product)) && beforeRecovery.SequenceEqual(FixtureTree(recovery)),
+            "two production rehearsals preserve real fixture folders, source store/configuration and recovery bytes");
+        var journalAfter = SyncSharkJournalNative.Query(volume);
+        if (journalBefore is not null)
+            Require(journalAfter is not null && journalBefore[4] == journalAfter[4] && journalBefore[5] == journalAfter[5],
+                "observe-only rehearsal does not resize the native journal");
+        else Console.WriteLine("WARN rehearsal fixture: native journal sizing comparison unavailable on this runner.");
+        Require(messages.Any(message => message.StartsWith("not simulated:", StringComparison.Ordinal)),
+            "production rehearsal reports unsupported simulation paths");
+    }
+
+    private static string[] FixtureTree(string root) => Directory.EnumerateFileSystemEntries(root, "*", SearchOption.AllDirectories)
+        .Select(path => Path.GetRelativePath(root, path) + (Directory.Exists(path) ? "/" : ":" +
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(path)))))
+        .OrderBy(value => value, StringComparer.Ordinal).ToArray();
+
     private static string Text(Plan plan) => string.Join("; ", plan.Actions.Select(action =>
         $"{action.Kind} {action.Target} {action.Path} {action.Source?.Hash}"));
 

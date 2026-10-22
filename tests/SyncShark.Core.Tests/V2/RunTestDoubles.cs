@@ -118,6 +118,7 @@ internal sealed class CountingWriter : IEndpointWriter, IRecoveryAvailability, I
     public int Preserves => Volatile.Read(ref _preserves);
     public int Calls => Puts + Moves + Deletes + MkDirs + Preserves;
     public Action<string>? OnRead { get; set; }
+    public Action<string>? OnContentRead { get; set; }
 
     /// <summary>
     /// When set, every effect after the first waits here until the run is cancelled, and the first such wait completes
@@ -237,6 +238,7 @@ internal sealed class CountingWriter : IEndpointWriter, IRecoveryAvailability, I
 
     public Task<Stream> OpenReadAsync(ItemState s, CancellationToken ct)
     {
+        OnContentRead?.Invoke(s.Path);
         OnRead?.Invoke(s.Path);
         return _inner.OpenReadAsync(s, ct);
     }

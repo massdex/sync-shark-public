@@ -21,6 +21,7 @@ internal static partial class RunChecks
         fx.A.Seed("upload.txt", "upload");
         fx.B.Seed("download.txt", "download");
         var writes = fx.WriterA.Calls + fx.WriterB.Calls;
+        fx.WriterA.OnContentRead = fx.WriterB.OnContentRead = _ => throw new InvalidOperationException("Rehearsal opened real content.");
         var effects = new List<RehearsalEffect>();
         using var overlay = new RehearsalOverlay(Path.Combine(LocalChecks.FreshRoot("rehearsal"), "overlay.db"));
         var endpoints = new RehearsalEndpoints(fx.Provider, overlay, effect => { lock (effects) effects.Add(effect); });
@@ -49,6 +50,26 @@ internal static partial class RunChecks
         var gapRun = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
         Require(gapRun.Failed == 0 && !store.GapInventoryPending(fx.Pair.A.RootId), "rehearsal executes finishing gap settlement and AdvanceCursors even when content holds defer actions");
         var writer = endpoints.Writer(fx.Pair.B);
+        var localWriter = endpoints.Writer(fx.Pair.A);
+        var refusal = new FreeSpaceRefusal("fixture space hold", "free-space-unknown");
+        fx.WriterA.FreeSpaceAdmissionFor = _ => new FreeSpaceAdmission(null, refusal);
+        var admission = await ((ILocalFreeSpaceAdmission)localWriter).AdmitFreeSpaceAsync(
+            new SyncAction("space-fixture", 0, ActionKind.CopyNew, Side.A, "space.txt", null, null, null, false, null), default);
+        Require(admission.Refusal == refusal, "rehearsal delegates the real free-space admission decision");
+        fx.WriterA.FreeSpaceAdmissionFor = null;
+        Require(localWriter is ISyncDirectDownloadTarget && writer is ISyncDirectDownloadSource && writer is IFolderTreeDeleter,
+            "rehearsal preserves local download and cloud whole-folder capability selection");
+        var stages = new List<bool>();
+        var directSource = (await writer.ObserveAsync("download.txt", default))!;
+        await ((ISyncDirectDownloadTarget)localWriter).PutDownloadedAsync(
+            new SyncAction("direct-fixture", 0, ActionKind.CopyNew, Side.A, "direct.txt", null, directSource, null, false, null),
+            (ISyncDirectDownloadSource)writer, (stage, _) => { stages.Add(stage.Verified); return Task.CompletedTask; }, default);
+        Require(stages.SequenceEqual(new[] { false, true }), "direct download checkpoints creation then verification before publication");
+        fx.WriterB.RecoveryUnavailable = "fixture recovery unavailable";
+        Require(((IRecoveryAvailability)writer).RecoveryUnavailable == fx.WriterB.RecoveryUnavailable,
+            "rehearsal reports actual recovery availability to production safety gates");
+        fx.WriterB.RecoveryUnavailable = null;
+        Require(((IRecoveryAvailability)writer).RecoveryUnavailable is null, "rehearsal observes restored recovery availability");
         var uploaded = (await writer.ObserveAsync("upload.txt", default))!;
         var recovery = await writer.PreserveAsync(uploaded, "preserve-fixture", default);
         Require(recovery.Hash == uploaded.Hash && recovery.Size == uploaded.Size, "simulated recovery retains source metadata");
@@ -72,6 +93,15 @@ internal static partial class RunChecks
         Require(gapIo.Probe(fx.Pair.A, synthetic)?.File.Size == synthetic.Size &&
             (await gapIo.HashAsync(fx.Pair.A, synthetic, default))?.Hash == synthetic.Hash,
             "gap verification sees virtual metadata without opening a synthetic identity on disk");
+        for (var index = 0; index < 600; index++)
+        {
+            var item = synthetic with { Path = "Tree/" + index.ToString("D4") };
+            overlay.Save("range-fixture", item.Path, item);
+        }
+        overlay.Save("range-fixture", "Tree-extra", synthetic with { Path = "Tree-extra" });
+        overlay.Save("range-fixture", "Tree/deleted", null);
+        Require(overlay.Items("range-fixture", "tree").Count() == 600,
+            "indexed subtree pages are case insensitive, exclude prefix siblings and tombstones");
         Console.WriteLine("PASS rehearsal virtual effects, full executor, two-run convergence and isolated-root guards");
     }
 }

@@ -13,14 +13,16 @@ public sealed partial class SyncRun
         var root = notice.UploadQuotaSide == Side.A ? pair.A : pair.B;
         if (!string.Equals(root.Provider, SyncProviders.Dropbox, StringComparison.OrdinalIgnoreCase)) return;
         var writer = _endpoints.Writer(root) as DropboxWriter;
-        if (writer is null && _endpoints is not PlanOnlyEndpoints) return;
+        if (writer is null && _endpoints is not (PlanOnlyEndpoints or RehearsalEndpoints)) return;
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(TimeSpan.FromSeconds(10));
             var available = writer is not null
                 ? await writer.HasUploadSpaceAsync(needBytes, timeout.Token).ConfigureAwait(false)
-                : await ((PlanOnlyEndpoints)_endpoints).HasUploadSpaceAsync(root, needBytes, timeout.Token).ConfigureAwait(false);
+                : _endpoints is RehearsalEndpoints rehearsal
+                    ? await rehearsal.HasUploadSpaceAsync(root, needBytes, timeout.Token).ConfigureAwait(false)
+                    : await ((PlanOnlyEndpoints)_endpoints).HasUploadSpaceAsync(root, needBytes, timeout.Token).ConfigureAwait(false);
             if (!available) return;
         }
         catch (Exception error) when (RunFailure(error, ct))

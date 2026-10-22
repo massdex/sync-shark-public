@@ -22,7 +22,12 @@ internal sealed class RehearsalEndpoints(IEndpointProvider real, RehearsalOverla
     }
     private void Open(RootDef root, Side side)
     {
-        var overlay = _roots.GetOrAdd(root.RootId, _ => new Overlay(root, side, storage, record));
+        var overlay = _roots.GetOrAdd(root.RootId, _ => root.Provider switch
+        {
+            SyncProviders.Local => new LocalOverlay(root, side, storage, record),
+            SyncProviders.Dropbox => new CloudOverlay(root, side, storage, record),
+            _ => new Overlay(root, side, storage, record)
+        });
         overlay.Reader = _reads.Writer(root);
         overlay.Inventory = _reads.Inventory(root);
         if (overlay.Inventory is LocalInventory local && local.GapIo is { } realGap && store is ILocalGapStore gaps)
@@ -36,6 +41,8 @@ internal sealed class RehearsalEndpoints(IEndpointProvider real, RehearsalOverla
     }
     public IInventorySource Inventory(RootDef root) => _roots[root.RootId];
     public IEndpointWriter Writer(RootDef root) => _roots[root.RootId];
+    internal Task<bool> HasUploadSpaceAsync(RootDef root, long need, CancellationToken ct) =>
+        _reads.HasUploadSpaceAsync(root, need, ct);
 
     internal static IInventorySource Unwrap(IInventorySource inventory) => inventory is Overlay overlay ? overlay.Inventory : inventory;
     internal static void Acknowledge(IInventorySource inventory)
@@ -50,11 +57,13 @@ internal sealed class RehearsalEndpoints(IEndpointProvider real, RehearsalOverla
     {
         if (inventory is not Overlay overlay) { await cloud.HydratePrefixesAsync(prefixes, accept, ct); return; }
         await cloud.HydratePrefixesAsync(prefixes, page => accept(page.Where(row => !overlay.Try(row.Path, out _)).ToArray()), ct);
-        foreach (var page in overlay.StoredItems().Where(item => prefixes.Any(prefix => PairPath.IsSelfOrUnder(item.Path, prefix))).Chunk(256))
-            await accept(page.Select(item => new DropboxChange(item.Path, DropboxItems.ToEntry(item))).ToArray());
+        foreach (var prefix in prefixes.Distinct(StringComparer.OrdinalIgnoreCase)
+            .Where(prefix => !prefixes.Any(parent => !PairPath.Same(prefix, parent) && PairPath.IsSelfOrUnder(prefix, parent))))
+            foreach (var page in overlay.StoredItems(prefix).Chunk(256))
+                await accept(page.Select(item => new DropboxChange(item.Path, DropboxItems.ToEntry(item))).ToArray());
     }
 
-    private sealed class Overlay(RootDef root, Side side, RehearsalOverlay storage, Action<RehearsalEffect> record) : IEndpointWriter, IInventorySource, ISourceAbsenceProbe, IRecoveryRecordReader
+    private class Overlay(RootDef root, Side side, RehearsalOverlay storage, Action<RehearsalEffect> record) : IEndpointWriter, IInventorySource, ISourceAbsenceProbe, IRecoveryRecordReader, IRecoveryAvailability
     {
         // A null value is an explicit tombstone, never a cache miss. Keyed to the root entity, not the run/pair.
         private long _acknowledged, _observed;
@@ -67,6 +76,7 @@ internal sealed class RehearsalEndpoints(IEndpointProvider real, RehearsalOverla
             _observed = through;
             return result;
         }
+        public string? RecoveryUnavailable => (Reader as IRecoveryAvailability)?.RecoveryUnavailable;
         public IEndpointWriter Reader { get; set; } = null!;
         public IInventorySource Inventory { get; set; } = null!;
         private static string Id(string value) => "rehearsal-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
@@ -79,8 +89,8 @@ internal sealed class RehearsalEndpoints(IEndpointProvider real, RehearsalOverla
             return SyncLocalEndpointStore.ObjectId(volume, BitConverter.ToUInt64(hash, 0) | (1UL << 63));
         }
         internal bool Try(string path, out ItemState? item) => storage.Try(root.RootId, path, out item);
-        internal IEnumerable<ItemState> StoredItems() => storage.Items(root.RootId);
-        private void Save(string kind, string path, ItemState? state, ItemState? victim = null)
+        internal IEnumerable<ItemState> StoredItems(string subtree) => storage.Items(root.RootId, subtree);
+        protected void Save(string kind, string path, ItemState? state, ItemState? victim = null)
         {
             storage.Save(root.RootId, path, state, victim);
             var described = state ?? victim;
@@ -107,19 +117,21 @@ internal sealed class RehearsalEndpoints(IEndpointProvider real, RehearsalOverla
             await DescribeRecoveryAsync(recovery, ct);
             return Stream.Null;
         }
-        public Task<Stream> OpenReadAsync(ItemState item, CancellationToken ct)
+        public async Task<Stream> OpenReadAsync(ItemState item, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
-            // No invented bytes: simulated content has metadata only. The simulated sink never consumes this stream.
-            if (Try(item.Path, out var simulated))
-            {
-                if (simulated is null || simulated.Hash != item.Hash || simulated.Size != item.Size)
-                    throw new ExpectedTargetMismatchException("The simulated source changed.");
-                return Task.FromResult(Stream.Null);
-            }
-            return Reader.OpenReadAsync(item, ct);
+            // Local metadata-only probes intentionally omit hashes; use the production observation
+            // for that side. Cloud metadata includes the hash and must never open a download stream.
+            var actual = Try(item.Path, out var simulated) ? simulated : root.Provider == SyncProviders.Local
+                ? await Reader.ObserveAsync(item.Path, ct)
+                : await ((ISourceAbsenceProbe)Reader).ObserveSourceMetadataAsync(item.Path, ct);
+            if (actual is null || actual.Kind != item.Kind || actual.ObjectId != item.ObjectId ||
+                actual.VersionId != item.VersionId || actual.Size != item.Size || actual.Hash != item.Hash)
+                throw new ExpectedTargetMismatchException("The rehearsal source changed since planning.");
+            // All sources are metadata-only, including real Dropbox files. Never download content.
+            return Stream.Null;
         }
-        private async Task CheckTargetAsync(SyncAction action, string path, CancellationToken ct)
+        protected async Task CheckTargetAsync(SyncAction action, string path, CancellationToken ct)
         {
             var actual = await ObserveAsync(path, ct);
             var expected = action.ExpectedTarget;
@@ -237,9 +249,92 @@ internal sealed class RehearsalEndpoints(IEndpointProvider real, RehearsalOverla
             if (Try(path, out var simulated) && simulated is null) return;
             if (!Try(path, out _) || await Reader.ObserveAsync(path, ct) is not null)
                 await Inventory.ReadSubtreeAsync(path, page => accept(page.Where(item => !Try(item.Path, out _)).ToArray()), ct, progress);
-            foreach (var page in storage.Items(root.RootId)
-                .Where(item => PairPath.IsSelfOrUnder(item.Path, path)).Chunk(256)) await accept(page);
+            foreach (var page in storage.Items(root.RootId, path).Chunk(256)) await accept(page);
         }
+    }
+    // Only final endpoint effects are virtual. Capability selection, admission, intent checkpoints,
+    // preserve-after-verification and whole-folder result bookkeeping stay in the ordinary Executor.
+    private sealed class LocalOverlay(RootDef root, Side side, RehearsalOverlay storage, Action<RehearsalEffect> record)
+        : Overlay(root, side, storage, record), ILocalFreeSpaceAdmission, ISyncDirectDownloadTarget
+    {
+        public Task<FreeSpaceAdmission> AdmitFreeSpaceAsync(SyncAction action, CancellationToken ct) =>
+            ((ILocalFreeSpaceAdmission)Reader).AdmitFreeSpaceAsync(action, ct);
+
+        public async Task<ItemState> PutDownloadedAsync(SyncAction action, ISyncDirectDownloadSource source,
+            Func<SyncDownloadStage, CancellationToken, Task>? preservedAfterVerify, CancellationToken ct)
+        {
+            await CheckTargetAsync(action, action.Path, ct);
+            var planned = action.Source ?? throw new InvalidOperationException("Download requires source metadata.");
+            if (planned.Kind != ItemKind.File || planned.Hash is null)
+                throw new ArgumentException("A local download requires a file source with a content hash.", nameof(action));
+            var stage = new SyncDownloadStage("rehearsal:" + action.ActionId, "rehearsal:" + action.ActionId,
+                action.RecoveryFirst ? "rehearsal:recovery:" + action.ActionId : "", false);
+            if (preservedAfterVerify is not null) await preservedAfterVerify(stage, ct);
+            await source.DownloadToAsync(planned, Stream.Null, ct);
+            if (preservedAfterVerify is not null) await preservedAfterVerify(stage with { Verified = true }, ct);
+            return await PutAsync(action, Stream.Null, ct);
+        }
+
+        public Task<ActionResult> ResumeDownloadAsync(SyncAction action, ProviderEffectCheckpoint checkpoint,
+            CancellationToken ct) => Task.FromResult(new ActionResult(action.ActionId, Outcome.Uncertain,
+                null, null, null, "not simulated: retained direct-download checkpoint reconciliation"));
+    }
+
+    private sealed class CloudOverlay(RootDef root, Side side, RehearsalOverlay storage, Action<RehearsalEffect> record)
+        : Overlay(root, side, storage, record), ISyncDirectDownloadSource, IFolderTreeDeleter
+    {
+        public async Task<SyncDownloadResult> DownloadToAsync(ItemState item, Stream destination, CancellationToken ct)
+        {
+            await using var content = await OpenReadAsync(item, ct);
+            return new SyncDownloadResult(item.ObjectId, item.VersionId ?? "", item.Size, item.Hash ?? "");
+        }
+
+        public async Task<IReadOnlyList<FolderTreeOutcome>> DeleteFolderTreesAsync(string scanCursor,
+            IReadOnlyList<FolderTree> trees, Func<IReadOnlyList<FolderTree>, string, Task> beforeSubmit, CancellationToken ct)
+        {
+            var accepted = new List<FolderTree>();
+            var outcomes = new List<FolderTreeOutcome>();
+            foreach (var tree in trees)
+            {
+                var expected = tree.Victims.Append(tree.Folder).ToDictionary(item => PathKey.Of(item.Path));
+                var changed = false;
+                var seen = 0;
+                await ReadSubtreeAsync(tree.Folder.Path, page =>
+                {
+                    foreach (var item in page)
+                    {
+                        if (PairPath.Same(item.Path, tree.Folder.Path)) continue;
+                        seen++;
+                        if (!expected.TryGetValue(PathKey.Of(item.Path), out var victim) ||
+                            victim.Kind != item.Kind || victim.ObjectId != item.ObjectId || victim.VersionId != item.VersionId ||
+                            victim.Hash != item.Hash || victim.Size != item.Size) changed = true;
+                    }
+                    return Task.CompletedTask;
+                }, ct);
+                var folder = await ObserveAsync(tree.Folder.Path, ct);
+                changed |= folder?.ObjectId != tree.Folder.ObjectId || seen != tree.Victims.Count;
+                if (changed) outcomes.Add(FolderTreeOutcome.Of(tree, FolderTreeStatus.NotSubmitted,
+                    "The rehearsal folder changed after the scan."));
+                else accepted.Add(tree);
+            }
+            if (accepted.Count > 0)
+            {
+                await beforeSubmit(accepted, "rehearsal:whole-folder");
+                foreach (var tree in accepted)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    foreach (var victim in tree.Victims) Save("Delete", victim.Path, null, victim);
+                    Save("DeleteWholeFolder", tree.Folder.Path, null, tree.Folder);
+                    outcomes.Add(FolderTreeOutcome.Of(tree, FolderTreeStatus.Completed));
+                }
+            }
+            return outcomes;
+        }
+
+        public Task<IReadOnlyList<FolderTreeOutcome>> ReconcileFolderTreesAsync(string scanCursor,
+            IReadOnlyList<FolderTree> trees, string recoveryState, Func<string, Task> checkpoint, CancellationToken ct) =>
+            Task.FromResult<IReadOnlyList<FolderTreeOutcome>>(trees.Select(tree => FolderTreeOutcome.Of(tree,
+                FolderTreeStatus.Uncertain, "not simulated: retained whole-folder checkpoint reconciliation")).ToArray());
     }
 }
 
