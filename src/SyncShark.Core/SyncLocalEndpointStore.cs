@@ -651,7 +651,7 @@ public sealed partial class SyncLocalEndpointStore : ISyncRemoteStore, ISyncUplo
         cancellationToken.ThrowIfCancellationRequested();
         using var root = OpenRoot();
         using var path = new HeldPath(root, relativePath);
-        using var created = PilotDirectoryLease.CreateChild(path.Parent, path.Name, hidden: false);
+        using var created = PilotDirectoryLease.OpenOrCreateChild(path.Parent, path.Name, pin: true);
         return Task.FromResult(DescribeDirectory(created, path.Relative));
     }
 

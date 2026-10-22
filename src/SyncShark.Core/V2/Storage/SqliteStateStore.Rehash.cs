@@ -13,6 +13,10 @@ public sealed partial class SqliteStateStore
         return _rehashOrder;
     }
 
+    internal long RehashPendingCount(string rootId) => InStore(() =>
+        Convert.ToInt64(StoreSchema.Scalar(_connection, null,
+            "SELECT COUNT(*) FROM local_rehash WHERE root_no=(SELECT root_no FROM root WHERE root_id=$id);", ("$id", rootId))));
+
     public long RehashWatermark(string rootId) => InStore(() =>
     {
         var root = RootNo(rootId);

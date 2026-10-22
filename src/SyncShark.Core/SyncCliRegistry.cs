@@ -1386,7 +1386,8 @@ public static class SyncCliRegistry
                     throw new SyncCliException("canceled",
                         $"The run for pair '{run.PairName}' ({run.PairId}) stopped before it finished.",
                         SyncCliExitCode.Canceled, data: run);
-                if (run.Blocked > 0 || run.Conflicts > 0 || run.Failed > 0 ||
+                if (run.Blocked > 0 || run.Conflicts > 0 ||
+                    run.Failed > 0 && run.Outcome != V2.RunOutcomes.Partial ||
                     run.NotAttempted > 0 || run.NeedsVerification > 0)
                     throw new SyncCliReviewException($"The run for pair '{run.PairName}' ({run.PairId}) finished " +
                         $"with {run.Blocked} blocked item(s), {run.Conflicts} conflict(s), " +

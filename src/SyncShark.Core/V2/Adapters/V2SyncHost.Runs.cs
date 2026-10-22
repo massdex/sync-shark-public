@@ -90,6 +90,9 @@ public sealed partial class V2SyncHost
                     continue;
                 }
                 if (report is null) break;
+                // Preserve the counted report while retaining the established damage boundary.
+                if (report.HaltedBy is StateDamagedException damaged) { damaged.Data["RunReport"] = report; throw damaged; }
+                if (report.HaltedBy is Microsoft.Data.Sqlite.SqliteException sqlDamage && StoreSchema.IsDamaged(sqlDamage)) { sqlDamage.Data["RunReport"] = report; throw sqlDamage; }
                 var pairDef = _store.Pair(pair.Id) ??
                     throw new InvalidDataException("The folder pair " + pair.Id + " is no longer available.");
                 items.Add(RunResultMapping.ToItem(pair, pairDef, report, observation.Take()));

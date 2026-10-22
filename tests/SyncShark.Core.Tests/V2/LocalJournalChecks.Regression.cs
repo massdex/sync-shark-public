@@ -42,7 +42,7 @@ internal static partial class LocalJournalChecks
         var mtime = File.GetLastWriteTimeUtc(Path.Combine(root, "a/one.txt"));
         LocalChecks.Seed(root, "a/one.txt", "bbb"); File.SetLastWriteTimeUtc(Path.Combine(root, "a/one.txt"), mtime);
         var delta = await inventory.ChangesSinceAsync(snapshot.CursorAfter, store.BeginGeneration("root-local", "delta"), _ => true, default);
-        LocalChecks.Require(delta.CursorInvalid && inventory.LastFallbackReason!.Contains("multiple stored hard-link names"), "edit of existing multiple-link ID forces reconciliation");
+        LocalChecks.Require(!delta.CursorInvalid && delta.IncompleteSubtrees.Contains("a/one.txt") && delta.IncompleteSubtrees.Contains("b/two.txt"), "edit of a multiple-link ID retains scoped debt without rejecting replay");
         snapshot = await SaveFull(inventory, store);
         LocalChecks.Require(store.Live("root-local", ["a/one.txt", "b/two.txt"]).Count == 2, "full reconciliation retains both aliases");
         LocalChecks.Require(store.Live("root-local", ["a/one.txt", "b/two.txt"]).All(i => (i.Flags & ItemFlags.NeedsRehash) != 0), "authoritative hidden edit debt survives hardlink fallback for both aliases");
@@ -55,12 +55,12 @@ internal static partial class LocalJournalChecks
         snapshot = snapshot with { CursorAfter = delta.CursorAfter };
         File.Move(Path.Combine(root, "b/two.txt"), Path.Combine(root, "b/renamed.txt"));
         delta = await inventory.ChangesSinceAsync(snapshot.CursorAfter, store.BeginGeneration("root-local", "delta"), _ => true, default);
-        LocalChecks.Require(delta.CursorInvalid && inventory.LastFallbackReason!.Contains("multiple stored hard-link names"), "rename other alias forces reconciliation");
+        LocalChecks.Require(!delta.CursorInvalid && delta.IncompleteSubtrees.Contains("a/one.txt") && delta.IncompleteSubtrees.Contains("b/two.txt") && delta.IncompleteSubtrees.Contains("b/renamed.txt"), "rename alias retains old names and discovers the new name as scoped debt");
         snapshot = await SaveFull(inventory, store);
         LocalChecks.Require(store.Live("root-local", ["a/one.txt", "b/renamed.txt"]).Count == 2 && store.Live("root-local", ["b/two.txt"]).Count == 0, "rename does not remove surviving alias or retain phantom");
         File.Delete(Path.Combine(root, "b/renamed.txt")); // test-owned fixture only
         delta = await inventory.ChangesSinceAsync(snapshot.CursorAfter, store.BeginGeneration("root-local", "delta"), _ => true, default);
-        LocalChecks.Require(delta.CursorInvalid && (inventory.LastFallbackReason!.Contains("multiple stored hard-link names") || inventory.LastFallbackReason == "hard-link journal change"), "link removal reconciles");
+        LocalChecks.Require(!delta.CursorInvalid && delta.IncompleteSubtrees.Count > 0, "link removal retains scoped reconciliation debt");
         await SaveFull(inventory, store);
         LocalChecks.Require(store.Live("root-local", ["a/one.txt"]).Count == 1 && store.Live("root-local", ["b/renamed.txt"]).Count == 0, "deleting one link retains the other");
     }
@@ -76,7 +76,7 @@ internal static partial class LocalJournalChecks
         LocalChecks.Require(!store.HasMultipleNames("root-local", one.ObjectId), "only one alias is inventoried");
         LocalChecks.Seed(root, "one.txt", "bbb");
         var delta = await inventory.ChangesSinceAsync(snapshot.CursorAfter, store.BeginGeneration("root-local", "delta"), _ => true, default);
-        LocalChecks.Require(delta.CursorInvalid && inventory.LastFallbackReason!.Contains("2 live hard links"), "live NumberOfLinks catches outside-root alias");
+        LocalChecks.Require(!delta.CursorInvalid && delta.IncompleteSubtrees.Contains("one.txt"), "live NumberOfLinks scopes outside-root alias debt");
         var def = LocalChecks.RootOf(root, "root-local"); var identity = LocalItems.ParseObjectId(def.RootObjectId);
         var id = LocalItems.ParseObjectId(one.ObjectId).FileId;
         var change = new NtfsUsnChange(id, identity.FileId, 1, 0x100, FileAttributes.Normal, "one.txt");
@@ -99,7 +99,7 @@ internal static partial class LocalJournalChecks
             var snapshot = await SaveFull(inventory, store);
             Directory.Move(incoming, Path.Combine(root, "incoming"));
             var delta = await inventory.ChangesSinceAsync(snapshot.CursorAfter, store.BeginGeneration("root-local", "delta"), _ => true, default);
-            LocalChecks.Require(delta.CursorInvalid && inventory.LastFallbackReason!.Contains("2 live hard links"), "moved-in subtree validates files absent from journal records");
+            LocalChecks.Require(!delta.CursorInvalid && delta.IncompleteSubtrees.Contains("incoming/one.txt"), "moved-in ambiguous files stay protected without rejecting unrelated replay");
             await SaveFull(inventory, store);
             LocalChecks.Require(store.Live("root-local", ["incoming/one.txt", "incoming/two.txt"]).Count == (bothInside ? 2 : 1), "full reconciliation preserves all incoming aliases");
         }

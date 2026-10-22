@@ -34,6 +34,10 @@ public sealed partial class LocalInventory : IInventorySource
 
     internal LocalGapWorker? GapWorker { get; set; }
     internal ILocalGapIo? GapIo { get; set; }
+    internal const int ForegroundVerificationLimit = 512;
+    internal const long MaximumReplayBytes = 64L * 1024 * 1024;
+    internal Action<long, long>? VerificationProgress { get; set; }
+    internal static bool ReplayTooLarge(long from, long through) => through > from && through - from > MaximumReplayBytes;
 
     /// <summary>Binds one local root; the saved root object id must parse into its NTFS identity.</summary>
     public LocalInventory(RootDef root, Side side, IStateStore known,
@@ -144,6 +148,17 @@ public sealed partial class LocalInventory : IInventorySource
             NtfsUsnCheckpoint.TryParseCursor(_known.Cursor(rootId), out var savedJournal, out var savedNext) &&
             checkpoint.RequiresFullReconciliation(_known.Cursor(rootId)))
             BeginJournalGap(rootId, savedJournal, savedNext, checkpoint);
+        if (checkpoint is not null && sql?.GapInventoryPending(rootId) == true &&
+            NtfsUsnCheckpoint.TryParseCursor(_known.Cursor(rootId), out var replayJournal, out var replayNext) &&
+            replayJournal == checkpoint.JournalId && ReplayTooLarge(replayNext, checkpoint.NextUsn))
+        {
+            // Re-protect the skipped interval BEFORE the one fresh metadata walk. A new
+            // epoch invalidates old discharges; the store preserves the oldest proof boundary.
+            ((ILocalGapStore)sql).BeginGap(rootId, checkpoint.Cursor, replayNext, true,
+                "catch-up replay byte budget exceeded; fresh inventory with per-file protection");
+            sql.ForgetLocalWalk(rootId);
+            RunLog.Trace($"local catch-up bounded ({rootId}): fresh protected walk, no oversized journal replay");
+        }
         if (checkpoint is null) { sql?.ForgetLocalWalk(rootId); sql = null; }
         var options = JsonSerializer.Serialize(new { _settings.ReplaceOnlineOnlyStubs,
             ProductOwned = _productOwnedPaths.OrderBy(path => path, StringComparer.Ordinal).ToArray() });
@@ -230,22 +245,73 @@ public sealed partial class LocalInventory : IInventorySource
             return Invalid(gen, rootId, cursor,
                 journalId != through.JournalId ? "journal replaced" : next > through.NextUsn ? "cursor ahead of journal" : "journal gap: cursor precedes retained range");
         }
+        if (ReplayTooLarge(next, through.NextUsn))
+            return JournalReadFailed(gen, rootId, cursor, through, next,
+                "journal byte range exceeds replay budget", NtfsUsnReadFailure.OverLimit);
         if (!(JournalReadForTest ?? NtfsUsnJournal.TryReadChanges)(_root.RootPath, from, through, out var changes, out var readFailure, out var readFailureKind, ct))
         {
             return JournalReadFailed(gen, rootId, cursor, through, next, readFailure ?? "journal read failed", readFailureKind);
         }
         var names = new LocalJournalNames(_root, _known, changes, _settings.LocalDeltaMaxPaths);
+        var scopedParents = new HashSet<(ulong Object, ulong Parent)>();
+        var ambiguous = new Dictionary<string, ItemState>(StringComparer.Ordinal);
+        var scoped = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var scopeOverflow = false;
+        long scopeCharacters = 0;
+        void Scope(string path, string reason)
+        {
+            if (scopeOverflow) return;
+            if (!scoped.ContainsKey(path)) scopeCharacters += path.Length;
+            scoped[path] = reason;
+            scopeOverflow = scoped.Count > Math.Min(_settings.LocalDeltaMaxPaths, PathProtectionIndex.DefaultPathLimit) || scopeCharacters > PathProtectionIndex.DefaultCharacterLimit;
+        }
+        void Defer(NtfsUsnChange record, ItemState? known, string? scope, string reason)
+        {
+            scopeOverflow |= names.ScopeOverflow;
+            if (scopeOverflow) return;
+            var resolveNames = record.Name.Length == 0 && (record.Reason & 0x13100) != 0;
+            if (scope is not null && !(resolveNames && known is null)) Scope(scope, reason);
+            if (resolveNames && scopedParents.Add((record.FileId, record.ParentFileId)))
+            {
+                var parent = record.ParentFileId == _rootFileId ? "" :
+                    _known.ByObject(rootId, SyncLocalEndpointStore.ObjectId(_volume, record.ParentFileId)) is { Kind: ItemKind.Folder } folder
+                        ? folder.Path : null;
+                if (parent is not null)
+                {
+                    var aliases = names.FindAmbiguous(record, parent, ct);
+                    if (aliases is null) Scope(parent, "ambiguous journal parent could not be read; scoped retry required");
+                    else foreach (var alias in aliases) Scope(alias, reason);
+                    scopeOverflow |= names.ScopeOverflow;
+                }
+            }
+            if (scopeOverflow || known is null) return; // Unknown parent/object is outside the retained inventory.
+            if (!ambiguous.TryAdd(known.ObjectId, known)) return;
+            // Entity-owned rehash protects all aliases; named scopes also protect opposite-side
+            // absence decisions and names not yet present in our inventory.
+            for (var offset = 0; ; offset += 128)
+            {
+                var aliases = _known.ObjectPaths(rootId, known.ObjectId, offset, 128);
+                foreach (var alias in aliases) Scope(alias, reason);
+                if (aliases.Count < 128) break;
+                if (scopeOverflow) break;
+            }
+            Scope(known.Path, reason);
+        }
         var fallbackReason = "resolved path limit exceeded";
         var context = new ResolveContext(_rootFileId, _volume,
             id => _known.ByObject(rootId, SyncLocalEndpointStore.ObjectId(_volume, id)),
-            _settings.LocalDeltaMaxPaths, names.Find, names.Ambiguous, reason => fallbackReason = names.LastFailure ?? reason);
+            _settings.LocalDeltaMaxPaths, names.Find, names.Ambiguous, reason => fallbackReason = names.LastFailure ?? reason, Defer, () => scopeOverflow);
         var paths = await LocalDeltaResolver.ResolveAsync(changes, context, ct).ConfigureAwait(false);
-        if (paths is null || paths.Count > _settings.LocalDeltaMaxPaths)
+        if (scopeOverflow || paths is null || paths.Count > _settings.LocalDeltaMaxPaths)
         {
             // Unlike a gap, this batch contains authoritative write evidence. Keep it through fallback.
             PreserveWrites();
             return Invalid(gen, rootId, cursor, fallbackReason);
         }
+        // Persist the hold before any cursor can advance. Do not hash or infer a delete
+        // from a journal record whose name/identity is ambiguous.
+        _known.RequireRehashBatch(rootId, ambiguous.Values.Where(item => item.Kind == ItemKind.File && !item.Flags.HasFlag(ItemFlags.OwnedPointer)),
+            "ambiguous journal identity; scoped verification required");
         var watched = paths.ToHashSet(StringComparer.OrdinalIgnoreCase);
         paths = WithDefenderDeferredPaths(paths, rootId);
         var exact = paths.Where(path => !UnderAny(path, watched)).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -257,11 +323,38 @@ public sealed partial class LocalInventory : IInventorySource
         AfterRefreshScan?.Invoke();
         foreach (var change in delta.Changes)
         {
+            if (scopeOverflow) break;
             if (change.State is not { Kind: ItemKind.File } state) continue;
             ct.ThrowIfCancellationRequested();
             if (!names.Ambiguous(LocalItems.ParseObjectId(state.ObjectId).FileId, state, requirePresent: true)) continue;
-            PreserveWrites();
-            return Invalid(gen, rootId, cursor, names.LastFailure ?? "refreshed file has ambiguous hard-link identity");
+            RunLog.Trace("local journal post-refresh retry: " + names.LastFailure);
+            Defer(new(LocalItems.ParseObjectId(state.ObjectId).FileId, 0, 0, 0, FileAttributes.Normal, ""),
+                _known.ByObject(rootId, state.ObjectId), state.Path,
+                names.LastFailure ?? "refreshed file has ambiguous hard-link identity");
+        }
+        if (scopeOverflow) { PreserveWrites(); return Invalid(gen, rootId, cursor, "ambiguous journal scope exceeds bounded path budget"); }
+        if (scoped.Count > 0)
+        {
+            _known.RequireRehashBatch(rootId, ambiguous.Values.Where(item => item.Kind == ItemKind.File && !item.Flags.HasFlag(ItemFlags.OwnedPointer)),
+                "ambiguous journal identity; scoped verification required");
+            var scopeIndex = PathProtectionIndex.TryCreate(scoped.Keys);
+            if (scopeIndex is null) { PreserveWrites(); return Invalid(gen, rootId, cursor, "ambiguous journal scope exceeds bounded path budget"); }
+            bool Protected(string path) => scoped.ContainsKey("") ||
+                scopeIndex.Touches(path, false) || scopeIndex.Touches(path, true);
+            var retained = new List<Change>();
+            foreach (var change in delta.Changes)
+                if (Protected(change.Path) || ambiguous.ContainsKey(change.ObjectId))
+                    Scope(change.Path, scoped.GetValueOrDefault(change.Path) ?? "change overlaps ambiguous journal identity; reread required");
+                else retained.Add(change);
+            if (scopeOverflow) { PreserveWrites(); return Invalid(gen, rootId, cursor, "ambiguous journal scope exceeds bounded path budget"); }
+            delta = delta with
+            {
+                Changes = retained.ToArray(),
+                IncompleteSubtrees = delta.IncompleteSubtrees.Concat(scoped.Keys).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
+                IncompleteReasons = delta.IncompleteReasons.Concat(scoped).GroupBy(entry => entry.Key, StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(group => group.Key, group => group.Last().Value, StringComparer.OrdinalIgnoreCase)
+            };
+            RunLog.Trace($"local journal scoped retry ({rootId}): {scoped.Count} ambiguous path(s); remaining replay retained");
         }
         var written = changes.Where(change => (change.Reason & 0x7) != 0)
             .Select(change => SyncLocalEndpointStore.ObjectId(_volume, change.FileId)).ToHashSet(StringComparer.Ordinal);
@@ -323,6 +416,11 @@ public sealed partial class LocalInventory : IInventorySource
     /// <inheritdoc/>
     public async Task VerifyPendingAsync(Func<string, bool> include, Action<string> touched, CancellationToken ct)
     {
+        long done = 0;
+        var backlog = _known is SqliteStateStore sql ? sql.RehashPendingCount(_root.RootId) :
+            _known.LiveFlaggedSummary(_root.RootId, ItemFlags.NeedsRehash, 0).Count;
+        VerificationProgress?.Invoke(done, backlog);
+        RunLog.Trace($"Verifying content ({_root.RootId}): {backlog:N0} queued; up to {ForegroundVerificationLimit} candidates this run");
         var through = _known.RehashWatermark(_root.RootId);
         if (_known is ILocalGapStore gaps && GapIo is { } gapIo)
         {
@@ -336,11 +434,13 @@ public sealed partial class LocalInventory : IInventorySource
         catch (Exception error) when (IsRootUnavailable(error)) { return; }
         using (lease)
         {
-            while (true)
+            for (var pageNumber = 0; pageNumber < ForegroundVerificationLimit / 128; pageNumber++)
             {
                 ct.ThrowIfCancellationRequested();
                 var page = _known.RehashCandidates(_root.RootId, 128, through);
                 if (page.Count == 0) break;
+                done += page.Count;
+                VerificationProgress?.Invoke(done, backlog);
                 // Verified obligations replay their planning touches, not a foreground content read.
                 foreach (var verified in page.Where(item => item.Hash is not null && (item.Flags & ItemFlags.NeedsRehash) == 0))
                     for (var offset = 0; ; offset += 128)
@@ -665,7 +765,7 @@ public sealed partial class LocalInventory : IInventorySource
         changes.AddRange(LocalDeletes.Build(_known, rootId, paths, scan,
             path => include(path) && !LocalItems.IsExcluded(path, _productOwnedRelative) &&
                 !UnderAny(path, heldPaths) && !UnderAny(path, incompletePaths),
-            scanTime, row => seenIds.Contains(row.ObjectId) || checking.CanCloseAbsent(row)));
+            scanTime, row => seenIds.Contains(row.ObjectId) || checking.CanCloseAbsent(row), seenIds));
         return new Delta(rootId, _side, gen, cursor, throughCursor, changes, false, decisionPaths)
             { IncludesPath = include, IncompleteReasons = DecisionReasons(scan, include),
                 PendingDeletionEvidence = absence.PendingDeletionEvidence, DisplacementEvidence = absence };

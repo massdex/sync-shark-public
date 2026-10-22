@@ -137,6 +137,29 @@ public sealed partial class SyncRun
         ProgressThrottle throttle, IReadOnlySet<string>? reviewedDeletes, CancellationToken ct,
         bool allowUnreviewedEvidence = false)
     {
+        var tally = new Tally(_settings);
+        try { return await ExecuteWithEvidenceCoreAsync(approved, pair, throttle, reviewedDeletes, ct, allowUnreviewedEvidence, tally); }
+        catch (Exception error)
+        {
+            // Pause and user cancellation retain their original control-flow contracts.
+            if (error is PairPausedException || error is OperationCanceledException && ct.IsCancellationRequested)
+            {
+                error.Data.Remove("SyncRun.ExecutionReport");
+                throw;
+            }
+            // The result consumer owns these counts, including effects committed before a
+            // producer/finally failed. Never reconstruct them from a bounded failure sample.
+            if (tally.PlannedDone > 0 || tally.ExtraDone > 0)
+                error.Data["SyncRun.ExecutionReport"] = BuildReport(pair.PairId, approved, tally, ct.IsCancellationRequested);
+            else error.Data.Remove("SyncRun.ExecutionReport"); // Keep the pre-result authority-loss contract.
+            throw;
+        }
+    }
+
+    private async Task<DeferredExecution> ExecuteWithEvidenceCoreAsync(Plan approved, PairDef pair,
+        ProgressThrottle throttle, IReadOnlySet<string>? reviewedDeletes, CancellationToken ct,
+        bool allowUnreviewedEvidence, Tally tally)
+    {
         var initial = PrepareInitialExecution(approved, pair, reviewedDeletes, allowUnreviewedEvidence);
         approved = initial.Plan;
         var unapproved = initial.Unapproved;
@@ -145,7 +168,7 @@ public sealed partial class SyncRun
         if (held.Count == 0)
         {
             Trace("0 held deletes skipped Recovery (identical to Dropbox history)");
-            return new(approved, await ExecuteAsync(approved, pair, throttle, ct), unapproved.Concat(approved.RecoveryPending).Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
+            return new(approved, await ExecuteAsync(approved, pair, throttle, ct, tally), unapproved.Concat(approved.RecoveryPending).Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
         }
         var parkedFootprints = LinkExclusions.None.WithPending(OutstandingFootprints(pair.PairId));
         // RQ-141: one exclusion snapshot for the lane, not a root scan per action. Folder refreshes
@@ -188,7 +211,6 @@ public sealed partial class SyncRun
             if (action?.Kind == ActionKind.Delete && result.Outcome == Outcome.Done)
                 completedDeletes[FolderDelete.VictimKey(action.Target, action.Path)] = action;
         }
-        var tally = new Tally(_settings);
         // The denominator grows by each resolved plan's own non-Hold actions; a held path that resolves to
         // nothing is not pre-counted, so the planned progress can still reach its total.
         tally.Plan(approved.Actions);
@@ -682,7 +704,12 @@ public sealed partial class SyncRun
         {
             stop.Cancel();
             try { await finish; }
-            finally { AddProviderNameRefusalNotice(pair); }
+            finally
+            {
+                // Cancellation of the consumer cannot erase durable results already queued.
+                while (results.Reader.TryRead(out var item)) tally.Add(pair, item.Action, item.Result);
+                AddProviderNameRefusalNotice(pair);
+            }
         }
         Trace($"{skippedRecovery} held deletes skipped Recovery (identical to Dropbox history)");
         return new(approved with { Actions = actions, Notices = notices, SkippedActions = skipped }, tally,

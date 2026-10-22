@@ -17,6 +17,24 @@ using Microsoft.Data.Sqlite;
 // attributes for the whole test host. Non-Windows hosts make no native call.
 WindowsPlaceholderCompatibility.Expose();
 
+if (args is ["--v2-hotfix-gap-checks", var hotfixGapRoot])
+{
+    await Massdex.SyncShark.V2.LocalJournalChecks.HotfixChecksAsync(Path.GetFullPath(hotfixGapRoot));
+    return 0;
+}
+
+if (args is ["--directory-lease-checks"])
+{
+    await DirectoryLeaseChecks.RunAsync();
+    return 0;
+}
+
+if (args is ["--v2-hotfix-completion-checks"])
+{
+    await Massdex.SyncShark.V2.RunChecks.HotfixCompletionChecksAsync();
+    return 0;
+}
+
 if (args is ["--v2-removal-review-checks"])
 {
     await Massdex.SyncShark.V2.RunChecks.RemovalReviewChecksAsync();

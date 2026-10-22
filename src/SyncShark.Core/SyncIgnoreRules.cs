@@ -56,7 +56,7 @@ public static class SyncIgnorePolicy
 
     public static bool IsIgnored(string relativePath, bool isDirectory, IReadOnlyList<SyncIgnoreRule> rules)
     {
-        if (rules.Count == 0) return false;
+        if (relativePath.Length == 0 || rules.Count == 0) return false;
         var path = PilotPath.NormalizeInventoryPath(relativePath.Replace('\\', '/'));
         var components = path.Split('/');
         var name = components[^1];

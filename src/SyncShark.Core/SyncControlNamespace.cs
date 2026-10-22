@@ -113,8 +113,18 @@ public static class SyncControlNamespace
         var created = false;
         if (!Directory.Exists(plan.ControlPath))
         {
-            control = PilotDirectoryLease.CreateChild(parent, plan.DeterministicName);
-            created = true;
+            try
+            {
+                control = PilotDirectoryLease.CreateChild(parent, plan.DeterministicName);
+                created = true;
+            }
+            catch (IOException error) when (error.HResult == unchecked((int)0x800700B7))
+            {
+                // A concurrent creator won. Open verifies directory/reparse identity;
+                // the existing marker checks below still own adoption authority.
+                // Never mark this as ours or grant cleanup rights over its contents.
+                control = PilotDirectoryLease.Open(plan.ControlPath);
+            }
         }
         else
         {

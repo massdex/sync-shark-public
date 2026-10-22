@@ -30,11 +30,24 @@ public sealed partial class SyncRun
         try
         {
             var report = await ApplyBodyAsync(pairId, approved, progress, reviewedDeletes, rebuildables, ct, continuation);
-            CloseUnavailable(pairId);
+            if (!report.CompletionFailed) report = CompleteAvailable(pairId, report, ct);
             return report;
         }
-        catch (Exception error) when (RunFailure(error, ct))
+        catch (Exception error) when (error.Data["SyncRun.ExecutionReport"] is RunReport || RunFailure(error, ct))
         {
+            if (error.Data["SyncRun.ExecutionReport"] is RunReport counted)
+            {
+                var completion = new CompletionSteps(this, pairId, ct);
+                completion.Failed(error);
+                var report = completion.Finish(counted);
+                // Store damage remains an exception boundary even after durable effects.
+                if (error is StateDamagedException || error is Microsoft.Data.Sqlite.SqliteException sql && StoreSchema.IsDamaged(sql))
+                {
+                    error.Data["RunReport"] = report;
+                    throw;
+                }
+                return report;
+            }
             RecordUnavailable(pairId, error);
             return FailedRun(pairId, [new("", Outcome.Failed, null, null, null, error.Message)]);
         }
@@ -47,11 +60,24 @@ public sealed partial class SyncRun
         {
             RetryNotices(pairId);
             var report = await IncrementalBodyAsync(pairId, decisions, resolvingNoticeId, progress, ct);
-            if (report.Outcome != RunOutcomes.Failed) CloseUnavailable(pairId);
+            if (!report.CompletionFailed && report.Outcome != RunOutcomes.Failed) report = CompleteAvailable(pairId, report, ct);
             return report;
         }
-        catch (Exception error) when (RunFailure(error, ct))
+        catch (Exception error) when (error.Data["SyncRun.ExecutionReport"] is RunReport || RunFailure(error, ct))
         {
+            if (error.Data["SyncRun.ExecutionReport"] is RunReport counted)
+            {
+                var completion = new CompletionSteps(this, pairId, ct);
+                completion.Failed(error);
+                var report = completion.Finish(counted);
+                // Store damage remains an exception boundary even after durable effects.
+                if (error is StateDamagedException || error is Microsoft.Data.Sqlite.SqliteException sql && StoreSchema.IsDamaged(sql))
+                {
+                    error.Data["RunReport"] = report;
+                    throw;
+                }
+                return report;
+            }
             RecordUnavailable(pairId, error);
             return FailedRun(pairId, [new("", Outcome.Failed, null, null, null, error.Message)]);
         }
@@ -90,8 +116,24 @@ public sealed partial class SyncRun
                     _store.CloseNotice(notice.NoticeId, "resolved");
     }
 
+    private RunReport CompleteAvailable(string pairId, RunReport report, CancellationToken ct)
+    {
+        var completion = new CompletionSteps(this, pairId, ct);
+        if (_store is SqliteStateStore sql) completion.Step(sql.RetryResultMaintenance);
+        if (completion.Step(() => CloseUnavailable(pairId)) && report.OutcomeBeforeRetryDebt is { } effectOutcome)
+            completion.Step(() => report = IncrementalOutcome(report with
+            {
+                Outcome = effectOutcome,
+                Deferred = _store.CountSyncRetries(pairId),
+                OutcomeBeforeRetryDebt = null
+            }, report.DeletionEvidencePending));
+        return completion.Finish(report);
+    }
+
     private void CloseUnavailable(string pairId)
     {
+        if (_store.SyncRetryAt(pairId, string.Empty)?.Kind == "run")
+            _store.ClearSyncRetry(pairId, string.Empty);
         foreach (var notice in _store.OpenNotices(pairId))
             if (notice.ReasonKey == "run-unavailable" && notice.NoticeId is not null)
                 _store.CloseNotice(notice.NoticeId, "resolved");
@@ -132,9 +174,9 @@ public sealed partial class SyncRun
         }
     }
 
-    private void RecordUnavailable(string pairId, Exception error)
+    private void RecordUnavailable(string pairId, Exception error, bool completion = false)
     {
-        RunLog.Trace("Run incomplete; automatic retry required: " + error.Message);
+        RunLog.Trace("Run incomplete; automatic retry required: " + error.ToString());
         try
         {
             if (_store.Pair(pairId) is null) return;
@@ -142,11 +184,18 @@ public sealed partial class SyncRun
             if (previous is null || previous.Kind == "run")
                 _store.SaveSyncRetry(pairId, new(string.Empty, "run", (previous?.Attempts ?? 0) + 1,
                     error.Message, _time.GetUtcNow().AddSeconds(30)));
-            _store.AddNotices([new Notice(pairId, 40, NoticeKind.Info, "",
-                "Sync could not proceed: " + error.Message + ". Check endpoint access and available disk space; sync will retry automatically.", "run-unavailable")]);
+            var cause = error is StateDamagedException ? "store-damage" : error is EndpointAccessException ? "account-access" : "run-unavailable";
+            var fix = error is StateDamagedException
+                ? "Check state-store diagnostics and restore a verified backup if needed, then Retry."
+                : error is EndpointAccessException ? "Reconnect the account, then Retry."
+                : "Retry to save the remaining bookkeeping; automatic retries continue. If it persists, inspect the run log for the failed operation. Ignore dismisses this notice without excluding files.";
+            var message = completion
+                ? "Sync finished its file changes but could not save its final bookkeeping (" + cause + "): " + error.Message + ". " + fix
+                : "Sync could not proceed: " + error.Message + ". Check endpoint access and available disk space; sync will retry automatically.";
+            _store.AddNotices([new Notice(pairId, cause == "run-unavailable" ? 40 : 0, NoticeKind.Info, "", message, cause == "run-unavailable" ? "run-unavailable" : "autosync-failed")]);
         }
         catch (Exception writeError) when (RunFailure(writeError, CancellationToken.None))
-        { RunLog.Trace("Unable to persist run notice; retry on next run: " + writeError.Message); }
+        { RunLog.Trace("Unable to persist run notice; retry on next run: " + writeError.ToString()); }
     }
 
     private static bool RunFailure(Exception error, CancellationToken ct) =>

@@ -216,6 +216,7 @@ internal sealed class PairLoop
         if (_last is { Deferred: > 0 } previous && report.Deferred < previous.Deferred)
             _backoff = TimeSpan.Zero; // A bounded backlog is draining; don't exponentially slow useful progress.
         _last = report with { CompletedUtc = _in.Time.GetUtcNow() };
+        if (report.HaltedBy is { } halted) { Hold(halted); return; }
         if (report.Outcome is RunOutcomes.Stopped or RunOutcomes.Paused) return;
         if (report.ProviderReached || report.Outcome is RunOutcomes.Complete or RunOutcomes.Partial)
         {
@@ -233,7 +234,7 @@ internal sealed class PairLoop
             RecordFailure(new IOException(failure?.Reason ?? "The run reported failure; inspect its item notices for details.",
                 failure?.FailureHResult ?? unchecked((int)0x80131620)));
         }
-        if (report.Outcome == RunOutcomes.Failed || report.FailureCount > 0 || report.Failures.Count > 0 || report.Deferred > 0 ||
+        if (report.CompletionFailed || report.Outcome == RunOutcomes.Failed || report.FailureCount > 0 || report.Failures.Count > 0 || report.Deferred > 0 ||
             report.DeletionEvidencePending.Count > 0) ScheduleRetry();
         else _backoff = TimeSpan.Zero;
     }

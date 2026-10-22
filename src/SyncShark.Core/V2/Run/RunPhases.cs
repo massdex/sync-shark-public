@@ -14,6 +14,9 @@ public static class RunPhases
     /// <summary>Reading the content hashes of the files a plan will copy (before they are copied).</summary>
     public const string Hashing = "Checking file contents";
 
+    /// <summary>Bounded verification of retained content debt, separate from metadata reading.</summary>
+    public const string Verifying = "Verifying content";
+
     /// <summary>Choosing the effects for this run.</summary>
     public const string Planning = "Planning";
 

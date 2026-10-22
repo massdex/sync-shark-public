@@ -8,6 +8,8 @@ internal static class PlanningProtectionChecks
     {
         foreach (var scenario in new[] { "gap-release", "gap-retained", "moved-release", "retry-release", "flag-release", "flag-moved-a", "flag-moved-b" })
             Check(Path.Combine(folder, scenario), scenario);
+        foreach (var side in new[] { Side.A, Side.B })
+            CheckUnbaselined(Path.Combine(folder, "unbaselined-" + side), side);
         CheckRetryGate(Path.Combine(folder, "retry-gate"));
         CheckIncompleteCoverage();
         PlanningDeferredChecks.Run(Path.Combine(folder, "planning-deferred"));
@@ -15,6 +17,49 @@ internal static class PlanningProtectionChecks
         BlockedDeleteNoticeChecks.Run(Path.Combine(folder, "blocked-delete-notices"));
         DeleteReviewNoticeChecks.Run(Path.Combine(folder, "delete-review-notices"));
         Console.WriteLine("PASS immutable scope protection and real scan completeness: no false Delete/Forget");
+    }
+
+    private static void CheckUnbaselined(string folder, Side hiddenSide)
+    {
+        try
+        {
+            using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+            var pair = new PairDef("pair", "Pair A", new("local", SyncProviders.Local, null, "/local", "local"),
+                new("cloud", SyncProviders.Dropbox, null, "/cloud", "cloud"), [], [], true);
+            store.SavePair(pair);
+            var a = Enumerable.Range(0, 512).Select(n => new ItemState($"file-{n}.txt", ItemKind.File,
+                "local-" + n, null, new string('a', 64), 1, DateTimeOffset.UnixEpoch, ItemFlags.None)).ToArray();
+            var b = a.Select((item, n) => item with { ObjectId = "cloud-" + n }).ToArray();
+            foreach (var side in new[] { Side.A, Side.B })
+            {
+                var root = side == Side.A ? pair.A : pair.B;
+                var gen = store.BeginGeneration(root.RootId, "fixture");
+                store.WriteSnapshot(new(root.RootId, side, gen, "cursor", side == Side.A ? a : b, []));
+                store.CompleteGeneration(gen, "cursor", true);
+            }
+            var hiddenRoot = hiddenSide == Side.A ? pair.A : pair.B;
+            ((ILocalGapStore)store).BeginGap(hiddenRoot.RootId, "cursor", 1, false, "fixture gap");
+            RunScope Scanner() => new(store, _ => true, _ => true, LinkExclusions.Of(store, pair, false));
+            var scope = Scanner().LoadFull(pair);
+            LocalChecks.Require(scope.A.Count == 0 && scope.B.Count == 0 && Decide(scope).Actions.Count == 0,
+                "unbaselined hidden " + hiddenSide + " cannot produce a counterpart CopyNew");
+            using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+                { DataSource = SqliteStateStore.DatabasePath(folder), Pooling = false }.ToString()))
+            {
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = "UPDATE local_gap SET discovery_done=1; DELETE FROM local_gap_item;";
+                command.ExecuteNonQuery();
+            }
+            var visible = Decide(Scanner().LoadFull(pair));
+            LocalChecks.Require(visible.Actions.Count == 512 && visible.Actions.All(action => action.Kind == ActionKind.Adopt),
+                "released unbaselined identical files Adopt on both-visible run, never CopyNew");
+            Plan Decide(RunScope.Scope scope) => Planner.Decide(pair.PairId, 1,
+                Planner.Join(scope.Baselines, scope.A, scope.B, new Dictionary<string, DateTimeOffset?>(),
+                    new Dictionary<string, DateTimeOffset?>(), new(true, true, new HashSet<string>(), new HashSet<string>()), false),
+                new(TimeSpan.Zero, false, new("{name} [{side}]{ext}", "s", TimeSpan.Zero, "Local", "Dropbox"), 10));
+        }
+        finally { LocalJournalChecks.RemoveFixture(folder); }
     }
 
     private static void CheckRetryGate(string folder)

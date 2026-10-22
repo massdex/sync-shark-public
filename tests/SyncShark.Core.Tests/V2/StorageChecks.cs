@@ -14,6 +14,7 @@ internal static partial class StorageChecks
     {
         if (Directory.Exists(root)) Directory.Delete(root, true);
         Directory.CreateDirectory(root);
+        ResultMaintenanceChecks(Path.Combine(root, "result-maintenance"));
         IntegratedSchemaChecks(root);
         await JournalSizingChecks.RunAsync(root);
         OpenFreshReopen(root);

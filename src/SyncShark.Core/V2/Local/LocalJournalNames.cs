@@ -9,9 +9,14 @@ internal sealed class LocalJournalNames
     private readonly RootDef _root;
     private readonly IStateStore _known;
     private readonly HashSet<ulong> _wanted;
+    private readonly HashSet<ulong> _ambiguousNames = [];
     private readonly Dictionary<string, Dictionary<ulong, string>> _parents = new(StringComparer.Ordinal);
     private readonly int _limit;
     private int _retained;
+    private readonly Dictionary<string, Dictionary<ulong, List<string>>?> _scopeParents = new(StringComparer.Ordinal);
+    private int _scopeRetained;
+    private long _scopeCharacters;
+    internal bool ScopeOverflow { get; private set; }
 
     public LocalJournalNames(RootDef root, IStateStore known, IReadOnlyList<NtfsUsnChange> changes, int limit)
     {
@@ -64,13 +69,51 @@ internal sealed class LocalJournalNames
     private static extern Microsoft.Win32.SafeHandles.SafeFileHandle OpenMetadata(string path, uint access, uint share,
         IntPtr security, uint disposition, uint flags, IntPtr template);
 
+    // Ambiguous identities are read as retry scopes, never authoritative delta upserts.
+    // In particular, a redacted hard-link rename must discover the new alias as well
+    // as retaining the old stored names. Do not require a single-link handle here.
+    internal IReadOnlyList<string>? FindAmbiguous(NtfsUsnChange change, string parent, CancellationToken ct)
+    {
+        if (ScopeOverflow) return null;
+        if (_scopeParents.TryGetValue(parent, out var cached))
+            return cached is null ? null : cached.GetValueOrDefault(change.FileId) ?? [];
+        if (_scopeParents.Count >= _limit) { ScopeOverflow = true; return null; }
+        _scopeParents[parent] = null;
+        try
+        {
+            var child = parent.Length == 0 ? ".journal-name-probe" : parent + "/.journal-name-probe";
+            using var guard = LocalItems.GuardRefreshPaths(_root.RootPath, _root.RootId, _known, [child]);
+            if (guard.Incomplete.Count != 0 || guard.Safe.Count != 1) return null;
+            var directory = parent.Length == 0 ? _root.RootPath :
+                Path.Combine(_root.RootPath, parent.Replace('/', Path.DirectorySeparatorChar));
+            var result = new Dictionary<ulong, List<string>>();
+            foreach (var entry in WindowsDirectoryListing.List(directory))
+            {
+                ct.ThrowIfCancellationRequested();
+                var id = unchecked((ulong)entry.FileId);
+                if (!_wanted.Contains(id)) continue;
+                var path = parent.Length == 0 ? entry.Name : parent + "/" + entry.Name;
+                _scopeCharacters += path.Length;
+                if (++_scopeRetained > Math.Min(_limit, PathProtectionIndex.DefaultPathLimit) || _scopeCharacters > PathProtectionIndex.DefaultCharacterLimit)
+                { ScopeOverflow = true; return null; }
+                if (!result.TryGetValue(id, out var paths)) result[id] = paths = [];
+                paths.Add(path);
+            }
+            _scopeParents[parent] = result;
+            return result.GetValueOrDefault(change.FileId) ?? [];
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or Win32Exception or ArgumentException)
+        { return null; }
+    }
+
     // null is never absence evidence. Caller falls back on any inaccessible/replaced parent or ambiguous ID.
     public IReadOnlyList<string>? Find(NtfsUsnChange change, string parent, CancellationToken ct)
     {
         LookupForTest?.Invoke();
+        if (_ambiguousNames.Contains(change.FileId)) return Failed("ambiguous identity in parent listing");
         if (!_parents.TryGetValue(parent, out var names))
         {
-            if (_parents.Count >= _limit) return Failed($"parent lookup limit reached at {parent}");
+            if (_parents.Count >= _limit) { ScopeOverflow = true; return Failed($"parent lookup limit reached at {parent}"); }
             try
             {
                 // GuardRefreshPaths holds every ancestor, including the requested parent, through enumeration.
@@ -87,8 +130,13 @@ internal sealed class LocalJournalNames
                     var id = unchecked((ulong)entry.FileId);
                     if (!_wanted.Contains(id)) continue;
                     var path = parent.Length == 0 ? entry.Name : parent + "/" + entry.Name;
-                    if ((entry.Attributes & FileAttributes.Directory) == 0 && !SingleLink(path, id)) return null;
-                    if (++_retained > _limit) return Failed($"retained-name limit reached at {parent}");
+                    if ((entry.Attributes & FileAttributes.Directory) == 0 && !SingleLink(path, id))
+                    {
+                        _ambiguousNames.Add(id);
+                        if (_ambiguousNames.Count > _limit) { ScopeOverflow = true; return Failed("ambiguous-name limit reached"); }
+                        continue; // Another record's ambiguous identity cannot invalidate this name lookup.
+                    }
+                    if (++_retained > _limit) { ScopeOverflow = true; return Failed($"retained-name limit reached at {parent}"); }
                     if (!names.TryAdd(id, path)) return Failed($"multiple names for object {id:x16} under {parent}");
                 }
                 _parents.Add(parent, names);
@@ -99,6 +147,7 @@ internal sealed class LocalJournalNames
                 return Failed($"parent listing failed at {parent}: {error.Message}");
             }
         }
+        if (_ambiguousNames.Contains(change.FileId)) return Failed("ambiguous identity in parent listing");
         return names.TryGetValue(change.FileId, out var foundPath) ? [foundPath] : [];
     }
 }

@@ -61,6 +61,36 @@ internal static partial class AutoSyncChecks
         Require(notice.ReasonKey == "autosync-failed" && notice.Detail.Contains("Reconnect", StringComparison.Ordinal),
             "first auth failure immediately explains the reconnect fix");
         Pass("ImmediateAccessNotice");
+        foreach (var error in new Exception[] { new EndpointAccessException("completion access lost"), new StateDamagedException("completion store damaged") })
+        {
+            await using var completion = new Rig(["p1"]);
+            completion.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Partial, 0) with { Done = 1, Uploaded = 1,
+                CompletionFailed = true, HaltedBy = error });
+            await completion.StartAsync();
+            await completion.ParkedAsync(AutoStatus.Held);
+            Require(completion._store.OpenNotices("p1").Single().Detail.Contains(error is EndpointAccessException ? "Reconnect" : "verified backup"),
+                "counted Partial holds pair and raises correct authority notice in same run");
+        }
+    }
+
+    internal static async Task CountedPauseDoesNotHoldAsync(RunReport report)
+    {
+        await using var rig = new Rig(["p1"]);
+        rig.Run.Then(report);
+        await rig.StartAsync();
+        await rig.ParkedAsync(AutoStatus.Idle);
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            var before = rig.Run.Runs("p1");
+            rig.Run.Then(report);
+            rig.WatchA.Signal();
+            await rig.ParkedAsync(AutoStatus.Waiting);
+            rig.Clock.Advance(Settings.ChangeQuietWindow);
+            await Until(() => rig.Run.Runs("p1") > before, "watch signal returns another paused report");
+            await rig.ParkedAsync(AutoStatus.Idle);
+        }
+        Require(rig._store.OpenNotices("p1").Count == 0 && rig.State("p1").RetryAt is null,
+            "three counted pauses neither hold AutoSync nor accumulate failure notices or retry backoff");
     }
 
     internal static async Task ImmediateDiskFullReportAsync()

@@ -120,6 +120,8 @@ public sealed partial class SyncRun
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var item in previous)
         {
+            // Run-level debt is settled only after completion, never by item equality/absence.
+            if (item.Path.Length == 0 && item.Kind == "run") continue;
             // Read-stage debt is owned by RecordScanRetries, never by action/equality settlement.
             if (plan.RecoveryPending.Contains(item.Path, StringComparer.OrdinalIgnoreCase))
             { remaining.Remove(item.Path); continue; }

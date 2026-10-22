@@ -228,6 +228,15 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
         try
         {
             var report = await _run.IncrementalAsync(pairId, new RunProgressForwarder(sink), ct);
+            if (report.HaltedBy is EndpointAccessException access)
+            {
+                var review = new SyncCliReviewException(ReconnectText(access));
+                review.Data["RunReport"] = report;
+                throw review;
+            }
+            if (report.HaltedBy is StateDamagedException damaged) { damaged.Data["RunReport"] = report; throw damaged; }
+            if (report.HaltedBy is Microsoft.Data.Sqlite.SqliteException sqlDamage && StoreSchema.IsDamaged(sqlDamage))
+            { sqlDamage.Data["RunReport"] = report; throw sqlDamage; }
             await SettleAfterRunAsync(ct).ConfigureAwait(false);
             return new SyncCliRunData(report.PairId, pair.Name, report.Uploaded, report.Downloaded, 0,
                 report.KeptBoth, report.Held,

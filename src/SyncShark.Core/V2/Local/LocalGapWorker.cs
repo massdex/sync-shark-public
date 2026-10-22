@@ -78,7 +78,8 @@ internal sealed class LocalGapWorker(ILocalGapStore store, ILocalGapIo io) : IAs
                     // Retry discovery only after the next Start/run; do not cancel independent content work.
                     pausedDiscoveryRun = run;
                 }
-                if (!worked) await Task.Delay(TimeSpan.FromSeconds(2), ct).ConfigureAwait(false);
+                // Give foreground store callers a scheduling opportunity after EVERY page.
+                await Task.Delay(worked ? TimeSpan.FromMilliseconds(20) : TimeSpan.FromSeconds(2), ct).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }

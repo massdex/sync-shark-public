@@ -373,7 +373,12 @@ internal sealed class RecordingStore : IStateStore
         RecoveryRestoreProtectionCalls++;
         return _inner.RecoveryRestoreProtected(pairId, path, descendants, includeReady);
     }
-    public void SaveSyncRetry(string pairId, SyncRetry retry) => _inner.SaveSyncRetry(pairId, retry);
+    public string? FailSaveRetryPath { get; set; }
+    public void SaveSyncRetry(string pairId, SyncRetry retry)
+    {
+        if (retry.Path == FailSaveRetryPath) throw new IOException("injected retry persistence failure");
+        _inner.SaveSyncRetry(pairId, retry);
+    }
     public void ClearSyncRetry(string pairId, string path) => _inner.ClearSyncRetry(pairId, path);
     public void SuspendHeldRetry(string pairId, SyncRetry retry) => _inner.SuspendHeldRetry(pairId, retry);
     public void RequireRehash(string rootId, ItemState item, string reason) => _inner.RequireRehash(rootId, item, reason);
@@ -437,8 +442,12 @@ internal sealed class RecordingStore : IStateStore
         _inner.WriteDelta(d);
     }
 
-    public void CompleteGeneration(long gen, string cursor, bool complete) =>
+    public int CompletedGenerations { get; private set; }
+    public void CompleteGeneration(long gen, string cursor, bool complete)
+    {
         _inner.CompleteGeneration(gen, cursor, complete);
+        CompletedGenerations++;
+    }
 
     public string? Cursor(string rootId) => _inner.Cursor(rootId);
 
@@ -450,8 +459,13 @@ internal sealed class RecordingStore : IStateStore
 
     public IReadOnlyList<ItemState> Live(string rootId, IEnumerable<string>? paths = null) => _inner.Live(rootId, paths);
 
-    public IReadOnlyList<ItemState> LiveUnder(string rootId, IEnumerable<string> pathPrefixes) =>
-        _inner.LiveUnder(rootId, pathPrefixes);
+    public int RootIntakeReads { get; set; }
+    public IReadOnlyList<ItemState> LiveUnder(string rootId, IEnumerable<string> pathPrefixes)
+    {
+        var paths = pathPrefixes.ToArray();
+        if (paths.Contains(string.Empty)) RootIntakeReads++;
+        return _inner.LiveUnder(rootId, paths);
+    }
 
     public List<string> ChildDirectories { get; } = [];
     public IReadOnlyList<ItemState> LiveChildren(string rootId, string directory)
@@ -508,11 +522,13 @@ internal sealed class RecordingStore : IStateStore
 
     internal Action<SyncAction>? AfterIntent { get; set; }
 
+    public Action<SyncAction>? IntentRecorded { get; set; }
     public void RecordIntent(string pairId, SyncAction a)
     {
         _intents++;
         _inner.RecordIntent(pairId, a);
         AfterIntent?.Invoke(a);
+        IntentRecorded?.Invoke(a);
         if (_intents == CrashAfterIntent) throw new SimulatedCrash();
     }
 
@@ -560,7 +576,12 @@ internal sealed class RecordingStore : IStateStore
     public void RecordRecovery(string pairId, string actionId, string path, RecoveryRef recovery) =>
         _inner.RecordRecovery(pairId, actionId, path, recovery);
 
-    public void CloseNotice(string noticeId, string? choice) => _inner.CloseNotice(noticeId, choice);
+    public string? FailCloseNoticeId { get; set; }
+    public void CloseNotice(string noticeId, string? choice)
+    {
+        if (noticeId == FailCloseNoticeId) throw new InvalidOperationException("injected completion notice failure");
+        _inner.CloseNotice(noticeId, choice);
+    }
     public void RecordNoticeChoiceFailure(Notice original, string failure) => _inner.RecordNoticeChoiceFailure(original, failure);
 
     public void RecordRunSummary(RunSummary summary) => _inner.RecordRunSummary(summary);
@@ -579,7 +600,14 @@ internal sealed class RecordingStore : IStateStore
     public void StoreDeletionEvidence(string pairId, string rootId, IReadOnlyList<DeletionEvidenceRecord> results) =>
         _inner.StoreDeletionEvidence(pairId, rootId, results);
 
-    public void Prune() => _inner.Prune();
+    public bool FailPrune { get; set; }
+    public Exception? PruneError { get; set; }
+    public void Prune()
+    {
+        if (PruneError is { } error) throw error;
+        if (FailPrune) throw new InvalidOperationException("injected completion prune failure");
+        _inner.Prune();
+    }
 
     public void Dispose() => _inner.Dispose();
 }

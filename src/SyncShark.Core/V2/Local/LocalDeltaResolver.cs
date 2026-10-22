@@ -3,7 +3,8 @@ namespace Massdex.SyncShark.V2;
 /// <summary>The inputs one journal-delta resolution needs, supplied by the local inventory.</summary>
 internal sealed record ResolveContext(ulong RootFileId, uint Volume, Func<ulong, ItemState?> KnownById,
     int MaxPaths, Func<NtfsUsnChange, string, CancellationToken, IReadOnlyList<string>?> FindNames,
-    Func<ulong, ItemState?, bool>? Ambiguous = null, Action<string>? Fallback = null);
+    Func<ulong, ItemState?, bool>? Ambiguous = null, Action<string>? Fallback = null,
+    Action<NtfsUsnChange, ItemState?, string?, string>? Defer = null, Func<bool>? ScopeOverflow = null);
 
 /// <summary>Resolves NTFS journal changes into the exact pair-relative paths to re-scan; bounded parent-name and identity reads.</summary>
 internal static class LocalDeltaResolver
@@ -34,16 +35,23 @@ internal static class LocalDeltaResolver
         foreach (var change in changes)
         {
             ct.ThrowIfCancellationRequested();
-            if ((change.Reason & ReasonHardLink) != 0) return Reject("hard-link journal change");
+            if (context.ScopeOverflow?.Invoke() == true) return Reject("ambiguous scope limit exceeded");
             if (change.FileId == context.RootFileId)
             {
                 if ((change.Reason & RootFatal) != 0) return Reject("root renamed, deleted or reparse identity changed");
                 continue;
             }
             var known = context.KnownById(change.FileId);
-            if (context.Ambiguous?.Invoke(change.FileId, known) == true) return Reject("changed object failed single-link identity check");
-            if (known is not null) collected.Add(known.Path);
             var parent = ParentPath(change, context);
+            var scope = parent is not null && change.Name.Length > 0 && IsUsableName(change.Name)
+                ? (parent.Length == 0 ? change.Name : parent + "/" + change.Name) : known?.Path ?? parent;
+            if ((change.Reason & ReasonHardLink) != 0 || context.Ambiguous?.Invoke(change.FileId, known) == true)
+            {
+                if (context.Defer is null) return Reject("hard-link journal change or ambiguous object identity");
+                context.Defer(change, known, scope, "hard-link journal change or ambiguous object identity");
+                continue;
+            }
+            if (known is not null) collected.Add(known.Path);
             if (parent is null) continue;
             if (change.Name.Length == 0)
             {
@@ -51,7 +59,12 @@ internal static class LocalDeltaResolver
                 if (known is not null && (change.Reason & CreateOrRename) == 0) continue;
                 // Empty is not absence evidence; null requests full reconciliation.
                 var names = context.FindNames(change, parent, ct);
-                if (names is null) return Reject("parent name lookup failed");
+                if (names is null)
+                {
+                    if (context.Defer is null) return Reject("parent name lookup failed");
+                    context.Defer(change, known, parent, "parent name lookup failed; scoped retry required");
+                    continue;
+                }
                 collected.AddRange(names);
                 continue;
             }
@@ -60,7 +73,11 @@ internal static class LocalDeltaResolver
             if (context.Ambiguous?.Invoke(change.FileId, new ItemState(namedPath,
                 (change.Attributes & FileAttributes.Directory) != 0 ? ItemKind.Folder : ItemKind.File,
                 SyncLocalEndpointStore.ObjectId(context.Volume, change.FileId), null, null, 0, default, ItemFlags.None)) == true)
-                return Reject("named object failed single-link identity check");
+            {
+                if (context.Defer is null) return Reject("named object failed single-link identity check");
+                context.Defer(change, known, namedPath, "named object failed single-link identity check");
+                continue;
+            }
             collected.Add(namedPath);
         }
         return Finalize(collected, context.MaxPaths, context.Fallback);

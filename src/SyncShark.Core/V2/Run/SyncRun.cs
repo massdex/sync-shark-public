@@ -242,15 +242,21 @@ public sealed partial class SyncRun : ISyncRun
             await using var accountVerification = SyncProviderAccountVerificationScope.Begin(linked.Token);
             var result = await body(activity.Progress, linked.Token).ConfigureAwait(false);
             if (result is not RunReport report) return result;
-            var space = FreeSpacePresentation.Group(_store.OpenNotices(report.PairId));
-            foreach (var summary in space)
-                activity.Progress.Report(new RunProgress("Pending", null, 0, 0) { Message = summary.Detail });
-            var completed = report with
+            var completion = new CompletionSteps(this, report.PairId, linked.Token);
+            var completed = report;
+            completion.Step(() =>
             {
-                CompletedUtc = _time.GetUtcNow(),
-                Diagnostics = instrumentation?.Snapshot(),
-                FreeSpacePending = space
-            };
+                var space = FreeSpacePresentation.Group(_store.OpenNotices(report.PairId));
+                foreach (var summary in space)
+                    activity.Progress.Report(new RunProgress("Pending", null, 0, 0) { Message = summary.Detail });
+                completed = report with
+                {
+                    CompletedUtc = _time.GetUtcNow(),
+                    Diagnostics = instrumentation?.Snapshot(),
+                    FreeSpacePending = space
+                };
+            });
+            completed = completion.Finish(completed);
             // the run owns its retained outcome. Only the bounded counts are stored; the live
             // report keeps its failure examples for the caller and nothing else is written.
             RecordSummarySafely(completed, startedAt);
@@ -265,6 +271,7 @@ public sealed partial class SyncRun : ISyncRun
         }
         catch (Exception error)
         {
+            RunLog.Trace("Run failed: " + error.ToString());
             if (historyPairId is not null)
                 RecordSummarySafely(new RunReport(historyPairId,
                     error is OperationCanceledException && linked.IsCancellationRequested ? RunOutcomes.Stopped : RunOutcomes.Failed,
@@ -293,7 +300,7 @@ public sealed partial class SyncRun : ISyncRun
     {
         try
         {
-            if (report.ProviderReached || report.Outcome is RunOutcomes.Complete or RunOutcomes.Partial)
+            if (report.HaltedBy is null && (report.ProviderReached || report.Outcome is RunOutcomes.Complete or RunOutcomes.Partial))
                 _store.CloseNoticeFamily(report.PairId, "autosync-failed");
         }
         catch (Exception error) { RunOutput.Observe(error); }
@@ -631,68 +638,76 @@ public sealed partial class SyncRun : ISyncRun
         var execution = await ExecuteWithEvidenceAsync(approved, pair, throttle, reviewedDeletes, ct);
         approved = execution.Plan;
         var tally = execution.Tally;
-        if (execution.Pending.Count > 0 && execution.EvidenceUnavailable)
+        var completion = new CompletionSteps(this, pairId, ct);
+        RunReport? completedReport = null;
+        await completion.StepAsync(async () =>
         {
-            var alreadyPending = openNotices.Where(notice => notice.ReasonKey == "deletion-evidence-pending")
+            if (execution.Pending.Count > 0 && execution.EvidenceUnavailable)
+            {
+                var alreadyPending = openNotices.Where(notice => notice.ReasonKey == "deletion-evidence-pending")
+                    .Select(notice => notice.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                WriteNotices(execution.Pending.Where(path => !alreadyPending.Contains(path))
+                    .Select(path => new Notice(pairId, 4, NoticeKind.Info, path,
+                        "Deletion evidence is pending; this item will be retried without blocking other files.", "deletion-evidence-pending")));
+            }
+            completion.Step(() => WriteRestoredEvidenceNotices(pairId, execution.Pending));
+            // The approved plan came from a full-scope preview, so every path was re-evaluated for it.
+            var pendingEvidence = execution.Pending.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (!ct.IsCancellationRequested)
+                completion.Step(() => CloseResolvedNotices(openNotices, approved, tally, path => !pendingEvidence.Contains(path)));
+            // Decision 85: unfinished reviewed work is retained as item-owned retry input and visible issues.
+            // The reviewed exclusion persists even when its removal is unfinished; exclusion grants no deletion authority.
+            var statuses = RebuildableStatuses(pair, rebuildables?.Cloud, approved, tally, rebuildablePaths);
+            var blockedRebuildables = statuses.Where(status => status.Blocked).Select(status => status.Path).ToArray();
+            // Decision 64: user-decision Holds (ties, needs-decision rows) do not block completion; their paths stay
+            // pending (left alone on both sides) while their notices are open, and the user's decision is applied later.
+            // Evidence-blocked work is not a user decision. Retain its evidence input before promoting cursors;
+            // the later ordinary run must still prove deletion safety rather than interpret missing evidence as absence.
+            var evidenceBlocked = approved.Notices.Where(notice => notice.ReasonKey == PlanNotices.DeletionEvidencePending.Key)
                 .Select(notice => notice.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            WriteNotices(execution.Pending.Where(path => !alreadyPending.Contains(path))
-                .Select(path => new Notice(pairId, 4, NoticeKind.Info, path,
-                    "Deletion evidence is pending; this item will be retried without blocking other files.", "deletion-evidence-pending")));
-        }
-        WriteRestoredEvidenceNotices(pairId, execution.Pending);
-        // The approved plan came from a full-scope preview, so every path was re-evaluated for it.
-        var pendingEvidence = execution.Pending.ToHashSet(StringComparer.OrdinalIgnoreCase);
-        if (!ct.IsCancellationRequested) CloseResolvedNotices(openNotices, approved, tally, path => !pendingEvidence.Contains(path));
-        // Decision 85: unfinished reviewed work is retained as item-owned retry input and visible issues.
-        // The reviewed exclusion persists even when its removal is unfinished; exclusion grants no deletion authority.
-        var statuses = RebuildableStatuses(pair, rebuildables?.Cloud, approved, tally, rebuildablePaths);
-        var blockedRebuildables = statuses.Where(status => status.Blocked).Select(status => status.Path).ToArray();
-        // Decision 64: user-decision Holds (ties, needs-decision rows) do not block completion; their paths stay
-        // pending (left alone on both sides) while their notices are open, and the user's decision is applied later.
-        // Evidence-blocked work is not a user decision. Retain its evidence input before promoting cursors;
-        // the later ordinary run must still prove deletion safety rather than interpret missing evidence as absence.
-        var evidenceBlocked = approved.Notices.Where(notice => notice.ReasonKey == PlanNotices.DeletionEvidencePending.Key)
-            .Select(notice => notice.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var unfinished = approved.Actions.Where(action =>
-            (action.Kind != ActionKind.Hold || evidenceBlocked.Contains(action.Path)) &&
-            !tally.WasSettled(action.ActionId)).ToArray();
-        var alreadyDeferred = execution.Pending.Concat(blockedRebuildables).Concat(unfinished.Select(action => action.Path))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        // Hash failures remove executable rows from the plan, but are not user-decision Holds.
-        // Keep first-sync choices available until those content checks can actually finish.
-        var unconfirmed = approved.Notices.Where(notice => notice.ReasonKey == PlanNotices.ContentUnconfirmed.Key || notice.ReasonKey == "sync-retry")
-            .Select(notice => notice.Path).Distinct(StringComparer.OrdinalIgnoreCase)
-            .Order(StringComparer.Ordinal).ToArray();
-        var unresolvedIntents = await CompletionIntentPreflightAsync(pair);
-        var deferred = execution.Pending.Count + dropped + blockedRebuildables.Length + unfinished.Length +
-            unconfirmed.Count(path => !alreadyDeferred.Contains(path)) + unresolvedIntents;
-        if (!ct.IsCancellationRequested && !execution.EvidenceUnavailable)
-        {
-            ParkFirstSyncWork(pair, approved, tally,
-                execution.Pending.Concat(_store.UnresolvedIntents(pairId).Select(action => action.Path)),
-                unconfirmed, blockedRebuildables);
-            // The exclusions are written immediately before the done marker (the store offers no combined
-            // transaction, and none is added for this): a crash between the two leaves them saved without the marker,
-            // so the apply simply re-runs, and there is never a window in which the first sync is done but its
-            // exclusions are missing.
-            PromoteFirstSyncInventory(pair, approved);
-            PersistRebuildables(pair, statuses);
-            _store.MarkFirstSyncDone(pairId);
-        }
-        throttle.Flush();
-        var report = WithReconciliation(BuildReport(pairId, approved, tally, ct.IsCancellationRequested), reconcile);
-        return report with
-        {
-            Outcome = ct.IsCancellationRequested ? RunOutcomes.Stopped : deferred > 0 ? RunOutcomes.Partial : report.Outcome,
-            Deferred = _store.FirstSyncDone(pairId) ? 0 : deferred,
-            DeletionEvidencePending = execution.Pending,
-            ReviewedDeletionEvidencePendingCount = approved.HeldDeletions
-                .Select(held => held.Path).Distinct(StringComparer.OrdinalIgnoreCase).Count(pendingEvidence.Contains),
-            UnreviewedPending = approved.UnreviewedHeldDeletions.Count,
-            ContentUnconfirmedCount = unconfirmed.Length,
-            ContentUnconfirmedExamples = unconfirmed.Take(50).ToArray(),
-            RebuildablesBlocked = blockedRebuildables
-        };
+            var unfinished = approved.Actions.Where(action =>
+                (action.Kind != ActionKind.Hold || evidenceBlocked.Contains(action.Path)) &&
+                !tally.WasSettled(action.ActionId)).ToArray();
+            var alreadyDeferred = execution.Pending.Concat(blockedRebuildables).Concat(unfinished.Select(action => action.Path))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            // Hash failures remove executable rows from the plan, but are not user-decision Holds.
+            // Keep first-sync choices available until those content checks can actually finish.
+            var unconfirmed = approved.Notices.Where(notice => notice.ReasonKey == PlanNotices.ContentUnconfirmed.Key || notice.ReasonKey == "sync-retry")
+                .Select(notice => notice.Path).Distinct(StringComparer.OrdinalIgnoreCase)
+                .Order(StringComparer.Ordinal).ToArray();
+            var unresolvedIntents = await CompletionIntentPreflightAsync(pair);
+            var deferred = execution.Pending.Count + dropped + blockedRebuildables.Length + unfinished.Length +
+                unconfirmed.Count(path => !alreadyDeferred.Contains(path)) + unresolvedIntents;
+            if (!ct.IsCancellationRequested && !execution.EvidenceUnavailable)
+            {
+                ParkFirstSyncWork(pair, approved, tally,
+                    execution.Pending.Concat(_store.UnresolvedIntents(pairId).Select(action => action.Path)),
+                    unconfirmed, blockedRebuildables);
+                // The exclusions are written immediately before the done marker (the store offers no combined
+                // transaction, and none is added for this): a crash between the two leaves them saved without the marker,
+                // so the apply simply re-runs, and there is never a window in which the first sync is done but its
+                // exclusions are missing.
+                PromoteFirstSyncInventory(pair, approved);
+                PersistRebuildables(pair, statuses);
+                _store.MarkFirstSyncDone(pairId);
+            }
+            var report = WithReconciliation(BuildReport(pairId, approved, tally, ct.IsCancellationRequested), reconcile);
+            completedReport = report with
+            {
+                Outcome = ct.IsCancellationRequested ? RunOutcomes.Stopped : deferred > 0 ? RunOutcomes.Partial : report.Outcome,
+                Deferred = _store.FirstSyncDone(pairId) ? 0 : deferred,
+                DeletionEvidencePending = execution.Pending,
+                ReviewedDeletionEvidencePendingCount = approved.HeldDeletions
+                    .Select(held => held.Path).Distinct(StringComparer.OrdinalIgnoreCase).Count(pendingEvidence.Contains),
+                UnreviewedPending = approved.UnreviewedHeldDeletions.Count,
+                ContentUnconfirmedCount = unconfirmed.Length,
+                ContentUnconfirmedExamples = unconfirmed.Take(50).ToArray(),
+                RebuildablesBlocked = blockedRebuildables
+            };
+        });
+        completion.Step(() => throttle.Flush());
+        return completion.Finish(completedReport ??
+            WithReconciliation(BuildReport(pairId, approved, tally, ct.IsCancellationRequested), reconcile));
     }
 
     internal sealed record IncrementalPlanPreview(Plan Plan, IReadOnlyList<string> Unapproved);
@@ -776,7 +791,8 @@ public sealed partial class SyncRun : ISyncRun
         ResetRecoveryProtection();
         var current = LeftAlone(pair);
         var retryCount = _store.CountSyncRetries(pairId);
-        var retries = _store.DueSyncRetries(pairId, _time.GetUtcNow(), 256);
+        var retries = _store.DueSyncRetries(pairId, _time.GetUtcNow(), 256)
+            .Where(retry => retry.Path.Length != 0 || retry.Kind != "run").ToArray();
         var deferredBefore = DateTime.UtcNow.Ticks;
         // One intake read; reuse its versioned rows for paths, IDs and acknowledgement.
         IReadOnlyList<SqliteStateStore.DeferredPlanning> deferredPlanning = _store is SqliteStateStore deferredStore
@@ -927,28 +943,46 @@ public sealed partial class SyncRun : ISyncRun
                 allowUnreviewedEvidence: true);
             plan = execution.Plan;
             var tally = execution.Tally;
-            var unresolvedEvidence = execution.Pending.Where(path =>
-                _store.SyncRetryAt(pairId, path) is { Held: not null, ReprobeEvidence: true, Kind: not "decision" }).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            WriteRestoredEvidenceNotices(pairId, unresolvedEvidence);
+            var completion = new CompletionSteps(this, pairId, ct);
+            var unresolvedEvidence = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            completion.Step(() =>
+            {
+                unresolvedEvidence.UnionWith(execution.Pending.Where(path =>
+                    _store.SyncRetryAt(pairId, path) is { Held: not null, ReprobeEvidence: true, Kind: not "decision" }));
+                WriteRestoredEvidenceNotices(pairId, unresolvedEvidence);
+            });
             if (!ct.IsCancellationRequested)
             {
-                UpdateRetryWork(pair, plan, tally, retries, execution.Pending, evaluated, scan.A.Complete && scan.B.Complete);
-                RetainPlanningFailures(pair, plan);
-                CloseResolvedNotices(openNotices, plan, tally, path => evaluated(path) && _store.SyncRetryAt(pairId, path) is not { Held: not null, Kind: not "decision" });
-                await CloseArrivedReplacementsAsync(pair, openNotices, plan.Gen, ct);
-                CloseAppliedDecisions(openNotices, plan, tally, decisions, resolvingNoticeId);
-                RefreshRetryProtection();
-                AcknowledgeVerifiedRehash(pair, scan, plan, tally, evaluated, predicates.A, predicates.B, ct, deferredPlanning);
-                RaiseLinksSummary(pair, LeftAlone(pair));
-                AdvanceCursors(scan);
-                _store.Prune();
+                // Cursor promotion requires durable retry input for every unfinished item.
+                // If that write failed, retain the previous cursor for safe replay.
+                var retrySaved = completion.Step(() => UpdateRetryWork(pair, plan, tally, retries,
+                    execution.Pending, evaluated, scan.A.Complete && scan.B.Complete));
+                retrySaved &= completion.Step(() => RetainPlanningFailures(pair, plan));
+                completion.Step(() => CloseResolvedNotices(openNotices, plan, tally, path => evaluated(path) &&
+                    _store.SyncRetryAt(pairId, path) is not { Held: not null, Kind: not "decision" }));
+                await completion.StepAsync(() => CloseArrivedReplacementsAsync(pair, openNotices, plan.Gen, ct));
+                completion.Step(() => CloseAppliedDecisions(openNotices, plan, tally, decisions, resolvingNoticeId));
+                completion.Step(RefreshRetryProtection);
+                completion.Step(() => AcknowledgeVerifiedRehash(pair, scan, plan, tally, evaluated, predicates.A, predicates.B, ct, deferredPlanning));
+                completion.Step(() => RaiseLinksSummary(pair, LeftAlone(pair)));
+                // A completed full walk can settle independently of cursor promotion.
+                // Existing per-side inventory/evidence preconditions are retained.
+                if (retrySaved)
+                {
+                    completion.Step(() => AdvanceCursor(scan.A));
+                    completion.Step(() => AdvanceCursor(scan.B));
+                }
+                completion.Step(() => SettleGapInventory(scan.A));
+                completion.Step(() => SettleGapInventory(scan.B));
+                completion.Step(_store.Prune);
             }
-            throttle.Report(RunPhases.Finishing, null, tally.Done, 0);
-            throttle.Flush();
-            var report = WithReconciliation(BuildReport(pairId, plan, tally, ct.IsCancellationRequested), reconcile)
-                with { Deferred = _store.CountSyncRetries(pairId) };
-            var evidencePendingPaths = pendingEvidence.Keys.Concat(unresolvedEvidence).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-            return IncrementalOutcome(report, evidencePendingPaths);
+            completion.Step(() => throttle.Report(RunPhases.Finishing, null, tally.Done, 0));
+            completion.Step(() => throttle.Flush());
+            var report = WithReconciliation(BuildReport(pairId, plan, tally, ct.IsCancellationRequested), reconcile);
+            completion.Step(() => report = report with { Deferred = _store.CountSyncRetries(pairId) });
+            completion.Step(() => report = IncrementalOutcome(report,
+                pendingEvidence.Keys.Concat(unresolvedEvidence).Distinct(StringComparer.OrdinalIgnoreCase).ToArray()));
+            return completion.Finish(report);
         }
     }
 
@@ -1371,38 +1405,47 @@ public sealed partial class SyncRun : ISyncRun
         {
             Outcome = string.Equals(report.Outcome, RunOutcomes.Complete, StringComparison.Ordinal)
                 ? RunOutcomes.Partial : report.Outcome,
-            DeletionEvidencePending = evidencePendingPaths
+            DeletionEvidencePending = evidencePendingPaths,
+            // Preserve the effect outcome: retirement of bookkeeping debt must not
+            // manufacture success for failed/skipped/held effects.
+            OutcomeBeforeRetryDebt = report.OutcomeBeforeRetryDebt ?? report.Outcome
         };
+
+    private void SettleGapInventory(SideScan side)
+    {
+        if (side.Full && side.CursorAfter.Length > 0 && !side.IncompleteSubtrees.Contains(string.Empty) &&
+            _store is SqliteStateStore gapStore)
+            gapStore.SettleGapInventory(side.Gen,
+                cursorHeldForEvidence: !side.PendingDeletionEvidence.Keys.All(side.ReleasedDeletionEvidence.Contains));
+    }
 
     internal void AdvanceCursors(BothScan scan)
     {
-        Advance(scan.A);
-        Advance(scan.B);
-        void Advance(SideScan side)
-        {
-            // Targeted read debt permits a valid newer checkpoint, but an incomplete full
-            // listing with no checkpoint must not erase the previously committed cursor.
-            var complete = (!side.Full || side.Complete || side.CursorAfter.Length > 0) && !side.IncompleteSubtrees.Contains(string.Empty) && side.PendingDeletionEvidence.Keys.All(side.ReleasedDeletionEvidence.Contains);
-            _store.CompleteGeneration(side.Gen, side.CursorAfter, complete);
-            // Only a completed full-inventory side settles this obligation. A targeted
-            // quarantine refresh (or an ordinary delta) cannot account for the skipped range.
-            // Pending evidence retains its cursor/replay and per-item protection, not a full walk.
-            // A whole-root read failure still retains the inventory obligation.
-            // Finding 2: the whole-root inventory obligation covers what the walk could READ. Once a
-            // full walk has covered every readable path, a named unreadable subfolder is scoped debt
-            // (its own durable scan retry and notice, which keep it hidden from planning and free of
-            // delete or absence authority) rather than a reason to repeat the whole walk each run.
-            // Changes inside that folder are observed when its retry re-reads it. Only a whole-root
-            // failure (the empty sentinel) keeps this obligation open.
-            if (side.Full && side.CursorAfter.Length > 0 && !side.IncompleteSubtrees.Contains(string.Empty) &&
-                _store is SqliteStateStore gapStore)
-                gapStore.SettleGapInventory(side.Gen,
-                    cursorHeldForEvidence: !side.PendingDeletionEvidence.Keys.All(side.ReleasedDeletionEvidence.Contains));
-            // Observation coverage advances with effect replay, never merely with ingestion. A crash
-            // between these writes can cause extra hydration, but cannot skip unfinished changes.
-            if (complete && side.ObservedCoverage is { } coverage && _store is SqliteStateStore sql)
-                sql.SaveInventoryObservation(coverage, side.CursorAfter);
-        }
+        AdvanceCursor(scan.A);
+        AdvanceCursor(scan.B);
+    }
+
+    private void AdvanceCursor(SideScan side)
+    {
+        // Targeted read debt permits a valid newer checkpoint, but an incomplete full
+        // listing with no checkpoint must not erase the previously committed cursor.
+        var complete = (!side.Full || side.Complete || side.CursorAfter.Length > 0) && !side.IncompleteSubtrees.Contains(string.Empty) && side.PendingDeletionEvidence.Keys.All(side.ReleasedDeletionEvidence.Contains);
+        _store.CompleteGeneration(side.Gen, side.CursorAfter, complete);
+        // Only a completed full-inventory side settles this obligation. A targeted
+        // quarantine refresh (or an ordinary delta) cannot account for the skipped range.
+        // Pending evidence retains its cursor/replay and per-item protection, not a full walk.
+        // A whole-root read failure still retains the inventory obligation.
+        // Finding 2: the whole-root inventory obligation covers what the walk could READ. Once a
+        // full walk has covered every readable path, a named unreadable subfolder is scoped debt
+        // (its own durable scan retry and notice, which keep it hidden from planning and free of
+        // delete or absence authority) rather than a reason to repeat the whole walk each run.
+        // Changes inside that folder are observed when its retry re-reads it. Only a whole-root
+        // failure (the empty sentinel) keeps this obligation open.
+        SettleGapInventory(side);
+        // Observation coverage advances with effect replay, never merely with ingestion. A crash
+        // between these writes can cause extra hydration, but cannot skip unfinished changes.
+        if (complete && side.ObservedCoverage is { } coverage && _store is SqliteStateStore sql)
+            sql.SaveInventoryObservation(coverage, side.CursorAfter);
     }
 
     private RunReport FailedRun(string pairId, IReadOnlyList<ActionResult> failures) =>

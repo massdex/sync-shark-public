@@ -25,7 +25,7 @@ public sealed partial class SqliteStateStore
         if (paths.Count > 1024) throw new ArgumentOutOfRangeException(nameof(paths));
         if (paths.Count == 0) return Array.Empty<ProtectionMatch>();
         using var operation = RunOperations.Begin(RunOperationKind.Store, "store ProtectionBatch");
-        lock (_gate)
+        using (_gate.Enter())
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             ProtectionBatchQueries++;
@@ -48,7 +48,7 @@ public sealed partial class SqliteStateStore
                 var code = exception is SqliteException failure
                     ? $" sqlite={failure.SqliteErrorCode}/{failure.SqliteExtendedErrorCode}" : "";
                 RunLog.Trace($"protection reader unavailable ({exception.GetType().Name}{code}): {exception.Message}; using gated store connection once");
-                lock (_gate)
+                using (_gate.Enter())
                 {
                     ObjectDisposedException.ThrowIf(_disposed, this);
                     using var transaction = _connection.BeginTransaction(deferred: true);
@@ -65,7 +65,7 @@ public sealed partial class SqliteStateStore
 
     private (SqliteConnection Connection, SqliteTransaction Transaction, long? Root) OpenProtectionSnapshot(string rootId)
     {
-        lock (_gate)
+        using (_gate.Enter())
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             var connection = new SqliteConnection(new SqliteConnectionStringBuilder(_connection.ConnectionString)

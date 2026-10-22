@@ -10,6 +10,7 @@ internal static partial class LocalJournalChecks
         var def = LocalChecks.RootOf(root, "root-local");
         var pair = new PairDef("drain-check", "drain", def,
             new RootDef("unused", SyncProviders.Dropbox, null, "/", "unused"), [], [], true);
+        store.SavePair(pair);
         var provider = new FakeEndpointProvider().AddInventory(def, inventory);
         var run = new SyncRun(store, new Executor(store, StorageChecks.Fast, ExecutorChecks.Admission()),
             provider, StorageChecks.Fast, TimeProvider.System);
@@ -144,6 +145,8 @@ internal static partial class LocalJournalChecks
 
     private static async Task VanishAsync(string folder)
     {
+        try
+        {
         var root = Path.Combine(folder, "root"); LocalChecks.Seed(root, "survivor.txt", "same");
         var incoming = Path.Combine(folder, "incoming"); Directory.CreateDirectory(incoming);
         LocalChecks.Require(CreateHardLink(Path.Combine(incoming, "alias.txt"), Path.Combine(root, "survivor.txt"), IntPtr.Zero), "vanish alias fixture");
@@ -156,9 +159,13 @@ internal static partial class LocalJournalChecks
         Delta delta;
         using (log) delta = await inventory.ChangesSinceAsync(snapshot.CursorAfter, store.BeginGeneration("root-local", "delta"), _ => true, default);
         await log.Completion;
-        LocalChecks.Require(delta.CursorInvalid && delta.Changes.Count == 0 && File.ReadAllText(log.Path!).Contains("metadata open failed for incoming/alias.txt: Windows error 2"),
+        LocalChecks.Require(!delta.CursorInvalid && delta.IncompleteSubtrees.Contains("incoming/alias.txt") &&
+            delta.IncompleteSubtrees.Contains("survivor.txt") && delta.Changes.Count == 0 &&
+            delta.IncompleteReasons.Values.Any(reason => reason.Contains("metadata open failed for incoming/alias.txt: Windows error 2")) && File.ReadAllText(log.Path!).Contains("metadata open failed for incoming/alias.txt: Windows error 2"),
             "post-refresh disappearance rejects stale alias upsert with exact missing-file reason");
         LocalChecks.Require(store.Live("root-local", ["survivor.txt"]).Count == 1, "vanish race preserves original alias row");
         Console.WriteLine("PASS deterministic post-refresh vanish race");
+        }
+        finally { RemoveFixture(folder); }
     }
 }

@@ -521,7 +521,8 @@ public sealed class PilotDirectoryLease : IDisposable
             if (status < 0)
             {
                 var error = unchecked((int)RtlNtStatusToDosError(status));
-                throw new IOException($"The private control directory could not be created atomically (Windows error {error}).");
+                throw new IOException($"The private control directory could not be created atomically (Windows error {error}).",
+                    unchecked((int)(0x80070000u | (uint)error)));
             }
             try
             {
@@ -584,7 +585,8 @@ public sealed class PilotDirectoryLease : IDisposable
         return created;
     }
 
-    private static PilotDirectoryLease OpenOrCreateChild(PilotDirectoryLease parent, string childName)
+    internal static PilotDirectoryLease OpenOrCreateChild(PilotDirectoryLease parent, string childName,
+        bool hidden = false, bool pin = false)
     {
         if (!OperatingSystem.IsWindows())
             throw new PlatformNotSupportedException("Verified descendant directories require Windows NTFS handles.");
@@ -615,8 +617,8 @@ public sealed class PilotDirectoryLease : IDisposable
             };
             var status = NtCreateFile(out var handle,
                 Synchronize | FileListDirectory | FileReadAttributes,
-                ref attributes, out _, IntPtr.Zero, (uint)FileAttributes.Normal,
-                FileShare.Read | FileShare.Write | FileShare.Delete, FileOpenIf,
+                ref attributes, out _, IntPtr.Zero, (uint)(hidden ? FileAttributes.Hidden : FileAttributes.Normal),
+                FileShare.Read | FileShare.Write | (pin ? 0 : FileShare.Delete), FileOpenIf,
                 FileDirectoryFile | FileSynchronousIoNonAlert | FileFlagOpenReparsePoint,
                 IntPtr.Zero, 0);
             if (status < 0)
@@ -628,7 +630,7 @@ public sealed class PilotDirectoryLease : IDisposable
             {
                 if (!GetFileInformationByHandle(handle, out var info) ||
                     (info.FileAttributes & FileAttributes.Directory) == 0 ||
-                    IsUnsafeHeld(handle, info.FileAttributes) ||
+                    (pin ? PilotPath.IsUnsafeAttributes(info.FileAttributes) : IsUnsafeHeld(handle, info.FileAttributes)) ||
                     !string.Equals(FinalPath(handle), fullPath, StringComparison.OrdinalIgnoreCase))
                     throw new IOException("A descendant directory is a reparse point or changed identity.");
                 var identity = new PilotDirectoryIdentity(info.VolumeSerialNumber,

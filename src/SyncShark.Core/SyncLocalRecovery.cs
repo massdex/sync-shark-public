@@ -345,20 +345,13 @@ public static class SyncLocalRecovery
     {
         controlRoot.VerifyBinding();
         var childName = RecoveryFolderPrefix + RequireSafeId(pairId, "pair");
-        var path = Path.Combine(controlRoot.Path, childName);
         var gate = RecoveryRootGates[(uint)controlRoot.Identity.GetHashCode() % (uint)RecoveryRootGates.Length];
         lock (gate)
         {
             controlRoot.VerifyBinding();
-            PilotDirectoryIdentity? createdIdentity = null;
-            if (!Directory.Exists(path) && !File.Exists(path))
-            {
-                // Keep atomic parent-relative creation and all of its safety checks. Close
-                // its DELETE-capable handle before publishing a shared read-only lease.
-                using var created = PilotDirectoryLease.CreateChild(controlRoot, childName);
-                createdIdentity = created.Identity;
-            }
-            var lease = PilotDirectoryLease.Open(path, createdIdentity);
+            // Shared lazy directory: atomically open-or-create, verifying the handle is
+            // a real directory and not a junction. Never request create-new here.
+            var lease = PilotDirectoryLease.OpenOrCreateChild(controlRoot, childName, hidden: true, pin: true);
             try
             {
                 if (lease.Identity.VolumeSerialNumber != controlRoot.Identity.VolumeSerialNumber)

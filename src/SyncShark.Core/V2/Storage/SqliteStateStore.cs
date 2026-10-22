@@ -9,7 +9,7 @@ public sealed partial class SqliteStateStore : IStateStore
     /// <summary>Bounded page size for the lazy unresolved-intent stream.</summary>
     private const int IntentStreamPageSize = 200;
 
-    private readonly object _gate = new();
+    private readonly FairStoreGate _gate = new();
     private readonly SqliteConnection _connection;
     private readonly V2Settings _settings;
     private readonly TimeProvider _clock;
@@ -108,7 +108,7 @@ public sealed partial class SqliteStateStore : IStateStore
     /// <summary>Closes the store's connection; idempotent.</summary>
     public void Dispose()
     {
-        lock (_gate)
+        using (_gate.Enter())
         {
             if (_disposed) return;
             _disposed = true;
@@ -547,7 +547,7 @@ public sealed partial class SqliteStateStore : IStateStore
         if (results.Any(row => row.Action.Kind == ActionKind.Delete))
             RefreshDeleteReviewNotices(transaction, pairNo, pairId, now, exact: false);
         transaction.Commit();
-        CleanupStorageItems();
+        TryResultMaintenance(pairId);
     });
 
     public void RecordIntent(string pairId, SyncAction action) => RecordIntents(pairId, [action]);
@@ -911,6 +911,8 @@ public sealed partial class SqliteStateStore : IStateStore
 
     public void Prune() => InStore(() =>
     {
+        TryResultMaintenance();
+        if (Volatile.Read(ref _resultMaintenanceHalt) is not null) return;
         var cutoff = NowMs() - (long)_settings.HistoryRetention.TotalMilliseconds;
         using var transaction = _connection.BeginTransaction();
         var pin = Pin(transaction);
@@ -1090,7 +1092,7 @@ public sealed partial class SqliteStateStore : IStateStore
         // One tracked operation covers both the lock wait and the body (RQ-090): a store call that waits on the lock
         // is exactly as slow as one that runs, and both are named the same way.
         using var operation = RunOperations.Begin(RunOperationKind.Store, "store " + operationName);
-        lock (_gate)
+        using (_gate.Enter())
         {
             try
             {

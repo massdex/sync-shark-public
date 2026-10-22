@@ -169,7 +169,15 @@ internal static partial class RunChecks
                 ChangesError = new IOException("cloud root unavailable") };
             fx.Provider.AddInventory(pair.B, cloud);
         }
-        await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+        if (cause == "overflow")
+        {
+            store.SavePair(pair with { IgnoreRules = ["FolderName:cache"] });
+            store.SaveSyncRetry(pair.PairId, new("", "run", 1, "previous completion failed", DateTimeOffset.MinValue));
+        }
+        var completed = await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+        // This inventory fixture uses a fake local writer (except cloud-outage), so
+        // a real-file copy may fail independently. Assert bookkeeping, not effect success.
+        Require(!completed.CompletionFailed, cause + ": root retry does not fail completion bookkeeping");
         Require(gaps.GapEpoch(root.RootId)!.Epoch == epoch.Epoch, cause + ": next run preserves interrupted epoch");
         Require(reads.Count == 1 && reads[0] == (cause == "replace-pending" ? 250 : 200),
             cause + ": run catch-up replays advanced checkpoint, not newer walk start");

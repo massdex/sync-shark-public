@@ -9,6 +9,16 @@ internal static class CliDeadlineChecks
 {
     internal static async Task RunAsync()
     {
+        foreach (var behavior in new[] { "retry-only", "retry-conflict", "retry-blocked" })
+        {
+            var runtime = new DeadlineRuntime(behavior);
+            var result = await Execute(["--cli", "run", "--pair", "fixture", "--yes", "--json"], () => runtime);
+            Require(result.Exit == (behavior == "retry-only" ? 0 : 5) &&
+                result.Error == (behavior == "retry-only" ? null : "review_required") &&
+                result.Data.GetProperty("outcome").GetString() == "partial" &&
+                result.Data.GetProperty("failed").GetInt32() == 1,
+                "retry-only partial succeeds; genuine conflict/blocked partial still requires review");
+        }
         var factoryCalls = 0;
         ISyncCliRuntime NeverOpen()
         {
@@ -190,6 +200,10 @@ internal static class CliDeadlineChecks
         {
             Dispatches++;
             CompletedFiles = 1;
+            if (behavior.StartsWith("retry-", StringComparison.Ordinal))
+                return new(pairId, "Fixture", 1, 0, 0, behavior == "retry-conflict" ? 1 : 0,
+                    behavior == "retry-blocked" ? 1 : 0, false)
+                { Failed = 1, Outcome = "partial" };
             if (behavior == "success") return new(pairId, "Fixture", 1, 0, 0, 0, 0, false);
             if (behavior == "returned-stop") return new(pairId, "Fixture", 1, 0, 0, 0, 0, true);
             if (behavior == "returned-review") return new(pairId, "Fixture", 1, 0, 0, 1, 0, false);

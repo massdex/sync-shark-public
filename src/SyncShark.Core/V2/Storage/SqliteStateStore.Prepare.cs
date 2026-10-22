@@ -66,7 +66,7 @@ public sealed partial class SqliteStateStore
         }
         finally
         {
-            lock (_gate)
+            using (_gate.Enter())
             {
                 lock (PrepareWritersGate) ActivePrepareGenerations.Remove(generation);
             }

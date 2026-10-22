@@ -11,6 +11,7 @@ internal static partial class RunChecks
     {
         await ProvenanceAsync();
         await RehearsalAsync();
+        await HotfixCompletionChecksAsync();
         await PlanOnlyAsync();
         await FirstSyncOutageRetainsReadDebtAsync();
         await ReadOutageCompletesSafelyAsync();
