@@ -25,6 +25,7 @@ internal static partial class RunChecks
             ("catch-up-fresh-fallback", CatchUpFreshFallbackUnreadableSubtreeAsync),
             ("catch-up-synced-folder-in-gap", GapRetainsEarlierSyncedUnreadableFolderAsync),
             ("catch-up-second-run", CatchUpRetrySurvivesSecondCatchUpAsync),
+            ("replaced-directory-incomplete", ReplacedDirectoryIncompleteNotDeletedAsync),
             ("sleeping-root-retry-replay", SleepingLocalRootRetryClearsAfterReplayAsync),
             ("other-root-outage-sleeping-retry", OtherRootOutageSkipsPairLoadFromSleepingRetryAsync),
             ("failed-due-root-retry", FailedDueRootRetryDoesNotLoadPairAsync),
@@ -334,6 +335,84 @@ internal static partial class RunChecks
             try { RemoveDirectoryRule(locked, deny); }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
         }
+    }
+
+    // A queued directory moved intact away and replaced before enumeration must stay incomplete.
+    // Exercise the complete run with a baselined remote child: retain it, publish one actionable
+    // scan-retry notice, and authorize no delete. SQLite, inventory and local writer are real;
+    // journal reads are injected.
+    private static async Task ReplacedDirectoryIncompleteNotDeletedAsync(string folder)
+    {
+        var directory = Path.Combine(folder, "root");
+        Directory.CreateDirectory(directory);
+        LocalChecks.Seed(directory, "keep.txt", "keep");
+        LocalChecks.Seed(directory, "d/child.txt", "child");
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        var fx = Build(suppliedStore: store);
+        var root = LocalChecks.RootOf(directory, "ra");
+        var pair = fx.Pair with { A = root };
+        store.SavePair(pair);
+        store.MarkFirstSyncDone(pair.PairId);
+        // Hash like Dropbox on both fake sides so the replaced-directory run compares the uploaded
+        // child instead of re-uploading it for a hash-algorithm difference.
+        fx.A.DropboxHashes = fx.B.DropboxHashes = true;
+        fx.Provider.AddWriter(root, await LocalWriter.OpenAsync(root, Side.A, pair.PairId,
+            LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default));
+        // Seed the baseline: the child is synced earlier and still exists in the cloud.
+        var firstInventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings,
+            TimeProvider.System, pairId: pair.PairId)
+            { WalkCheckpointForTest = () => (new NtfsUsnCheckpoint(1, 0, 100, 0), false) };
+        firstInventory.JournalReadForTest = NoJournalChanges;
+        fx.Provider.AddInventory(root, firstInventory);
+        var first = await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+        Require(first.Failed == 0, "the replaced-directory fixture syncs its child first (failed=" + first.Failed +
+            (first.Failures.Count > 0 ? ": " + first.Failures[0].Reason : "") + ")");
+        var child = store.Live(root.RootId, ["d/child.txt"]).Single();
+        Require(store.BaselinesTouching(pair.PairId, Side.A, [child.ObjectId], []).Count == 1 &&
+            await fx.B.ObserveAsync("d/child.txt", default) is not null,
+            "the child has a baseline and a surviving remote copy before the directory is replaced");
+        // No committed cursor: the next run takes the checkpointed full walk on the catch-up path,
+        // where a queued directory's identity is proved again on the listing handle before it is read.
+        store.ForgetCursor(root.RootId);
+        var moved = directory + "-moved";
+        var movedOnce = false;
+        var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings,
+            TimeProvider.System, pairId: pair.PairId)
+            { WalkCheckpointForTest = () => (new NtfsUsnCheckpoint(1, 0, 200, 0), false) };
+        inventory.JournalReadForTest = NoJournalChanges;
+        // The root has already listed 'd' and queued its identity when this callback runs: move the
+        // whole directory away intact and put a different directory at the same name.
+        inventory.DirectoryCompletedForTest = path =>
+        {
+            if (movedOnce || !string.Equals(path, Path.GetFullPath(directory), StringComparison.OrdinalIgnoreCase)) return;
+            movedOnce = true;
+            Directory.Move(Path.Combine(directory, "d"), moved);
+            LocalChecks.Seed(directory, "d/replacement.txt", "replacement");
+        };
+        fx.Provider.AddInventory(root, inventory);
+        var replaced = await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+        Require(movedOnce, "the fixture moved the intact directory away while its queued identity was still pending");
+        Require(replaced.Failed == 0, "a replaced directory is never a run failure (failed=" + replaced.Failed +
+            (replaced.Failures.Count > 0 ? ": " + replaced.Failures[0].Reason : "") + ")");
+        Require(replaced.Outcome == RunOutcomes.Partial && replaced.Deleted == 0,
+            "the replaced directory makes the run Partial with no delete");
+        // The incomplete scope is durable, and it is directly observed: the replacement was never
+        // enumerated under the queued identity, and the previous child's row is retained.
+        Require(store.SyncRetryAt(pair.PairId, "d") is { Kind: "scan" },
+            "the replaced directory keeps a durable scan retry");
+        Require(await fx.B.ObserveAsync("d/replacement.txt", default) is null,
+            "the replacement directory was never enumerated under the queued identity");
+        Require(store.Live(root.RootId, ["d/child.txt"]).Count == 1,
+            "the incomplete scope retains the previously synced child row");
+        var notices = store.OpenNotices(pair.PairId)
+            .Where(n => n.ReasonKey == "sync-retry" && n.Path == "d").ToArray();
+        Require(notices.Length == 1, "the replaced directory has exactly one sync-retry notice");
+        Require(notices[0].Detail.Contains("folder was replaced while being scanned", StringComparison.OrdinalIgnoreCase) &&
+            notices[0].Detail.Contains("rescanned next run", StringComparison.OrdinalIgnoreCase),
+            "the notice says the folder was replaced while being scanned and will be rescanned next run");
+        Require(fx.WriterA.Deletes + fx.WriterB.Deletes == 0 && replaced.Deleted == 0 &&
+            await fx.B.ObserveAsync("d/child.txt", default) is not null,
+            "the moved intact directory grants zero deletes and the remote child survives");
     }
 
     // Follow-up 2a: the CursorInvalid fresh-fallback branch of the local catch-up must carry the

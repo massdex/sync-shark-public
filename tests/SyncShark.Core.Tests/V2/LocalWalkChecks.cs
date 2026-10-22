@@ -163,6 +163,8 @@ internal static class LocalWalkChecks
         var snapshot = await inventory.FullAsync(2, _ => true, null!, CancellationToken.None);
         LocalChecks.Require(snapshot.IncompleteSubtrees.Contains("d"),
             "a missing pending directory is incomplete, never absence/deletion authority");
+        LocalChecks.Require(snapshot.IncompleteReasons["d"] == "A local folder could not be enumerated safely.",
+            "a vanished directory retains its original diagnostic, not an identity-mismatch diagnosis");
     }
 
     private static async Task ReplacedDirectoryAsync()

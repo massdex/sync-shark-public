@@ -58,17 +58,24 @@ public static partial class Planner
         {
             Hold(ctx, row, 29, PlanNotices.NeedDecision);                                 // rule 29
             if (curReplaced.Kind == ItemKind.Folder || curOther.Kind == ItemKind.Folder)
-                foreach (var path in new[] { row.A?.Path, row.B?.Path, row.Base?.A.Path, row.Base?.B.Path })
-                {
-                    if (path is null) continue;
-                    ctx.Held.Add(path);
-                    ctx.Held.Add(ctx.Mapping.TargetPath(Side.A, path));
-                    ctx.Held.Add(ctx.Mapping.TargetPath(Side.B, path));
-                }
+                HoldFolderFootprints(ctx, row);
             return;
         }
         Emit(ctx, row, 26, ActionKind.Delete, other, curOther.Path, null, null, curOther, true, key); // rule 26
         CreateOn(ctx, row, 26, other, curOther.Path, curReplaced, key);
+    }
+
+    private static void HoldFolderFootprints(Context ctx, PlanRow row)
+    {
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in new[] { row.A?.Path, row.B?.Path, row.Base?.A.Path, row.Base?.B.Path })
+        {
+            if (path is null) continue;
+            paths.Add(path);
+            paths.Add(ctx.Mapping.TargetPath(Side.A, path));
+            paths.Add(ctx.Mapping.TargetPath(Side.B, path));
+        }
+        ctx.Held.AddRange(paths);
     }
 
     /// <summary>The changed side against an unchanged one (rules 2, 9, 20, 25, 28).</summary>
@@ -264,7 +271,7 @@ public static partial class Planner
                 AttachConflictVersions(ctx, 14, PrimaryPath(row), new(row.A, row.B, Incoming:
                     NewAction(14, row.A.Kind == ItemKind.Folder ? ActionKind.MkDir : ActionKind.CopyNew,
                         Side.B, row.B.Path, null, row.A, null, false, null)));
-                ctx.Held.Add(PrimaryPath(row));
+                HoldFolderFootprints(ctx, row);
                 return;
             }
             var same = Content.SameContent(row.A, row.B);

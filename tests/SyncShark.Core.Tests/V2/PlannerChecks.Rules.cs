@@ -75,6 +75,10 @@ internal static partial class PlannerChecks
             null, F("second_folder/child", "mappedB", "h1"));
         var mappedPlan = Planner.Decide(PairId, Gen, [mappedClash, mappedChild], Opt());
         Require(!mappedPlan.Actions.Any(a => a.Kind == ActionKind.Delete), "kind clash also holds mapped folder spelling");
+        var unbaselinedPlan = Planner.Decide(PairId, Gen, [mappedClash with { Base = null }, mappedChild], Opt());
+        Require(unbaselinedPlan.Actions.Any(a => a.Kind == ActionKind.Hold && a.Rule == 14) &&
+            !unbaselinedPlan.Actions.Any(a => a.Kind == ActionKind.Delete),
+            "no-baseline kind clash reuses all-footprint protection for rule 14");
     }
 
     private static void Rule30_Unreadable()

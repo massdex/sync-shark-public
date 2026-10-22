@@ -45,12 +45,15 @@ public static class WindowsDirectoryListing
             throw new Win32Exception(Marshal.GetLastWin32Error(),
                 "The directory could not be opened for metadata enumeration.");
         // The identity proof and enumeration must use this same handle, never a check-then-reopen.
-        if (expectedIdentity is not null &&
-            (!PilotDirectoryLease.GetFileInformationByHandle(handle, out var identity) ||
-             identity.VolumeSerialNumber != expectedIdentity.VolumeSerialNumber ||
-             (((ulong)identity.FileIndexHigh << 32) | identity.FileIndexLow) != expectedIdentity.FileId ||
-             (identity.FileAttributes & FileAttributes.Directory) == 0))
-            throw new IOException("replaced during scan");
+        if (expectedIdentity is not null)
+        {
+            if (!PilotDirectoryLease.GetFileInformationByHandle(handle, out var identity))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "The directory identity could not be read.");
+            if (identity.VolumeSerialNumber != expectedIdentity.VolumeSerialNumber ||
+                (((ulong)identity.FileIndexHigh << 32) | identity.FileIndexLow) != expectedIdentity.FileId ||
+                (identity.FileAttributes & FileAttributes.Directory) == 0)
+                throw new DirectoryIdentityMismatchException();
+        }
         var buffer = Marshal.AllocHGlobal(BufferSize);
         try
         {
@@ -88,6 +91,8 @@ public static class WindowsDirectoryListing
         }
         finally { Marshal.FreeHGlobal(buffer); }
     }
+
+    internal sealed class DirectoryIdentityMismatchException() : IOException("replaced during scan");
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetFileInformationByHandleEx(SafeFileHandle hFile, int fileInformationClass,

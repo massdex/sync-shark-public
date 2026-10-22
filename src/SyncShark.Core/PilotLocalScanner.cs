@@ -339,7 +339,7 @@ public sealed class PilotLocalScanner
                         ? new IOException("The selected local root could not be enumerated.", exception)
                         : exception;
                 var blocked = PilotPath.NormalizeRelative(Path.GetRelativePath(rootLease.Path, currentDirectory));
-                decisions.Add(queuedDirectory.Identity is not null
+                decisions.Add(exception is WindowsDirectoryListing.DirectoryIdentityMismatchException
                     ? new PilotDecision(blocked, PilotDecisionKind.Blocked, "replaced during scan")
                     : new PilotDecision(blocked, PilotDecisionKind.Blocked,
                         "A local folder could not be enumerated safely.") { QuarantineCode = V2.QuarantineFailure.NativeCode(exception) });
@@ -930,8 +930,9 @@ public sealed class PilotLocalScanner
             FileShare.Read | FileShare.Write | FileShare.Delete, IntPtr.Zero, PilotDirectoryLease.OpenExisting,
             PilotDirectoryLease.FileFlagBackupSemantics | PilotDirectoryLease.FileFlagOpenReparsePoint,
             IntPtr.Zero);
-        if (handle.IsInvalid || !PilotDirectoryLease.GetFileInformationByHandle(handle, out var information) ||
-            (information.FileAttributes & FileAttributes.Directory) == 0 ||
+        if (handle.IsInvalid || !PilotDirectoryLease.GetFileInformationByHandle(handle, out var information))
+            throw new IOException("The local folder identity could not be verified.", new Win32Exception(Marshal.GetLastWin32Error()));
+        if ((information.FileAttributes & FileAttributes.Directory) == 0 ||
             PilotPath.IsUnsafeAttributes(information.FileAttributes) &&
             PilotPath.IsUnsafeObject(PilotPath.AttributeTag(handle).Attributes, PilotPath.AttributeTag(handle).ReparseTag) ||
             !string.Equals(PilotDirectoryLease.FinalPath(handle), Path.GetFullPath(fullPath),

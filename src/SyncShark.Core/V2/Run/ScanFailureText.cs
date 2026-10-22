@@ -25,6 +25,9 @@ internal static class ScanFailureText
         // The online-only observation message is matched by this exact prefix when its notices are
         // made due or closed, so it must stay unchanged. It already states a cause and a fix.
         if (diagnostic == OwnedPointerProof.ObservationMessage) return diagnostic;
+        if (Has(diagnostic, "replaced during scan"))
+            return "The folder was replaced while being scanned; it will be rescanned next run. " +
+                "Choose Retry to check it again now.";
         // The folder itself could not be opened, listed or enumerated: the targeted re-read path, the
         // scanner's blocked-folder decision, and the journal name resolver's parent listing.
         if (Has(diagnostic, "targeted re-read") || Has(diagnostic, "targeted refresh") ||
