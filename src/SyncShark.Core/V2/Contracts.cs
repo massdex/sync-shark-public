@@ -38,6 +38,8 @@ public sealed record Snapshot(string RootId, Side Side, long Gen, string CursorA
     public IReadOnlyDictionary<string, string> IncompleteReasons { get; init; } = new Dictionary<string, string>();
     internal Func<LocalFileAbsence>? OpenAbsenceVerifier { get; init; }
     internal Func<ItemState, FileAbsence>? VerifyAbsence { get; init; }
+    // The snapshot writer emits only its actual change set, not unchanged observations.
+    internal Action<string>? ChangedObject { get; init; }
     internal Dictionary<string, string> PendingDeletionEvidence { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     internal bool CanCloseAbsent(ItemState item)

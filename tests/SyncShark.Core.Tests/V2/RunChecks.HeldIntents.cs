@@ -591,6 +591,15 @@ internal static partial class RunChecks
                 ? LinkExclusions.Reason.Key : LinkExclusions.StubReason.Key;
             Require(store.OpenNotices(fx.Pair.PairId).Count(notice => notice.ReasonKey == summaryKey) == 1,
                 label + ": setup leaves the standing summary explaining the protected item");
+            Require(store.CountDeferredPlanning(fx.Pair.PairId) == 0,
+                label + ": full SyncRun creates no deferred rows for permanent holds");
+            if (kind == ItemFlags.Link)
+            {
+                fx.B.Seed(target.Path, "changed counterpart");
+                await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+                Require(store.CountDeferredPlanning(fx.Pair.PairId) == 0,
+                    "changed counterpart under a permanent link still creates no deferred row");
+            }
             var baselinesBefore = store.Baselines(fx.Pair.PairId).Count;
 
             store.SaveSyncRetry(fx.Pair.PairId,

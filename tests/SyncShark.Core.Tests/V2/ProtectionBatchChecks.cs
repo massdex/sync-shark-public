@@ -156,7 +156,7 @@ internal static class ProtectionBatchChecks
                 var rootNumber = Convert.ToInt64(StoreSchema.Scalar(connection, transaction,
                     "SELECT root_no FROM root WHERE root_id=$r;", ("$r", root)));
                 using var stream = new SqliteStateStore.ProtectionStream(connection, transaction,
-                    rootNumber, null, ItemFlags.NeedsRehash, false, new[] { queries });
+                    rootNumber, null, ItemFlags.NeedsRehash, false);
                 var distinct = queries.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
                 var streamed = stream.Read(distinct);
                 var expected = distinct.Select(path => actual[Array.IndexOf(queries, path)]);

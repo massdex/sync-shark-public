@@ -60,6 +60,24 @@ public sealed partial class SyncRun
     {
         if (input?.Offset is > 0)
             return "Use the next cursor (--name) from the previous page, not an offset. No pending changes were modified.";
+        if (input?.Name?.StartsWith("deferred:", StringComparison.Ordinal) == true && _store is SqliteStateStore deferredStore)
+        {
+            try
+            {
+                var cursor = System.Text.Json.JsonSerializer.Deserialize<string[]>(
+                    Convert.FromBase64String(input.Name[9..]));
+                if (cursor is not { Length: 2 } || cursor[1] is null || !long.TryParse(cursor[0],
+                    System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var root))
+                    throw new FormatException("Invalid deferred cursor");
+                var remaining = deferredStore.DeferredPlanningPage(pair.PairId, root, cursor[1]).Take(50).ToArray();
+                var deferredLines = remaining.Select(item => $"Deferred: {item.Path} ({item.Reason}; not synced)").ToList();
+                if (remaining.Length == 0) deferredLines.Add("No remaining changes on this page.");
+                else deferredLines.Add("Next cursor (--name): " + DeferredCursor(remaining[^1].Root, remaining[^1].ObjectId));
+                return string.Join(Environment.NewLine, deferredLines);
+            }
+            catch (Exception error) when (error is FormatException or System.Text.Json.JsonException or IndexOutOfRangeException)
+            { return "That remaining-items cursor is invalid. Start Show remaining again without a cursor; no pending changes were modified."; }
+        }
         IntentPage page;
         try { page = _store.HeldIntentsPage(pair.PairId, input?.Name, 50); }
         catch (ArgumentException)
@@ -67,8 +85,21 @@ public sealed partial class SyncRun
             return "That remaining-items cursor is invalid. Start Show remaining again without a cursor; no pending changes were modified.";
         }
         var lines = page.Items.Select(action => $"{action.Kind}: {action.Path} (pending verification; not synced)").ToList();
-        if (lines.Count == 0) lines.Add("No remaining changes on this page. Counts refresh on the next run.");
         if (page.NextCursor is { } next) lines.Add("Next cursor (--name): " + next);
+        else if (_store is SqliteStateStore store)
+        {
+            var remaining = store.DeferredPlanningPage(pair.PairId).Take(Math.Max(0, 50 - lines.Count)).ToArray();
+            lines.AddRange(remaining.Select(item => $"Deferred: {item.Path} ({item.Reason}; not synced)"));
+            if (remaining.Length > 0)
+                lines.Add("Next cursor (--name): " + DeferredCursor(remaining[^1].Root, remaining[^1].ObjectId));
+            else if (lines.Count == 50 && store.CountDeferredPlanning(pair.PairId) > 0)
+                lines.Add("Next cursor (--name): " + DeferredCursor(-1, ""));
+        }
+        if (lines.Count == 0) lines.Add("No remaining changes on this page. Counts refresh on the next run.");
         return string.Join(Environment.NewLine, lines);
+
+        static string DeferredCursor(long root, string id) => "deferred:" + Convert.ToBase64String(
+            System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new[] {
+                root.ToString(System.Globalization.CultureInfo.InvariantCulture), id }));
     }
 }

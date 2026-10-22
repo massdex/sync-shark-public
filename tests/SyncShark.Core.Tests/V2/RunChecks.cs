@@ -9,6 +9,7 @@ internal static partial class RunChecks
 {
     public static async Task RunAsync()
     {
+        await PlanningDeferredReplaysNextRunAsync();
         await PairSummaryDoesNotHoldSiblingsAsync();
         await HeldRetriesSurviveAsync();
         await ReleasedSurvivor_FlaggedAsync();

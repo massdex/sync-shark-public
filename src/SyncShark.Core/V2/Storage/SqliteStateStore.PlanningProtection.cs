@@ -34,8 +34,8 @@ public sealed partial class SqliteStateStore
             bool storageEnabled)
         { _connection = connection; _transaction = transaction; _a = a; _b = b; _storageEnabled = storageEnabled; }
 
-        internal ProtectionStream Stream(IEnumerable<IReadOnlyList<string>> batches) =>
-            new(_connection, _transaction, _a, _b, ItemFlags.NeedsRehash, _storageEnabled, batches);
+        internal ProtectionStream Stream() =>
+            new(_connection, _transaction, _a, _b, ItemFlags.NeedsRehash, _storageEnabled);
 
         internal IReadOnlyList<ProtectionMatch> Read(IReadOnlyList<string> paths)
         {
@@ -45,6 +45,12 @@ public sealed partial class SqliteStateStore
             return a.Zip(b, (left, right) => new ProtectionMatch(left.Covered || right.Covered,
                 left.Contains || right.Contains)).ToArray();
         }
+
+        // This uses the same pinned snapshot as RetryProtected. A later writer could not
+        // have been seen by the old callback either; execution refreshes live retry protection.
+        internal bool HasRetries(string pairId) => Convert.ToInt64(StoreSchema.Scalar(_connection, _transaction,
+            "SELECT EXISTS(SELECT 1 FROM sync_retry WHERE pair_no=(SELECT pair_no FROM pair WHERE pair_id=$id));",
+            ("$id", pairId))) != 0;
 
         internal bool RetryProtected(string pairId, string path, bool descendants,
             IReadOnlySet<string> active, bool restoredOnly)

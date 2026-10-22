@@ -223,6 +223,7 @@ internal static class StoreSchema
     private const string PlanningDeferredDdl = """
         CREATE TABLE IF NOT EXISTS planning_deferred(root_no INTEGER NOT NULL, object_id TEXT NOT NULL,
           pair_no INTEGER NOT NULL, path TEXT NOT NULL, version INTEGER NOT NULL, last_attempt INTEGER NOT NULL,
+          reason TEXT NOT NULL DEFAULT 'Waiting for content verification',
           PRIMARY KEY(root_no,object_id,pair_no)) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS planning_deferred_due ON planning_deferred(pair_no,last_attempt,root_no,object_id);
         """;
@@ -531,7 +532,13 @@ internal static class StoreSchema
         Step(19, tx => Execute(connection, tx, JournalDdl));
         Step(20, tx => MigrateRunSummary(connection, tx));
         Step(21, tx => EnsureGapSchema(connection, tx));
-        Step(22, tx => Execute(connection, tx, PlanningDeferredDdl));
+        Step(22, tx =>
+        {
+            Execute(connection, tx, PlanningDeferredDdl);
+            if (Convert.ToInt64(Scalar(connection, tx,
+                "SELECT COUNT(*) FROM pragma_table_info('planning_deferred') WHERE name='reason';")) == 0)
+                Execute(connection, tx, "ALTER TABLE planning_deferred ADD COLUMN reason TEXT NOT NULL DEFAULT 'Waiting for content verification';");
+        });
 
         void Step(int version, Action<SqliteTransaction>? create)
         {

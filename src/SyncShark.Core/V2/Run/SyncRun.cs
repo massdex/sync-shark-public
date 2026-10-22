@@ -729,7 +729,9 @@ public sealed partial class SyncRun : ISyncRun
         var current = LeftAlone(pair);
         var retryCount = _store.CountSyncRetries(pairId);
         var retries = _store.DueSyncRetries(pairId, _time.GetUtcNow(), 256);
-        var deferredPlanning = (_store as SqliteStateStore)?.DeferredPlanningPage(pairId) ?? [];
+        var deferredBefore = DateTime.UtcNow.Ticks;
+        IEnumerable<SqliteStateStore.DeferredPlanning> deferredPlanning = _store is SqliteStateStore deferredStore
+            ? deferredStore.DeferredPlanningPages(pairId, deferredBefore).SelectMany(page => page) : [];
         var activeRetries = retries.Select(item => item.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var retryHeld = retries.Where(item => item.Held is not null).Select(item => item.Held!).ToArray();
         var pendingEvidence = scan.A.PendingDeletionEvidence.Concat(scan.B.PendingDeletionEvidence)
@@ -769,7 +771,7 @@ public sealed partial class SyncRun : ISyncRun
         var predicates = Predicates(pair, links);
         var scanner = new RunScope(_store, predicates.A, predicates.B, links, rules: PairInclude.IgnoreRules(pair),
             decisions: decisions, activeRetries: activeRetries,
-            restoreProtection: incrementalRestore);
+            restoreProtection: incrementalRestore, persistDeferred: true, cancellationToken: ct);
         retryPaths = retryPaths.Concat(recoveryTouched).Concat(retries.Select(item => item.Path))
             .Concat(deferredPlanning.SelectMany(item => item.Paths)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var touched = new List<string>(scan.Touched(reconcile.Touched.Concat(retryPaths)
@@ -779,9 +781,13 @@ public sealed partial class SyncRun : ISyncRun
         Func<RunScope.Scope> loadScope = () =>
         {
             if (inventory is not null) return inventory;
+            var changesA = scan.A.ChangeObjectIds.Concat(deferredPlanning.Where(item => item.RootId == pair.A.RootId)
+                .Select(item => item.ObjectId)).ToArray();
+            var changesB = scan.B.ChangeObjectIds.Concat(deferredPlanning.Where(item => item.RootId == pair.B.RootId)
+                .Select(item => item.ObjectId)).ToArray();
+            scanner.PendingChanges(changesA, changesB);
             var scope = scan.AnyFull ? scanner.LoadFull(pair) :
-                scanner.LoadTouched(pair, touched, scan.A.ChangeObjectIds.Concat(deferredPlanning.Select(item => item.ObjectId)).ToArray(),
-                    scan.B.ChangeObjectIds.Concat(deferredPlanning.Select(item => item.ObjectId)).ToArray());
+                scanner.LoadTouched(pair, touched, changesA, changesB);
             inventory = scope;
             // Keep only small ancestor context, not a second full inventory, between planning passes.
             mappingContext = new([], [], []) { ContextA = scope.ContextA, ContextB = scope.ContextB };
@@ -864,14 +870,14 @@ public sealed partial class SyncRun : ISyncRun
             CloseAppliedDecisions(openNotices, plan, tally, decisions, resolvingNoticeId);
             RefreshRetryProtection();
             AcknowledgeVerifiedRehash(pair, scan, plan, tally, evaluated, predicates.A, predicates.B, ct, deferredPlanning);
+            RaiseLinksSummary(pair, LeftAlone(pair));
             AdvanceCursors(scan);
             _store.Prune();
         }
         throttle.Report(RunPhases.Finishing, null, tally.Done, 0);
         throttle.Flush();
         var report = WithReconciliation(BuildReport(pairId, plan, tally, ct.IsCancellationRequested), reconcile)
-            with { Deferred = (int)Math.Min(int.MaxValue, (long)_store.CountSyncRetries(pairId) +
-                ((_store as SqliteStateStore)?.CountDeferredPlanning(pairId) ?? 0)) };
+            with { Deferred = _store.CountSyncRetries(pairId) };
         var evidencePendingPaths = pendingEvidence.Keys.Concat(unresolvedEvidence).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         return evidencePendingPaths.Length == 0 ? report : report with
         {

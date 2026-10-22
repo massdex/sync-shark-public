@@ -103,7 +103,8 @@ internal sealed class LinkExclusions
         return new(Flagged(ItemFlags.Link), stubsLeftAlone ? Flagged(ItemFlags.Placeholder) : Array.Empty<string>(),
             pending: HoldPaths(store, pair),
             nonLocalLinks: nonLocalLinks, rehash: new RehashProtection(store, pair),
-            heldCount: store.CountHeldIntents(pair.PairId));
+            heldCount: (int)Math.Min(int.MaxValue, (long)store.CountHeldIntents(pair.PairId) +
+                (store is SqliteStateStore sqlite ? sqlite.CountDeferredPlanning(pair.PairId) : 0)));
     }
 
     // Evidence observations may inspect links/stubs, but must not retire debt under a real hold.

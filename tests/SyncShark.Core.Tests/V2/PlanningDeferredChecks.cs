@@ -1,3 +1,5 @@
+using Microsoft.Data.Sqlite;
+
 namespace Massdex.SyncShark.V2;
 
 internal static class PlanningDeferredChecks
@@ -18,7 +20,7 @@ internal static class PlanningDeferredChecks
             var gaps = (ILocalGapStore)store;
             gaps.BeginGap(pair.A.RootId, "cursor", 1, false, "synthetic gap");
             var links = LinkExclusions.Of(store, pair, false);
-            var scope = new RunScope(store, _ => true, _ => true, links).LoadTouched(pair,
+            var scope = new RunScope(store, _ => true, _ => true, links, persistDeferred: true).LoadTouched(pair,
                 [cloud.Path, added.Path], [], [cloud.ObjectId, added.ObjectId]);
             LocalChecks.Require(scope.B.Any(item => item.ObjectId == added.ObjectId) &&
                 !scope.B.Any(item => item.ObjectId == cloud.ObjectId),
@@ -30,8 +32,8 @@ internal static class PlanningDeferredChecks
                 new("{name} [{side}]{ext}", "s", TimeSpan.Zero, "Local", "Dropbox"), 10));
             LocalChecks.Require(plan.Actions.Any(action => action.Path == added.Path && action.Kind == ActionKind.CopyNew),
                 "incremental cloud-only file is planned during an unpublished local gap");
-            LocalChecks.Require(store.CountDeferredPlanning(pair.PairId) == 2,
-                "both hidden entities have durable item-owned work before cursor advancement");
+            LocalChecks.Require(store.CountDeferredPlanning(pair.PairId) == 1,
+                "only the changed hidden cloud entity is durable; the unchanged local entity has no row");
             var advanced = store.BeginGeneration(pair.B.RootId, "delta");
             store.WriteDelta(new(pair.B.RootId, Side.B, advanced, "cursor", "advanced", [], false, []));
             store.CompleteGeneration(advanced, "advanced", true);
@@ -39,7 +41,7 @@ internal static class PlanningDeferredChecks
         using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
         {
             var deferred = store.DeferredPlanningPage(pair.PairId);
-            LocalChecks.Require(store.Cursor(pair.B.RootId) == "advanced" && deferred.Count == 2,
+            LocalChecks.Require(store.Cursor(pair.B.RootId) == "advanced" && deferred.Count == 1,
                 "cursor advance and restart retain hidden entities for the next run");
             var gaps = (ILocalGapStore)store;
             var epoch = gaps.GapEpoch(pair.A.RootId)!;
@@ -54,13 +56,128 @@ internal static class PlanningDeferredChecks
                 scope.B.Any(item => item.ObjectId == cloud.ObjectId),
                 "with no new provider delta, publication re-admits the hidden change from durable work");
             store.AcknowledgeDeferredPlanning(pair.PairId, deferred, _ => false);
-            LocalChecks.Require(store.CountDeferredPlanning(pair.PairId) == 2, "unsettled work stays dirty");
+            LocalChecks.Require(store.CountDeferredPlanning(pair.PairId) == 1, "unsettled work stays dirty");
             store.DeferPlanning(pair.PairId, new[] { (pair.B.RootId, cloud) });
             store.AcknowledgeDeferredPlanning(pair.PairId, deferred, _ => true);
             LocalChecks.Require(store.CountDeferredPlanning(pair.PairId) == 1,
                 "a new hold cannot be cleared by an older acknowledgement page");
             store.AcknowledgeDeferredPlanning(pair.PairId, store.DeferredPlanningPage(pair.PairId), _ => true);
             LocalChecks.Require(store.CountDeferredPlanning(pair.PairId) == 0, "settled current entity work retires");
+            var heldLinks = LinkExclusions.Of(store, pair, false).WithPending([cloud.Path]);
+            new RunScope(store, _ => true, _ => true, heldLinks, persistDeferred: true)
+                .LoadTouched(pair, [cloud.Path], [], [cloud.ObjectId]);
+            LocalChecks.Require(store.CountDeferredPlanning(pair.PairId) == 0,
+                "ongoing decision holds never create planning deferrals");
+            store.RequireRehash(pair.A.RootId, local, "preview hold");
+            new RunScope(store, _ => true, _ => true, LinkExclusions.Of(store, pair, false))
+                .LoadTouched(pair, [cloud.Path], [], [cloud.ObjectId]);
+            LocalChecks.Require(store.CountDeferredPlanning(pair.PairId) == 0,
+                "preview preparation is read-only even for a changed hidden item");
+            store.SaveSyncRetry(pair.PairId, new(cloud.Path, "sync", 0, "existing retry", DateTimeOffset.MinValue));
+            new RunScope(store, _ => true, _ => true, LinkExclusions.Of(store, pair, false), persistDeferred: true)
+                .LoadTouched(pair, [cloud.Path], [], [cloud.ObjectId]);
+            LocalChecks.Require(store.CountDeferredPlanning(pair.PairId) == 0,
+                "an existing retry is not duplicated as planning debt");
+            store.ClearSyncRetry(pair.PairId, cloud.Path);
+            var many = Enumerable.Range(0, 1025).Select(n => (pair.B.RootId,
+                cloud with { ObjectId = $"deferred-{n:D6}", Path = $"Pending/{n}" }));
+            store.DeferPlanning(pair.PairId, many);
+            var drained = 0;
+            foreach (var page in store.DeferredPlanningPages(pair.PairId))
+            {
+                drained += page.Count;
+                LocalChecks.Require(page.Count <= 256, "drain memory stays page bounded");
+                store.AcknowledgeDeferredPlanning(pair.PairId, page, _ => true);
+            }
+            LocalChecks.Require(drained == 1025 && store.CountDeferredPlanning(pair.PairId) == 0,
+                "one streamed drain visits all due work, not just the first 256");
+            using var connection = new SqliteConnection($"Data Source={SqliteStateStore.DatabasePath(folder)};Pooling=False");
+            connection.Open();
+            AssertSeek(connection);
+            StoreSchema.Execute(connection, null, "CREATE TRIGGER fail_defer BEFORE INSERT ON planning_deferred BEGIN SELECT RAISE(FAIL,'synthetic deferral failure'); END;");
+            var retained = new RunScope(store, _ => true, _ => true, LinkExclusions.Of(store, pair, false), persistDeferred: true)
+                .LoadTouched(pair, [cloud.Path], [], [cloud.ObjectId]);
+            LocalChecks.Require(retained.B.Count == 0 && store.SyncRetryAt(pair.PairId, cloud.Path) is not null,
+                "deferral failure retains the hold and saves existing durable retry work without throwing");
+            store.ClearSyncRetry(pair.PairId, cloud.Path);
+            StoreSchema.Execute(connection, null, "CREATE TRIGGER fail_retry BEFORE INSERT ON sync_retry BEGIN SELECT RAISE(FAIL,'synthetic retry failure'); END;");
+            new RunScope(store, _ => true, _ => true, LinkExclusions.Of(store, pair, false), persistDeferred: true)
+                .LoadTouched(pair, [cloud.Path], [], [cloud.ObjectId]);
+            LocalChecks.Require(store.OpenNotices(pair.PairId).Count(notice => notice.ReasonKey == "run-unavailable") == 1,
+                "when both persistence paths fail one existing actionable notice is retained and preparation completes");
+        }
+
+        var migratedFolder = Path.Combine(folder, "migrated-v21");
+        using (var old = SqliteStateStore.Open(migratedFolder, StorageChecks.Fast, TimeProvider.System))
+        {
+            old.SavePair(pair);
+            Snapshot(old, pair.A, Side.A, [local]);
+        }
+        using (var connection = new SqliteConnection($"Data Source={SqliteStateStore.DatabasePath(migratedFolder)};Pooling=False"))
+        {
+            connection.Open();
+            StoreSchema.Execute(connection, null, "DROP TABLE planning_deferred; PRAGMA user_version=21;");
+        }
+        using (var migrated = SqliteStateStore.Open(migratedFolder, StorageChecks.Fast, TimeProvider.System))
+        {
+            migrated.DeferPlanning(pair.PairId, new[] { (pair.A.RootId, local) });
+            LocalChecks.Require(migrated.DeferredPlanningPage(pair.PairId).Single().Reason.Length > 0,
+                "v21 migration creates usable reason-bearing deferrals");
+            using var connection = new SqliteConnection($"Data Source={SqliteStateStore.DatabasePath(migratedFolder)};Pooling=False");
+            connection.Open();
+            AssertSeek(connection);
+        }
+
+        using (var store = SqliteStateStore.Open(Path.Combine(folder, "hidden-delete"), StorageChecks.Fast, TimeProvider.System))
+        {
+            store.SavePair(pair);
+            var baselineCloud = cloud with { Hash = local.Hash };
+            Snapshot(store, pair.A, Side.A, [local]);
+            Snapshot(store, pair.B, Side.B, [baselineCloud]);
+            var adopt = new SyncAction("adopt", 3, ActionKind.Adopt, Side.B, cloud.Path, null, local, baselineCloud, false, "linked");
+            store.RecordIntent(pair.PairId, adopt);
+            store.CommitResult(pair.PairId, 1, adopt, new(adopt.ActionId, Outcome.Done, local, baselineCloud, null, null));
+            var edited = local with { Hash = new string('c', 64), Size = 2 };
+            Snapshot(store, pair.A, Side.A, [edited]);
+            Snapshot(store, pair.B, Side.B, []);
+            var gaps = (ILocalGapStore)store;
+            gaps.BeginGap(pair.A.RootId, "cursor", 1, false, "hidden delete");
+            new RunScope(store, _ => true, _ => true, LinkExclusions.Of(store, pair, false), persistDeferred: true)
+                .LoadTouched(pair, [cloud.Path], [], [cloud.ObjectId]);
+            LocalChecks.Require(store.CountDeferredPlanning(pair.PairId) == 1,
+                "a deleted hidden entity remains dirty through its baseline identity");
+            var epoch = gaps.GapEpoch(pair.A.RootId)!;
+            gaps.GapDiscoveredBatch(pair.A.RootId, epoch, new[] { (edited, false) });
+            gaps.GapDiscoveryDone(pair.A.RootId, epoch);
+            gaps.PromoteGapDiscovery(pair.A.RootId);
+            var deferred = store.DeferredPlanningPage(pair.PairId);
+            var scope = new RunScope(store, _ => true, _ => true, LinkExclusions.Of(store, pair, false))
+                .LoadTouched(pair, deferred.SelectMany(item => item.Paths).ToArray(), [], [cloud.ObjectId]);
+            var rows = Planner.Join(scope.Baselines, scope.A, scope.B,
+                new Dictionary<string, DateTimeOffset?>(), new Dictionary<string, DateTimeOffset?>(),
+                new(true, true, new HashSet<string>(), new HashSet<string>()), false);
+            var plan = Planner.Decide(pair.PairId, 2, rows, new(TimeSpan.Zero, false,
+                new("{name} [{side}]{ext}", "s", TimeSpan.Zero, "Local", "Dropbox"), 10));
+            LocalChecks.Require(scope.A.Any(item => item.ObjectId == local.ObjectId) &&
+                plan.Actions.All(action => action.Kind != ActionKind.Delete),
+                "hidden delete replay cannot delete the edited survivor without fresh deletion evidence");
+        }
+
+        static void AssertSeek(SqliteConnection connection)
+        {
+            using (var explain = StoreSchema.Command(connection, null, "EXPLAIN QUERY PLAN " + SqliteStateStore.DeferredPlanningPageSql))
+            {
+                explain.Parameters.AddWithValue("$p", 1);
+                explain.Parameters.AddWithValue("$root", 1);
+                explain.Parameters.AddWithValue("$id", "deferred-000001");
+                explain.Parameters.AddWithValue("$version", long.MaxValue);
+                using var reader = explain.ExecuteReader();
+                var details = new List<string>();
+                while (reader.Read()) details.Add(reader.GetString(3));
+                LocalChecks.Require(details.Any(detail => detail.Contains("SEARCH d USING PRIMARY KEY", StringComparison.Ordinal)) &&
+                    details.All(detail => !detail.Contains("TEMP B-TREE", StringComparison.Ordinal)),
+                    "deferred paging seeks the entity key without sorting the pair on every page");
+            }
         }
 
         static void Snapshot(SqliteStateStore store, RootDef root, Side side, IReadOnlyList<ItemState> items)

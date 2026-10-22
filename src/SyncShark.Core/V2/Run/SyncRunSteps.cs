@@ -581,6 +581,7 @@ public sealed partial class SyncRun
             }
         }
         throttle.Report(RunPhases.Reading(root), null, 0, 0);
+        var fullChanges = new HashSet<string>(StringComparer.Ordinal);
         if (cursor is null)
         {
             Trace($"scan {side}: full listing required; no compatible {(inventoryCursors is null ? "committed" : "pending")} inventory cursor");
@@ -588,15 +589,15 @@ public sealed partial class SyncRun
             Trace($"scan {side}: full snapshot read start ({watch.ElapsedMilliseconds} ms)");
             var snapshot = await ReadFullAsync(inventory, gen, include, root, throttle, ct);
             Trace($"scan {side}: full snapshot read done ({watch.ElapsedMilliseconds} ms); storing");
-            _store.WriteSnapshot(snapshot with { IncludesPath = path => include(path) && (snapshot.IncludesPath?.Invoke(path) ?? true) });
+            _store.WriteSnapshot(snapshot with { IncludesPath = path => include(path) && (snapshot.IncludesPath?.Invoke(path) ?? true), ChangedObject = id => fullChanges.Add(id) });
             if (inventory is LocalInventory && !string.IsNullOrEmpty(snapshot.CursorAfter))
-                return await CatchUpLocalWalkAsync(pair, side, inventory, snapshot, include, root, throttle, ct);
+                return await CatchUpLocalWalkAsync(pair, side, inventory, snapshot, include, root, throttle, ct, fullChanges);
             await inventory.VerifyPendingAsync(include, _ => { }, ct);
             if (snapshot.IncompleteSubtrees.Count == 0) CloseHydrationFallback(pair, root);
             if (firstSync && snapshot.IncompleteSubtrees.Count == 0 && snapshot.CursorAfter is { } observedCursor)
                 observationStore?.SaveInventoryObservation(coverage, observedCursor);
             Trace($"scan {side}: snapshot stored ({watch.ElapsedMilliseconds} ms)");
-            return new SideScan(gen, snapshot.CursorAfter, snapshot.IncompleteSubtrees.Count == 0, true, [], [],
+            return new SideScan(gen, snapshot.CursorAfter, snapshot.IncompleteSubtrees.Count == 0, true, [], fullChanges.ToArray(),
                 NoDeletions, []) { ScopedFullCoverage = snapshot.IncompleteSubtrees.Count > 0 && !snapshot.IncompleteSubtrees.Contains(string.Empty), PendingDeletionEvidence = snapshot.PendingDeletionEvidence, IncompleteSubtrees = snapshot.IncompleteSubtrees, IncompleteReasons = snapshot.IncompleteReasons, ObservedCoverage = observationStore is null ? null : coverage, RehashThrough = _store.RehashWatermark(root.RootId) };
         }
         Trace($"scan {side}: resuming {(inventoryCursors is null ? "committed" : "pending")} inventory cursor");
@@ -645,15 +646,15 @@ public sealed partial class SyncRun
             Trace($"scan {side}: rescan snapshot read start ({watch.ElapsedMilliseconds} ms)");
             var rescan = await ReadFullAsync(inventory, fullGen, include, root, throttle, ct);
             Trace($"scan {side}: rescan snapshot read done ({watch.ElapsedMilliseconds} ms); storing");
-            _store.WriteSnapshot(rescan with { IncludesPath = path => include(path) && (rescan.IncludesPath?.Invoke(path) ?? true) });
+            _store.WriteSnapshot(rescan with { IncludesPath = path => include(path) && (rescan.IncludesPath?.Invoke(path) ?? true), ChangedObject = id => fullChanges.Add(id) });
             if (inventory is LocalInventory && !string.IsNullOrEmpty(rescan.CursorAfter))
-                return await CatchUpLocalWalkAsync(pair, side, inventory, rescan, include, root, throttle, ct);
+                return await CatchUpLocalWalkAsync(pair, side, inventory, rescan, include, root, throttle, ct, fullChanges);
             await inventory.VerifyPendingAsync(include, _ => { }, ct);
             if (rescan.IncompleteSubtrees.Count == 0) CloseHydrationFallback(pair, root);
             if (firstSync && rescan.IncompleteSubtrees.Count == 0 && rescan.CursorAfter is { } rescanCursor)
                 observationStore?.SaveInventoryObservation(coverage, rescanCursor);
             Trace($"scan {side}: rescan snapshot stored ({watch.ElapsedMilliseconds} ms)");
-            return new SideScan(fullGen, rescan.CursorAfter, rescan.IncompleteSubtrees.Count == 0, true, [], [],
+            return new SideScan(fullGen, rescan.CursorAfter, rescan.IncompleteSubtrees.Count == 0, true, [], fullChanges.ToArray(),
                 NoDeletions, []) { ScopedFullCoverage = rescan.IncompleteSubtrees.Count > 0 && !rescan.IncompleteSubtrees.Contains(string.Empty), PendingDeletionEvidence = rescan.PendingDeletionEvidence, IncompleteSubtrees = rescan.IncompleteSubtrees, IncompleteReasons = rescan.IncompleteReasons, ObservedCoverage = observationStore is null ? null : coverage, RehashThrough = _store.RehashWatermark(root.RootId) };
         }
         var paths = new List<string>();
@@ -665,6 +666,8 @@ public sealed partial class SyncRun
             paths.Add(change.Path);
             if (change.Kind == ChangeKind.Delete)
             {
+                // Retain the previous entity identity for hidden-delete replanning, never deletion authority.
+                ids.AddRange(_store.Live(root.RootId, [change.Path]).Select(item => item.ObjectId));
                 // D81: hydration is a scoped full inventory, not historical deletion authority.
                 // Keep absence in file_state but do not turn excluded-period events into rule-19 deletes.
                 if (!hydrate.Any(prefix => PairPath.IsSelfOrUnder(change.Path, prefix)))
@@ -693,7 +696,8 @@ public sealed partial class SyncRun
     // The full snapshot must be installed first: journal name resolution uses its object/parent rows.
     // Always start from the ORIGINAL pre-walk cursor, including after a multi-day pause.
     private async Task<SideScan> CatchUpLocalWalkAsync(PairDef pair, Side side, IInventorySource inventory,
-        Snapshot snapshot, Func<string, bool> include, RootDef root, ProgressThrottle throttle, CancellationToken ct)
+        Snapshot snapshot, Func<string, bool> include, RootDef root, ProgressThrottle throttle, CancellationToken ct,
+        HashSet<string> fullChanges)
     {
         var gen = _store.BeginGeneration(root.RootId, "delta");
         var delta = await inventory.ChangesSinceAsync(snapshot.CursorAfter, gen, include, ct);
@@ -705,9 +709,9 @@ public sealed partial class SyncRun
                 "local-walk-catch-up")]);
             var freshGen = _store.BeginGeneration(root.RootId, "full");
             var fresh = await ReadFullAsync(inventory, freshGen, include, root, throttle, ct);
-            _store.WriteSnapshot(fresh with { IncludesPath = path => include(path) && (fresh.IncludesPath?.Invoke(path) ?? true) });
+            _store.WriteSnapshot(fresh with { IncludesPath = path => include(path) && (fresh.IncludesPath?.Invoke(path) ?? true), ChangedObject = id => fullChanges.Add(id) });
             await inventory.VerifyPendingAsync(include, _ => { }, ct);
-            return new SideScan(freshGen, fresh.CursorAfter, fresh.IncompleteSubtrees.Count == 0, true, [], [],
+            return new SideScan(freshGen, fresh.CursorAfter, fresh.IncompleteSubtrees.Count == 0, true, [], fullChanges.ToArray(),
                 NoDeletions, []) { RehashThrough = _store.RehashWatermark(root.RootId) };
         }
         _store.WriteDelta(delta with { IncludesPath = include });
@@ -715,7 +719,7 @@ public sealed partial class SyncRun
         var complete = snapshot.IncompleteSubtrees.Count == 0 && delta.IncompleteSubtrees.Count == 0;
         if (complete) CloseHydrationFallback(pair, root);
         return new SideScan(gen, delta.CursorAfter, complete, true,
-            delta.Changes.Select(c => c.Path).ToArray(), delta.Changes.Select(c => c.ObjectId).ToArray(),
+            delta.Changes.Select(c => c.Path).ToArray(), fullChanges.Concat(delta.Changes.Select(c => c.ObjectId)).Distinct().ToArray(),
             NoDeletions, []) { RehashThrough = _store.RehashWatermark(root.RootId),
                 PendingDeletionEvidence = delta.PendingDeletionEvidence, ReleasedDeletionEvidence = delta.ReleasedDeletionEvidence };
     }
@@ -1158,7 +1162,7 @@ public sealed partial class SyncRun
 
     private void AcknowledgeVerifiedRehash(PairDef pair, BothScan scan, Plan plan, Tally tally,
         Func<string, bool> evaluated, Func<string, bool> includeA, Func<string, bool> includeB, CancellationToken ct,
-        IReadOnlyList<SqliteStateStore.DeferredPlanning>? deferredPlanning = null)
+        IEnumerable<SqliteStateStore.DeferredPlanning>? deferredPlanning = null)
     {
         var unsettled = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var notice in plan.Notices)
@@ -1180,7 +1184,11 @@ public sealed partial class SyncRun
             return !unsettled.GetViewBetween(path + "/", path + "0").Any();
         }
         if (deferredPlanning is not null && _store is SqliteStateStore deferredStore)
-            deferredStore.AcknowledgeDeferredPlanning(pair.PairId, deferredPlanning, Settled);
+            foreach (var page in deferredPlanning.Chunk(256))
+            {
+                ct.ThrowIfCancellationRequested();
+                deferredStore.AcknowledgeDeferredPlanning(pair.PairId, page, Settled);
+            }
         _store.AcknowledgeRehash(pair.A.RootId, scan.A.RehashThrough, path => Settled(path) && includeA(path), ct);
         _store.AcknowledgeRehash(pair.B.RootId, scan.B.RehashThrough, path => Settled(path) && includeB(path), ct);
     }

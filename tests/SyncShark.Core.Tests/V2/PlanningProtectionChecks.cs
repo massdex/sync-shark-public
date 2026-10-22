@@ -8,12 +8,42 @@ internal static class PlanningProtectionChecks
     {
         foreach (var scenario in new[] { "gap-release", "gap-retained", "moved-release", "retry-release", "flag-release", "flag-moved-a", "flag-moved-b" })
             Check(Path.Combine(folder, scenario), scenario);
+        CheckRetryGate(Path.Combine(folder, "retry-gate"));
         CheckIncompleteCoverage();
         PlanningDeferredChecks.Run(Path.Combine(folder, "planning-deferred"));
         ProtectionStreamChecks.Run(Path.Combine(folder, "protection-stream"));
         BlockedDeleteNoticeChecks.Run(Path.Combine(folder, "blocked-delete-notices"));
         DeleteReviewNoticeChecks.Run(Path.Combine(folder, "delete-review-notices"));
         Console.WriteLine("PASS immutable scope protection and real scan completeness: no false Delete/Forget");
+    }
+
+    private static void CheckRetryGate(string folder)
+    {
+        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        var pair = new PairDef("pair", "Pair A", new("local", SyncProviders.Local, null, "/local", "local"),
+            new("cloud", SyncProviders.Dropbox, null, "/cloud", "cloud"), [], [], true);
+        store.SavePair(pair);
+        var item = new ItemState("Parent/File", ItemKind.File, "local-file", null, new string('a', 64),
+            1, DateTimeOffset.UnixEpoch, ItemFlags.None);
+        var gen = store.BeginGeneration(pair.A.RootId, "fixture");
+        store.WriteSnapshot(new(pair.A.RootId, Side.A, gen, "cursor", [item], []));
+        store.CompleteGeneration(gen, "cursor", true);
+        gen = store.BeginGeneration(pair.B.RootId, "fixture");
+        store.WriteSnapshot(new(pair.B.RootId, Side.B, gen, "cursor", [item with { ObjectId = "cloud-file" }], []));
+        store.CompleteGeneration(gen, "cursor", true);
+        var calls = 0;
+        RunScope Scanner() => new(store, _ => true, _ => true, LinkExclusions.Of(store, pair, false),
+            activeRetries: new HashSet<string>(), restoreProtection: RecoveryRestoreProtection.None)
+            { RetryProtectionReadForTest = () => calls++ };
+        var scanner = Scanner();
+        scanner.AfterHideAForTest = () => store.SaveSyncRetry(pair.PairId,
+            new(item.Path, "sync", 0, "created after snapshot", DateTimeOffset.MaxValue));
+        var frozen = scanner.LoadFull(pair);
+        LocalChecks.Require(frozen.A.Count == 1 && frozen.B.Count == 1 && calls == 0,
+            "empty frozen retry snapshot makes zero per-path calls, including a mid-prepare writer");
+        var next = Scanner().LoadFull(pair);
+        LocalChecks.Require(next.A.Count == 0 && next.B.Count == 0 && calls > 0,
+            "next snapshot sees the new retry and protects its exact path");
     }
 
     private static void CheckIncompleteCoverage()

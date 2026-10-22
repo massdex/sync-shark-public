@@ -43,15 +43,39 @@ internal static class ProtectionStreamChecks
                 right.SequenceEqual(LegacyProtectionOracle.Read(connection, "cloud", flags, paths)), "old SQL oracle is exact");
             var expected = left.Zip(right, (x, y) => new ProtectionMatch(x.Covered || y.Covered, x.Contains || y.Contains)).ToArray();
             using var tx = connection.BeginTransaction();
-            using var stream = new SqliteStateStore.ProtectionStream(connection, tx, a, b, flags, false, paths.Chunk(3));
+            using var stream = new SqliteStateStore.ProtectionStream(connection, tx, a, b, flags, false);
             var actual = paths.Chunk(3).SelectMany(chunk => stream.Read(chunk)).ToArray();
             LocalChecks.Require(actual.SequenceEqual(expected),
                 "set-based streamed partial gap equals old SQL for both roots, folders, absent paths, independent flags and Unicode");
         }
+        using (var tx = connection.BeginTransaction())
+        using (var stream = new SqliteStateStore.ProtectionStream(connection, tx, a, b, ItemFlags.NeedsRehash, false))
+        {
+            StoreSchema.Execute(connection, tx, "DROP TABLE protection_held;");
+            var expected = store.ProtectionBatch("local", ItemFlags.NeedsRehash, paths)
+                .Zip(store.ProtectionBatch("cloud", ItemFlags.NeedsRehash, paths),
+                    (x, y) => new ProtectionMatch(x.Covered || y.Covered, x.Contains || y.Contains)).ToArray();
+            LocalChecks.Require(stream.Read(paths).SequenceEqual(expected),
+                "SQL failure in the held index falls back to the exact old batch reader");
+            LocalChecks.Require(stream.Read(paths).SequenceEqual(expected),
+                "subsequent batches retain exact fallback semantics");
+        }
+        store.EnableStorage();
+        using (var tx = connection.BeginTransaction())
+        using (var stream = new SqliteStateStore.ProtectionStream(connection, tx, a, b,
+            ItemFlags.NeedsRehash | ItemFlags.Placeholder, true))
+        {
+            var flags = ItemFlags.NeedsRehash | ItemFlags.Placeholder;
+            var expected = store.ProtectionBatch("local", flags, paths)
+                .Zip(store.ProtectionBatch("cloud", flags, paths),
+                    (x, y) => new ProtectionMatch(x.Covered || y.Covered, x.Contains || y.Contains));
+            LocalChecks.Require(stream.Read(paths).SequenceEqual(expected),
+                "FoD-enabled held index remains equivalent to exact storage-aware SQL");
+        }
         var many = Enumerable.Range(0, 2049).Select(n => $"Parent/above/child-{n}");
         using (var tx = connection.BeginTransaction())
         using (var stream = new SqliteStateStore.ProtectionStream(connection, tx, a, b,
-            ItemFlags.NeedsRehash, false, many.Chunk(1024)))
+            ItemFlags.NeedsRehash, false))
         {
             var count = 0;
             foreach (var batch in many.Chunk(1024))
@@ -61,9 +85,9 @@ internal static class ProtectionStreamChecks
                     "stream preserves ancestor-only coverage across result batch boundaries");
                 count += result.Count;
             }
-            LocalChecks.Require(count == 2049 && stream.SourcePasses == 2 && stream.ResultQueries == 1 &&
+            LocalChecks.Require(count == 2049 && stream.SourcePasses == 3 && stream.ResultQueries == 3 &&
                 stream.MaximumInputBatch == 1024,
-                "three bounded result batches share two source passes and one streaming result query, independent of item count");
+                "three bounded result batches use three indexed source passes and one query per batch");
         }
     }
 }

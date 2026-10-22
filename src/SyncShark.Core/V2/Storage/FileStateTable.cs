@@ -172,6 +172,9 @@ internal sealed class FileStateTable
                 : changes.Read();
             foreach (var change in replay)
             {
+                snapshot.ChangedObject?.Invoke(change.Entry.Item.ObjectId);
+                if (change.Incoming is { } changed && changed.ObjectId != change.Entry.Item.ObjectId)
+                    snapshot.ChangedObject?.Invoke(changed.ObjectId);
                 if (change.Incoming is null)
                 {
                     DeleteRow(rootNo, change.Entry.DirNo, change.Entry.Name, batch, change.Entry.NameKey);

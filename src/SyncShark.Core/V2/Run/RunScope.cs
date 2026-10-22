@@ -7,6 +7,12 @@ internal sealed class RunScope
     // RehashProtection accepts at most 1024 distinct paths, bound as one JSON parameter.
     private const int ItemBatchSize = 512;
     private const int BaselineBatchSize = 256;
+    private readonly bool _persistDeferred;
+    private readonly CancellationToken _cancellationToken;
+    private IReadOnlySet<string> _dirtyA = new HashSet<string>();
+    private IReadOnlySet<string> _dirtyB = new HashSet<string>();
+    private readonly HashSet<string> _permanentA = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _permanentB = new(StringComparer.Ordinal);
     private PairDef? _deferredPair;
     private readonly List<(string Root, ItemState Item)> _deferred = new(256);
     private bool _streamingProtection;
@@ -22,6 +28,7 @@ internal sealed class RunScope
     private readonly IReadOnlySet<string>? _activeRetries;
     private readonly bool _restoredRetriesOnly;
     private readonly RecoveryRestoreProtection? _restoreProtection;    internal Action? AfterHideAForTest { get; set; }
+    internal Action? RetryProtectionReadForTest { get; set; }
     private readonly RebuildableSelection? _rebuildables;
     private ProviderRefusedPaths _refusedFoldersA = new([]);
     private ProviderRefusedPaths _refusedFoldersB = new([]);
@@ -29,8 +36,11 @@ internal sealed class RunScope
     public RunScope(IStateStore store, Func<string, bool> includeA, Func<string, bool> includeB,
         LinkExclusions? links = null, RebuildableSelection? rebuildables = null, IReadOnlyList<SyncIgnoreRule>? rules = null, IReadOnlyDictionary<string, Side>? decisions = null,
         IReadOnlySet<string>? activeRetries = null, bool restoredRetriesOnly = false,
-        RecoveryRestoreProtection? restoreProtection = null)
+        RecoveryRestoreProtection? restoreProtection = null, bool persistDeferred = false,
+        CancellationToken cancellationToken = default)
     {
+        _persistDeferred = persistDeferred;
+        _cancellationToken = cancellationToken;
         _store = store;
         _activeRetries = activeRetries;
         _restoredRetriesOnly = restoredRetriesOnly;
@@ -49,6 +59,12 @@ internal sealed class RunScope
         _downloadChoices = _decisions?.Where(entry =>
             (entry.Value == Side.A ? pair.A : pair.B).Provider == SyncProviders.Dropbox)
             .Select(entry => entry.Key).ToHashSet(StringComparer.OrdinalIgnoreCase) ?? [];
+    }
+
+    internal void PendingChanges(IEnumerable<string> a, IEnumerable<string> b)
+    {
+        _dirtyA = a.ToHashSet(StringComparer.Ordinal);
+        _dirtyB = b.ToHashSet(StringComparer.Ordinal);
     }
 
     public Scope LoadFull(PairDef pair) => Prepare(pair, _store.Live(pair.A.RootId), _store.Live(pair.B.RootId),
@@ -92,6 +108,7 @@ internal sealed class RunScope
     public Scope LoadTouched(PairDef pair, IReadOnlyCollection<string> touched,
         IReadOnlyCollection<string> changeIdsA, IReadOnlyCollection<string> changeIdsB)
     {
+        PendingChanges(changeIdsA, changeIdsB);
         LoadRefusedFolders(pair);
         var prefixes = new HashSet<string>(touched, StringComparer.OrdinalIgnoreCase);
         var ancestorsA = new List<ItemState>();
@@ -197,6 +214,7 @@ internal sealed class RunScope
     private Scope Prepare(PairDef pair, IReadOnlyList<ItemState> a, IReadOnlyList<ItemState> b,
         IReadOnlyList<Baseline> baselines, IReadOnlyList<ItemState> contextA, IReadOnlyList<ItemState> contextB)
     {
+        _cancellationToken.ThrowIfCancellationRequested();
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         _protectionStarted = started;
         _protectionBatches = 0;
@@ -214,7 +232,7 @@ internal sealed class RunScope
             contextA = Normalize(pair, Side.A, contextA);
             contextB = Normalize(pair, Side.B, contextB);
             using var protection = snapshot is not null && _links.HasRehashProtection
-                ? snapshot.Stream(ProtectionBatches(a, b, baselines, contextA, contextB)) : null;
+                ? snapshot.Stream() : null;
             _streamingProtection = protection is not null;
             _scopeLinks = snapshot is null ? _links : _links.Freeze(snapshot, protection is null ? null : protection.Read);
             var restore = _restoreProtection;
@@ -229,10 +247,16 @@ internal sealed class RunScope
                     restoreLookup = (path, descendants) => snapshot.RecoveryRestoreProtected(pair.PairId, path, descendants);
                 else if (restore.Active)
                     restoreLookup = restore.Bind(snapshot, pair.PairId);
+                var hasRetries = active is not null && snapshot.HasRetries(pair.PairId);
                 if (restoreLookup is not null || active is not null)
                     _scopeLinks = _scopeLinks.WithRetryProtection((path, descendants) =>
                         (restoreLookup is not null && restoreLookup(path, descendants)) ||
-                        (active is not null && snapshot.RetryProtected(pair.PairId, path, descendants, active, _restoredRetriesOnly)));
+                        (hasRetries && ReadRetry(path, descendants)));
+                bool ReadRetry(string path, bool descendants)
+                {
+                    RetryProtectionReadForTest?.Invoke();
+                    return snapshot.RetryProtected(pair.PairId, path, descendants, active!, _restoredRetriesOnly);
+                }
             }
             else if (restore is { Active: true })
             {
@@ -240,6 +264,15 @@ internal sealed class RunScope
             }
             if (!_streamingProtection) RunActivity.Preparation($"Preparing protection scope 0/{_protectionTotal}");
             LoadRefusedFolders(pair);
+            _permanentA.Clear();
+            _permanentB.Clear();
+            foreach (var basis in baselines)
+            {
+                if (!_dirtyA.Contains(basis.A.ObjectId) && !_dirtyB.Contains(basis.B.ObjectId)) continue;
+                if (!PermanentHold(basis.A, _scopeLinks ?? _links) && !PermanentHold(basis.B, _scopeLinks ?? _links)) continue;
+                if (_dirtyA.Contains(basis.A.ObjectId)) _permanentA.Add(basis.A.ObjectId);
+                if (_dirtyB.Contains(basis.B.ObjectId)) _permanentB.Add(basis.B.ObjectId);
+            }
             var hiddenA = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var hiddenB = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             a = Hide(a, Side.A, baselines.Count == 0 ? null : hiddenA);
@@ -306,8 +339,11 @@ internal sealed class RunScope
                 Covered(basis.A, Side.A, links) || Covered(basis.B, Side.B, links);
             if (covered)
             {
-                Defer(basis.A, Side.A);
-                Defer(basis.B, Side.B);
+                if (!PermanentHold(basis.A, links) && !PermanentHold(basis.B, links))
+                {
+                    Defer(basis.A, Side.A, links);
+                    Defer(basis.B, Side.B, links);
+                }
                 visible ??= baselines.Take(index).ToList();
                 hiddenA.Add(basis.A.ObjectId);
                 hiddenB.Add(basis.B.ObjectId);
@@ -358,7 +394,7 @@ internal sealed class RunScope
             if (covered)
             {
                 hidden?.Add(item.ObjectId);
-                Defer(item, side);
+                Defer(item, side, links);
             }
             var flags = item.Flags;
             var refused = side == Side.A ? _refusedFoldersA : _refusedFoldersB;
@@ -388,9 +424,16 @@ internal sealed class RunScope
         return visible is null ? items : visible;
     }
 
-    private void Defer(ItemState item, Side side)
+    private static bool PermanentHold(ItemState item, LinkExclusions links) =>
+        new[] { item.Path, DropboxNameMapping.MatchPath(item) }.Any(path =>
+            links.CoversLink(path) || links.CoversStub(path) || links.CoversPending(path));
+
+    private void Defer(ItemState item, Side side, LinkExclusions links)
     {
-        if (_deferredPair is not { } pair || _store is not SqliteStateStore) return;
+        if (!_persistDeferred || _deferredPair is not { } pair || _store is not SqliteStateStore ||
+            !(side == Side.A ? _dirtyA : _dirtyB).Contains(item.ObjectId) ||
+            (side == Side.A ? _permanentA : _permanentB).Contains(item.ObjectId) || PermanentHold(item, links) ||
+            _store.SyncRetryAt(pair.PairId, item.Path) is not null) return;
         _deferred.Add(((side == Side.A ? pair.A : pair.B).RootId, item));
         if (_deferred.Count == 256) FlushDeferred();
     }
@@ -398,37 +441,43 @@ internal sealed class RunScope
     private void FlushDeferred()
     {
         if (_deferred.Count == 0) return;
-        if (_store is SqliteStateStore store && _deferredPair is { } pair)
-            store.DeferPlanning(pair.PairId, _deferred);
-        _deferred.Clear();
-    }
-
-    private static IEnumerable<IReadOnlyList<string>> ProtectionBatches(IReadOnlyList<ItemState> a,
-        IReadOnlyList<ItemState> b, IReadOnlyList<Baseline> baselines,
-        IReadOnlyList<ItemState> contextA, IReadOnlyList<ItemState> contextB)
-    {
-        foreach (var batch in Items(a)) yield return batch;
-        foreach (var batch in Items(b)) yield return batch;
-        for (var n = 0; n < baselines.Count; n += BaselineBatchSize)
-            yield return baselines.Skip(n).Take(BaselineBatchSize).SelectMany(basis => new[]
-            { basis.A.Path, DropboxNameMapping.MatchPath(basis.A), basis.B.Path, DropboxNameMapping.MatchPath(basis.B) }).ToArray();
-        foreach (var batch in Items(contextA)) yield return batch;
-        foreach (var batch in Items(contextB)) yield return batch;
-
-        static IEnumerable<IReadOnlyList<string>> Items(IReadOnlyList<ItemState> items)
+        try
         {
-            for (var n = 0; n < items.Count; n += ItemBatchSize)
-                yield return items.Skip(n).Take(ItemBatchSize)
-                    .SelectMany(item => new[] { item.Path, DropboxNameMapping.MatchPath(item) }).ToArray();
+            if (_store is SqliteStateStore store && _deferredPair is { } pair)
+                store.DeferPlanning(pair.PairId, _deferred);
         }
+        catch (Exception error)
+        {
+            RunLog.Trace($"Deferred planning write failed; retaining retry work: {error.Message}");
+            if (_deferredPair is { } pair)
+            {
+                var noticeAttempted = false;
+                foreach (var row in _deferred)
+                    try
+                    {
+                        _store.SaveSyncRetry(pair.PairId, new(row.Item.Path, "planning", 0,
+                            error.Message, DateTimeOffset.MinValue));
+                    }
+                    catch (Exception retryError)
+                    {
+                        if (noticeAttempted) continue;
+                        noticeAttempted = true;
+                        try { _store.AddNotices([new Notice(pair.PairId, 40, NoticeKind.Info, "",
+                            $"Could not save verification retries: {retryError.Message}. Free database space and retry sync; items remain unsynced.",
+                            "run-unavailable")]); }
+                        catch (Exception noticeError) { RunLog.Trace($"Verification notice write failed: {noticeError.Message}"); }
+                    }
+            }
+        }
+        finally { _deferred.Clear(); }
     }
 
     private static long Batches(int count, int size) => ((long)count + size - 1) / size;
 
     private void ProtectionBatchStarting()
     {
+        _cancellationToken.ThrowIfCancellationRequested();
         var batch = ++_protectionBatches;
-        if (_streamingProtection) return;
         var message = $"Preparing protection scope {batch}/{_protectionTotal}";
         RunActivity.Preparation(message);
         if (batch == 1 || batch % 2048 == 0 || batch == _protectionTotal)
