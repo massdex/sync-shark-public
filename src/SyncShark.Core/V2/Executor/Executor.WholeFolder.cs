@@ -107,24 +107,33 @@ public sealed partial class Executor
             var target = side == Side.A ? a : b;
             var byTree = new Dictionary<FolderTree, WholeFolder>(ReferenceEqualityComparer.Instance);
             foreach (var whole in group)
+            {
+                var requests = whole.Actions.Where(DeleteSourceGuard.RequiresAbsence)
+                    .Select(action => (Historical: committer.DeleteSource(action), Path: action.Path)).ToArray();
                 byTree[new FolderTree(whole.Folder.ExpectedTarget!, whole.Victims)
                 {
                     RevalidateDelete = async () =>
                     {
-                        var batch = new AdmissionAbsenceBatch();
-                        foreach (var page in whole.Actions.Chunk(128))
+                        if (requests.Length == 0) return true;
+                        if (source is not ISourceAbsenceProbe probe || requests.Any(request => request.Historical is null)) return false;
+                        try
                         {
-                            var checks = await Task.WhenAll(page.Select(action => DeleteSourceGuard.CheckAsync(
-                                action, source, committer, plan.PairId, ct,
-                                DeleteSourceGuard.Replacement(action, replacements), admissionBatch: batch)))
-                                .ConfigureAwait(false);
-                            if (checks.Any(result => result is not null)) return false;
+                            foreach (var page in requests.Chunk(128))
+                            {
+                                var checks = await probe.IsAbsentBatchAsync(page.Select(request =>
+                                    (request.Historical!, request.Path)).ToArray(), ct).ConfigureAwait(false);
+                                if (checks.Count != page.Length || checks.Any(result => result.Absent != true)) return false;
+                            }
+                            return true;
                         }
-                        return true;
+                        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                        catch (Exception error) when (error is not (OutOfMemoryException or PairPausedException)) { return false; }
                     }
                 }] = whole;
-            // Freeze ordinary intents before the pre-read; the one group checkpoint is the only store wait
-            // between the provider's pre-read and submission. No destructive effect exists before that checkpoint.
+            }
+            // Freeze ordinary intents and capture source evidence before provider admission. After the
+            // pre-feed read, source-only probes precede the one group checkpoint (the only store wait).
+            // No destructive effect exists before that checkpoint.
             await Task.WhenAll(group.SelectMany(tree => tree.Actions)
                 .Select(action => committer.RecordIntentAsync(action, ct))).ConfigureAwait(false);
             SyncAction? anchor = null;

@@ -8,7 +8,8 @@ internal static partial class DropboxChecks
 {
     private static async Task FolderTreeChecksAsync()
     {
-        await FolderTreeDispatchReappearedAsync();
+        await FolderTreeDispatchReappearedAsync(false);
+        await FolderTreeDispatchReappearedAsync(true);
         await FolderTreeUnchangedAsync();
         await FolderTreeLargeGuardedAsync(false);
         await FolderTreeLargeGuardedAsync(true);
@@ -71,9 +72,10 @@ internal static partial class DropboxChecks
             new FakeEndpoint(Side.A, "ra"), writer, delete, snapshot.CursorAfter);
     }
 
-    private static async Task FolderTreeDispatchReappearedAsync()
+    private static async Task FolderTreeDispatchReappearedAsync(bool unknown)
     {
         using var rig = await TreeRigAsync(52);
+        var source = new RecordingWriter(rig.A);
         rig.A.DropboxHashes = true;
         var folder = Path.Combine(_root, "folder-dispatch-" + Guid.NewGuid().ToString("N"));
         using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
@@ -98,19 +100,20 @@ internal static partial class DropboxChecks
             {
                 if (recreated) return;
                 recreated = true;
-                rig.A.Seed("big/f0.txt", "recreated during prepare");
+                if (unknown) source.AbsenceUnknown = true;
+                else rig.A.Seed("big/f0.txt", "recreated during prepare");
             };
             var delete = rig.Delete with { Rule = 6, ChoiceRemove = false,
                 ObjectKey = "baseline-" + rig.Delete.ExpectedTarget!.ObjectId };
             var results = new List<ActionResult>();
             var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission());
-            await foreach (var result in executor.ApplyAsync(rig.Plan() with { Actions = [delete] }, rig.A, rig.B, default))
+            await foreach (var result in executor.ApplyAsync(rig.Plan() with { Actions = [delete] }, source, rig.B, default))
                 results.Add(result);
             Require(recreated && rig.H.Wire.WholeFolderDeletes == 0,
                 "prepare recheck prevents whole-folder submit after source recreation");
             Require(results.Any(result => result.DeleteSourceUnconfirmed) &&
                 await rig.B.ObserveAsync("big/f0.txt", default) is not null &&
-                await rig.B.ObserveAsync("big/f2.txt", default) is null,
+                (await rig.B.ObserveAsync("big/f2.txt", default) is null) == !unknown,
                 "existing per-item fallback preserves recreated victim and deletes absent siblings");
         }
         using var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);

@@ -38,8 +38,8 @@ public sealed partial class DropboxWriter
                 async completed => { recovery = recovery! with { Completed = completed }; await SaveAsync(); },
                 async () =>
                 {
-                    // Gate/root verification and durable intents precede this read. The only awaited work between
-                    // it and the submit is the one group checkpoint: necessary to retain pre-delete observations.
+                    // Gate/root verification and durable intents precede this read. The owner-approved
+                    // source-only probe follows it; then one durable group checkpoint precedes submission.
                     ct.ThrowIfCancellationRequested();
                     var (before, middle) = await ReadFeedAsync(scanCursor, ct);
                     foreach (var tree in trees)

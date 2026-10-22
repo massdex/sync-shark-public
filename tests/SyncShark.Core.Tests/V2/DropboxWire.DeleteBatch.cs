@@ -9,6 +9,7 @@ internal sealed partial class DropboxWire
     private object[]? _deleteJobEntries;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, object[]> _deleteJobs = new(StringComparer.Ordinal);
 
+    internal Action? AfterDeleteWriteRefusal { get; set; }
     public Dictionary<string, int> DeleteWriteRefusals { get; } = new(StringComparer.OrdinalIgnoreCase);
     public List<int> DeleteBatchSizes { get; } = [];
     public TaskCompletionSource? DeleteBatchEntered { get; set; }
@@ -54,6 +55,7 @@ internal sealed partial class DropboxWire
             if (node is not null && DeleteWriteRefusals.TryGetValue(node.Relative, out var refusals) && refusals > 0)
             {
                 DeleteWriteRefusals[node.Relative] = refusals - 1;
+                AfterDeleteWriteRefusal?.Invoke();
                 results.Add(new Dictionary<string, object>
                 {
                     [".tag"] = "failure", ["failure"] = new Dictionary<string, object> { [".tag"] = "too_many_write_operations" }

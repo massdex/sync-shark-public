@@ -97,6 +97,7 @@ public sealed partial class DropboxPilotClient
                 expectedConnection.RootNamespaceId, settings.UploadCommitConcurrency);
             await V2.RunOperations.WaitAsync(gate, "upload commit gate").ConfigureAwait(false);
             JsonDocument response;
+            var refusals = new List<Func<Task>>();
             try
             {
                 // Deletes stay id-rooted by parent_rev binds the file, not its parent, so a
@@ -109,9 +110,20 @@ public sealed partial class DropboxPilotClient
                 batch = candidates.Where(item => !item.Result.Task.IsCompleted).ToArray();
                 // Recheck after batch/job/commit admission waits, before any submit checkpoint.
                 // Guard callbacks coalesce these requests through the existing 128-item absence probe.
+                var admitted = new List<PendingDropboxDelete>(batch.Count);
                 foreach (var page in batch.Chunk(128))
-                    await Task.WhenAll(page.Select(RevalidateDeleteAsync)).ConfigureAwait(false);
-                batch = batch.Where(item => !item.Result.Task.IsCompleted).ToArray();
+                {
+                    var observations = await Task.WhenAll(page.Select(RevalidateDeleteAsync)).ConfigureAwait(false);
+                    for (var i = 0; i < page.Length; i++)
+                    {
+                        var item = page[i];
+                        var observed = observations[i];
+                        if (observed.Absent == true && !item.Result.Task.IsCompleted) admitted.Add(item);
+                        else if (!item.Result.Task.IsCompleted)
+                            refusals.Add(() => RefuseDeleteAsync(item, observed));
+                    }
+                }
+                batch = admitted;
                 if (batch.Count == 0) return;
                 // Token resolution and request pacing after this checkpoint remain a residual window.
                 var submissionId = Guid.NewGuid().ToString("N");
@@ -122,7 +134,11 @@ public sealed partial class DropboxPilotClient
                 submitted = true;
                 response = await LaunchDeleteBatchAsync(batch, settings);
             }
-            finally { gate.Release(); }
+            finally
+            {
+                gate.Release();
+                await Task.WhenAll(refusals.Select(refuse => refuse())).ConfigureAwait(false);
+            }
             // Polling a server job is a read, not a namespace write. Keep its separate bounded job slot.
             using var ownedResponse = response;
             try { await CompleteDeleteBatchAsync(batch, response.RootElement, settings); }
@@ -143,19 +159,28 @@ public sealed partial class DropboxPilotClient
         }
     }
 
-    private static async Task RevalidateDeleteAsync(PendingDropboxDelete item)
+    private static async Task<AbsenceObservation> RevalidateDeleteAsync(PendingDropboxDelete item)
     {
-        if (item.Context?.RevalidateDelete is not { } revalidate) return;
-        try
-        {
-            if (await revalidate().ConfigureAwait(false) is { } blocked)
-                throw new DeleteSourceUnconfirmedException(blocked);
-        }
+        if (item.Context?.RevalidateDelete is not { } revalidate) return new(true, null);
+        try { return await revalidate().ConfigureAwait(false); }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
             item.WaitTiming?.Dispose();
             item.Result.TrySetException(error);
+            return new(null, null);
         }
+    }
+
+    private static async Task RefuseDeleteAsync(PendingDropboxDelete item, AbsenceObservation observed)
+    {
+        try
+        {
+            var result = item.Context?.RefuseDelete is { } refuse ? await refuse(observed).ConfigureAwait(false) : null;
+            if (result is null) throw new InvalidOperationException("The refused delete has no guard result.");
+            item.Result.TrySetException(new DeleteSourceUnconfirmedException(result));
+        }
+        catch (Exception error) when (error is not OutOfMemoryException) { item.Result.TrySetException(error); }
+        finally { item.WaitTiming?.Dispose(); }
     }
 
     private async Task<JsonDocument> LaunchDeleteBatchAsync(IReadOnlyList<PendingDropboxDelete> batch,

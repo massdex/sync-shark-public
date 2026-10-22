@@ -153,8 +153,21 @@ internal sealed class ActionRunner
                 return await CommitAsync(action, Failed(action, DropboxQuota.Detail) with { UploadQuotaBlocked = true });
             var providerContext = _committer.CreateProviderContext(action);
             if (DeleteSourceGuard.RequiresAbsence(action))
-                providerContext.RevalidateDelete = () => DeleteSourceGuard.CheckAsync(action, source,
-                    _committer, _pairId, ct, admissionBatch: _absenceBatch);
+            {
+                // Store evidence is captured before the provider queue takes any namespace gate.
+                var historical = _committer.DeleteSource(action);
+                providerContext.RevalidateDelete = async () =>
+                {
+                    if (historical is null || source is not ISourceAbsenceProbe probe) return new(null, null);
+                    try { return await _absenceBatch.ProbeAsync(probe, historical, action.Path, ct).ConfigureAwait(false); }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                    catch (Exception error) when (error is not (OutOfMemoryException or PairPausedException))
+                    { return new(null, AbsenceObservation.Cause(error)); }
+                };
+                // Only refused members need the full guard result; the provider invokes this after releasing its gate.
+                providerContext.RefuseDelete = observation => DeleteSourceGuard.CheckAsync(action, source,
+                    _committer, _pairId, ct, preprobed: true, absence: observation.Absent, absenceReason: observation.Reason);
+            }
             ProviderEffectContext.Current.Value = providerContext;
             // Step 4: the intent is durable before any effect is attempted (group-committed with its neighbours').
             await _committer.RecordIntentAsync(action, ct).ConfigureAwait(false);

@@ -7,7 +7,8 @@ public sealed class ProviderEffectContext
     public static AsyncLocal<ProviderEffectContext?> Current { get; } = new();
     private readonly Func<ProviderEffectCheckpoint, Task> _record;
 
-    internal Func<Task<ActionResult?>>? RevalidateDelete { get; set; }
+    internal Func<Task<AbsenceObservation>>? RevalidateDelete { get; set; }
+    internal Func<AbsenceObservation, Task<ActionResult?>>? RefuseDelete { get; set; }
 
     /// <summary>A free-standing context (tests, tools) with its own recorder and no owning committer.</summary>
     internal ProviderEffectContext(Func<ProviderEffectCheckpoint, Task> record) => _record = record;

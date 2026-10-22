@@ -4,13 +4,13 @@ internal static partial class DropboxChecks
 {
     private static async Task DispatchAbsenceAsync()
     {
-        foreach (var scenario in new[] { "one", "all", "unknown" })
+        foreach (var scenario in new[] { "one", "all", "unknown", "requeue" })
         {
             using var h = new Harness();
             var folder = Path.Combine(_root, "dispatch-" + scenario + "-" + Guid.NewGuid().ToString("N"));
             var local = new FakeEndpoint(Side.A, "local") { DropboxHashes = true };
             var source = new RecordingWriter(local);
-            var settings = V2Settings.Default with { DeleteBatchSize = 3, DeleteBatchMaxAge = TimeSpan.FromSeconds(30) };
+            var settings = V2Settings.Default with { DeleteBatchSize = 3, DeleteBatchMaxAge = TimeSpan.FromSeconds(1) };
             var remote = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(folder, "spool"), settings);
             var target = new QueuedDeleteWriter(remote, 3);
             var actions = new List<SyncAction>();
@@ -42,15 +42,23 @@ internal static partial class DropboxChecks
                     await target.Queued.Task.WaitAsync(TimeSpan.FromSeconds(20));
                     Require(!h.Wire.Calls.Contains("/2/files/delete_batch"), "job gate blocks submission after initial absence admission");
                     if (scenario == "unknown") source.AbsenceUnknown = true;
+                    else if (scenario == "requeue")
+                    {
+                        h.Wire.DeleteWriteRefusals["file-0"] = 1;
+                        h.Wire.AfterDeleteWriteRefusal = () => local.Seed("file-0", "recreated after refusal");
+                    }
                     else for (var i = 0; i < (scenario == "all" ? 3 : 1); i++) local.Seed("file-" + i, "recreated");
                 }
                 finally { gate.Exit(false); }
                 var results = await running.WaitAsync(TimeSpan.FromSeconds(30));
-                var blocked = scenario == "one" ? 1 : 3;
+                var blocked = scenario is "one" or "requeue" ? 1 : 3;
                 Require(results.Count(r => r.DeleteSourceUnconfirmed) == blocked,
                     "dispatch returns the existing source guard result for present and unknown sources");
-                Require(h.Wire.DeleteBatchSizes.Sum() == 3 - blocked,
+                Require(h.Wire.DeleteBatchSizes.Sum() == 3 - blocked + (scenario == "requeue" ? 1 : 0),
                     "only still-absent members are posted; an entirely blocked batch sends nothing");
+                if (scenario == "requeue")
+                    Require(h.Wire.DeleteWriteRefusals["file-0"] == 0 && h.Wire.DeleteBatchSizes.Count == 1,
+                        "definite refusal is requeued but fresh source blocks any second POST");
                 Require(await remote.ObserveAsync("file-0", default) is not null,
                     "recreated or unconfirmed source keeps its remote survivor");
 
