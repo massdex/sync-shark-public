@@ -192,6 +192,7 @@ jobs:
           - suite: run
             flag: --v2-run-checks
             takes-root: false
+            drive: c # Includes the production rehearsal fixture, which needs native journal evidence.
           - suite: executor
             flag: --v2-executor-checks
             takes-root: false
