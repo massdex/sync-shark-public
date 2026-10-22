@@ -769,7 +769,13 @@ public sealed partial class SyncRun
         var retryReads = await RetryScanScopesAsync(pair, root, side, inventory, delta.CursorAfter, deltaGen, include, ids.Add, throttle, ct,
             rootFeedComplete: !delta.IncompleteSubtrees.Contains(string.Empty));
         paths.AddRange(retryReads.Touched);
-        delta = delta with { IncompleteSubtrees = delta.IncompleteSubtrees.Concat(retryReads.Incomplete).Distinct(StringComparer.OrdinalIgnoreCase).ToArray() };
+        var deltaReasons = new Dictionary<string, string>(delta.IncompleteReasons, StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in retryReads.Reasons) deltaReasons[entry.Key] = entry.Value;
+        delta = delta with
+        {
+            IncompleteSubtrees = delta.IncompleteSubtrees.Concat(retryReads.Incomplete).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
+            IncompleteReasons = deltaReasons
+        };
         await inventory.VerifyPendingAsync(include, paths.Add, ct);
         if (firstSync && delta.IncompleteSubtrees.Count == 0 && delta.PendingDeletionEvidence.Count == 0)
             observationStore?.SaveInventoryObservation(coverage, delta.CursorAfter);
@@ -830,9 +836,8 @@ public sealed partial class SyncRun
         var reasons = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var entry in snapshot.IncompleteReasons) reasons[entry.Key] = entry.Value;
         foreach (var entry in delta.IncompleteReasons) reasons[entry.Key] = entry.Value;
-        var evidence = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var entry in snapshot.PendingDeletionEvidence) evidence[entry.Key] = entry.Value;
-        foreach (var entry in delta.PendingDeletionEvidence) evidence[entry.Key] = entry.Value;
+        var evidence = MergeCatchUpDeletionEvidence(snapshot.PendingDeletionEvidence,
+            delta.PendingDeletionEvidence, delta.ReleasedDeletionEvidence);
         var complete = incomplete.Length == 0;
         if (complete) CloseHydrationFallback(pair, root);
         return new SideScan(gen, delta.CursorAfter, complete, true,
@@ -841,6 +846,22 @@ public sealed partial class SyncRun
                 ScopedFullCoverage = incomplete.Length > 0 && !incomplete.Contains(string.Empty),
                 PendingDeletionEvidence = evidence, ReleasedDeletionEvidence = delta.ReleasedDeletionEvidence,
                 IncompleteSubtrees = incomplete, IncompleteReasons = reasons };
+    }
+
+    /// <summary>
+    /// Follow-up 4: merge the paused snapshot's and the catch-up replay's pending deletion evidence.
+    /// The replay wins per key, and a key this run's replay genuinely released is NOT pending: it must
+    /// never be listed as both. A key the replay did not release keeps its pending record.
+    /// </summary>
+    internal static Dictionary<string, string> MergeCatchUpDeletionEvidence(
+        IReadOnlyDictionary<string, string> snapshot, IReadOnlyDictionary<string, string> replay,
+        IReadOnlySet<string> released)
+    {
+        var evidence = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in snapshot) evidence[entry.Key] = entry.Value;
+        foreach (var entry in replay) evidence[entry.Key] = entry.Value;
+        foreach (var path in released) evidence.Remove(path);
+        return evidence;
     }
 
     private const string HydrationFallbackNoticeKey = "inventory-hydration-fallback";

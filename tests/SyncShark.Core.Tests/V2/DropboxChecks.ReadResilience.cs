@@ -336,6 +336,61 @@ internal static partial class DropboxChecks
         Console.WriteLine("PASS delta outage run retires root debt without a re-list after reopen");
     }
 
+    // Follow-up 2d: an edit made on the healthy local side while the remote root is unreadable must
+    // still be synced after recovery. The recovery run's own local delta is empty (the outage run
+    // ingested and advanced it), so the edit returns to planning only because the settling whole-root
+    // retry expands the touched scope to the stored rows.
+    private static async Task HealthyEditDuringOutageSyncsAfterRecoveryAsync(string state)
+    {
+        using var h = new Harness();
+        var (pair, local) = ReadResiliencePair(state);
+        local.Seed("retained.txt", "same");
+        h.Wire.SeedFile("retained.txt", "same");
+        var spool = state + "-spool";
+        var writerA = new CountingWriter(local);
+
+        string cursor;
+        using (var sql = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System))
+        {
+            sql.SavePair(pair);
+            var inventory = new DropboxInventory(Root(), Side.B, h.Client, sql, "p1");
+            var run = ReadResilienceRun(sql, pair, local, writerA, h.Writer(spool), inventory);
+            Require((await FirstSyncAsync(run, pair.PairId)).Failed == 0, "healthy-edit fixture completes first sync");
+            cursor = sql.Cursor(RootId) ?? "";
+            Require(cursor.Length > 0, "healthy-edit fixture commits a remote cursor");
+            // The healthy side gains a file while the remote root is unreadable.
+            local.Seed("healthy-edit.txt", "bytes");
+            var clock = new ResilienceChecks.Clock();
+            h.Client.ReadRetryTime = clock;
+            h.Client.ReadRetryDelay = (delay, ct) =>
+            {
+                ct.ThrowIfCancellationRequested();
+                clock.Advance(delay);
+                return Task.CompletedTask;
+            };
+            h.Wire.RequestException = path => path == "/2/files/list_folder/continue" ? DnsTransportFailure() : null;
+            var outage = await run.IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+            h.Wire.RequestException = null;
+            Require(outage.Failed == 0 && sql.SyncRetryAt(pair.PairId, "") is { Kind: "scan" },
+                "the remote outage finishes as durable whole-root read debt");
+            Require(sql.Live(pair.A.RootId, ["healthy-edit.txt"]).Count == 1,
+                "the outage run stored the healthy side's edit");
+            Require(await h.Client.FindEntryAtPathAsync("healthy-edit.txt", default) is null,
+                "the healthy side's edit is not uploaded while the remote root is unreadable");
+            // The outage shortened the remote feed; the next real feed replays from the saved cursor.
+            h.Wire.SeedChangePage(cursor, [], false, cursor + "-recovered");
+        }
+        using var reopened = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System);
+        var resumedInventory = new DropboxInventory(Root(), Side.B, h.Client, reopened, "p1");
+        var resumed = ReadResilienceRun(reopened, pair, local, writerA, h.Writer(spool), resumedInventory);
+        var recovery = await resumed.IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+        Require(recovery.Failed == 0, "the recovery run completes");
+        Require(reopened.SyncRetryAt(pair.PairId, "") is null, "the recovery run settles the whole-root debt");
+        Require(await h.Client.FindEntryAtPathAsync("healthy-edit.txt", default) is not null,
+            "the healthy side's earlier edit is uploaded after recovery");
+        Console.WriteLine("PASS healthy-side edit during a remote outage syncs after recovery");
+    }
+
     // Adversarial deletion safety: the local side deletes X while the Dropbox delta is unavailable. An
     // outage-shortened remote read is not absence authority, so nothing is deleted remotely.
     private static async Task AdversarialDeleteDuringDeltaOutageAsync(string state)

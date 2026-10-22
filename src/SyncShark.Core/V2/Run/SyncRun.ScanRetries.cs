@@ -5,12 +5,14 @@ public sealed partial class SyncRun
     private static IEnumerable<string> ScanFailures(BothScan scan) =>
         scan.A.IncompleteSubtrees.Concat(scan.B.IncompleteSubtrees).Distinct(StringComparer.OrdinalIgnoreCase);
 
-    private async Task<(IReadOnlyList<string> Touched, IReadOnlyList<string> Incomplete)> RetryScanScopesAsync(
+    private async Task<(IReadOnlyList<string> Touched, IReadOnlyList<string> Incomplete,
+        IReadOnlyDictionary<string, string> Reasons)> RetryScanScopesAsync(
         PairDef pair, RootDef root, Side side, IInventorySource inventory, string cursor, long gen,
         Func<string, bool> include, Action<string> changed, ProgressThrottle throttle, CancellationToken ct, bool rootFeedComplete = false)
     {
         var touched = new List<string>();
         var incomplete = new List<string>();
+        var reasons = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var remaining = 256;
         var rootPlanned = false;
         foreach (var batch in _store.ReadSyncRetries(pair.PairId)
@@ -19,14 +21,6 @@ public sealed partial class SyncRun
             .Chunk(64))
         {
             ct.ThrowIfCancellationRequested();
-            // Finding 3 (F4 memory): a root retry's job is planning coverage, not a second read. Plan
-            // the whole pair from the stored rows (LoadTouched expands the empty path to every stored
-            // directory) instead of re-enumerating a root as a delta-shaped change list.
-            if (!rootPlanned && batch.Any(retry => retry.Path.Length == 0 && retry.Kind == "scan"))
-            {
-                rootPlanned = true;
-                touched.Add(string.Empty);
-            }
             // Read-resilience F-R (approved in review-read-resilience-2): a provider replay from the
             // UNADVANCED cursor already covers the whole root, so root debt must not stay asleep after
             // it succeeds. A completed Dropbox feed and a local journal replay are authoritative;
@@ -40,18 +34,48 @@ public sealed partial class SyncRun
                 incomplete.Add(retry.Path); // Sleeping work still protects both sides and its notice.
                 return false;
             }).Select(retry => retry.Path).ToArray();
-            if (scopes.Length == 0) continue;
+            // Finding 3 (F4 memory): a root retry's job is planning coverage, not a second read. Plan
+            // the whole pair from the stored rows (LoadTouched expands the empty path to every stored
+            // directory) instead of re-enumerating a root as a delta-shaped change list. Follow-up:
+            // ONLY do that in the run where the whole-root debt actually settles or is re-read. While
+            // the retry sleeps, during a transient journal failure or while the provider feed is still
+            // root-incomplete, the stored path set stays protected by ScanFailures -> links pending, so
+            // there is no reason to load and join every row on each poll for the whole episode.
+            var rootRetry = batch.FirstOrDefault(retry => retry.Path.Length == 0 && retry.Kind == "scan");
+            var rootSettles = rootRetry is not null && rootFeedComplete &&
+                (authoritativeReplay || rootRetry.RetryAfter <= _time.GetUtcNow() && scopes.Contains(string.Empty));
+            if (scopes.Length == 0)
+            {
+                if (rootSettles && !rootPlanned) { rootPlanned = true; touched.Add(string.Empty); }
+                continue;
+            }
             if (inventory is LocalInventory local)
             {
                 var reread = await local.ChangesForPathsAsync(scopes, cursor, gen, include, ct);
-                if (reread.CursorInvalid) { incomplete.AddRange(scopes); continue; }
+                if (reread.CursorInvalid)
+                {
+                    incomplete.AddRange(scopes);
+                    // Follow-up 3: carry the real cause (exception kind and message) so the notice
+                    // says why the reread failed instead of the generic "could not be completely read".
+                    var reason = reread.IncompleteReasons.GetValueOrDefault(string.Empty) ?? local.LastFallbackReason;
+                    if (!string.IsNullOrWhiteSpace(reason))
+                        foreach (var scope in scopes) reasons[scope] = reason!;
+                    // A root-open failure means the scope was not observed, so the root debt is not settled.
+                    if (scopes.Contains(string.Empty)) rootSettles = false;
+                    continue;
+                }
                 _store.WriteDelta(reread with { ChangedObject = changed });
                 // WriteDelta's callback covers deletions; re-read identities widen the dirty set too, exactly
                 // as the main scan's delta does, so a hidden change is never merely touched.
                 foreach (var change in reread.Changes)
                     if (change.ObjectId.Length > 0) changed(change.ObjectId);
-                incomplete.AddRange(reread.IncompleteSubtrees);
+                foreach (var path in reread.IncompleteSubtrees)
+                {
+                    incomplete.Add(path);
+                    if (reread.IncompleteReasons.GetValueOrDefault(path) is { Length: > 0 } detail) reasons[path] = detail;
+                }
                 touched.AddRange(reread.Changes.Select(change => change.Path));
+                if (reread.IncompleteSubtrees.Contains(string.Empty)) rootSettles = false;
             }
             else if (inventory is DropboxInventory dropbox && _store is SqliteStateStore sql)
             {
@@ -70,6 +94,7 @@ public sealed partial class SyncRun
                 catch (Exception error) when (ScopeFailure(error, ct))
                 {
                     incomplete.AddRange(scopes);
+                    if (scopes.Contains(string.Empty)) rootSettles = false;
                     RunLog.Trace("Targeted inventory remains incomplete: " + error.Message);
                 }
             }
@@ -85,12 +110,18 @@ public sealed partial class SyncRun
                     IncludesPath = path => include(path) && within(path) && (reread.IncludesPath?.Invoke(path) ?? true),
                     ChangedObject = changed
                 });
-                incomplete.AddRange(reread.IncompleteSubtrees);
+                foreach (var path in reread.IncompleteSubtrees)
+                {
+                    incomplete.Add(path);
+                    if (reread.IncompleteReasons.GetValueOrDefault(path) is { Length: > 0 } detail) reasons[path] = detail;
+                }
+                if (reread.IncompleteSubtrees.Contains(string.Empty)) rootSettles = false;
                 touched.AddRange(reread.Items.Select(item => item.Path));
             }
             touched.AddRange(scopes);
+            if (rootSettles && !rootPlanned) { rootPlanned = true; touched.Add(string.Empty); }
         }
-        return (touched, incomplete);
+        return (touched, incomplete, reasons);
     }
 
     private void RecordScanRetries(PairDef pair, BothScan scan)

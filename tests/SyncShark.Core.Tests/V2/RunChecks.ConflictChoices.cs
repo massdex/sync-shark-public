@@ -5,6 +5,7 @@ internal static partial class RunChecks
     public static async Task ConflictChoiceChecksAsync()
     {
         await CallerOwnedDeleteLowSpaceAsync();
+        await ReconcileRefusedUnparksRetryAsync();
         foreach (var rule in new[] { 10, 11, 27 })
         foreach (var choice in new[] { NoticeChoices.KeepA, NoticeChoices.KeepB, NoticeChoices.KeepBoth, "stale", "retry" })
         {

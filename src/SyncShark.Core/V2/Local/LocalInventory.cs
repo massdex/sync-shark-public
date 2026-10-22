@@ -412,9 +412,12 @@ public sealed partial class LocalInventory : IInventorySource
         {
             // Finding 4: a root that cannot be opened for a targeted re-read is read debt, exactly like a
             // failed listing: report the scopes incomplete so the caller keeps their retry and notice
-            // instead of failing the whole run.
+            // instead of failing the whole run. Follow-up 3: carry the real cause (exception kind and
+            // message) so the notice explains why instead of the generic "could not be completely read".
+            var cause = error.GetType().Name +
+                (string.IsNullOrWhiteSpace(error.Message) ? "" : ": " + error.Message);
             return Invalid(gen, _root.RootId, cursor,
-                "root unavailable during targeted refresh (" + error.GetType().Name + ")");
+                "The folder could not be opened for a targeted re-read (" + cause + ").");
         }
         using (lease)
             return await RefreshAsync(lease, gen, cursor, cursor, include, paths, ct).ConfigureAwait(false);
@@ -748,7 +751,10 @@ public sealed partial class LocalInventory : IInventorySource
     {
         LastFallbackReason = reason;
         RunLog.Trace($"local full reconciliation ({rootId}): {reason}");
-        return new(rootId, _side, gen, cursor, cursor, Array.Empty<Change>(), true, Array.Empty<string>());
+        // A caller that keeps the scopes as read debt (RetryScanScopesAsync) reads this to explain the
+        // failure; callers that rescan ignore it.
+        return new(rootId, _side, gen, cursor, cursor, Array.Empty<Change>(), true, Array.Empty<string>())
+        { IncompleteReasons = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { [string.Empty] = reason } };
     }
 
     private static bool IsRootUnavailable(Exception error) =>

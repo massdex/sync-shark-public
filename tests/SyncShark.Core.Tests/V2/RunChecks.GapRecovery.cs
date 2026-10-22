@@ -22,12 +22,17 @@ internal static partial class RunChecks
         foreach (var (name, check) in new (string, Func<string, Task>)[]
         {
             ("catch-up-unreadable-subtree", CatchUpUnreadableSubtreeAsync),
+            ("catch-up-fresh-fallback", CatchUpFreshFallbackUnreadableSubtreeAsync),
+            ("catch-up-second-run", CatchUpRetrySurvivesSecondCatchUpAsync),
+            ("sleeping-root-retry-replay", SleepingLocalRootRetryClearsAfterReplayAsync),
             ("targeted-root-open", TargetedRootOpenFailureBecomesDebtAsync)
         })
         {
             try { await check(Path.Combine(folder, name)); }
             catch (Exception error) { failures.Add(new InvalidOperationException(name + ": " + error.Message, error)); }
         }
+        try { CatchUpEvidenceMergeTest(); }
+        catch (Exception error) { failures.Add(new InvalidOperationException("catch-up-evidence-merge: " + error.Message, error)); }
         if (failures.Count > 0) throw new AggregateException(failures);
     }
 
@@ -314,6 +319,180 @@ internal static partial class RunChecks
         }
     }
 
+    // Follow-up 2a: the CursorInvalid fresh-fallback branch of the local catch-up must carry the
+    // fresh walk's unread scope exactly like the ordinary branches: retry and notice survive, the run
+    // is Partial, nothing in the unread folder is deleted or uploaded, and a sibling still syncs.
+    [SupportedOSPlatform("windows")]
+    private static async Task CatchUpFreshFallbackUnreadableSubtreeAsync(string folder)
+    {
+        var directory = Path.Combine(folder, "root");
+        Directory.CreateDirectory(directory);
+        LocalChecks.Seed(directory, "a.txt", "alpha");
+        LocalChecks.Seed(directory, "locked/hidden.txt", "hidden");
+        var locked = Path.Combine(directory, "locked");
+        var deny = new FileSystemAccessRule(WindowsIdentity.GetCurrent().User!, FileSystemRights.ListDirectory,
+            AccessControlType.Deny);
+        AddDirectoryRule(locked, deny);
+        try
+        {
+            using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+            var fx = Build(suppliedStore: store);
+            var root = LocalChecks.RootOf(directory, "ra");
+            var pair = fx.Pair with { A = root };
+            store.SavePair(pair);
+            store.MarkFirstSyncDone(pair.PairId);
+            var checkpoint = new NtfsUsnCheckpoint(1, 0, 200, 0);
+            var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings,
+                TimeProvider.System, pairId: pair.PairId) { WalkCheckpointForTest = () => (checkpoint, false) };
+            // The catch-up replay itself is unavailable, which selects the fresh-fallback branch.
+            inventory.JournalReadForTest = OverLimitJournal;
+            fx.Provider.AddInventory(root, inventory);
+            fx.Provider.AddWriter(root, await LocalWriter.OpenAsync(root, Side.A, pair.PairId,
+                LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default));
+            var report = await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+            Require(report.Failed == 0, "the fresh-fallback catch-up path is never a run failure (failed=" + report.Failed +
+                (report.Failures.Count > 0 ? ": " + report.Failures[0].Reason : "") + ")");
+            Require(report.Outcome == RunOutcomes.Partial,
+                "the fresh-fallback catch-up path with an unreadable subfolder reports Partial, never Complete");
+            Require(store.SyncRetryAt(pair.PairId, "locked") is { Kind: "scan" },
+                "the fresh-fallback branch keeps the unread folder's durable retry");
+            Require(store.OpenNotices(pair.PairId).Any(n => n.ReasonKey == "sync-retry" && n.Path == "locked"),
+                "the fresh-fallback branch keeps the unread folder's notice");
+            Require(fx.WriterA.Deletes + fx.WriterB.Deletes == 0,
+                "nothing inside the unread folder is deleted on the fresh-fallback branch");
+            Require(await fx.B.ObserveAsync("locked", default) is null &&
+                await fx.B.ObserveAsync("locked/hidden.txt", default) is null,
+                "nothing inside the unread folder is uploaded on the fresh-fallback branch");
+            Require(store.Live(root.RootId, ["a.txt"]).Count == 1,
+                "the fresh-fallback walk still stores the readable sibling");
+        }
+        finally
+        {
+            try { RemoveDirectoryRule(locked, deny); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        }
+    }
+
+    // Follow-up 2b: an already-existing retry must survive a SECOND catch-up run (the first run
+    // created it; the second deliberately takes the catch-up path again while the folder is still
+    // unreadable). The old test only re-read through the delta branch.
+    [SupportedOSPlatform("windows")]
+    private static async Task CatchUpRetrySurvivesSecondCatchUpAsync(string folder)
+    {
+        var directory = Path.Combine(folder, "root");
+        Directory.CreateDirectory(directory);
+        LocalChecks.Seed(directory, "a.txt", "alpha");
+        LocalChecks.Seed(directory, "locked/hidden.txt", "hidden");
+        var locked = Path.Combine(directory, "locked");
+        var deny = new FileSystemAccessRule(WindowsIdentity.GetCurrent().User!, FileSystemRights.ListDirectory,
+            AccessControlType.Deny);
+        AddDirectoryRule(locked, deny);
+        try
+        {
+            using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+            var fx = Build(suppliedStore: store);
+            var root = LocalChecks.RootOf(directory, "ra");
+            var pair = fx.Pair with { A = root };
+            store.SavePair(pair);
+            store.MarkFirstSyncDone(pair.PairId);
+            var checkpoint = new NtfsUsnCheckpoint(1, 0, 200, 0);
+            var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings,
+                TimeProvider.System, pairId: pair.PairId) { WalkCheckpointForTest = () => (checkpoint, false) };
+            inventory.JournalReadForTest = NoJournalChanges;
+            fx.Provider.AddInventory(root, inventory);
+            fx.Provider.AddWriter(root, await LocalWriter.OpenAsync(root, Side.A, pair.PairId,
+                LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default));
+            var first = await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+            Require(first.Outcome == RunOutcomes.Partial && store.SyncRetryAt(pair.PairId, "locked") is { Kind: "scan" },
+                "the first catch-up run creates the unread folder's retry");
+            // Model an interrupted run: without a committed cursor the next run takes a full walk
+            // with a checkpoint again, i.e. the catch-up path, while the folder is still unreadable.
+            store.ForgetCursor(root.RootId);
+            var second = await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+            Require(second.Outcome == RunOutcomes.Partial,
+                "a second catch-up run while the folder is still unreadable reports Partial");
+            Require(store.SyncRetryAt(pair.PairId, "locked") is { Kind: "scan" },
+                "an existing retry survives a second catch-up run");
+            Require(store.OpenNotices(pair.PairId).Any(n => n.ReasonKey == "sync-retry" && n.Path == "locked"),
+                "the existing notice survives a second catch-up run");
+        }
+        finally
+        {
+            try { RemoveDirectoryRule(locked, deny); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        }
+    }
+
+    // Follow-up 2c: a sleeping whole-root LOCAL retry must clear after a clean journal replay even
+    // though its scheduled retry is not due (the replay from the unadvanced cursor is authoritative).
+    private static async Task SleepingLocalRootRetryClearsAfterReplayAsync(string folder)
+    {
+        var directory = Path.Combine(folder, "root");
+        Directory.CreateDirectory(directory);
+        LocalChecks.Seed(directory, "sub/file.txt", "content");
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        var fx = Build(suppliedStore: store);
+        var root = LocalChecks.RootOf(directory, "ra");
+        var pair = fx.Pair with { A = root };
+        store.SavePair(pair);
+        store.MarkFirstSyncDone(pair.PairId);
+        var checkpoint = new NtfsUsnCheckpoint(1, 0, 100, 0);
+        var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings,
+            TimeProvider.System, pairId: pair.PairId) { WalkCheckpointForTest = () => (checkpoint, false) };
+        inventory.JournalReadForTest = NoJournalChanges;
+        fx.Provider.AddInventory(root, inventory);
+        fx.Provider.AddWriter(root, await LocalWriter.OpenAsync(root, Side.A, pair.PairId,
+            LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default));
+        var first = await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+        Require(first.Failed == 0 && store.Cursor(root.RootId) is { Length: > 0 },
+            "the fixture commits a local cursor before the sleeping-retry run");
+        // Synthetic durable whole-root debt that is still sleeping on its backoff.
+        store.SaveSyncRetry(pair.PairId,
+            new SyncRetry(string.Empty, "scan", 1, "synthetic whole-root read debt", DateTimeOffset.UtcNow.AddMinutes(5)));
+        store.AddNotices([new Notice(pair.PairId, 40, NoticeKind.Info, string.Empty,
+            "synthetic whole-root retry notice", "sync-retry")]);
+        var replay = await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+        Require(replay.Failed == 0 && store.SyncRetryAt(pair.PairId, string.Empty) is null,
+            "a sleeping whole-root local retry clears after a clean journal replay");
+        Require(!store.OpenNotices(pair.PairId).Any(n => n.ReasonKey == "sync-retry" && n.Path.Length == 0),
+            "the whole-root retry notice closes with the settled local debt");
+    }
+
+    // Follow-up 4: the catch-up merge must never list the same deletion evidence as both pending and
+    // released. Released wins only where the replay genuinely released it; otherwise pending stands.
+    private static void CatchUpEvidenceMergeTest()
+    {
+        var snapshot = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["released.txt"] = "snapshot pending",
+            ["held.txt"] = "snapshot pending"
+        };
+        var replay = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["other.txt"] = "replay pending",
+            ["held.txt"] = "replay pending"
+        };
+        var released = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "released.txt" };
+        var merged = SyncRun.MergeCatchUpDeletionEvidence(snapshot, replay, released);
+        Require(!merged.ContainsKey("released.txt") && merged.ContainsKey("held.txt") && merged.ContainsKey("other.txt"),
+            "a genuinely released path is not also listed as pending, while unresolved evidence stays pending");
+        Require(merged["held.txt"] == "replay pending", "the catch-up replay's pending reason wins per key");
+        var notReleased = SyncRun.MergeCatchUpDeletionEvidence(snapshot, replay,
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+        Require(notReleased.ContainsKey("released.txt"),
+            "a pending path survives when the replay did not release it");
+    }
+
+    private static bool OverLimitJournal(string rootPath, NtfsUsnCheckpoint from, NtfsUsnCheckpoint through,
+        out IReadOnlyList<NtfsUsnChange> changes, out string? failure, out NtfsUsnReadFailure kind,
+        CancellationToken ct)
+    {
+        changes = [];
+        failure = "synthetic overflow";
+        kind = NtfsUsnReadFailure.OverLimit;
+        return false;
+    }
+
     // Finding 4 leftover: an ArgumentException/Win32Exception opening the root for a targeted reread
     // is read debt plus a notice, never a failed run. The scan itself succeeds (journal injected);
     // only the targeted open fails.
@@ -351,6 +530,17 @@ internal static partial class RunChecks
         Require(store.SyncRetryAt(pair.PairId, "sub") is { Kind: "scan" } &&
             store.OpenNotices(pair.PairId).Any(n => n.ReasonKey == "sync-retry" && n.Path == "sub"),
             "the targeted retry and its notice survive the unopenable root");
+        // Follow-up 3: the notice explains the real cause, not only the generic "could not be read",
+        // and there is exactly one notice for the path (deduplicated).
+        var causeNotices = store.OpenNotices(pair.PairId)
+            .Where(n => n.ReasonKey == "sync-retry" && n.Path == "sub").ToArray();
+        Require(causeNotices.Length == 1 && causeNotices[0].Detail.Contains("ArgumentException", StringComparison.Ordinal) &&
+            causeNotices[0].Detail.Contains("synthetic root open failure", StringComparison.Ordinal),
+            "the targeted root-open notice carries the real exception kind and message, deduplicated");
+        Require(store.SyncRetryAt(pair.PairId, "sub") is { LastError: var cause } &&
+            cause.Contains("ArgumentException", StringComparison.Ordinal) &&
+            cause.Contains("synthetic root open failure", StringComparison.Ordinal),
+            "the durable retry keeps the real cause for the next run");
         inventory.BeforeTargetedRefreshLeaseForTest = null;
         store.SaveSyncRetry(pair.PairId,
             store.SyncRetryAt(pair.PairId, "sub")! with { RetryAfter = DateTimeOffset.MinValue });

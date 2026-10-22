@@ -94,6 +94,94 @@ internal static partial class RunChecks
         }
     }
 
+    // Review rc3-1 finding 2b: a Refused result inside the batched reconcile loop is retryable debt.
+    // It unparks the path's retry to due and never settles, clears or forgets anything. The loop is
+    // invoked directly because a full run's post-execution retry work settles a clean equal path.
+    private static async Task ReconcileRefusedUnparksRetryAsync()
+    {
+        var folder = FixtureFolder("reconcile-refused-retry");
+        try
+        {
+            using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+            var fx = Build(suppliedStore: store);
+            fx.A.Seed("held.txt", "reviewed bytes");
+            fx.B.Seed("held.txt", "reviewed bytes");
+            // Reconciliation has no free-space admission of its own; the owner-notice replay is the only
+            // producer of a Refused result, so the test supplies that exact outcome through the executor.
+            var executor = new RefusedReconcileExecutor(fx.Executor, store, fx.Pair.PairId, "nch-reconcile-refused");
+            var run = new SyncRun(store, executor, fx.Provider, Settings, TimeProvider.System);
+            await FirstSyncAsync(run, fx);
+            var victim = (await fx.B.ObserveAsync("held.txt", CancellationToken.None))!;
+            var baselines = store.Baselines(fx.Pair.PairId).Count;
+            // A caller-owned notice delete whose earlier attempt left a parked retry behind.
+            store.RecordIntent(fx.Pair.PairId, new SyncAction("nch-reconcile-refused", 16, ActionKind.Delete,
+                Side.B, victim.Path, null, null, victim, true, null)
+                { SuppressReconciledBaseline = true, CallerOwnsNotice = true });
+            store.SaveSyncRetry(fx.Pair.PairId, new(victim.Path, "sync", 1, "previous refusal", DateTimeOffset.MaxValue));
+            const System.Reflection.BindingFlags hidden =
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+            var reconcile = (Task)typeof(SyncRun).GetMethod("ReconcileAsync", hidden)!.Invoke(run,
+                [fx.Pair, new ProgressThrottle(null, TimeProvider.System, TimeSpan.Zero), CancellationToken.None, null])!;
+            await reconcile;
+            var result = reconcile.GetType().GetProperty("Result")!.GetValue(reconcile)!;
+            var touched = (IReadOnlyList<string>)result.GetType().GetProperty("Touched")!.GetValue(result)!;
+            var retry = store.SyncRetryAt(fx.Pair.PairId, victim.Path);
+            Require(retry is { Kind: "sync" } && retry.RetryAfter == DateTimeOffset.MinValue,
+                "a Refused reconcile result keeps the retry and unparks it to due");
+            Require(touched.Contains(victim.Path, StringComparer.OrdinalIgnoreCase),
+                "a Refused reconcile result keeps its path in the touched set");
+            Require(store.Baselines(fx.Pair.PairId).Count == baselines &&
+                store.Recoveries(fx.Pair.PairId).Count == 0 &&
+                fx.WriterB.Preserves == 0 && fx.WriterB.Deletes == 0 &&
+                await fx.B.ObserveAsync(victim.Path, CancellationToken.None) is not null,
+                "a refusal settles no baseline, forgets nothing and performs no effect");
+        }
+        finally { DeleteFixture(folder); }
+    }
+
+    // Commits the Refused result against the store exactly as the real executor does (a real observed
+    // refusal is durable before the loop sees it). It also reproduces the parked-shape cleanup: a writer
+    // re-parks the deadline while the outcome is observed, so CommitResults drops the row and only the
+    // reconcile loop's own re-save can restore it as due debt.
+    private sealed class RefusedReconcileExecutor : IExecutor
+    {
+        private readonly IExecutor _inner;
+        private readonly SqliteStateStore _store;
+        private readonly string _pairId;
+        private readonly string _actionId;
+
+        public RefusedReconcileExecutor(IExecutor inner, SqliteStateStore store, string pairId, string actionId)
+        {
+            _inner = inner;
+            _store = store;
+            _pairId = pairId;
+            _actionId = actionId;
+        }
+
+        public IAsyncEnumerable<ActionResult> ApplyAsync(Plan p, IEndpointWriter a, IEndpointWriter b,
+            CancellationToken ct) => _inner.ApplyAsync(p, a, b, ct);
+
+        public async Task<IReadOnlyList<ActionResult>> ReconcileAsync(IReadOnlyList<SyncAction> intents, long gen,
+            IEndpointWriter a, IEndpointWriter b, CancellationToken ct, IProgress<int>? progress = null)
+        {
+            var refused = intents.Where(intent => intent.ActionId == _actionId).ToArray();
+            if (refused.Length == 0) return await _inner.ReconcileAsync(intents, gen, a, b, ct, progress);
+            var results = new List<ActionResult>();
+            foreach (var intent in refused)
+            {
+                if (_store.SyncRetryAt(_pairId, intent.Path) is { } current)
+                    _store.SaveSyncRetry(_pairId, current with { RetryAfter = DateTimeOffset.MaxValue });
+                var result = new ActionResult(intent.ActionId, Outcome.Refused, null, null, null,
+                    "Not enough free space; free space and retry.");
+                _store.CommitResult(_pairId, gen, intent, result);
+                results.Add(result);
+            }
+            var others = intents.Where(intent => intent.ActionId != _actionId).ToArray();
+            if (others.Length > 0) results.AddRange(await _inner.ReconcileAsync(others, gen, a, b, ct, progress));
+            return results;
+        }
+    }
+
     private static async Task QuarantineDeleteLowSpaceAsync(string root)
     {
         using var store = SqliteStateStore.Open(Path.Combine(root, "delete-low-space"), Settings, TimeProvider.System);

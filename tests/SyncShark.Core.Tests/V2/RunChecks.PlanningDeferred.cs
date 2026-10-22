@@ -30,8 +30,12 @@ internal static partial class RunChecks
             var deferred = store.DeferredPlanningPage(fx.Pair.PairId);
             Require(deferred.Count == 1 && deferred[0].RootId == fx.Pair.B.RootId,
                 "SyncRun retains only the changed cloud entity under the local gap");
+            // Review rc3-1 finding 2a: planning_deferred rows are not sync_retry debt and are not counted by
+            // IncrementalOutcome, so a run whose only outstanding work is deferral rows still reports Complete.
             Require(held.Deferred == 0 && store.CountSyncRetries(fx.Pair.PairId) == 0,
                 "verification deferrals alone never create scheduling debt");
+            Require(held.Outcome == RunOutcomes.Complete,
+                "verification deferrals alone never make the run Partial");
             var epoch = gaps.GapEpoch(fx.Pair.A.RootId)!;
             gaps.GapDiscoveredBatch(fx.Pair.A.RootId, epoch, new[] { (local, false) });
             gaps.GapDiscoveryDone(fx.Pair.A.RootId, epoch);
