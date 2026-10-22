@@ -53,7 +53,7 @@ internal static partial class ExecutorChecks
         await Reconcile_Move_Done_WhenSourceContentDiffers();
         await Reconcile_Move_UnrelatedDestination_Superseded();
         await Reconcile_Move_SourcePresent_NotApplied();
-        await Reconcile_RecoveryLookupFails_Continues();
+        await Reconcile_MissingRecoveryReceipt_Continues();
         await FolderDelete_ExpandsPerFile();
         await FolderDelete_OwnedPointerDoesNotArchive();
         await OwnedPointerUpdates_NoDownloadAsync();
@@ -744,6 +744,10 @@ internal static partial class ExecutorChecks
             "lost commit is reported uncertain, never as a completed effect");
         var intents = inner.UnresolvedIntents("p1");
         Require(intents.Any(intent => intent.ActionId == action.ActionId), "the interrupted intent is still unresolved");
+        // Production persists the verified archive receipt before the effect, independently of the lost result.
+        // Recreate that durable row here so reconciliation resolves from the index instead of preserving again.
+        inner.RecordRecovery("p1", action.ActionId, action.Path,
+            new RecoveryRef(Side.B, "memory://recovery/" + action.ActionId, victim.VersionId, victim.Hash!, victim.Size));
 
         var results = await executor.ReconcileAsync(intents, 1, a, b, CancellationToken.None);
         var result = results.Single(r => r.ActionId == action.ActionId);
@@ -811,8 +815,8 @@ internal static partial class ExecutorChecks
             "a move whose source is still present is not applied: " + result.Reason);
     }
 
-    // A failing recovery lookup must not abort the intents after it.
-    private static async Task Reconcile_RecoveryLookupFails_Continues()
+    // A missing recovery receipt must stay protective, never re-run PreserveAsync, and never abort later intents.
+    private static async Task Reconcile_MissingRecoveryReceipt_Continues()
     {
         var (store, a, b, executor) = Rig();
         var victim = b.Seed("x", "content", versionId: "v1");
@@ -824,13 +828,13 @@ internal static partial class ExecutorChecks
         var remove = Act(ActionKind.Delete, Side.B, "x", expected: victim, rf: true, key: "k1");
         var copy = Act(ActionKind.CopyNew, Side.B, "present", source: presentSource, key: "k2");
         foreach (var action in new[] { remove, copy }) store.RecordIntent("p1", action);
-        var record = new RecordingWriter(b) { PreserveFailsMismatch = true };
+        var record = new RecordingWriter(b);
 
         var results = await executor.ReconcileAsync(new[] { remove, copy }, 1, a, record, CancellationToken.None);
-        Require(results[0].Outcome == Outcome.Uncertain, "a failed recovery lookup leaves the intent uncertain");
-        Require(results[0].Reason!.Contains("recovery copy lookup failed") &&
-            results[0].Reason!.Contains(nameof(ExpectedTargetMismatchException)),
-            "the uncertain outcome names the failed recovery lookup: " + results[0].Reason);
+        Require(results[0].Outcome == Outcome.Uncertain, "a missing recovery receipt leaves the intent uncertain");
+        Require(results[0].Reason!.Contains("retained copy is not indexed"),
+            "the uncertain outcome names the missing retained copy: " + results[0].Reason);
+        Require(record.Preserves == 0, "reconciliation never repeats a destructive preserve");
         Require(results[1].Outcome == Outcome.Done, "reconciliation continues with the next intent");
         Require(store.UnresolvedIntents("p1").Count == 1, "only the uncertain intent stays unresolved");
     }
@@ -1181,6 +1185,8 @@ internal static partial class ExecutorChecks
         public void AddNotices(IEnumerable<Notice> n) => _inner.AddNotices(n);
         public IReadOnlyList<Notice> OpenNotices(string? pairId) => _inner.OpenNotices(pairId);
         public IReadOnlyList<RecoveryRecord> Recoveries(string pairId) => _inner.Recoveries(pairId);
+        public void RecordRecovery(string pairId, string actionId, string path, RecoveryRef recovery) =>
+            _inner.RecordRecovery(pairId, actionId, path, recovery);
         public void CloseNotice(string noticeId, string? choice) => _inner.CloseNotice(noticeId, choice);
         public void RecordNoticeChoiceFailure(Notice original, string failure) => _inner.RecordNoticeChoiceFailure(original, failure);
         public void Prune() => _inner.Prune();

@@ -491,9 +491,14 @@ public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResource
             var exists = File.Exists(recoveryPath);
             if (!exists) await RequireTargetAsync(victim.Path, victim, ct).ConfigureAwait(false);
             var durable = exists ? DurableIdentity(recoveryPath) : null;
+            // The archive owner persists the verified copy through the Executor's durable sink here, before it
+            // removes the original: a crash in the result window can no longer hide the only remaining copy.
             var archived = await SyncLocalRecovery.ArchiveAsync(LocalItems.ToScanEntry(victim, _rootPath), rootLease,
                 recoveryLease, _pairId, OperationId(actionId), recoveryPath, durable,
-                static (_, _) => Task.CompletedTask, ct).ConfigureAwait(false);
+                (archive, token) => ProviderEffectContext.Current.Value is { } context
+                    ? context.RecordRecoveryAsync(actionId, victim.Path,
+                        new RecoveryRef(_side, archive.RecoveryPath, null, archive.ContentHash, archive.Size), _pairId, token)
+                    : Task.CompletedTask, ct).ConfigureAwait(false);
             return new RecoveryRef(_side, archived.RecoveryPath, null, archived.ContentHash, archived.Size);
         }
         catch (Exception error) when (LocalItems.MapWriteError(error) is var mapped && mapped != error) { throw mapped; }

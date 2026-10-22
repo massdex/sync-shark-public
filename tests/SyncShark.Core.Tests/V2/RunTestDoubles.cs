@@ -552,6 +552,9 @@ internal sealed class RecordingStore : IStateStore
 
     public IReadOnlyList<RecoveryRecord> Recoveries(string pairId) => _inner.Recoveries(pairId);
 
+    public void RecordRecovery(string pairId, string actionId, string path, RecoveryRef recovery) =>
+        _inner.RecordRecovery(pairId, actionId, path, recovery);
+
     public void CloseNotice(string noticeId, string? choice) => _inner.CloseNotice(noticeId, choice);
     public void RecordNoticeChoiceFailure(Notice original, string failure) => _inner.RecordNoticeChoiceFailure(original, failure);
 

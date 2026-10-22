@@ -46,11 +46,9 @@ public sealed partial class SyncRun
     // link/stub summary already explains the cause, so no new notice is raised; only the pending effect is retired.
     private void RetireProtectedIntent(PairDef pair, SyncAction action, long generation, string reason)
     {
-        // A tagged conflict successor needs the explicit-retirement mark so it is truly retired (and its
-        // dedicated notice closes) instead of coerced back to Failed and replayed forever. Untagged intents
-        // keep their existing contract.
-        var retiring = action.ConflictTransitionKey is null ? action : action with { SuppressReconciledBaseline = true };
-        _store.CommitResult(pair.PairId, generation, retiring,
+        // Tagged successors stay pending in the caller: a temporary link/stub must not discard the
+        // authority protecting the original conflict. Keep the store's retention backstop here too.
+        _store.CommitResult(pair.PairId, generation, action,
             new ActionResult(action.ActionId, Outcome.Skipped, null, null, null, reason));
         if (_store.SyncRetryAt(pair.PairId, action.Path) is { Kind: "sync", Held: null })
             _store.ClearSyncRetry(pair.PairId, action.Path);

@@ -198,6 +198,15 @@ jobs:
           - suite: conflict-transition
             flag: --v2-conflict-transition-checks
             takes-root: false
+          - suite: conflict-retirement
+            flag: --v2-conflict-retirement-checks
+            takes-root: false
+          - suite: collision-baseline
+            flag: --v2-collision-baseline-checks
+            takes-root: false
+          - suite: recovery-first-restart
+            flag: --v2-recovery-first-restart-checks
+            takes-root: true
           - suite: planner
             flag: --v2-planner-checks
             takes-root: false

@@ -139,9 +139,15 @@ public sealed partial class Executor : IExecutor
             if (pairId is not null && intent.Kind == ActionKind.Delete)
                 await StoreAsync(() => historicalDeleteSource = StoreCommitter.DeleteSource(_store, pairId, intent),
                     token).ConfigureAwait(false);
+            // The archive receipt was durable before the effect began. Resolving from it is read-only, so an original
+            // that reappeared after the crash can never be archived or removed by this reconciliation.
+            RecoveryRef? preserved = null;
+            if (pairId is not null && intent.RecoveryFirst)
+                await StoreAsync(() => preserved = RecoverySafety.PreservedReceipt(_store, pairId, intent),
+                    token).ConfigureAwait(false);
             var result = await EffectResolver.ResolveAsync(intent, target, source, token,
                 _settings.UnknownCommitGracePeriod, jobChecks: jobChecks, materializationBlock: materializationBlock,
-                historicalDeleteSource: historicalDeleteSource).ConfigureAwait(false);
+                historicalDeleteSource: historicalDeleteSource, preserved: preserved).ConfigureAwait(false);
             if (pairId is not null)
             {
                 var committedByRunner = false;
@@ -191,10 +197,31 @@ public sealed partial class Executor : IExecutor
             // The resolver has already withheld NotApplied for a live/unknown submit within grace.
             // D86 keeps both current versions: a post-crash source edit is not a reason to retry stale bytes forever.
             var source = intent.Target == Side.A ? b : a;
-            var current = await source.ObserveAsync(intent.Source.Path, ct).ConfigureAwait(false);
+            ItemState? current;
+            bool sourceAbsent;
+            try
+            {
+                current = await source.ObserveAsync(intent.Source.Path, ct).ConfigureAwait(false);
+                sourceAbsent = current is null && source is ISourceAbsenceProbe probe &&
+                    await probe.IsSourceAbsentAsync(intent.Source, intent.Source.Path, ct).ConfigureAwait(false) == true;
+            }
+            catch (Exception error) when (EffectResolver.Unverifiable(error, ct))
+            {
+                return (observed with { Outcome = Outcome.Uncertain,
+                    Reason = BlockerDiagnostic.Describe(error) }, false);
+            }
+            if (sourceAbsent)
+            {
+                // Identity-confirmed absence means the user removed this version, not merely moved it or
+                // made its path unreadable. Retire only this copy authority; never delete the other version.
+                var retired = observed with { Reason = "The conflict source was deleted; its pending copy was retired without changing the other side." };
+                await StoreAsync(() => _store.CommitResult(pairId, gen,
+                    intent with { SuppressReconciledBaseline = true }, retired), ct).ConfigureAwait(false);
+                return (retired, true);
+            }
             if (current is not { Kind: ItemKind.File, Hash: not null })
                 return (observed with { Outcome = Outcome.Uncertain,
-                    Reason = $"The conflict source '{intent.Source.Path}' is absent or its content cannot be verified. Restore access to that file, then Retry." }, false);
+                    Reason = $"The conflict source '{intent.Source.Path}' cannot yet be verified. Retry checks its identity and content again." }, false);
             intent = intent with { Source = current, ProviderEffect = null };
             var committer = new StoreCommitter(_store, _storeGate, pairId, gen);
             var runner = new ActionRunner(committer, _settings, _admission, pairId, a, b, [], new(),
@@ -208,7 +235,13 @@ public sealed partial class Executor : IExecutor
         if (observed.Reason == EffectResolver.Superseded)
         {
             var target = intent.Target == Side.A ? a : b;
-            var occupant = await target.ObserveAsync(intent.Path, ct).ConfigureAwait(false);
+            ItemState? occupant;
+            try { occupant = await target.ObserveAsync(intent.Path, ct).ConfigureAwait(false); }
+            catch (Exception error) when (EffectResolver.Unverifiable(error, ct))
+            {
+                return (observed with { Outcome = Outcome.Uncertain,
+                    Reason = BlockerDiagnostic.Describe(error) }, false);
+            }
             if (occupant is not null && Content.SameContent(occupant, intent.Source) == false)
             {
                 var notice = new Notice(pairId, 27, NoticeKind.Info, intent.Path,

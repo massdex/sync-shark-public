@@ -114,6 +114,9 @@ internal sealed class StoreCommitter
 
     internal DefenderGrant? DefenderGrantConflict(SyncAction action) => _store.DefenderGrantConflict(_pairId, action);
 
+    /// <summary>The pair this committer's durable writes belong to.</summary>
+    internal string PairId => _pairId;
+
     /// <summary>Completes once the action's intent is durable; a cancelled caller records nothing.</summary>
     internal Task RecordIntentAsync(SyncAction action, CancellationToken ct)
     {
@@ -126,6 +129,19 @@ internal sealed class StoreCommitter
     {
         await RunOperations.WaitAsync(_storeGate, "store commit gate").ConfigureAwait(false);
         try { _store.CommitConflictTransition(_pairId, _gen, forget, result, successors); }
+        finally { _storeGate.Release(); }
+    }
+
+    /// <summary>
+    /// Completes once one verified archive's Recovery row is durable. Called before the archive owner removes the
+    /// original, so a crash in the result window can never hide the retained copy. The archive copy itself already
+    /// exists; this write is idempotent per action id.
+    /// </summary>
+    internal async Task RecordRecoveryAsync(string actionId, string path, RecoveryRef recovery, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        await RunOperations.WaitAsync(_storeGate, "store commit gate", ct).ConfigureAwait(false);
+        try { _store.RecordRecovery(_pairId, actionId, path, recovery); }
         finally { _storeGate.Release(); }
     }
 

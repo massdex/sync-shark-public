@@ -57,6 +57,17 @@ public sealed partial class SyncRun
             {
                 // Notice first: interruption can leave an extra warning, never a silently settled intent.
                 RaiseExcludedIntentNotice(pair, [intent]);
+                // Excluding only the generated copy name cannot abandon the still-included original's
+                // keep-both authority. Retain it until the exclusion clears, just like a temporary hold.
+                if (intent.ConflictTransitionKey is not null && intent.Source is { } original &&
+                    ReconcileAllowed(ExclusionPredicates(pair), intent with { Path = original.Path }))
+                {
+                    var pending = observed with { Outcome = Outcome.Uncertain,
+                        Reason = "The conflict-copy path is excluded; include it and Retry. The original versions remain protected." };
+                    _store.CommitResult(pair.PairId, gen, intent, pending);
+                    uncertain.Add(pending);
+                    continue;
+                }
                 // The user's exclusion explicitly retires this pending authority. Only a tagged conflict successor
                 // needs the mark, so the store does not coerce its retirement into Failed and retain it (and its
                 // notice) forever; untagged intents keep their existing contract.

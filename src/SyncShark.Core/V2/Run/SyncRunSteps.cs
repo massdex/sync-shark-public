@@ -349,7 +349,8 @@ public sealed partial class SyncRun
                         // move) stays pending too: retirement drops the intent without observing what it did, so a
                         // crash-interrupted apply must keep waiting for reconciliation. None of these are background
                         // verification or retry debt; release any older hold so the combined count never includes them.
-                        case HoldCause.Link or HoldCause.Stub when RecoverySafety.RequiresRecovery(action):
+                        case HoldCause.Link or HoldCause.Stub when RecoverySafety.RequiresRecovery(action) ||
+                            action.ConflictTransitionKey is not null:
                         case HoldCause.Pending:
                             if (rowStates[action.ActionId] == "held") releasedIds.Add(action.ActionId);
                             ParkRetry(parkedRetries, retry);
@@ -438,8 +439,10 @@ public sealed partial class SyncRun
                     _store.ClearSyncRetry(pair.PairId, action.Path);
                 else if (result.Outcome is Outcome.Skipped or Outcome.Refused)
                 {
-                    if (conflictSuccessor is not null)
+                    if (conflictSuccessor is not null && _store.IntentById(pair.PairId, action.ActionId) is not null)
                         SaveFailedRetry(pair, action.Path, result.Reason, retry, conflictSuccessor);
+                    else if (conflictSuccessor is not null)
+                        _store.ClearSyncRetry(pair.PairId, action.Path);
                     else if (retry is not null) _store.SaveSyncRetry(pair.PairId, retry with { RetryAfter = DateTimeOffset.MinValue });
                     touched.Add(action.Path);
                     if (action.FromPath is not null) touched.Add(action.FromPath);

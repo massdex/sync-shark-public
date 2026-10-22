@@ -337,7 +337,8 @@ public sealed partial class SyncRun
         {
             var intent = _store.IntentById(pair.PairId, action.ActionId) ?? action;
             var result = await EffectResolver.ResolveAsync(intent, intent.Target == Side.A ? a : b,
-                intent.Target == Side.A ? b : a, ct).ConfigureAwait(false);
+                intent.Target == Side.A ? b : a, ct,
+                preserved: RecoverySafety.PreservedReceipt(_store, pair.PairId, intent)).ConfigureAwait(false);
             return (Action: intent, Result: result);
         })).ConfigureAwait(false);
         var retry = new List<SyncAction>();

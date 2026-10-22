@@ -521,8 +521,18 @@ public sealed partial class SqliteStateStore : IStateStore
                 if (action.Kind == ActionKind.Delete && action.ExpectedTarget is { Kind: ItemKind.Folder } folder)
                     _files.RetireDeletedFolder(transaction, action.Target == Side.A ? rootNoA : rootNoB, folder);
                 if (!suppressBaseline)
+                {
                     _points.CommitDone(transaction, pairNo, pairId, gen, rootNoA, rootNoB, action, result,
                         (rootNo, objectId) => _points.HasBaseline(transaction, RootSides(rootNo, transaction), objectId));
+                    // The successor's link and the correspondence it replaces change in one transaction. The old
+                    // baseline stays authoritative until this Done commit, including after a physical effect that
+                    // was never acknowledged before a crash.
+                    if (action.ObsoleteBaselineKey is { } obsolete &&
+                        !string.Equals(obsolete, action.ObjectKey, StringComparison.Ordinal))
+                        _points.CommitDone(transaction, pairNo, pairId, gen, rootNoA, rootNoB,
+                            action with { Kind = ActionKind.Forget, ObjectKey = obsolete }, result,
+                            (rootNo, objectId) => _points.HasBaseline(transaction, RootSides(rootNo, transaction), objectId));
+                }
                 if (action.Kind is ActionKind.CopyNew or ActionKind.Update or ActionKind.Move or ActionKind.MkDir or ActionKind.KeepBoth &&
                     (action.Target == Side.A ? result.NewA : result.NewB) is { } written)
                     _files.ClearProviderNameRefused(transaction, action.Target == Side.A ? rootNoA : rootNoB,
@@ -827,6 +837,15 @@ public sealed partial class SqliteStateStore : IStateStore
     {
         var pairNo = PairNo(pairId);
         return pairNo is null ? new List<RecoveryRecord>() : _recoveries.Read(pairNo.Value, pairId);
+    });
+
+    public void RecordRecovery(string pairId, string actionId, string path, RecoveryRef recovery) => InStore(() =>
+    {
+        var pairNo = RequirePair(pairId);
+        using var transaction = _connection.BeginTransaction();
+        _recoveries.Insert(transaction, pairNo, pairId, actionId, path, recovery, NowMs(),
+            _settings.RecoveryRetention);
+        transaction.Commit();
     });
 
     public IReadOnlyList<RecoveryRecord> RecoveryPage(string pairId, RecoveryQuery query)

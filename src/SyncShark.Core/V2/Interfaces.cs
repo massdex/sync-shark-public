@@ -389,6 +389,12 @@ public interface IStateStore : IDisposable
     IReadOnlyList<RecoveryRecord> Recoveries(string pairId);
 
     /// <summary>
+    /// Records one already-verified archive before its original is removed. Idempotent per action id, exactly like the
+    /// result path: a repeated write for the same archive changes nothing.
+    /// </summary>
+    void RecordRecovery(string pairId, string actionId, string path, RecoveryRef recovery);
+
+    /// <summary>
     /// One bounded keyset page of this pair's Recovery rows, ordered lexicographically by recovery id. The filters
     /// are exact/inclusive as documented on <see cref="RecoveryQuery"/>, and <see cref="RecoveryQuery.AfterId"/> is
     /// exclusive, so each next page continues where the previous one stopped without duplicates.

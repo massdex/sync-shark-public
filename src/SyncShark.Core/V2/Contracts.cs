@@ -112,6 +112,10 @@ public sealed record SyncAction(string ActionId, int Rule, ActionKind Kind, Side
     /// Until Done, reconciliation retains its authority rather than re-planning a no-baseline winner.</summary>
     public string? ConflictTransitionKey { get; init; }
 
+    /// <summary>A baseline this Done link replaces. The store retires it in the same transaction as the link's
+    /// baseline, so planning never emits a separate commit-only Forget before the successor.</summary>
+    public string? ObsoleteBaselineKey { get; init; }
+
     /// <summary>Trusted historical opposite object ID for a prepared deletion without a baseline; absence checks
     /// verify this identity as well as the exact path. Older action JSON may omit it.</summary>
     public string? DeletionSourceObjectId { get; init; }

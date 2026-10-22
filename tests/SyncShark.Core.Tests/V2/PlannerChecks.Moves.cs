@@ -46,6 +46,61 @@ internal static partial class PlannerChecks
         AssertEmptyNotices(plan);
     }
 
+    /// <summary>Rule 12 onto another row's baselined occupant: the Adopt retires that correspondence on Done, so no
+    /// separate Forget precedes the link and the plan never holds two claims on one object.</summary>
+    private static void Rule12d_IdenticalOccupantRetiresBaselineWithAdopt()
+    {
+        var mover = Row(Base("k1", F("p", "idA1", "h1"), F("p", "idB1", "h1")), F("q", "idA1", "h1"),
+            F("p", "idB1", "h1"));
+        var occupant = Row(Base("k2", F("q", "idA2", "h9"), F("q", "idB2", "h2")), null, F("q", "idB2", "h1"));
+        var plan = Decide(false, mover, occupant);
+        AssertActions(plan,
+            new Exp(ActionKind.Delete, Side.B, "p", null, true, 12, "q"),
+            new Exp(ActionKind.Adopt, Side.B, "q", null, false, 12, "q", "k1"));
+        var adopt = plan.Actions.Single(action => action.Kind == ActionKind.Adopt);
+        Require(adopt.ObsoleteBaselineKey == "k2" &&
+            plan.Actions.All(action => action.Kind != ActionKind.Forget),
+            "Rule12d Adopt carries the replaced baseline and no Forget action precedes it");
+        AssertNotices(plan, new NExp(7, NoticeKind.EditBeatsDelete, "q"));
+    }
+
+    /// <summary>First-sync incoming newer over another row's baselined occupant: the winning Update retires the
+    /// occupant's correspondence on Done instead of emitting a separate Forget.</summary>
+    private static void Rule14j_IncomingWinsRetiresBaselineWithUpdate()
+    {
+        var plan = Decide(true, FolderFToGOnA(), RebasedIncoming(T0 + TimeSpan.FromSeconds(10)),
+            RebasedOccupant(T0));
+        AssertActions(plan,
+            new Exp(ActionKind.Update, Side.A, "G/c", null, true, 4, "G/c", "kc"),
+            new Exp(ActionKind.Move, Side.B, "G", "F", false, 25, "G", "k1"));
+        var update = plan.Actions.Single(action => action.Kind == ActionKind.Update);
+        Require(update.Source!.ObjectId == "idBc" && update.ExpectedTarget!.ObjectId == "idAo" &&
+            update.ObsoleteBaselineKey == "ko" && plan.Actions.All(action => action.Kind != ActionKind.Forget),
+            "Rule14j winning Update carries the occupant's replaced baseline");
+    }
+
+    /// <summary>First-sync occupant newer: the occupant's Update retires the losing incoming correspondence on Done,
+    /// never through a standalone Forget.</summary>
+    private static void Rule14k_OccupantWinsRetiresBaselineWithUpdate()
+    {
+        var plan = Decide(true, FolderFToGOnA(), RebasedIncoming(T0), RebasedOccupant(T0 + TimeSpan.FromSeconds(10)));
+        AssertActions(plan,
+            new Exp(ActionKind.Move, Side.B, "G", "F", false, 25, "G", "k1"),
+            new Exp(ActionKind.Update, Side.B, "G/c", null, true, 4, "G/c", "ko"));
+        var update = plan.Actions.Single(action => action.Kind == ActionKind.Update);
+        Require(update.Source!.ObjectId == "idAo" && update.ExpectedTarget!.ObjectId == "idBc" &&
+            update.ObsoleteBaselineKey == "kc" && plan.Actions.All(action => action.Kind != ActionKind.Forget),
+            "Rule14k occupant's Update carries the incoming row's replaced baseline");
+    }
+
+    /// <summary>A rebased create (rule 7 on B) landing after the folder move on A:G/c.</summary>
+    private static PlanRow RebasedIncoming(DateTimeOffset mtime) =>
+        Row(Base("kc", F("F/c", "idAc", "h0"), F("F/c", "idBc", "h0")), null, F("F/c", "idBc", "h3", mtime: mtime));
+
+    /// <summary>The independent occupant of A:G/c with its own baseline; its one mirror create is dropped by the clash.</summary>
+    private static PlanRow RebasedOccupant(DateTimeOffset mtime) =>
+        Row(Base("ko", F("G/c", "idAo", "h0"), F("G/c", "idBo", "h0")), F("G/c", "idAo", "h2", mtime: mtime), null);
+
     private static void Rule13_MoveOntoChangedOccupant()
     {
         var row1 = Row(Base("k1", F("p", "idA1", "h1"), F("p", "idB1", "h1")), F("q", "idA1", "h1"), F("p", "idB1", "h1"));
@@ -97,6 +152,10 @@ internal static partial class PlannerChecks
         AssertActions(plan,
             new Exp(ActionKind.Update, Side.A, "q", null, true, 4, "q", "k2"),
             new Exp(ActionKind.Delete, Side.B, "p", null, true, 4, "q", "k1"));
+        var moveUpdate = plan.Actions.Single(action => action.Kind == ActionKind.Update);
+        var moveDelete = plan.Actions.Single(action => action.Kind == ActionKind.Delete);
+        Require(moveUpdate.ObsoleteBaselineKey is null && moveDelete.ObjectKey == "k1",
+            "Rule14d a Move's paired Delete owns the stale key; its Update retires nothing");
         AssertNotices(plan, new NExp(4, NoticeKind.AutoConflict, "q"));
     }
 

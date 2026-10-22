@@ -12,14 +12,19 @@ internal sealed class RecoveryTable
 
     /// <summary>Records an archived copy once; a repeat for the same action id is idempotent.</summary>
     public void Insert(SqliteTransaction transaction, long pairNo, string pairId, SyncAction action, RecoveryRef recovery,
-        long now, TimeSpan retention)
+        long now, TimeSpan retention) =>
+        Insert(transaction, pairNo, pairId, action.ActionId, action.Path, recovery, now, retention);
+
+    /// <summary>Records one archived copy by its owner ids; used before an original is removed.</summary>
+    public void Insert(SqliteTransaction transaction, long pairNo, string pairId, string actionId, string path,
+        RecoveryRef recovery, long now, TimeSpan retention)
     {
-        var recoveryId = ShortId.Make("rc", pairId, action.ActionId);
+        var recoveryId = ShortId.Make("rc", pairId, actionId);
         StoreSchema.Execute(_connection, transaction,
             "INSERT INTO recovery(recovery_id, pair_no, action_id, side, path, path_key, location, version_id, hash, size, created, expires) " +
             "VALUES($rid, $p, $aid, $side, $path, $path_key, $loc, $vid, $hash, $size, $created, $expires) ON CONFLICT(recovery_id) DO NOTHING;",
-            ("$rid", recoveryId), ("$p", pairNo), ("$aid", action.ActionId), ("$side", recovery.Side.ToString()),
-            ("$path", action.Path), ("$path_key", PathKey.Of(action.Path)), ("$loc", recovery.Location), ("$vid", recovery.VersionId), ("$hash", recovery.Hash),
+            ("$rid", recoveryId), ("$p", pairNo), ("$aid", actionId), ("$side", recovery.Side.ToString()),
+            ("$path", path), ("$path_key", PathKey.Of(path)), ("$loc", recovery.Location), ("$vid", recovery.VersionId), ("$hash", recovery.Hash),
             ("$size", recovery.Size), ("$created", now), ("$expires", now + (long)retention.TotalMilliseconds));
         if (StoreSchema.Changes(_connection, transaction) != 0) return;
         using var command = StoreSchema.Command(_connection, transaction,
@@ -27,7 +32,7 @@ internal sealed class RecoveryTable
         command.Parameters.AddWithValue("$rid", recoveryId);
         using var reader = command.ExecuteReader();
         if (reader.Read() && reader.GetInt64(0) == pairNo &&
-            string.Equals(reader.GetString(1), action.ActionId, StringComparison.Ordinal) &&
+            string.Equals(reader.GetString(1), actionId, StringComparison.Ordinal) &&
             string.Equals(reader.GetString(2), recovery.Location, StringComparison.Ordinal))
             return;
         throw new InvalidDataException($"Short id collision: {recoveryId}");

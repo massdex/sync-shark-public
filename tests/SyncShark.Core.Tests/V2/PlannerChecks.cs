@@ -32,6 +32,7 @@ internal static partial class PlannerChecks
         Rule12_MoveOntoIdenticalOccupant();
         Rule12b_IdenticalOccupantCompletesTheMove();
         Rule12c_IdenticalOccupantOnSideA();
+        Rule12d_IdenticalOccupantRetiresBaselineWithAdopt();
         Rule13_MoveOntoChangedOccupant();
         Rule14_DestinationOccupied();
         Rule14b_FirstSyncOccupiedIncomingNewer();
@@ -43,6 +44,8 @@ internal static partial class PlannerChecks
         Rule14h_UnconfirmedCollisionSkipped();
         Rule13b_UnconfirmedVacatedDestinationSkipped();
         Rule14i_UnconfirmedDuplicateCreatesAllSkipped();
+        Rule14j_IncomingWinsRetiresBaselineWithUpdate();
+        Rule14k_OccupantWinsRetiresBaselineWithUpdate();
         Rule15_DeletedBoth();
         Rule16_CreatedBothSame();
         Rule17_CreatedBothDifferent();

@@ -14,7 +14,7 @@ internal static class EffectResolver
     internal static async Task<ActionResult> ResolveAsync(SyncAction x, IEndpointWriter target, IEndpointWriter source,
         CancellationToken ct, TimeSpan? unknownCommitGracePeriod = null, TimeProvider? timeProvider = null,
         ProviderJobCheckCache? jobChecks = null, string? materializationBlock = null,
-        ItemState? historicalDeleteSource = null)
+        ItemState? historicalDeleteSource = null, RecoveryRef? preserved = null)
     {
         // Restore creates only: without the atomic receipt we cannot claim ownership. Abandon the
         // intent, not the Recovery copy or notice, even if observation/provider lookup is unavailable.
@@ -140,13 +140,19 @@ internal static class EffectResolver
         switch (x.Kind)
         {
             case ActionKind.CopyNew or ActionKind.KeepBoth:
-                if (DefinitelyMatches(obs, x.Source)) return await DoneAsync(x, obs, target, ct).ConfigureAwait(false);
+                if (DefinitelyMatches(obs, x.Source))
+                    return await DoneAsync(x, obs, target, ct, preserved).ConfigureAwait(false);
+                if (obs is null && RecoverySafety.HasPreservedFileVictim(x))
+                    return await PreservedButAbsentAsync(x, preserved).ConfigureAwait(false);
                 return Skipped(x, obs is null ? NotApplied : Superseded);
             case ActionKind.Update:
-                if (DefinitelyMatches(obs, x.Source)) return await DoneAsync(x, obs, target, ct).ConfigureAwait(false);
+                if (DefinitelyMatches(obs, x.Source))
+                    return await DoneAsync(x, obs, target, ct, preserved).ConfigureAwait(false);
+                if (obs is null && RecoverySafety.HasPreservedFileVictim(x))
+                    return await PreservedButAbsentAsync(x, preserved).ConfigureAwait(false);
                 return Skipped(x, SameAsExpected(obs, x.ExpectedTarget) ? NotApplied : Superseded);
             case ActionKind.Move:
-                return await ResolveMoveAsync(x, obs, target, ct).ConfigureAwait(false);
+                return await ResolveMoveAsync(x, obs, target, ct, preserved).ConfigureAwait(false);
             case ActionKind.Delete:
                 // Typed expired/invalid job + elapsed grace ends verify-only waiting, not deletion
                 // authority. Without a trusted original identity retain history and park a user review.
@@ -157,9 +163,11 @@ internal static class EffectResolver
                     return Skipped(x, "The delete job expired without a trusted source identity. Review the item; nothing further was deleted.") with
                     { DeleteSourceUnconfirmed = true, DeleteSourceIdentityMissing = true };
                 if (obs is not null) return Skipped(x, SameAsExpected(obs, x.ExpectedTarget) ? NotApplied : Superseded);
-                return await ResolveAbsentDeleteAsync(x, target, source, historicalDeleteSource, ct).ConfigureAwait(false);
+                return await ResolveAbsentDeleteAsync(x, target, source, historicalDeleteSource, preserved, ct)
+                    .ConfigureAwait(false);
             case ActionKind.MkDir:
-                if (obs?.Kind == ItemKind.Folder) return await DoneAsync(x, obs, target, ct).ConfigureAwait(false);
+                if (obs?.Kind == ItemKind.Folder)
+                    return await DoneAsync(x, obs, target, ct, preserved).ConfigureAwait(false);
                 // A create job Dropbox still reports in progress must not be replanned over: its own outcome
                 // (present/refused) is definitive, so only an absent path with a live job stays unverified.
                 if (providerReportsInProgress) return Unverified(x, ExecutionReasons.ProviderPending.Detail);
@@ -170,12 +178,12 @@ internal static class EffectResolver
     }
 
     private static async Task<ActionResult> ResolveAbsentDeleteAsync(SyncAction action, IEndpointWriter target,
-        IEndpointWriter source, ItemState? historical, CancellationToken ct)
+        IEndpointWriter source, ItemState? historical, RecoveryRef? preserved, CancellationToken ct)
     {
         // Explicit victim choices and type replacement are not absence propagation. Their durable
         // authority must not be reinterpreted as a mistaken missing-source delete after a crash.
         if (DeleteSourceGuard.ExplicitRemoval(action) || action.Rule is 26 or 32)
-            return await DoneAsync(action, null, target, ct).ConfigureAwait(false);
+            return await DoneAsync(action, null, target, ct, preserved).ConfigureAwait(false);
         try
         {
             if (historical is not null && !string.IsNullOrWhiteSpace(historical.ObjectId) && source is ISourceAbsenceProbe probe)
@@ -194,7 +202,7 @@ internal static class EffectResolver
                     // The original moved: retain correspondence until its new location can be reconciled.
                 }
                 if (await probe.IsSourceAbsentAsync(historical, action.Path, ct).ConfigureAwait(false) == true)
-                    return await DoneAsync(action, null, target, ct).ConfigureAwait(false);
+                    return await DoneAsync(action, null, target, ct, preserved).ConfigureAwait(false);
             }
             return Unverified(action, "The interrupted deletion's source identity or absence could not be confirmed. " +
                 "The surviving copy is protected; Retry checks both endpoints again.") with
@@ -224,13 +232,13 @@ internal static class EffectResolver
     // A move is only Done when the source is gone and the destination holds the moved item, ExpectedTarget (its id,
     // plus its hash when both are known). Source is the opposite side and may differ (a move before an update).
     private static async Task<ActionResult> ResolveMoveAsync(SyncAction x, ItemState? obs, IEndpointWriter target,
-        CancellationToken ct)
+        CancellationToken ct, RecoveryRef? preserved)
     {
         var from = await ObserveAsync(target, x.FromPath, ct).ConfigureAwait(false);
         if (from.Failure is { } failure) return Unverified(x, Describe(failure)) with
             { RetryAfterSeconds = ProviderTransientFailure.IsTransient(failure, ct) ? ProviderTransientFailure.VerificationRetrySeconds : null };
         if (from.State is not null) return Skipped(x, NotApplied);
-        if (MoveLanded(obs, x)) return await DoneAsync(x, obs, target, ct).ConfigureAwait(false);
+        if (MoveLanded(obs, x)) return await DoneAsync(x, obs, target, ct, preserved).ConfigureAwait(false);
         return Skipped(x, Superseded);
     }
 
@@ -243,27 +251,40 @@ internal static class EffectResolver
         obs.Hash is null || moved.Hash is null ||
         string.Equals(obs.Hash, moved.Hash, StringComparison.OrdinalIgnoreCase);
 
-    // A failed recovery lookup keeps the intent unresolved (Uncertain, with the failure) for a later run.
-    private static async Task<ActionResult> DoneAsync(SyncAction x, ItemState? newT, IEndpointWriter target,
-        CancellationToken ct)
+    // The indexed receipt alone decides a RecoveryFirst file outcome. Repeating PreserveAsync here could archive or
+    // remove an original that reappeared after the crash; a legacy intent without an indexed ref stays unresolved.
+    // Folder victims carry no bytes and never require a receipt .
+    private static Task<ActionResult> DoneAsync(SyncAction x, ItemState? newT, IEndpointWriter target,
+        CancellationToken ct, RecoveryRef? preserved = null)
     {
         RecoveryRef? recovery = null;
-        if (x.RecoveryFirst && x.ExpectedTarget is not null)
+        if (RecoverySafety.HasPreservedFileVictim(x))
         {
-            try
-            {
-                recovery = await target.PreserveAsync(x.ExpectedTarget, x.ActionId, ct).ConfigureAwait(false);
-            }
-            catch (Exception e) when (Unverifiable(e, ct))
-            {
-                return Unverified(x, string.Format(ExecutionReasons.RecoveryUnverified.Detail, Describe(e)));
-            }
+            recovery = preserved;
+            if (recovery is null)
+                return Task.FromResult<ActionResult>(Unverified(x,
+                    "The displaced original's retained copy is not indexed; nothing further was changed. " +
+                    "Review Recovery before retrying.") with { Recovery = preserved });
         }
-        if (x.Kind == ActionKind.Delete) return new ActionResult(x.ActionId, Outcome.Done, null, null, recovery, null);
-        return x.Target == Side.A
-            ? new ActionResult(x.ActionId, Outcome.Done, newT, x.Source, recovery, null)
-            : new ActionResult(x.ActionId, Outcome.Done, x.Source, newT, recovery, null);
+        return Task.FromResult<ActionResult>(x.Kind == ActionKind.Delete
+            ? new ActionResult(x.ActionId, Outcome.Done, null, null, recovery, null)
+            : x.Target == Side.A
+                ? new ActionResult(x.ActionId, Outcome.Done, newT, x.Source, recovery, null)
+                : new ActionResult(x.ActionId, Outcome.Done, x.Source, newT, recovery, null));
     }
+
+    // The target is absent and this action preserved a file victim before its effect. That absence is ours, not the
+    // user's: closing the intent as a later change would leave a baseline whose next plan reads the absence as a
+    // deletion and propagates it to the only remaining copy. Stay unresolved (the run protects the footprint) until
+    // the retained original is restored or a later observation proves the intended state.
+    private static Task<ActionResult> PreservedButAbsentAsync(SyncAction x, RecoveryRef? preserved) =>
+        Task.FromResult<ActionResult>(new ActionResult(x.ActionId, Outcome.Uncertain, null, null, preserved,
+            preserved is null
+                ? "The original was preserved before this effect, but its retained copy is not indexed. Nothing further " +
+                  "was changed; review Recovery before retrying."
+                : "The displaced original is retained and awaits restoration; the absent target was produced by this " +
+                  "action, not by a user deletion. Restore it from Recovery, then retry.")
+            { RetryAfterSeconds = ProviderTransientFailure.VerificationRetrySeconds });
 
     private static async Task<(ItemState? State, Exception? Failure)> ObserveAsync(IEndpointWriter target,
         string? path, CancellationToken ct)
@@ -282,7 +303,7 @@ internal static class EffectResolver
     // A failure that only leaves the effect unverified. A requested cancellation (the caller's token), a user pause
     // (the run reports Paused and the intent is reconciled next run) and an access failure (the next run observes it)
     // are not swallowed.
-    private static bool Unverifiable(Exception e, CancellationToken ct) =>
+    internal static bool Unverifiable(Exception e, CancellationToken ct) =>
         e is not (EndpointAccessException or PairPausedException) &&
         !(e is OperationCanceledException && ct.IsCancellationRequested);
 

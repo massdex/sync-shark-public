@@ -81,7 +81,8 @@ public sealed partial class SyncRun
                 var action = FrozenChild(folder, victim.Ord, victim.Item);
                 var intent = _store.IntentById(pair.PairId, action.ActionId);
                 var result = intent is null ? null
-                    : await EffectResolver.ResolveAsync(intent, target, other, ct).ConfigureAwait(false);
+                    : await EffectResolver.ResolveAsync(intent, target, other, ct,
+                        preserved: RecoverySafety.PreservedReceipt(_store, pair.PairId, intent)).ConfigureAwait(false);
                 return (victim, Action: (intent ?? action) with { CallerOwnsNotice = true }, Result: result);
             })).ConfigureAwait(false);
             foreach (var (victim, action, result) in observed)

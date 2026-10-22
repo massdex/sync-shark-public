@@ -942,6 +942,13 @@ if (args is ["--v2-ignored-child-checks"])
     return 0;
 }
 
+if (args is ["--v2-recovery-first-restart-checks", var recoveryFirstRestartRoot])
+{
+    await Massdex.SyncShark.V2.LocalChecks.RunConstituentAsync(Path.GetFullPath(recoveryFirstRestartRoot),
+        "RecoveryFirstRestart");
+    return 0;
+}
+
 if (args is ["--v2-conflict-choice-checks"])
 {
     await Massdex.SyncShark.V2.PlannerChecks.ConflictChoiceChecksAsync();
@@ -959,6 +966,12 @@ if (args is ["--v2-conflict-transition-checks"])
 if (args is ["--v2-conflict-retirement-checks"])
 {
     await Massdex.SyncShark.V2.ConflictRetirementChecks.RunAsync();
+    return 0;
+}
+
+if (args is ["--v2-collision-baseline-checks"])
+{
+    await Massdex.SyncShark.V2.CollisionBaselineChecks.RunAsync();
     return 0;
 }
 

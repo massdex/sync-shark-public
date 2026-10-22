@@ -166,7 +166,8 @@ internal sealed class ActionRunner
                 // Refusal is retryable, not a conditional mismatch ("changed, kept").
                 return action.CallerOwnsNotice
                     ? await CommitAsync(action, Refused(action, refusal.Detail)).ConfigureAwait(false)
-                    : await PendingForFreeSpaceAsync(action, refusal).ConfigureAwait(false);
+                    : await CommitAsync(action,
+                        await PendingForFreeSpaceAsync(action, refusal).ConfigureAwait(false)).ConfigureAwait(false);
 
             if (_quota.Blocks(action))
                 return await CommitAsync(action, Failed(action, DropboxQuota.Detail) with { UploadQuotaBlocked = true });
@@ -185,6 +186,12 @@ internal sealed class ActionRunner
                 var (recovery, failure) = await PreserveAsync(action, target, ct).ConfigureAwait(false);
                 if (failure is not null) return await CommitAsync(action, failure).ConfigureAwait(false);
                 recoveryHolder.Reference = recovery;
+                // A remote archive is metadata-only and the local owner already persisted its file archive through
+                // the same recovery store before removal. Persist here too, idempotently, so the indexed receipt
+                // exists even if the effect's result is never committed.
+                if (recovery is not null && action.ExpectedTarget is { Kind: ItemKind.File } victim)
+                    await _committer.RecordRecoveryAsync(action.ActionId, victim.Path, recovery, ct)
+                        .ConfigureAwait(false);
             }
 
             var result = await ExecuteAsync(action, target, source, recoveryHolder, deferPreserve, ct)
@@ -286,20 +293,42 @@ internal sealed class ActionRunner
         return await CommitAsync(action, Skipped(action, warning) with { DefenderGrantHeld = true }).ConfigureAwait(false);
     }
 
-    // A proven shortage (or unprovable free space) leaves the item pending: a stored notice and a Skipped result
-    // (not Failed, and no intent to replay). The plan's other items keep running.
+    // A proven shortage (or unprovable free space) leaves the item pending: a stored notice and a Skipped result.
+    // The caller commits it, so a preserved destructive replace can still stay protective (Uncertain).
     private async Task<ActionResult> PendingForFreeSpaceAsync(SyncAction action, FreeSpaceRefusal refusal)
     {
         await _committer.AddNoticeAsync(new Notice(_pairId, action.Rule, NoticeKind.Info, action.Path,
             refusal.Detail, refusal.ReasonKey, FreeSpace: new FreeSpaceNoticeMetadata(refusal.VolumeRoot,
                 refusal.RequiredBytes, refusal.FreeBytes, refusal.ReserveBytes))).ConfigureAwait(false);
-        return await CommitAsync(action, Skipped(action, refusal.Detail)).ConfigureAwait(false);
+        return Skipped(action, refusal.Detail);
     }
 
     // Steps 6 and 7: run the conditional effect once, map its exceptions, and commit the outcome.
     private async Task<ActionResult?> ExecuteAsync(SyncAction action, IEndpointWriter target, IEndpointWriter source,
         RecoveryHolder recoveryHolder, bool deferPreserve, CancellationToken ct)
     {
+        // Once an archive exists, every settled outcome must carry it, and a non-Done destructive replace must not
+        // close its intent as Skipped/Refused: the target original was already removed, so a later plan would read
+        // the absence as a user deletion. Keep such an outcome protective (Uncertain) until reconciliation observes.
+        async Task<ActionResult?> SettleAsync(ActionResult result)
+        {
+            if (result.Recovery is null && recoveryHolder.Reference is { } retained)
+                result = result with { Recovery = retained };
+            var preservedDestructive = RecoverySafety.HasPreservedFileVictim(action) &&
+                (recoveryHolder.Reference is not null || recoveryHolder.CheckpointRecorded);
+            if (preservedDestructive && result.Outcome is Outcome.Skipped or Outcome.Refused)
+                result = result with
+                {
+                    Outcome = Outcome.Uncertain,
+                    Recovery = result.Recovery ?? recoveryHolder.Reference,
+                    Reason = "The displaced original is retained; this effect did not complete. " +
+                        "Reconcile will prove the target state; restore from Recovery if needed. " + result.Reason,
+                    RetryAfterSeconds = ProviderTransientFailure.VerificationRetrySeconds,
+                    ProviderNameRefused = false
+                };
+            return await CommitAsync(action, result).ConfigureAwait(false);
+        }
+
         ItemState? newT;
         try
         {
@@ -308,7 +337,7 @@ internal sealed class ActionRunner
         catch (Exception error) when (QuarantineFailure.IsQuarantine(error))
         {
             NativeIoDiagnostic.LogOnce($"pair={_pairId}; relative={action.Path}", error);
-            return await CommitAsync(action, new ActionResult(action.ActionId, Outcome.Skipped, null, null,
+            return await SettleAsync(new ActionResult(action.ActionId, Outcome.Skipped, null, null,
                 recoveryHolder.Reference, QuarantineFailure.Describe(action.Path, error)) { Quarantined = true })
                 .ConfigureAwait(false);
         }
@@ -317,7 +346,7 @@ internal sealed class ActionRunner
             action.Kind is ActionKind.CopyNew or ActionKind.Update or ActionKind.Move or ActionKind.MkDir or ActionKind.KeepBoth)
         {
             // Settled but not performed: never satisfy a child dependency or commit a sync baseline.
-            return await CommitAsync(action, new ActionResult(action.ActionId, Outcome.Skipped, null, null,
+            return await SettleAsync(new ActionResult(action.ActionId, Outcome.Skipped, null, null,
                 recoveryHolder.Reference, ProviderNameRefusedException.Detail) { ProviderNameRefused = true })
                 .ConfigureAwait(false);
         }
@@ -325,7 +354,8 @@ internal sealed class ActionRunner
         {
             if (_quota.Suspend())
                 await _committer.AddNoticeAsync(DropboxQuota.Notice(_pairId, action.Target, action.Source?.Size));
-            return await CommitAsync(action, Failed(action, DropboxQuota.Detail) with { UploadQuotaBlocked = true });
+            return await SettleAsync(
+                Failed(action, DropboxQuota.Detail) with { UploadQuotaBlocked = true });
         }
         catch (FreeSpaceRefusedException refused) when (!recoveryHolder.CheckpointRecorded)
         {
@@ -337,37 +367,38 @@ internal sealed class ActionRunner
             // sync without the restore ever running). Commit the pending outcome alone and let the restore report it.
             // The refusal precedes any effect, so a checkpoint-bearing action must never be retired as Refused or Skipped.
             return action.CallerOwnsNotice
-                ? await CommitAsync(action, Refused(action, refused.Refusal.Detail)).ConfigureAwait(false)
-                : await PendingForFreeSpaceAsync(action, refused.Refusal).ConfigureAwait(false);
+                ? await SettleAsync(Refused(action, refused.Refusal.Detail)).ConfigureAwait(false)
+                : await SettleAsync(await PendingForFreeSpaceAsync(action, refused.Refusal).ConfigureAwait(false))
+                    .ConfigureAwait(false);
         }
         catch (OwnedPointerDeferredException deferred) when (OwnedPointerUpdates.IsMetadataUpdate(action))
         {
             await _committer.DeferPointerUpdateAsync(action, deferred.Cause).ConfigureAwait(false);
-            return await CommitAsync(action, Skipped(action, deferred.Message)).ConfigureAwait(false);
+            return await SettleAsync(Skipped(action, deferred.Message)).ConfigureAwait(false);
         }
         catch (StoragePairException error) when (OwnedPointerUpdates.IsMetadataUpdate(action))
         {
             await _committer.DeferPointerUpdateAsync(action, error).ConfigureAwait(false);
-            return await CommitAsync(action, Skipped(action, error.Message)).ConfigureAwait(false);
+            return await SettleAsync(Skipped(action, error.Message)).ConfigureAwait(false);
         }
         catch (ProviderWriteThrottledException e)
         {
-            return await CommitAsync(action, Skipped(action, e.Message)).ConfigureAwait(false);
+            return await SettleAsync(Skipped(action, e.Message)).ConfigureAwait(false);
         }
         catch (ExpectedTargetMismatchException e)
         {
-            return await CommitAsync(action, Skipped(action, e.Message)).ConfigureAwait(false);
+            return await SettleAsync(Skipped(action, e.Message)).ConfigureAwait(false);
         }
         catch (UncertainEffectException)
         {
-            return await ResolveUncertainAsync(action, target, source, ct).ConfigureAwait(false);
+            return await ResolveUncertainAsync(action, target, source, recoveryHolder.Reference, ct).ConfigureAwait(false);
         }
         catch (DeferredFailureException deferred)
         {
             // The deferred Recovery archive refused or failed after the download was verified. Once the checkpoint
             // is durable, keep the action unresolved so reconcile can prove the original's state instead of
             // clearing it from a single observation.
-            return await CommitAsync(action, recoveryHolder.CheckpointRecorded
+            return await SettleAsync(recoveryHolder.CheckpointRecorded
                 ? new ActionResult(action.ActionId, Outcome.Uncertain, null, null, null, deferred.Result.Reason)
                 : deferred.Result).ConfigureAwait(false);
         }
@@ -387,13 +418,13 @@ internal sealed class ActionRunner
             NativeIoDiagnostic.LogOnce($"pair={_pairId}; relative={action.Path}", e);
             // An access failure is not committed: the intent stays unresolved and the next run observes it. After a
             // durable download checkpoint the same holds for any other failure, so resume keeps the provenance.
-            return await CommitAsync(action, recoveryHolder.CheckpointRecorded
+            return await SettleAsync(recoveryHolder.CheckpointRecorded
                 ? Uncertain(action, e)
                 : Failed(action, Describe(e)) with { FailureHResult = e.HResult }).ConfigureAwait(false);
         }
 
         var done = DoneResult(action, newT, recoveryHolder.Reference);
-        await CommitAsync(action, done).ConfigureAwait(false);
+        await SettleAsync(done).ConfigureAwait(false);
         return done;
     }
 
@@ -494,15 +525,16 @@ internal sealed class ActionRunner
     }
 
     private async Task<ActionResult> ResolveUncertainAsync(SyncAction action, IEndpointWriter target,
-        IEndpointWriter source, CancellationToken ct)
+        IEndpointWriter source, RecoveryRef? preserved, CancellationToken ct)
     {
-        var uncertain = new ActionResult(action.ActionId, Outcome.Uncertain, null, null, null, UncertainReason);
+        var uncertain = new ActionResult(action.ActionId, Outcome.Uncertain, null, null, preserved, UncertainReason);
         await CommitAsync(action, uncertain).ConfigureAwait(false);
         var resolved = await EffectResolver.ResolveAsync(_committer.LatestAction(action), target, source, ct,
             _unknownCommitGracePeriod, historicalDeleteSource: action.Kind == ActionKind.Delete
-                ? _committer.DeleteSource(action) : null).ConfigureAwait(false);
+                ? _committer.DeleteSource(action) : null, preserved: preserved).ConfigureAwait(false);
         // Still unverifiable: the committed Uncertain stands; report the actual failure in its reason.
         if (resolved.Outcome == Outcome.Uncertain) return resolved;
+        if (resolved.Recovery is null && preserved is not null) resolved = resolved with { Recovery = preserved };
         return await CommitAsync(action, resolved).ConfigureAwait(false);
     }
 

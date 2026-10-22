@@ -32,4 +32,14 @@ public sealed class ProviderEffectContext
         ArgumentException.ThrowIfNullOrEmpty(id);
         return _record(new ProviderEffectCheckpoint(kind, id, DateTimeOffset.UtcNow));
     }
+
+    /// <summary>
+    /// Records one verified archive through the owning committer before its original is removed. A free-standing
+    /// context (tests/tools) has no store owner and records nothing; production always has the Executor's committer.
+    /// </summary>
+    internal Task RecordRecoveryAsync(string actionId, string path, RecoveryRef recovery, string pairId,
+        CancellationToken ct) =>
+        Owner is { } owner && string.Equals(owner.PairId, pairId, StringComparison.Ordinal)
+            ? owner.RecordRecoveryAsync(actionId, path, recovery, ct)
+            : Task.CompletedTask;
 }

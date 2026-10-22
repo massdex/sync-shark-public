@@ -190,15 +190,14 @@ public static partial class Planner
         }
         var target = action.Target;
         var (a, b) = target == Side.B ? (incoming, occupant) : (occupant, incoming);
-        draft[i] = (row, NewAction(12, ActionKind.Adopt, Side.B, b.Path, null, a, b, false, action.ObjectKey)
-            with { ActionId = action.ActionId });
+        var successor = NewAction(12, ActionKind.Adopt, Side.B, b.Path, null, a, b, false, action.ObjectKey)
+            with { ActionId = action.ActionId };
+        draft[i] = (row, occRow.Base is { } occBase && !ReferenceEquals(occRow, row)
+            ? RetiringBaseline(successor, occBase.ObjectKey) : successor);
         DropDependants(ctx, draft, dropped, i, row, target, action.Path);
         DropMirrors(ctx, draft, dropped, occRow, action);
         Append(ctx, draft, row, NewAction(12, ActionKind.Delete, target, action.FromPath, null, incoming,
             action.ExpectedTarget, true, null));
-        if (occRow.Base is { } occBase && !ReferenceEquals(occRow, row))
-            Append(ctx, draft, occRow, NewAction(12, ActionKind.Forget, Side.B, occBase.A.Path, null, null, null, false,
-                occBase.ObjectKey));
     }
 
     /// <summary>
@@ -237,10 +236,9 @@ public static partial class Planner
             Append(ctx, draft, occRow, NewAction(4, ActionKind.Delete, action.Target, occupant.Path, null, incoming, occupant, true, key));
             return;
         }
-        draft[i] = (row, NewAction(4, ActionKind.Update, action.Target, occupant.Path, null, incoming, occupant, true,
-            own ? key : action.ObjectKey) with { ActionId = action.ActionId });
-        if (!own && key is not null)
-            Append(ctx, draft, occRow, NewAction(4, ActionKind.Forget, Side.B, occRow.Base!.A.Path, null, null, null, false, key));
+        var successor = NewAction(4, ActionKind.Update, action.Target, occupant.Path, null, incoming, occupant, true,
+            own ? key : action.ObjectKey) with { ActionId = action.ActionId };
+        draft[i] = (row, !own && key is not null ? RetiringBaseline(successor, key) : successor);
     }
 
     /// <summary>Occupant newer: it overwrites the incoming item (older to Recovery); a moved item's old copy goes to
@@ -255,10 +253,11 @@ public static partial class Planner
         if (action.Kind == ActionKind.Move)
             Append(ctx, draft, row, NewAction(4, ActionKind.Delete, target, action.FromPath ?? action.Path, null, incoming,
                 action.ExpectedTarget, true, action.ObjectKey));
-        else if (!own && action.ObjectKey is { } stale)
-            Append(ctx, draft, row, NewAction(4, ActionKind.Forget, Side.B, action.Path, null, null, null, false, stale));
-        Append(ctx, draft, occRow, NewAction(4, ActionKind.Update, Opposite(target), incoming.Path, null, occupant, incoming, true,
-            key ?? PlanIds.ObjectKey(ctx.PairId, target, occupant.ObjectId)));
+        var successor = NewAction(4, ActionKind.Update, Opposite(target), incoming.Path, null, occupant, incoming, true,
+            key ?? PlanIds.ObjectKey(ctx.PairId, target, occupant.ObjectId));
+        if (action.Kind != ActionKind.Move && !own && action.ObjectKey is { } stale)
+            successor = RetiringBaseline(successor, stale);
+        Append(ctx, draft, occRow, successor);
     }
 
     /// <summary>Rule 5 for an occupied first-sync destination: one Hold at the path; both rows' actions are held.</summary>
@@ -276,6 +275,17 @@ public static partial class Planner
             draft[i] = (row, NewAction(5, ActionKind.Hold, Side.B, action.Path, null, null, null, false, null)
                 with { ActionId = action.ActionId });
         AddNotice(ctx, 5, NoticeKind.UserDecision, action.Path, PlanNotices.NeedDecision);
+    }
+
+    /// <summary>The successor link owns the obsolete correspondence and retires it atomically when committed Done.
+    /// A link can never both retain and retire one key; that would leave two claims on one object.</summary>
+    private static SyncAction RetiringBaseline(SyncAction successor, string? obsolete)
+    {
+        if (obsolete is null)
+            return successor;
+        if (successor.ObjectKey is null || string.Equals(successor.ObjectKey, obsolete, StringComparison.Ordinal))
+            throw new InvalidOperationException("Planner: a baseline successor must retain exactly one key claim.");
+        return successor with { ObsoleteBaselineKey = obsolete };
     }
 
     /// <summary>Drops the occupant row's creates toward this create's source side at the same path.</summary>

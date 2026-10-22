@@ -31,6 +31,13 @@ internal static class ConflictTransitionChecks
         await PendingCheckpointDoesNotReplayAsync();
         await UnknownCopyContentStaysUncertainAsync();
         await TransitionRollbackAsync();
+        await ProtectedSuccessorResumesAsync(ItemFlags.Placeholder);
+        await ProtectedSuccessorResumesAsync(ItemFlags.Link);
+        await ProtectedSuccessorResumesAsync(ItemFlags.None);
+        await DeletedSourceAsync(false);
+        await DeletedSourceAsync(true);
+        await TransientObservationAsync(false);
+        await TransientObservationAsync(true);
         Console.WriteLine("Conflict transition checks passed: cold-reopen resume, one-copy observation, occupancy, Retry-only failure and ordinary intent.");
     }
 
@@ -404,6 +411,133 @@ internal static class ConflictTransitionChecks
             "the successor result transaction records the current source identity and content");
         Require((await rig.B.ObserveAsync(OriginalPath, CancellationToken.None))?.Hash == Hash("edit-b"),
             "the other original is never overwritten by successor replay");
+    }
+
+    private static async Task TransientObservationAsync(bool occupantCheck)
+    {
+        var rig = NewRig("conflict-transition-observe-error-" + occupantCheck);
+        SyncAction successor;
+        ItemState? occupant = null;
+        using (var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System))
+        {
+            var gen = SeedBaseline(store, rig);
+            var (_, forget, successors) = await ConflictPlanAsync(store, rig, gen, CancellationToken.None);
+            store.CommitConflictTransition(PairId, gen, forget,
+                new(forget.ActionId, Outcome.Done, null, null, null, null), successors);
+            successor = successors.Single(action => action.Target == Side.B);
+        }
+        var reads = 0;
+        if (occupantCheck)
+        {
+            occupant = rig.B.Seed(successor.Path, "unrelated occupant");
+            rig.WriterB.OnRead = path =>
+            {
+                // Let the resolver observe Superseded, then fail the replay lane's second observation.
+                if (path == successor.Path && Interlocked.Increment(ref reads) == 2)
+                    throw new IOException("transient occupant observation");
+            };
+        }
+        else rig.WriterA.OnRead = path =>
+        {
+            if (path == OriginalPath)
+            {
+                Interlocked.Increment(ref reads);
+                throw new IOException("transient source observation");
+            }
+        };
+        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
+        var run = NewRun(reopened, rig);
+        var report = await run.IncrementalAsync(PairId, new RecordingProgress(), CancellationToken.None);
+        Require(reads > 0 && report.Outcome != RunOutcomes.Failed && report.Uncertain > 0,
+            "transient " + (occupantCheck ? "occupant" : "source") + " observation stays item-local; run finishes");
+        Require(reopened.UnresolvedIntents(PairId).Single().ActionId == successor.ActionId,
+            "failed observation retains only its successor while the independent copy completes");
+        var notice = reopened.OpenNotices(PairId).Single(item => item.ReasonKey == ExecutionReasons.ConflictCopyBlocked);
+        Require(notice.Detail.Contains("transient", StringComparison.Ordinal) &&
+            NoticeChoices.Options(notice).All(option => option.Choice == NoticeChoices.RetryNow),
+            "transient failure remains explained and retryable, without an occupied-name diagnosis");
+        rig.WriterA.OnRead = null;
+        rig.WriterB.OnRead = null;
+        if (occupant is not null)
+            await rig.B.MoveAsync(new SyncAction("user-move", 0, ActionKind.Move, Side.B,
+                "excluded-away/occupant.txt", successor.Path, occupant, occupant, false, null), CancellationToken.None);
+        await run.ApplyRetryNoticeChoiceAsync(PairId, notice.NoticeId!, NoticeChoices.RetryNow, CancellationToken.None);
+        await run.IncrementalAsync(PairId, new RecordingProgress(), CancellationToken.None);
+        Require(reopened.IntentById(PairId, successor.ActionId) is null &&
+            reopened.NoticeById(PairId, notice.NoticeId!)!.Value.Closed &&
+            (await rig.B.ObserveAsync(successor.Path, CancellationToken.None))?.Hash == Hash("edit-a"),
+            "Retry completes the retained successor and closes its transient notice");
+    }
+
+    private static async Task DeletedSourceAsync(bool unknown)
+    {
+        var rig = NewRig("conflict-transition-deleted-source-" + unknown);
+        SyncAction successor;
+        string noticeId;
+        using (var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System))
+        {
+            var gen = SeedBaseline(store, rig);
+            var (_, forget, successors) = await ConflictPlanAsync(store, rig, gen, CancellationToken.None);
+            store.CommitConflictTransition(PairId, gen, forget,
+                new(forget.ActionId, Outcome.Done, null, null, null, null), successors);
+            successor = successors.Single(action => action.Target == Side.B);
+            noticeId = ExecutionReasons.ConflictCopyNoticeId(PairId, successor);
+            store.AddNotices([new Notice(PairId, 27, NoticeKind.Info, successor.Path, "Pending copy",
+                ExecutionReasons.ConflictCopyBlocked, noticeId)]);
+        }
+        await rig.A.DeleteAsync(new SyncAction("user-delete", 0, ActionKind.Delete, Side.A,
+            OriginalPath, null, null, successor.Source, false, null), CancellationToken.None);
+        rig.WriterA.AbsenceUnknown = unknown;
+        using (var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System))
+        {
+            var report = await NewRun(reopened, rig).IncrementalAsync(PairId, new RecordingProgress(), CancellationToken.None);
+            Require(report.Outcome != RunOutcomes.Failed, "deleted source does not abort the run");
+            Require((reopened.IntentById(PairId, successor.ActionId) is not null) == unknown,
+                "only identity-confirmed absence retires the successor; unknown remains protective");
+            Require(reopened.NoticeById(PairId, noticeId)!.Value.Closed == !unknown,
+                "source retirement closes the dedicated notice and the run does not reopen it");
+            Require((await rig.B.ObserveAsync(OriginalPath, CancellationToken.None))?.Hash == Hash("edit-b") &&
+                rig.WriterB.Deletes == 0,
+                "source deletion never removes or overwrites the other version");
+        }
+        using var cold = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
+        Require((cold.IntentById(PairId, successor.ActionId) is null) == !unknown &&
+            cold.NoticeById(PairId, noticeId)!.Value.Closed == !unknown,
+            "cold reopen sees successor retirement and notice closure together, or both retained");
+    }
+
+    private static async Task ProtectedSuccessorResumesAsync(ItemFlags flags)
+    {
+        var rig = NewRig("conflict-transition-protected-" + flags);
+        SyncAction forget;
+        SyncAction[] successors;
+        using (var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System))
+        {
+            var gen = SeedBaseline(store, rig);
+            (_, forget, successors) = await ConflictPlanAsync(store, rig, gen, CancellationToken.None);
+            store.CommitConflictTransition(PairId, gen, forget,
+                new(forget.ActionId, Outcome.Done, null, null, null, null), successors);
+            var snapshot = await rig.A.FullAsync(gen, _ => true, new NullProgress(), CancellationToken.None);
+            store.WriteSnapshot(snapshot with { Items = snapshot.Items.Select(item => item with { Flags = flags }).ToArray() });
+            if (flags == ItemFlags.None)
+                store.SavePair(rig.Pair with { Excluded = successors.Select(action => action.Path).ToArray() });
+        }
+        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
+        var settings = Settings with { ReplaceOnlineOnlyStubs = false };
+        var run = new SyncRun(reopened, new Executor(reopened, settings, Admission()), rig.Provider, settings, TimeProvider.System);
+        await run.IncrementalAsync(PairId, new RecordingProgress(), CancellationToken.None);
+        Require(reopened.UnresolvedIntents(PairId).Count == 2 && rig.WriterA.Puts + rig.WriterB.Puts == 0,
+            flags + ": temporary source protection or copy-only exclusion retains both successor authorities");
+        Require((await rig.A.ObserveAsync(OriginalPath, CancellationToken.None))?.Hash == Hash("edit-a") &&
+            (await rig.B.ObserveAsync(OriginalPath, CancellationToken.None))?.Hash == Hash("edit-b"),
+            flags + ": protection does not newest-wins either original");
+        reopened.SavePair(rig.Pair);
+        reopened.WriteSnapshot(await rig.A.FullAsync(reopened.BeginGeneration(rig.Pair.A.RootId, "hydrate"),
+            _ => true, new NullProgress(), CancellationToken.None));
+        await run.IncrementalAsync(PairId, new RecordingProgress(), CancellationToken.None);
+        await AssertResolvedAsync(reopened, rig, forget, successors);
+        await run.IncrementalAsync(PairId, new RecordingProgress(), CancellationToken.None);
+        await AssertResolvedAsync(reopened, rig, forget, successors);
     }
 
     // ---- fixture ------------------------------------------------------------

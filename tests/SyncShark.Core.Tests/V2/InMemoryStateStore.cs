@@ -597,6 +597,9 @@ internal sealed class InMemoryStateStore : IStateStore
             baselines[a.ObjectKey] = a.Target == Side.A
                 ? new Baseline(pairId, a.ObjectKey, target, otherState, gen)
                 : new Baseline(pairId, a.ObjectKey, otherState, target, gen);
+            if (a.ObsoleteBaselineKey is { } obsolete &&
+                !string.Equals(obsolete, a.ObjectKey, StringComparison.Ordinal))
+                baselines.Remove(obsolete);
         }
     }
 
@@ -819,6 +822,19 @@ internal sealed class InMemoryStateStore : IStateStore
     public RecoveryRecord? RecoveryForAction(string pairId, string actionId)
     {
         lock (_gate) return _recoveries.TryGetValue(pairId, out var map) ? map.GetValueOrDefault(actionId) : null;
+    }
+
+    public void RecordRecovery(string pairId, string actionId, string path, RecoveryRef recovery)
+    {
+        lock (_gate)
+        {
+            var map = RecoveriesFor(pairId);
+            if (map.ContainsKey(actionId)) return; // idempotent per action id, like the SQLite insert
+            var now = DateTimeOffset.UtcNow;
+            map[actionId] = new RecoveryRecord("rc:" + pairId + ":" + actionId, pairId, actionId, recovery.Side,
+                path, recovery.Location, recovery.VersionId, recovery.Hash, recovery.Size, now,
+                now + V2Settings.Default.RecoveryRetention);
+        }
     }
 
     public SyncAction? IntentById(string pairId, string actionId)

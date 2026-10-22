@@ -44,6 +44,7 @@ internal static class LocalChecks
         await LocalJournalChecks.RunAsync(Path.Combine(_base, "journal-regressions"), scale: false).ConfigureAwait(false);
         await LocalWriterChecks.RunAsync().ConfigureAwait(false);
         await DirectDownloadChecks.RunAsync().ConfigureAwait(false);
+        await RecoveryFirstRestartChecks.RunAsync().ConfigureAwait(false);
         await StubReplacementChecks.RunAsync().ConfigureAwait(false);
         if (realCloudFiles) await LocalCloudFilesChecks.RunAsync().ConfigureAwait(false);
         Console.WriteLine("v2 local checks passed.");
@@ -60,6 +61,7 @@ internal static class LocalChecks
             "LocalDelta" => LocalDeltaChecks.RunAsync(),
             "LocalWriter" => LocalWriterChecks.RunAsync(),
             "DirectDownload" => DirectDownloadChecks.RunAsync(),
+            "RecoveryFirstRestart" => RecoveryFirstRestartChecks.RunAsync(),
             "StubReplacement" => StubReplacementChecks.RunAsync(),
             _ => throw new ArgumentException("Unknown local constituent: " + constituent)
         };
