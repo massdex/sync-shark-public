@@ -63,6 +63,7 @@ public sealed partial class SyncRun
         IReadOnlyList<string> ChangePaths, IReadOnlyList<string> ChangeObjectIds,
         IReadOnlyDictionary<string, DateTimeOffset?> Deleted, IReadOnlyList<string> PreviousPaths)
     {
+        internal bool AllItemsChanged { get; init; }
         // Full also selects stored scope for hydrated deltas; only a returned full snapshot can establish this.
         public bool ScopedFullCoverage { get; init; }
         public IReadOnlyList<string> IncompleteSubtrees { get; init; } = [];
@@ -582,6 +583,13 @@ public sealed partial class SyncRun
         }
         throttle.Report(RunPhases.Reading(root), null, 0, 0);
         var fullChanges = new HashSet<string>(StringComparer.Ordinal);
+        var allChanged = false;
+        void StoreSnapshot(Snapshot value) => _store.WriteSnapshot(value with
+        {
+            IncludesPath = path => include(path) && (value.IncludesPath?.Invoke(path) ?? true),
+            ChangedObject = firstSync ? null : id => fullChanges.Add(id),
+            AllItemsChanged = () => allChanged = true
+        });
         if (cursor is null)
         {
             Trace($"scan {side}: full listing required; no compatible {(inventoryCursors is null ? "committed" : "pending")} inventory cursor");
@@ -589,16 +597,16 @@ public sealed partial class SyncRun
             Trace($"scan {side}: full snapshot read start ({watch.ElapsedMilliseconds} ms)");
             var snapshot = await ReadFullAsync(inventory, gen, include, root, throttle, ct);
             Trace($"scan {side}: full snapshot read done ({watch.ElapsedMilliseconds} ms); storing");
-            _store.WriteSnapshot(snapshot with { IncludesPath = path => include(path) && (snapshot.IncludesPath?.Invoke(path) ?? true), ChangedObject = id => fullChanges.Add(id) });
+            StoreSnapshot(snapshot);
             if (inventory is LocalInventory && !string.IsNullOrEmpty(snapshot.CursorAfter))
-                return await CatchUpLocalWalkAsync(pair, side, inventory, snapshot, include, root, throttle, ct, fullChanges);
+                return await CatchUpLocalWalkAsync(pair, side, inventory, snapshot, include, root, throttle, ct, fullChanges, allChanged, firstSync);
             await inventory.VerifyPendingAsync(include, _ => { }, ct);
             if (snapshot.IncompleteSubtrees.Count == 0) CloseHydrationFallback(pair, root);
             if (firstSync && snapshot.IncompleteSubtrees.Count == 0 && snapshot.CursorAfter is { } observedCursor)
                 observationStore?.SaveInventoryObservation(coverage, observedCursor);
             Trace($"scan {side}: snapshot stored ({watch.ElapsedMilliseconds} ms)");
             return new SideScan(gen, snapshot.CursorAfter, snapshot.IncompleteSubtrees.Count == 0, true, [], fullChanges.ToArray(),
-                NoDeletions, []) { ScopedFullCoverage = snapshot.IncompleteSubtrees.Count > 0 && !snapshot.IncompleteSubtrees.Contains(string.Empty), PendingDeletionEvidence = snapshot.PendingDeletionEvidence, IncompleteSubtrees = snapshot.IncompleteSubtrees, IncompleteReasons = snapshot.IncompleteReasons, ObservedCoverage = observationStore is null ? null : coverage, RehashThrough = _store.RehashWatermark(root.RootId) };
+                NoDeletions, []) { AllItemsChanged = allChanged, ScopedFullCoverage = snapshot.IncompleteSubtrees.Count > 0 && !snapshot.IncompleteSubtrees.Contains(string.Empty), PendingDeletionEvidence = snapshot.PendingDeletionEvidence, IncompleteSubtrees = snapshot.IncompleteSubtrees, IncompleteReasons = snapshot.IncompleteReasons, ObservedCoverage = observationStore is null ? null : coverage, RehashThrough = _store.RehashWatermark(root.RootId) };
         }
         Trace($"scan {side}: resuming {(inventoryCursors is null ? "committed" : "pending")} inventory cursor");
         var deltaGen = _store.BeginGeneration(root.RootId, "delta");
@@ -646,16 +654,16 @@ public sealed partial class SyncRun
             Trace($"scan {side}: rescan snapshot read start ({watch.ElapsedMilliseconds} ms)");
             var rescan = await ReadFullAsync(inventory, fullGen, include, root, throttle, ct);
             Trace($"scan {side}: rescan snapshot read done ({watch.ElapsedMilliseconds} ms); storing");
-            _store.WriteSnapshot(rescan with { IncludesPath = path => include(path) && (rescan.IncludesPath?.Invoke(path) ?? true), ChangedObject = id => fullChanges.Add(id) });
+            StoreSnapshot(rescan);
             if (inventory is LocalInventory && !string.IsNullOrEmpty(rescan.CursorAfter))
-                return await CatchUpLocalWalkAsync(pair, side, inventory, rescan, include, root, throttle, ct, fullChanges);
+                return await CatchUpLocalWalkAsync(pair, side, inventory, rescan, include, root, throttle, ct, fullChanges, allChanged, firstSync);
             await inventory.VerifyPendingAsync(include, _ => { }, ct);
             if (rescan.IncompleteSubtrees.Count == 0) CloseHydrationFallback(pair, root);
             if (firstSync && rescan.IncompleteSubtrees.Count == 0 && rescan.CursorAfter is { } rescanCursor)
                 observationStore?.SaveInventoryObservation(coverage, rescanCursor);
             Trace($"scan {side}: rescan snapshot stored ({watch.ElapsedMilliseconds} ms)");
             return new SideScan(fullGen, rescan.CursorAfter, rescan.IncompleteSubtrees.Count == 0, true, [], fullChanges.ToArray(),
-                NoDeletions, []) { ScopedFullCoverage = rescan.IncompleteSubtrees.Count > 0 && !rescan.IncompleteSubtrees.Contains(string.Empty), PendingDeletionEvidence = rescan.PendingDeletionEvidence, IncompleteSubtrees = rescan.IncompleteSubtrees, IncompleteReasons = rescan.IncompleteReasons, ObservedCoverage = observationStore is null ? null : coverage, RehashThrough = _store.RehashWatermark(root.RootId) };
+                NoDeletions, []) { AllItemsChanged = allChanged, ScopedFullCoverage = rescan.IncompleteSubtrees.Count > 0 && !rescan.IncompleteSubtrees.Contains(string.Empty), PendingDeletionEvidence = rescan.PendingDeletionEvidence, IncompleteSubtrees = rescan.IncompleteSubtrees, IncompleteReasons = rescan.IncompleteReasons, ObservedCoverage = observationStore is null ? null : coverage, RehashThrough = _store.RehashWatermark(root.RootId) };
         }
         var paths = new List<string>();
         var ids = new List<string>();
@@ -667,7 +675,7 @@ public sealed partial class SyncRun
             if (change.Kind == ChangeKind.Delete)
             {
                 // Retain the previous entity identity for hidden-delete replanning, never deletion authority.
-                ids.AddRange(_store.Live(root.RootId, [change.Path]).Select(item => item.ObjectId));
+                if (change.ObjectId.Length > 0) ids.Add(change.ObjectId);
                 // D81: hydration is a scoped full inventory, not historical deletion authority.
                 // Keep absence in file_state but do not turn excluded-period events into rule-19 deletes.
                 if (!hydrate.Any(prefix => PairPath.IsSelfOrUnder(change.Path, prefix)))
@@ -678,7 +686,7 @@ public sealed partial class SyncRun
             var before = _store.ByObject(root.RootId, change.ObjectId)?.Path;
             if (before is not null && !string.Equals(before, change.Path, StringComparison.Ordinal)) previous.Add(before);
         }
-        _store.WriteDelta(delta with { IncludesPath = include });
+        _store.WriteDelta(delta with { IncludesPath = include, ChangedObject = firstSync ? null : ids.Add });
         var retryReads = await RetryScanScopesAsync(pair, root, side, inventory, delta.CursorAfter, deltaGen, include, throttle, ct);
         paths.AddRange(retryReads.Touched);
         delta = delta with { IncompleteSubtrees = delta.IncompleteSubtrees.Concat(retryReads.Incomplete).Distinct(StringComparer.OrdinalIgnoreCase).ToArray() };
@@ -697,7 +705,7 @@ public sealed partial class SyncRun
     // Always start from the ORIGINAL pre-walk cursor, including after a multi-day pause.
     private async Task<SideScan> CatchUpLocalWalkAsync(PairDef pair, Side side, IInventorySource inventory,
         Snapshot snapshot, Func<string, bool> include, RootDef root, ProgressThrottle throttle, CancellationToken ct,
-        HashSet<string> fullChanges)
+        HashSet<string> fullChanges, bool allChanged, bool firstSync)
     {
         var gen = _store.BeginGeneration(root.RootId, "delta");
         var delta = await inventory.ChangesSinceAsync(snapshot.CursorAfter, gen, include, ct);
@@ -709,18 +717,18 @@ public sealed partial class SyncRun
                 "local-walk-catch-up")]);
             var freshGen = _store.BeginGeneration(root.RootId, "full");
             var fresh = await ReadFullAsync(inventory, freshGen, include, root, throttle, ct);
-            _store.WriteSnapshot(fresh with { IncludesPath = path => include(path) && (fresh.IncludesPath?.Invoke(path) ?? true), ChangedObject = id => fullChanges.Add(id) });
+            _store.WriteSnapshot(fresh with { IncludesPath = path => include(path) && (fresh.IncludesPath?.Invoke(path) ?? true), ChangedObject = firstSync || allChanged ? null : id => fullChanges.Add(id), AllItemsChanged = () => allChanged = true });
             await inventory.VerifyPendingAsync(include, _ => { }, ct);
             return new SideScan(freshGen, fresh.CursorAfter, fresh.IncompleteSubtrees.Count == 0, true, [], fullChanges.ToArray(),
-                NoDeletions, []) { RehashThrough = _store.RehashWatermark(root.RootId) };
+                NoDeletions, []) { AllItemsChanged = allChanged, RehashThrough = _store.RehashWatermark(root.RootId) };
         }
-        _store.WriteDelta(delta with { IncludesPath = include });
+        _store.WriteDelta(delta with { IncludesPath = include, ChangedObject = firstSync || allChanged ? null : id => fullChanges.Add(id) });
         await inventory.VerifyPendingAsync(include, _ => { }, ct);
         var complete = snapshot.IncompleteSubtrees.Count == 0 && delta.IncompleteSubtrees.Count == 0;
         if (complete) CloseHydrationFallback(pair, root);
         return new SideScan(gen, delta.CursorAfter, complete, true,
-            delta.Changes.Select(c => c.Path).ToArray(), fullChanges.Concat(delta.Changes.Select(c => c.ObjectId)).Distinct().ToArray(),
-            NoDeletions, []) { RehashThrough = _store.RehashWatermark(root.RootId),
+            delta.Changes.Select(c => c.Path).ToArray(), firstSync || allChanged ? [] : fullChanges.Concat(delta.Changes.Select(c => c.ObjectId)).Distinct().ToArray(),
+            NoDeletions, []) { AllItemsChanged = allChanged, RehashThrough = _store.RehashWatermark(root.RootId),
                 PendingDeletionEvidence = delta.PendingDeletionEvidence, ReleasedDeletionEvidence = delta.ReleasedDeletionEvidence };
     }
 
@@ -1187,7 +1195,12 @@ public sealed partial class SyncRun
             foreach (var page in deferredPlanning.Chunk(256))
             {
                 ct.ThrowIfCancellationRequested();
-                deferredStore.AcknowledgeDeferredPlanning(pair.PairId, page, Settled);
+                deferredStore.AcknowledgeDeferredPlanning(pair.PairId, page, path =>
+                    Settled(path) || (scan.A.Complete && scan.B.Complete && includeA(path) && includeB(path) &&
+                        !evaluated(path) && !unsettled.Any(p => PairPath.IsSelfOrUnder(path, p) || PairPath.IsSelfOrUnder(p, path)) &&
+                        _store.Live(pair.A.RootId, [path]).Count == 0 && _store.Live(pair.B.RootId, [path]).Count == 0 &&
+                        !_store.BaselinesAt(pair.PairId, Side.A, [path]).Any() &&
+                        !_store.BaselinesAt(pair.PairId, Side.B, [path]).Any()));
             }
         _store.AcknowledgeRehash(pair.A.RootId, scan.A.RehashThrough, path => Settled(path) && includeA(path), ct);
         _store.AcknowledgeRehash(pair.B.RootId, scan.B.RehashThrough, path => Settled(path) && includeB(path), ct);

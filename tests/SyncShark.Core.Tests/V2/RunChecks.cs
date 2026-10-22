@@ -1392,9 +1392,15 @@ internal static partial class RunChecks
 
     // RQ-130: every line is recorded with an ISO timestamp to a .log and a JSON-lines twin, names never collide,
     // rotation keeps whole pairs within a combined budget, and a single run's log is capped.
+    private static string PhysicalFixtureRoot =>
+        Environment.GetEnvironmentVariable("SYNCSHARK_TEST_ROOT") ?? Path.GetTempPath();
+
     private static void RunLog_WritesAndRotatesAsync()
     {
-        var root = Path.Combine(Path.GetTempPath(), "runlog-" + Guid.NewGuid().ToString("N"));
+        // Physical log rotation refuses reparse ancestors. Honour the existing safe
+        // fixture root independently of TEMP, which may live inside a worktree.
+        var testRoot = PhysicalFixtureRoot;
+        var root = Path.Combine(testRoot, "runlog-" + Guid.NewGuid().ToString("N"));
         try
         {
             string textPath, jsonPath;
@@ -1427,7 +1433,7 @@ internal static partial class RunChecks
         }
 
         // Rotation counts a .log and its .jsonl twin together against the budget, and deletes them together.
-        var rotateRoot = Path.Combine(Path.GetTempPath(), "runlog-rotate-" + Guid.NewGuid().ToString("N"), "v2", "logs");
+        var rotateRoot = Path.Combine(testRoot, "runlog-rotate-" + Guid.NewGuid().ToString("N"), "v2", "logs");
         try
         {
             Directory.CreateDirectory(rotateRoot);
@@ -1448,7 +1454,7 @@ internal static partial class RunChecks
         }
 
         // A single run's log is capped: one "log truncated" line, then file output stops.
-        var capRoot = Path.Combine(Path.GetTempPath(), "runlog-cap-" + Guid.NewGuid().ToString("N"));
+        var capRoot = Path.Combine(testRoot, "runlog-cap-" + Guid.NewGuid().ToString("N"));
         try
         {
             string capPath;
@@ -1472,7 +1478,7 @@ internal static partial class RunChecks
         }
 
         // File logging is best-effort: a folder that cannot be created leaves the run continuing with no file.
-        var blocker = Path.Combine(Path.GetTempPath(), "runlog-block-" + Guid.NewGuid().ToString("N"));
+        var blocker = Path.Combine(testRoot, "runlog-block-" + Guid.NewGuid().ToString("N"));
         File.WriteAllText(blocker, "not a folder");
         try
         {

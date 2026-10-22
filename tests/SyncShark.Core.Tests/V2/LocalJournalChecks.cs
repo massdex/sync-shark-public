@@ -152,7 +152,7 @@ internal static partial class LocalJournalChecks
         var emptyGen = store.BeginGeneration(pair.B.RootId, "fixture");
         store.WriteSnapshot(new(pair.B.RootId, Side.B, emptyGen, "cursor", [], []));
         store.CompleteGeneration(emptyGen, "cursor", true);
-        foreach (var mode in new[] { "no-holds", "production-no-holds", "partial-gap", "whole-root-gap" })
+        foreach (var mode in new[] { "no-holds", "production-no-holds", "production-one-retry", "partial-gap", "whole-root-gap" })
         {
             if (mode is "partial-gap" or "whole-root-gap")
             {
@@ -164,10 +164,12 @@ internal static partial class LocalJournalChecks
             }
             var active = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var links = LinkExclusions.Of(store, pair, false);
-            if (mode == "production-no-holds")
+            if (mode == "production-one-retry")
+                store.SaveSyncRetry(pair.PairId, new("unrelated/failing", "sync", 0, "synthetic retry", DateTimeOffset.MaxValue));
+            if (mode.StartsWith("production-", StringComparison.Ordinal))
                 links = links.WithRetryProtection(RetryProtection.Create(store, pair.PairId, active));
             var scope = new RunScope(store, _ => true, _ => true, links,
-                activeRetries: mode == "production-no-holds" ? active : null,
+                activeRetries: mode.StartsWith("production-", StringComparison.Ordinal) ? active : null,
                 restoreProtection: RecoveryRestoreProtection.Create(store, pair.PairId), persistDeferred: true);
             scope.PendingChanges([held.ObjectId], []);
             GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();

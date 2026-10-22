@@ -42,8 +42,8 @@ internal static class PlanningProtectionChecks
         LocalChecks.Require(frozen.A.Count == 1 && frozen.B.Count == 1 && calls == 0,
             "empty frozen retry snapshot makes zero per-path calls, including a mid-prepare writer");
         var next = Scanner().LoadFull(pair);
-        LocalChecks.Require(next.A.Count == 0 && next.B.Count == 0 && calls > 0,
-            "next snapshot sees the new retry and protects its exact path");
+        LocalChecks.Require(next.A.Count == 0 && next.B.Count == 0 && calls == 0,
+            "next snapshot sees the new retry and protects its exact path without per-path SQL");
     }
 
     private static void CheckIncompleteCoverage()

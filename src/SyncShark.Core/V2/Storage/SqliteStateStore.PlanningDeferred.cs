@@ -7,13 +7,11 @@ public sealed partial class SqliteStateStore
     internal sealed record DeferredPlanning(long Root, string ObjectId, string Path, long Version,
         IReadOnlyList<string> Paths, bool AllAliases, string RootId = "", string Reason = "Waiting for content verification");
 
-    // Unary + keeps the consumer filter exact but excludes it as an index-search term.
-    // The entity keyset then seeks naturally on the PK, without relying on an autoindex name
-    // or sorting the whole pair through the historical due index on every page.
+    // Pair-leading index supports both counting and ordered entity keyset seeks.
     internal const string DeferredPlanningPageSql = """
         SELECT d.root_no,d.object_id,d.path,d.version,r.root_id,d.reason
         FROM planning_deferred d
-        JOIN root r ON r.root_no=d.root_no WHERE +d.pair_no=$p
+        JOIN root r ON r.root_no=d.root_no WHERE d.pair_no=$p
           AND (d.root_no,d.object_id)>($root,$id) AND d.version<$version
         ORDER BY d.root_no,d.object_id LIMIT 256;
         """;
@@ -29,9 +27,9 @@ public sealed partial class SqliteStateStore
                 var rows = batch.Select(row => new { root = RootNo(row.Root), id = row.Item.ObjectId, path = row.Item.Path })
                     .Where(row => row.root is not null).ToArray();
                 StoreSchema.Execute(_connection, tx, """
-                    INSERT INTO planning_deferred(root_no,object_id,pair_no,path,version,last_attempt,reason)
+                    INSERT INTO planning_deferred(root_no,object_id,pair_no,path,version,reason)
                     SELECT json_extract(value,'$.root'),json_extract(value,'$.id'),$p,
-                      json_extract(value,'$.path'),$version,0,'Waiting for content verification' FROM json_each($rows) WHERE 1
+                      json_extract(value,'$.path'),$version,'Waiting for content verification' FROM json_each($rows) WHERE 1
                     ON CONFLICT(root_no,object_id,pair_no) DO UPDATE SET
                       path=excluded.path,reason=excluded.reason,version=MAX(planning_deferred.version+1,excluded.version);
                     """, ("$p", pair.Value), ("$version", DateTime.UtcNow.Ticks), ("$rows", System.Text.Json.JsonSerializer.Serialize(rows)));
@@ -101,9 +99,11 @@ public sealed partial class SqliteStateStore
     {
         var pair = PairNo(pairId);
         if (pair is null) return;
-        using var tx = _connection.BeginTransaction();
+        // Settlement may read current inventory/baselines through the store. Evaluate under
+        // its gate before opening the write transaction; newer work is still version-guarded.
         var rows = page.Where(row => row.AllAliases && row.Paths.All(settled))
             .Select(row => new { root = row.Root, id = row.ObjectId, version = row.Version }).ToArray();
+        using var tx = _connection.BeginTransaction();
         StoreSchema.Execute(_connection, tx, """
             DELETE FROM planning_deferred WHERE pair_no=$p AND (root_no,object_id,version) IN (
               SELECT json_extract(value,'$.root'),json_extract(value,'$.id'),json_extract(value,'$.version')

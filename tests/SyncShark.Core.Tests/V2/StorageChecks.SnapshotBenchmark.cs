@@ -15,13 +15,17 @@ internal static partial class StorageChecks
         GC.Collect(2, GCCollectionMode.Forced, true, true);
         Console.WriteLine($"snapshot-input-gen2-heap={GC.GetGCMemoryInfo().HeapSizeBytes}");
         using var process = Process.GetCurrentProcess();
-        long peakManaged = GC.GetTotalMemory(false), peakWorking = 0;
+        var managedBefore = GC.GetTotalMemory(false);
+        long peakManaged = managedBefore, peakWorking = 0, peakPrivate = 0;
+        var changed = new HashSet<string>(StringComparer.Ordinal);
+        var allChanged = false;
         using var stop = new CancellationTokenSource();
         var sampler = Task.Run(async () =>
         {
             while (!stop.IsCancellationRequested)
             {
                 process.Refresh();
+                peakPrivate = Math.Max(peakPrivate, process.PrivateMemorySize64);
                 peakWorking = Math.Max(peakWorking, process.WorkingSet64);
                 peakManaged = Math.Max(peakManaged, GC.GetTotalMemory(false));
                 try { await Task.Delay(10, stop.Token); } catch (OperationCanceledException) { break; }
@@ -29,7 +33,8 @@ internal static partial class StorageChecks
         });
         try
         {
-            var snapshot = new Snapshot("root", Side.A, gen, "c", items, []);
+            var snapshot = new Snapshot("root", Side.A, gen, "c", items, [])
+            { ChangedObject = id => changed.Add(id), AllItemsChanged = () => allChanged = true };
             var watch = Stopwatch.StartNew();
             store.WriteSnapshot(snapshot);
             Console.WriteLine($"snapshot-write-ms={watch.ElapsedMilliseconds}");
@@ -38,9 +43,12 @@ internal static partial class StorageChecks
             Console.WriteLine($"snapshot-noop-ms={watch.ElapsedMilliseconds}");
             GC.Collect(2, GCCollectionMode.Forced, true, true);
             Console.WriteLine($"snapshot-saved-gen2-heap={GC.GetGCMemoryInfo().HeapSizeBytes}");
+            Console.WriteLine($"snapshot-change-ids={changed.Count}; all-changed={allChanged}; retained-managed-delta={GC.GetTotalMemory(false)-managedBefore}");
+            Require(allChanged ? changed.Count == 0 : changed.Count == items.Length, "initial snapshot reports all changes without losing identities");
+            GC.KeepAlive(changed);
             GC.KeepAlive(items);
         }
         finally { stop.Cancel(); await sampler; }
-        Console.WriteLine($"snapshot-production-million: peak-managed={peakManaged}; peak-working-set={peakWorking}");
+        Console.WriteLine($"snapshot-production-million: peak-managed={peakManaged}; peak-managed-delta={peakManaged-managedBefore}; peak-private={peakPrivate}; peak-working-set={peakWorking}");
     }
 }

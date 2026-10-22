@@ -15,7 +15,13 @@ internal static class PlanningDeferredChecks
         using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
         {
             store.SavePair(pair);
-            Snapshot(store, pair.A, Side.A, [local]);
+            var initialIds = new List<string>();
+            var allChanged = false;
+            var gen = store.BeginGeneration(pair.A.RootId, "fixture");
+            store.WriteSnapshot(new(pair.A.RootId, Side.A, gen, "cursor", [local], [])
+            { ChangedObject = initialIds.Add, AllItemsChanged = () => allChanged = true });
+            store.CompleteGeneration(gen, "cursor", true);
+            LocalChecks.Require(allChanged && initialIds.Count == 0, "initial root snapshot reports all-changed without collecting identities");
             Snapshot(store, pair.B, Side.B, [cloud, added]);
             var gaps = (ILocalGapStore)store;
             gaps.BeginGap(pair.A.RootId, "cursor", 1, false, "synthetic gap");
@@ -68,6 +74,16 @@ internal static class PlanningDeferredChecks
                 .LoadTouched(pair, [cloud.Path], [], [cloud.ObjectId]);
             LocalChecks.Require(store.CountDeferredPlanning(pair.PairId) == 0,
                 "ongoing decision holds never create planning deferrals");
+            foreach (var hold in new[] { "ancestor retry", "recovery restore" })
+            {
+                var retryLinks = LinkExclusions.Of(store, pair, false).WithRetryProtection(
+                    (path, descendants) => PairPath.IsSelfOrUnder(path, "Held"));
+                var retryScope = new RunScope(store, _ => true, _ => true, retryLinks,
+                    restoreProtection: RecoveryRestoreProtection.None, persistDeferred: true)
+                    .LoadTouched(pair, [cloud.Path], [], [cloud.ObjectId]);
+                LocalChecks.Require(retryScope.A.Count == 0 && retryScope.B.Count == 0 && store.CountDeferredPlanning(pair.PairId) == 0,
+                    hold + " does not create a misleading verification row");
+            }
             store.RequireRehash(pair.A.RootId, local, "preview hold");
             new RunScope(store, _ => true, _ => true, LinkExclusions.Of(store, pair, false))
                 .LoadTouched(pair, [cloud.Path], [], [cloud.ObjectId]);
@@ -128,6 +144,28 @@ internal static class PlanningDeferredChecks
             AssertSeek(connection);
         }
 
+        // A store created by the earlier unshipped v22 must preserve queued work and
+        // heal idempotently, without rebuilding domain tables or changing schema version.
+        using (var connection = new SqliteConnection($"Data Source={SqliteStateStore.DatabasePath(migratedFolder)};Pooling=False"))
+        {
+            connection.Open();
+            StoreSchema.Execute(connection, null, "DROP INDEX planning_deferred_pair;" +
+                "ALTER TABLE planning_deferred ADD COLUMN last_attempt INTEGER NOT NULL DEFAULT 0;" +
+                "CREATE INDEX planning_deferred_due ON planning_deferred(pair_no,last_attempt,root_no,object_id);");
+        }
+        for (var open = 0; open < 2; open++)
+        {
+            using var migrated = SqliteStateStore.Open(migratedFolder, StorageChecks.Fast, TimeProvider.System);
+            LocalChecks.Require(migrated.CountDeferredPlanning(pair.PairId) == 1, "v22 index migration preserves queued entities on repeated opens");
+            migrated.DeferPlanning(pair.PairId, new[] { (pair.A.RootId, local) });
+            using var connection = new SqliteConnection($"Data Source={SqliteStateStore.DatabasePath(migratedFolder)};Pooling=False");
+            connection.Open();
+            AssertSeek(connection);
+            LocalChecks.Require(Convert.ToInt64(StoreSchema.Scalar(connection, null,
+                "SELECT COUNT(*) FROM pragma_table_info('planning_deferred') WHERE name='last_attempt';")) == 0,
+                "unshipped deferral scheduling column is removed");
+        }
+
         using (var store = SqliteStateStore.Open(Path.Combine(folder, "hidden-delete"), StorageChecks.Fast, TimeProvider.System))
         {
             store.SavePair(pair);
@@ -174,7 +212,7 @@ internal static class PlanningDeferredChecks
                 using var reader = explain.ExecuteReader();
                 var details = new List<string>();
                 while (reader.Read()) details.Add(reader.GetString(3));
-                LocalChecks.Require(details.Any(detail => detail.Contains("SEARCH d USING PRIMARY KEY", StringComparison.Ordinal)) &&
+                LocalChecks.Require(details.Any(detail => detail.Contains("SEARCH d USING INDEX planning_deferred_pair", StringComparison.Ordinal)) &&
                     details.All(detail => !detail.Contains("TEMP B-TREE", StringComparison.Ordinal)),
                     "deferred paging seeks the entity key without sorting the pair on every page");
             }

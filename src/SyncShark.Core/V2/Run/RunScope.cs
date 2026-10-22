@@ -9,6 +9,7 @@ internal sealed class RunScope
     private const int BaselineBatchSize = 256;
     private readonly bool _persistDeferred;
     private readonly CancellationToken _cancellationToken;
+    private bool _allChangedA, _allChangedB;
     private IReadOnlySet<string> _dirtyA = new HashSet<string>();
     private IReadOnlySet<string> _dirtyB = new HashSet<string>();
     private readonly HashSet<string> _permanentA = new(StringComparer.Ordinal);
@@ -61,8 +62,10 @@ internal sealed class RunScope
             .Select(entry => entry.Key).ToHashSet(StringComparer.OrdinalIgnoreCase) ?? [];
     }
 
-    internal void PendingChanges(IEnumerable<string> a, IEnumerable<string> b)
+    internal void PendingChanges(IEnumerable<string> a, IEnumerable<string> b, bool allA = false, bool allB = false)
     {
+        _allChangedA = allA;
+        _allChangedB = allB;
         _dirtyA = a.ToHashSet(StringComparer.Ordinal);
         _dirtyB = b.ToHashSet(StringComparer.Ordinal);
     }
@@ -247,16 +250,12 @@ internal sealed class RunScope
                     restoreLookup = (path, descendants) => snapshot.RecoveryRestoreProtected(pair.PairId, path, descendants);
                 else if (restore.Active)
                     restoreLookup = restore.Bind(snapshot, pair.PairId);
-                var hasRetries = active is not null && snapshot.HasRetries(pair.PairId);
-                if (restoreLookup is not null || active is not null)
+                var retryLookup = active is null ? null : snapshot.RetryLookup(pair.PairId, active,
+                    _restoredRetriesOnly, RetryProtectionReadForTest);
+                if (restoreLookup is not null || retryLookup is not null)
                     _scopeLinks = _scopeLinks.WithRetryProtection((path, descendants) =>
                         (restoreLookup is not null && restoreLookup(path, descendants)) ||
-                        (hasRetries && ReadRetry(path, descendants)));
-                bool ReadRetry(string path, bool descendants)
-                {
-                    RetryProtectionReadForTest?.Invoke();
-                    return snapshot.RetryProtected(pair.PairId, path, descendants, active!, _restoredRetriesOnly);
-                }
+                        (retryLookup is not null && retryLookup(path, descendants)));
             }
             else if (restore is { Active: true })
             {
@@ -431,7 +430,9 @@ internal sealed class RunScope
     private void Defer(ItemState item, Side side, LinkExclusions links)
     {
         if (!_persistDeferred || _deferredPair is not { } pair || _store is not SqliteStateStore ||
-            !(side == Side.A ? _dirtyA : _dirtyB).Contains(item.ObjectId) ||
+            (!(side == Side.A ? _allChangedA : _allChangedB) && !(side == Side.A ? _dirtyA : _dirtyB).Contains(item.ObjectId)) ||
+            !new[] { item.Path, DropboxNameMapping.MatchPath(item) }.Any(links.TouchesRehash) ||
+            new[] { item.Path, DropboxNameMapping.MatchPath(item) }.Any(links.CoversRetry) ||
             (side == Side.A ? _permanentA : _permanentB).Contains(item.ObjectId) || PermanentHold(item, links) ||
             _store.SyncRetryAt(pair.PairId, item.Path) is not null) return;
         _deferred.Add(((side == Side.A ? pair.A : pair.B).RootId, item));

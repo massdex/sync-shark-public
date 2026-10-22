@@ -730,8 +730,10 @@ public sealed partial class SyncRun : ISyncRun
         var retryCount = _store.CountSyncRetries(pairId);
         var retries = _store.DueSyncRetries(pairId, _time.GetUtcNow(), 256);
         var deferredBefore = DateTime.UtcNow.Ticks;
-        IEnumerable<SqliteStateStore.DeferredPlanning> deferredPlanning = _store is SqliteStateStore deferredStore
-            ? deferredStore.DeferredPlanningPages(pairId, deferredBefore).SelectMany(page => page) : [];
+        // One intake read; reuse its versioned rows for paths, IDs and acknowledgement.
+        IReadOnlyList<SqliteStateStore.DeferredPlanning> deferredPlanning = _store is SqliteStateStore deferredStore
+            ? deferredStore.DeferredPlanningPages(pairId, deferredBefore).SelectMany(page =>
+                { ct.ThrowIfCancellationRequested(); return page; }).ToArray() : [];
         var activeRetries = retries.Select(item => item.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var retryHeld = retries.Where(item => item.Held is not null).Select(item => item.Held!).ToArray();
         var pendingEvidence = scan.A.PendingDeletionEvidence.Concat(scan.B.PendingDeletionEvidence)
@@ -785,7 +787,7 @@ public sealed partial class SyncRun : ISyncRun
                 .Select(item => item.ObjectId)).ToArray();
             var changesB = scan.B.ChangeObjectIds.Concat(deferredPlanning.Where(item => item.RootId == pair.B.RootId)
                 .Select(item => item.ObjectId)).ToArray();
-            scanner.PendingChanges(changesA, changesB);
+            scanner.PendingChanges(changesA, changesB, scan.A.AllItemsChanged, scan.B.AllItemsChanged);
             var scope = scan.AnyFull ? scanner.LoadFull(pair) :
                 scanner.LoadTouched(pair, touched, changesA, changesB);
             inventory = scope;

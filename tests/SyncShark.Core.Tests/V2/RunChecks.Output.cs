@@ -69,7 +69,7 @@ internal static partial class RunChecks
             Require(messages.Count == 3 && messages[1].StartsWith("Still waiting for the Sync Shark data lock ("), "outer gate repeats timed wait announcements");
             gate.Release();
         }
-        var root = Path.Combine(Path.GetTempPath(), "output-check-" + Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(PhysicalFixtureRoot, "output-check-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         try
         {

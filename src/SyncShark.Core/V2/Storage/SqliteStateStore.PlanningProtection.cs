@@ -46,11 +46,26 @@ public sealed partial class SqliteStateStore
                 left.Contains || right.Contains)).ToArray();
         }
 
-        // This uses the same pinned snapshot as RetryProtected. A later writer could not
-        // have been seen by the old callback either; execution refreshes live retry protection.
-        internal bool HasRetries(string pairId) => Convert.ToInt64(StoreSchema.Scalar(_connection, _transaction,
-            "SELECT EXISTS(SELECT 1 FROM sync_retry WHERE pair_no=(SELECT pair_no FROM pair WHERE pair_id=$id));",
-            ("$id", pairId))) != 0;
+        // Read once from the same pinned snapshot as protection. Large backlogs retain
+        // the existing bounded fallback; ordinary retries never require per-item SQL.
+        internal Func<string, bool, bool> RetryLookup(string pairId, IReadOnlySet<string> active,
+            bool restoredOnly, Action? onRead = null) => RetryProtection.Create(RetryPaths(pairId, restoredOnly), active,
+                (path, descendants) =>
+                {
+                    onRead?.Invoke();
+                    return RetryProtected(pairId, path, descendants, active, restoredOnly);
+                });
+
+        private IEnumerable<string> RetryPaths(string pairId, bool restoredOnly)
+        {
+            using var command = StoreSchema.Command(_connection, _transaction,
+                "SELECT path_key FROM sync_retry WHERE pair_no=(SELECT pair_no FROM pair WHERE pair_id=$id)" +
+                (restoredOnly ? " AND json_extract(json,'$.ReprobeEvidence')=1 AND retry_after<$held" : "") + ";");
+            command.Parameters.AddWithValue("$id", pairId);
+            if (restoredOnly) command.Parameters.AddWithValue("$held", DateTimeOffset.MaxValue.ToUnixTimeMilliseconds());
+            using var reader = command.ExecuteReader();
+            while (reader.Read()) yield return reader.GetString(0);
+        }
 
         internal bool RetryProtected(string pairId, string path, bool descendants,
             IReadOnlySet<string> active, bool restoredOnly)

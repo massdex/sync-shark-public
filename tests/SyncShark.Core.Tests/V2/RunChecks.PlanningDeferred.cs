@@ -31,6 +31,39 @@ internal static partial class RunChecks
         Require(store.OpenNotices(fx.Pair.PairId).All(notice => notice.ReasonKey != RehashProtection.Reason),
             "verification summary closes in the successful replay run");
         await MirrorAsync(fx);
+        await PlanningDeferredEmptyPathAsync();
+        await DropboxChecks.PlanningGapFolderDeleteAsync(Path.Combine(Path.GetTempPath(), "planning-folder-" + Guid.NewGuid().ToString("N")));
         Console.WriteLine("PASS PlanningDeferredReplaysNextRun");
+    }
+    private static async Task PlanningDeferredEmptyPathAsync()
+    {
+        using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(),
+            "planning-empty-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System);
+        var fx = Build(suppliedStore: store);
+        var run = new SyncRun(store, fx.Executor, fx.Provider, Settings, TimeProvider.System);
+        // BeginGap deliberately does nothing for an empty stored root.
+        fx.A.Seed("Anchor", "same");
+        fx.B.Seed("Anchor", "same");
+        await FirstSyncAsync(run, fx);
+        var a = fx.A.Seed("Gone", "new");
+        var b = fx.B.Seed("Gone", "new");
+        var gaps = (ILocalGapStore)store;
+        gaps.BeginGap(fx.Pair.A.RootId, "cursor", 1, false, "synthetic gap");
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        Require(store.CountDeferredPlanning(fx.Pair.PairId) > 0 &&
+            store.OpenNotices(fx.Pair.PairId).Any(n => n.ReasonKey == RehashProtection.Reason),
+            "new hidden work has a verification summary before disappearing");
+        await fx.A.DeleteAsync(new("remove-a", 6, ActionKind.Delete, Side.A, a.Path, null, null, a, false, null), default);
+        await fx.B.DeleteAsync(new("remove-b", 6, ActionKind.Delete, Side.B, b.Path, null, null, b, false, null), default);
+        var epoch = gaps.GapEpoch(fx.Pair.A.RootId)!;
+        gaps.GapDiscoveredBatch(fx.Pair.A.RootId, epoch, store.Live(fx.Pair.A.RootId)
+            .Where(item => item.Kind == ItemKind.File).Select(item => (item, false)).ToArray());
+        gaps.GapDiscoveryDone(fx.Pair.A.RootId, epoch);
+        gaps.PromoteGapDiscovery(fx.Pair.A.RootId);
+        Require(!gaps.HasGapProtection(fx.Pair.A.RootId), "empty-path fixture completes gap discovery before replay");
+        var complete = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        Require(complete.Failed == 0 && store.CountDeferredPlanning(fx.Pair.PairId) == 0 &&
+            store.OpenNotices(fx.Pair.PairId).All(n => n.ReasonKey != RehashProtection.Reason),
+            "complete run settles an empty touched path without a baseline and closes verification notice");
     }
 }

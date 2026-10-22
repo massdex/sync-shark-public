@@ -172,8 +172,8 @@ internal sealed class FileStateTable
                 : changes.Read();
             foreach (var change in replay)
             {
-                snapshot.ChangedObject?.Invoke(change.Entry.Item.ObjectId);
-                if (change.Incoming is { } changed && changed.ObjectId != change.Entry.Item.ObjectId)
+                if (!initialLoad) snapshot.ChangedObject?.Invoke(change.Entry.Item.ObjectId);
+                if (!initialLoad && change.Incoming is { } changed && changed.ObjectId != change.Entry.Item.ObjectId)
                     snapshot.ChangedObject?.Invoke(changed.ObjectId);
                 if (change.Incoming is null)
                 {
@@ -209,6 +209,7 @@ internal sealed class FileStateTable
         }
         else if (locked) lockedBatch!.Flush();
         else if (!Equals(version, StoreSchema.Scalar(_connection, null, "PRAGMA data_version;"))) return false;
+        if (initialLoad) snapshot.AllItemsChanged?.Invoke();
         phase("publish");
         return true;
     }
@@ -249,7 +250,7 @@ internal sealed class FileStateTable
             .Select(change => change.ObjectId).ToHashSet(StringComparer.Ordinal);
         using var batch = new StoreBatch(_connection, _settings.StoreBatchRows);
         foreach (var change in delta.Changes)
-            if (change.Kind == ChangeKind.Delete) Delete(change, rootNo, suppressed, batch, delta.IncludesPath);
+            if (change.Kind == ChangeKind.Delete) Delete(change, rootNo, suppressed, batch, delta.IncludesPath, delta.ChangedObject);
         var now = _clock.GetUtcNow();
         foreach (var change in delta.Changes)
             if (change.Kind == ChangeKind.Upsert && (delta.IncludesPath?.Invoke(change.Path) ?? true))
@@ -335,12 +336,16 @@ internal sealed class FileStateTable
     // object is upserted later in the delta is a move written as Delete(old) + Upsert(new) and is left for that
     // Upsert, which removes it in the same step as the insertion. One step per removed row.
     private void Delete(Change change, long rootNo, HashSet<string> suppressed, StoreBatch batch,
-        Func<string, bool>? include)
+        Func<string, bool>? include, Action<string>? changedObject)
     {
         var deletedAt = change.DeletedUtc ?? _clock.GetUtcNow();
         foreach (var row in ExactRows(rootNo, change, batch.Transaction))
             if (!suppressed.Contains(row.ObjectId) && (include?.Invoke(RowCodec.Join(row.Path, row.Name)) ?? true))
-                Step(batch, RemoveAt(rootNo, row.DirNo, row.Name, deletedAt, suppressed, batch));
+                {
+                var removed = RemoveAt(rootNo, row.DirNo, row.Name, deletedAt, suppressed, batch);
+                if (removed) changedObject?.Invoke(row.ObjectId);
+                Step(batch, removed);
+            }
     }
 
     private List<RowRef> ExactRows(long rootNo, Change change, SqliteTransaction transaction)

@@ -122,7 +122,7 @@ internal static partial class RunChecks
                     !quiet.Reports.Any(x => x.Message?.Contains("transfer slots;") == true),
                 "routine slot waits do not suppress heartbeat");
         }
-        var directory = Path.Combine(Path.GetTempPath(), "orphan-" + Guid.NewGuid().ToString("N"), "v2", "logs");
+        var directory = Path.Combine(PhysicalFixtureRoot, "orphan-" + Guid.NewGuid().ToString("N"), "v2", "logs");
         Directory.CreateDirectory(directory);
         try
         {

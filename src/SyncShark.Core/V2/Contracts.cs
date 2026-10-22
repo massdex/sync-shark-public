@@ -40,6 +40,7 @@ public sealed record Snapshot(string RootId, Side Side, long Gen, string CursorA
     internal Func<ItemState, FileAbsence>? VerifyAbsence { get; init; }
     // The snapshot writer emits only its actual change set, not unchanged observations.
     internal Action<string>? ChangedObject { get; init; }
+    internal Action? AllItemsChanged { get; init; }
     internal Dictionary<string, string> PendingDeletionEvidence { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     internal bool CanCloseAbsent(ItemState item)
@@ -66,6 +67,7 @@ public sealed record Delta(string RootId, Side Side, long Gen, string CursorBefo
     public IReadOnlyDictionary<string, string> IncompleteReasons { get; init; } = new Dictionary<string, string>();
     // Local partial refreshes use the same evidence for displaced objects as for missing rows.
     internal Snapshot? DisplacementEvidence { get; init; }
+    internal Action<string>? ChangedObject { get; init; }
 
     /// <summary>Held paths whose retry bound expired; these no longer retain the side's cursor.</summary>
     public IReadOnlySet<string> ReleasedDeletionEvidence { get; init; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

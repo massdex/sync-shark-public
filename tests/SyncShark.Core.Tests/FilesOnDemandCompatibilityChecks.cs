@@ -51,7 +51,7 @@ internal static class FilesOnDemandCompatibilityChecks
             Require(removedOpen.All(row => TypeOf(row) == "table" && (NameOf(row) is "notice" or "recovery")),
                 "no-command open only redefines the notice and recovery tables");
             Require(addedOpen.All(row => (TypeOf(row) == "table" && (NameOf(row) is "notice" or "recovery" or "planning_deferred")) ||
-                (TypeOf(row) == "index" && (RecoveryIndexes.Contains(NameOf(row), StringComparer.Ordinal) || NameOf(row) == "planning_deferred_due"))),
+                (TypeOf(row) == "index" && (RecoveryIndexes.Contains(NameOf(row), StringComparer.Ordinal) || NameOf(row) == "planning_deferred_pair"))),
                 "no-command open adds only recovery and entity-owned deferred planning objects");
             Require(addedOpen.Where(row => TypeOf(row) == "table").Select(NameOf).OrderBy(name => name, StringComparer.Ordinal)
                 .SequenceEqual(new[] { "notice", "planning_deferred", "recovery" }),
