@@ -223,8 +223,10 @@ internal static partial class RunChecks
             var (store, fx, notice) = await FolderReplaceAsync("restore-low-space", side => side.Seed("new/old.txt", "existing"));
             using var _ = store;
             Require((await Choose(fx, notice, NoticeChoices.ReplaceExisting)).Outcome == Outcome.Done, "replace before low-space restore");
-            fx.WriterA.PutError = new FreeSpaceRefusedException(new FreeSpaceRefusal("Not enough free space; free space and retry.",
-                FreeSpaceRefusal.InsufficientReasonKey, @"C:\", 2L << 20, 1L << 20, 512L << 20));
+            fx.WriterA.PutFailure = action => action.ConflictRestore
+                ? new FreeSpaceRefusedException(new FreeSpaceRefusal("Not enough free space; free space and retry.",
+                    FreeSpaceRefusal.InsufficientReasonKey, @"C:\", 2L << 20, 1L << 20, 512L << 20))
+                : null;
             var restored = await Choose(fx, notice, NoticeChoices.RestoreExisting);
             Require(restored.Outcome == Outcome.Skipped && restored.Reason!.Contains("Not enough free space", StringComparison.Ordinal),
                 "conflict restore returns the refusal detail");
@@ -237,8 +239,8 @@ internal static partial class RunChecks
                     "exactly the original conflict notice remains open with the free-space cause");
             }
             OneConflictNotice();
-            // Prevent the separate incoming item from arriving; this sync does not perform the restore.
-            store.SavePair(fx.Pair with { Excluded = ["new"] });
+            // Allow unrelated sync work normally. Excluding the folder would deliberately add a
+            // separate pair-excluded summary and contaminate this exact-one-notice assertion.
             store.MarkFirstSyncDone(fx.Pair.PairId);
             await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
             OneConflictNotice();

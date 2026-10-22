@@ -721,7 +721,7 @@ public sealed partial class SyncRun : ISyncRun
         }
 
         RecordScanRetries(pair, scan);
-        var recoveryTouched = await RefreshRecoveryRestoresAsync(pair, ct);
+        var recoveryTouched = await RefreshRecoveryRestoresAsync(pair, scan, ct);
         CloseObservedRepairs(pair, scan);
         // Finding 1 (Astra): a link or stub that disappears in this run still protects its path for the whole run.
         // The restore refresh above may have frozen a new intent; take the run's hold snapshot after it.
