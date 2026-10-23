@@ -35,6 +35,8 @@ internal static partial class DropboxChecks
         await PrepareCursorLegacyOrRescanAsync(true);
         await PrepareCursorDeletionFallbackAsync(false);
         await PrepareCursorDeletionFallbackAsync(true);
+        await PrepareCursorDeletionFallbackAsync(false, editLocal: true);
+        await PrepareCursorDeletionFallbackAsync(true, editLocal: true);
         await PermanentEvidenceCallbackChecksAsync();
         await PrepareCursorDeferredAsync();
         await PrepareCursorRefreshRaceAsync();

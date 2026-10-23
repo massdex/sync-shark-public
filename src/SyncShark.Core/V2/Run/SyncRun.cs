@@ -540,7 +540,11 @@ public sealed partial class SyncRun : ISyncRun
         var restored = _store.DueSyncRetries(pairId, _time.GetUtcNow(), 256)
             .Where(retry => retry.ReprobeEvidence && retry.Held is not null &&
                 !pair.Excluded.Any(path => PairPath.IsSelfOrUnder(retry.Path, path))).ToArray();
-        var activeFirstSyncRetries = ActiveFirstSyncRetries(pair);
+        // Admit only due, prepare-matched evidence retries to ordinary planning. Their durable
+        // rows remain intact; the planner and fresh executor admission still own deletion authority.
+        var activeFirstSyncRetries = ActiveFirstSyncRetries(pair).Concat(restored
+            .Where(retry => !UsesDeletionEvidenceLane(retry.Path, matchedAtPrepare))
+            .Select(retry => retry.Path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var restoreProtection = RecoveryProtection(pair);
         var links = Protection(pair, scan, before, activeRetries: activeFirstSyncRetries);
         var predicates = Predicates(pair, links);
@@ -564,7 +568,9 @@ public sealed partial class SyncRun : ISyncRun
         matchedAtPrepare = InterruptedDeleteRepair.WithoutMatches(matchedAtPrepare, repairPaths);
         var evidence = await PrepareDeferredEvidenceAsync(pair, inventory, rebuildablePaths, matchedAtPrepare,
             scan, ct, repairPaths);
-        evidence = evidence with { Held = evidence.Held.Concat(restored.Select(retry => retry.Held!))
+        evidence = evidence with { Held = evidence.Held.Concat(restored
+            .Where(retry => UsesDeletionEvidenceLane(retry.Path, matchedAtPrepare, repairPaths))
+            .Select(retry => retry.Held!))
             .DistinctBy(held => held.Path, StringComparer.OrdinalIgnoreCase).ToArray() };
         scan = evidence.Scan;
         // (third-review finding 1): held paths are hidden from the planner's rows, so the planner

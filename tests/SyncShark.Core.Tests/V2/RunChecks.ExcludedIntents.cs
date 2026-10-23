@@ -4,6 +4,9 @@ internal static partial class RunChecks
 {
     private static async Task Reconcile_ExcludedUncertainHonorsGraceAsync()
     {
+        var checks = new List<(bool Condition, string Label)>();
+        // Capture each condition at its original checkpoint; assert only after both variants are logged.
+        void Capture(bool condition, string label) => checks.Add((condition, label));
         foreach (var folder in new[] { false, true })
         {
             var fx = Build();
@@ -19,18 +22,28 @@ internal static partial class RunChecks
             fx.Store.RecordIntent(fx.Pair.PairId, intent);
             var run = fx.Run();
             var pending = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
-            Require(fx.Store.UnresolvedIntents(fx.Pair.PairId).Count == 1,
+            Capture(fx.Store.UnresolvedIntents(fx.Pair.PairId).Count == 1,
                 "excluded uncertain effect retains provider evidence within grace (folder minimum two hours)");
-            Require(pending.Failures.Single().Reason!.Contains("excluded, awaiting provider confirmation"),
+            Capture(pending.Failures.Single().Reason!.Contains("excluded, awaiting provider confirmation"),
                 "pending excluded effect is explicitly reported rather than silently stalled");
-            Require(!fx.Store.OpenNotices(fx.Pair.PairId).Any(n => n.ReasonKey == SyncRun.ExcludedIntentNoticeKey),
+            Capture(!fx.Store.OpenNotices(fx.Pair.PairId).Any(n => n.ReasonKey == SyncRun.ExcludedIntentNoticeKey),
                 "uncertain effect is not described as not applied");
             fx.Store.RecordIntent(fx.Pair.PairId, intent with
             {
                 ProviderEffect = intent.ProviderEffect! with { RecordedAtUtc = DateTimeOffset.UtcNow - TimeSpan.FromDays(1) }
             });
-            await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
-            Require(fx.Store.UnresolvedIntents(fx.Pair.PairId).Count == 1,
+            var aged = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+            Console.WriteLine("AGED EXCLUDED DELETE " + System.Text.Json.JsonSerializer.Serialize(new
+            {
+                folder, report = aged,
+                unresolvedCount = fx.Store.UnresolvedIntents(fx.Pair.PairId).Count,
+                intents = fx.Store.UnresolvedIntents(fx.Pair.PairId),
+                retries = fx.Store.ReadSyncRetries(fx.Pair.PairId).ToArray(),
+                notices = fx.Store.UnresolvedNotices(fx.Pair.PairId).ToArray(),
+                target = await fx.B.ObserveAsync(intent.Path, CancellationToken.None),
+                callsA = fx.WriterA.Calls, callsB = fx.WriterB.Calls
+            }));
+            Capture(fx.Store.UnresolvedIntents(fx.Pair.PairId).Count == 1,
                 "an aged delete submission without a job id remains protected");
 
             var jobWriter = new ExcludedDeleteJobWriter(fx.WriterB);
@@ -49,9 +62,9 @@ internal static partial class RunChecks
             {
                 jobWriter.Failure = failure;
                 await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
-                Require(fx.Store.UnresolvedIntents(fx.Pair.PairId).Count == 1,
+                Capture(fx.Store.UnresolvedIntents(fx.Pair.PairId).Count == 1,
                     "excluded live jobs and generic lookup failures never expire by age");
-                Require(!fx.Store.OpenNotices(fx.Pair.PairId).Any(n => n.ReasonKey == SyncRun.ExcludedIntentNoticeKey),
+                Capture(!fx.Store.OpenNotices(fx.Pair.PairId).Any(n => n.ReasonKey == SyncRun.ExcludedIntentNoticeKey),
                     "unverified excluded job does not get a not-applied notice");
             }
 
@@ -61,16 +74,17 @@ internal static partial class RunChecks
                 ProviderEffect = jobIntent.ProviderEffect! with { RecordedAtUtc = intent.ProviderEffect!.RecordedAtUtc }
             });
             await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
-            Require(fx.Store.UnresolvedIntents(fx.Pair.PairId).Count == 1,
+            Capture(fx.Store.UnresolvedIntents(fx.Pair.PairId).Count == 1,
                 "typed expired excluded job still honors file grace and folder minimum two hours");
             fx.Store.RecordIntent(fx.Pair.PairId, jobIntent);
             await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
-            Require(fx.Store.UnresolvedIntents(fx.Pair.PairId).Count == 0,
+            Capture(fx.Store.UnresolvedIntents(fx.Pair.PairId).Count == 0,
                 "unchanged excluded target settles only with typed expired-job evidence after grace");
-            Require(fx.WriterB.Deletes == 0, "pending or expired excluded effect is never replayed");
-            Require(fx.Store.OpenNotices(fx.Pair.PairId).Count(n => n.ReasonKey == SyncRun.ExcludedIntentNoticeKey) == 1,
+            Capture(fx.WriterB.Deletes == 0, "pending or expired excluded effect is never replayed");
+            Capture(fx.Store.OpenNotices(fx.Pair.PairId).Count(n => n.ReasonKey == SyncRun.ExcludedIntentNoticeKey) == 1,
                 "definitive expired effect gets the settlement notice");
         }
+        foreach (var check in checks) Require(check.Condition, check.Label);
     }
 
     private sealed class ExcludedDeleteJobWriter(IEndpointWriter inner) : IEndpointWriter, IProviderEffectReconciler, IFolderTreeDeleter

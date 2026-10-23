@@ -82,10 +82,13 @@ internal static partial class DropboxChecks
         }
     }
 
-    private static async Task PrepareCursorDeletionFallbackAsync(bool released)
+    private static Task PrepareCursorDeletionFallbackAsync(bool released) =>
+        PrepareCursorDeletionFallbackAsync(released, editLocal: false);
+
+    private static async Task PrepareCursorDeletionFallbackAsync(bool released, bool editLocal)
     {
         using var h = new Harness();
-        var scenario = released ? "released-delete" : "pending-delete";
+        var scenario = (released ? "released-delete" : "pending-delete") + (editLocal ? "-edited" : "");
         var productRoot = Path.Combine(_root, "prepare-cursor-" + scenario);
         var stateRoot = Path.Combine(productRoot, "state");
         // Local files have no provider revision; prepare must retain their content hash, not a fake v-stamp.
@@ -132,6 +135,10 @@ internal static partial class DropboxChecks
             Require(survivor.VersionId is null && survivor.Hash is not null &&
                 matches["matched.txt"].A == survivor.ObjectId + "|h:" + survivor.Hash,
                 scenario + ": prepared local survivor carries real identity and hash evidence");
+            var edited = editLocal ? local.Seed("matched.txt", "local edit after prepare") : null;
+            if (edited is not null)
+                Require(edited.ObjectId == survivor.ObjectId && edited.Hash != survivor.Hash,
+                    "edited fallback fixture changes bytes without changing the saved local identity");
             var lists = h.Wire.ListRequests.Count;
             var calls = h.Wire.Calls.Count;
             var delta = await run.PreviewFirstSyncApplyResolvedAsync(pair.PairId, null, null, [], matches,
@@ -179,10 +186,53 @@ internal static partial class DropboxChecks
                     $"local={JsonSerializer.Serialize(observedA)}; remote={JsonSerializer.Serialize(observedB)}; " +
                     $"retry={JsonSerializer.Serialize(store.SyncRetryAt(pair.PairId, path))}");
             }
+            Require(delta.Plan.HeldDeletions.Any(held => held.Path == "remote-only.txt") &&
+                full.Plan.HeldDeletions.Any(held => held.Path == "remote-only.txt") &&
+                store.SyncRetryAt(pair.PairId, "remote-only.txt")?.Held is not null,
+                scenario + ": history failure without a saved match remains durably held");
+            if (edited is not null)
+            {
+                foreach (var plan in new[] { delta.Plan, full.Plan })
+                {
+                    Require(plan.Actions.All(action => action.Path != "matched.txt" || action.Kind != ActionKind.Delete),
+                        "postprepare local edit never becomes a deletion when history is unreadable");
+                    Require(plan.HeldDeletions.Any(held => held.Path == "matched.txt") ||
+                        plan.Actions.Any(action => action.Path == "matched.txt" && action.Target == Side.B &&
+                            action.Kind is ActionKind.CopyNew or ActionKind.Update),
+                        "postprepare local edit is retained as a hold or a copy back to Dropbox");
+                }
+                await runtime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { }, CancellationToken.None);
+                var afterEditApply = await local.ObserveAsync("matched.txt", CancellationToken.None);
+                Require(afterEditApply is not null && afterEditApply.ObjectId == edited.ObjectId && afterEditApply.Hash == edited.Hash,
+                    "applying after unreadable history preserves the edited local identity and bytes");
+                return;
+            }
             Require(Effects(delta.Plan) == Effects(full.Plan) &&
                 delta.Plan.Actions.Any(action => action.Kind == ActionKind.Delete && action.Path == "matched.txt") &&
                 delta.Plan.Actions.All(action => action.Path != "remote-only.txt"),
                 scenario + ": resumed plan matches full listing, propagates D71 deletion and drops the vanished download");
+            var matchedDelete = delta.Plan.Actions.Single(action => action.Kind == ActionKind.Delete && action.Path == "matched.txt");
+            Require(matchedDelete.Rule == 6 && !matchedDelete.FirstSyncChoice && !matchedDelete.RemovalReviewChoice &&
+                matchedDelete.Target == Side.A && matchedDelete.ExpectedTarget?.ObjectId == survivor.ObjectId &&
+                matchedDelete.ExpectedTarget?.Hash == survivor.Hash &&
+                matchedDelete.DeletionSourceObjectId == matches["matched.txt"].B.Split('|')[0],
+                "prepared propagation retains unchanged target proof and source identity for fresh ordinary delete admission");
+            async Task RequireCompletedMatchedRetryClosedAsync()
+            {
+                Require(store.SyncRetryAt(pair.PairId, "matched.txt") is null,
+                    scenario + ": successful matched propagation closes its durable retry");
+                var notices = store.UnresolvedNotices(pair.PairId);
+                Require(!notices.Any(notice => notice.Path == "matched.txt"),
+                    scenario + ": successful matched propagation closes its unresolved notice");
+                Require(store.SyncRetryAt(pair.PairId, "remote-only.txt") is null &&
+                    !notices.Any(notice => notice.Path == "remote-only.txt"),
+                    scenario + ": absence on both sides retires the vanished download retry and notice");
+                Require(delta.Plan.Actions.All(action => action.Path != "remote-only.txt") &&
+                    full.Plan.Actions.All(action => action.Path != "remote-only.txt") &&
+                    await local.ObserveAsync("remote-only.txt", CancellationToken.None) is null &&
+                    await h.Writer().ObserveAsync("remote-only.txt", CancellationToken.None) is null,
+                    scenario + ": vanished download retires without a copy or delete and stays absent on both sides");
+            }
             if (released)
             {
                 local.FailNextWrites = 1;
@@ -215,6 +265,7 @@ internal static partial class DropboxChecks
                     await local.ObserveAsync("matched.txt", CancellationToken.None) is null &&
                     await local.ObserveAsync("remote-only.txt", CancellationToken.None) is null,
                     "the resumed delta retries the unrelated download and propagates only the proven source deletion");
+                await RequireCompletedMatchedRetryClosedAsync();
                 return;
             }
             var applied = await runtime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { },
@@ -228,6 +279,7 @@ internal static partial class DropboxChecks
             Require(await local.ObserveAsync("matched.txt", CancellationToken.None) is null &&
                 await local.ObserveAsync("remote-only.txt", CancellationToken.None) is null,
                 scenario + ": resumed public apply completes without retrying a phantom download");
+            await RequireCompletedMatchedRetryClosedAsync();
         }
     }
 

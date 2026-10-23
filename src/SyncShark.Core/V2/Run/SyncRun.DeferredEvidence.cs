@@ -38,6 +38,12 @@ public sealed partial class SyncRun
     private sealed record PreparedEvidence(BothScan Scan, IReadOnlyList<HeldDeletion> Held, int Resolved);
     private sealed record HeldPlanResult(Plan Plan, bool RecoverySkipped);
 
+    // D71: prepare-matched input belongs to the ordinary planner, whose identity/hash checks
+    // decide delete versus copy-back. Interrupted repairs retain their separate protection owner.
+    private static bool UsesDeletionEvidenceLane(string path,
+        IReadOnlyDictionary<string, PrepareMatch>? matchedAtPrepare, IReadOnlySet<string>? interruptedRepairs = null) =>
+        !(interruptedRepairs?.Contains(path) ?? false) && !(matchedAtPrepare?.ContainsKey(path) ?? false);
+
     private async Task<PreparedEvidence> PrepareDeferredEvidenceAsync(PairDef pair, RunScope.Scope scope,
         IReadOnlyList<string> rebuildables, IReadOnlyDictionary<string, PrepareMatch>? matchedAtPrepare, BothScan scan, CancellationToken ct,
         IReadOnlySet<string>? interruptedRepairs = null)
@@ -48,8 +54,7 @@ public sealed partial class SyncRun
         var probed = DeletionProbePaths(pair,
             sides.Local == Side.A ? OnlyIn(scope.A, scope.B) : OnlyIn(scope.B, scope.A), rebuildables);
         // finding 2: a prepare-matched path is ordinary planning input, never deletion evidence.
-        var paths = probed.Where(path => !(interruptedRepairs?.Contains(path) ?? false) &&
-            !(matchedAtPrepare?.ContainsKey(path) ?? false)).ToArray();
+        var paths = probed.Where(path => UsesDeletionEvidenceLane(path, matchedAtPrepare, interruptedRepairs)).ToArray();
         var localItems = sides.Local == Side.A ? scope.A : scope.B;
         var candidates = paths.ToHashSet(StringComparer.OrdinalIgnoreCase);
         var folders = localItems.Where(item => item.Kind == ItemKind.Folder && candidates.Contains(item.Path))
