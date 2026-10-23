@@ -36,6 +36,10 @@ public sealed record V2Settings(
     public int StoreNoticePageRows { get; init; } = 128;
     internal const int MinimumStoreNoticePageRows = 1;
 
+    /// <summary>Metadata entities per gap-promotion transaction; a memory/gate bound, not a run limit.
+    /// Promotion drains the captured discovery horizon, releasing the store gate after every page.</summary>
+    public int GapPromotionPageRows { get; init; } = 64;
+
     /// <summary>Shared background gap-verification byte budget; never used for foreground transfers.</summary>
     public long LocalGapBytesPerSecond { get; init; } = 30_000_000;
     /// <summary>User-input quiet time required for background gap IO; battery operation also pauses it.</summary>

@@ -41,6 +41,17 @@ internal static partial class RunChecks
             Require(store.RehashPendingCount(fx.Pair.A.RootId) == rehashBefore,
                 "the planning handoff creates no content-hash debt");
 
+            // A clock before the durable versions must admit nothing. A wall-clock cutoff
+            // would incorrectly rotate these rows, making this a production-entrypoint regression test.
+            var queued = store.AdmitDeferredPlanning(fx.Pair.PairId, long.MaxValue, rotate: false).ToArray();
+            var pastRun = new SyncRun(store, fx.Executor, fx.Provider, Settings,
+                new LocalChecks.FixedClock(DateTimeOffset.UnixEpoch));
+            Require(pastRun.AdmitPlanningPage(fx.Pair.PairId).Count == 0,
+                "deferred intake uses the injected UTC clock rather than wall time");
+            Require(store.AdmitDeferredPlanning(fx.Pair.PairId, long.MaxValue, rotate: false)
+                    .Select(row => row.Version).SequenceEqual(queued.Select(row => row.Version)),
+                "ineligible deferred versions are not rotated by a past-clock run");
+
             var replay = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
             var synced = await fx.A.ObserveAsync("Held/File", CancellationToken.None);
             Require(replay.Failures.Count == 0 && synced?.Hash == edited.Hash,

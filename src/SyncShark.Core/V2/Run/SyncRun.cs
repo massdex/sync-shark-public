@@ -877,14 +877,9 @@ public sealed partial class SyncRun : ISyncRun
         var retryCount = _store.CountSyncRetries(pairId);
         var retries = _store.DueSyncRetries(pairId, _time.GetUtcNow(), 256)
             .Where(retry => retry.Path.Length != 0 || retry.Kind != "run").ToArray();
-        var deferredBefore = DateTime.UtcNow.Ticks;
         ct.ThrowIfCancellationRequested();
-        // One bounded intake read: oldest queued work first, at most one page of entities and alias
-        // paths. An apply admits and rotates that page so a permanently held prefix cannot starve
-        // later entities across runs; a read-only preview selects the same page without rotating.
-        IReadOnlyList<SqliteStateStore.DeferredPlanning> deferredPlanning = _store is SqliteStateStore deferredStore
-            ? deferredStore.AdmitDeferredPlanning(pairId, deferredBefore,
-                rotate: _endpoints is not PlanOnlyEndpoints) : [];
+        var deferredPlanning = AdmitPlanningPage(pairId);
+        using var planningTiming = new RunBoundaryTiming("planning", _settings.EnableRunInstrumentation);
         var activeRetries = retries.Select(item => item.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var retryHeld = retries.Where(item => item.Held is not null).Select(item => item.Held!).ToArray();
         var pendingEvidence = scan.A.PendingDeletionEvidence.Concat(scan.B.PendingDeletionEvidence)
@@ -1021,6 +1016,8 @@ public sealed partial class SyncRun : ISyncRun
                     _store.Live(item.Held.Local == Side.A ? pair.A.RootId : pair.B.RootId, [item.Path]).FirstOrDefault() is { } currentHeld &&
                     expected.ObjectId == currentHeld.ObjectId && Content.SideStamp(expected) == Content.SideStamp(currentHeld))
                     .Select(item => FolderDelete.VictimKey(item.Held!.Local, item.Path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        planningTiming.PeakScopeRows = scanner.PeakMaterializedRows;
+        planningTiming.Dispose();
         return new(plan, null, ExecutePreparedAsync, () =>
         {
             var initial = PrepareInitialExecution(plan, pair, reviewedDeletes, allowUnreviewedEvidence: true);
@@ -1040,8 +1037,7 @@ public sealed partial class SyncRun : ISyncRun
                     BuildReport(pairId, plan, new Tally(_settings), false), reconcile));
             }
             ClosePlanBoundNotice(pairId);
-            var execution = await ExecuteWithEvidenceAsync(plan, pair, throttle, reviewedDeletes, ct,
-                allowUnreviewedEvidence: true);
+            var execution = await ExecuteMeasuredPlanAsync(plan, pair, throttle, reviewedDeletes, ct);
             plan = execution.Plan;
             var tally = execution.Tally;
             var completion = new CompletionSteps(this, pairId, ct);
@@ -1064,7 +1060,8 @@ public sealed partial class SyncRun : ISyncRun
                 await completion.StepAsync(() => CloseArrivedReplacementsAsync(pair, openNotices, plan.Gen, ct));
                 completion.Step(() => CloseAppliedDecisions(openNotices, plan, tally, decisions, resolvingNoticeId));
                 completion.Step(RefreshRetryProtection);
-                completion.Step(() => AcknowledgeVerifiedRehash(pair, scan, plan, tally, evaluated, predicates.A, predicates.B, ct, deferredPlanning));
+                using (var acknowledgementTiming = new RunBoundaryTiming("acknowledgement", _settings.EnableRunInstrumentation))
+                    completion.Step(() => AcknowledgeVerifiedRehash(pair, scan, plan, tally, evaluated, predicates.A, predicates.B, ct, deferredPlanning));
                 completion.Step(() => RaiseLinksSummary(pair, LeftAlone(pair)));
                 // Inventory settlement and cursor completion share one durable transaction.
                 if (retrySaved)

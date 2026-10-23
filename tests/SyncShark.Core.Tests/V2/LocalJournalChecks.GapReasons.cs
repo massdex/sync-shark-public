@@ -173,17 +173,9 @@ internal static partial class LocalJournalChecks
             LocalChecks.Require(io.Seen.SequenceEqual(rows.Skip(7).Select(x => x.ObjectId)),
                 "next run resumes exactly after durable frontier without repeating processed items or pages");
             gaps.PromoteGapDiscovery(root.RootId);
-            var promotionCapacity = SqliteStateStore.GapPromotionPagesPerPass * SqliteStateStore.GapPromotionPageSize;
-            if (count - 7 > promotionCapacity)
-            {
-                LocalChecks.Require(gaps.HasGapProtection(root.RootId) && reopened.ProtectionBatch(root.RootId,
-                    ItemFlags.NeedsRehash, [rows[^1].Path]).Single().Covered,
-                    "the bounded promotion pass preserves protection for its remaining proved suffix");
-                // Discovery resumed after seven entities; the 270-row case has 263 publications,
-                // so the next independent pass drains the seven left by the 256-entity cap.
-                gaps.PromoteGapDiscovery(root.RootId);
-            }
-            LocalChecks.Require(!gaps.HasGapProtection(root.RootId), "only completed next-run proof promotion releases protection");
+            LocalChecks.Require(!gaps.HasGapProtection(root.RootId) && reopened.ProtectionBatch(root.RootId,
+                ItemFlags.NeedsRehash, [rows[^1].Path]).All(hit => !hit.Covered),
+                "one invocation drains the entire proved suffix and releases its protection");
         }
     }
 

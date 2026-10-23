@@ -3,10 +3,9 @@ using Microsoft.Data.Sqlite;
 namespace Massdex.SyncShark.V2;
 
 /// <summary>
-/// Queue audit V4: run-start metadata promotion is bounded per pass. Promoted rows leave the
-/// staged index, so the unvisited remainder is durable and the next run (or the same store after
-/// reopen) resumes it. The published discovery frontier waits for a complete drain, so the
-/// unvisited suffix keeps its protection in the meantime. Every verified unchanged entity is also
+/// Run-start metadata promotion drains its captured horizon in bounded transactions. Promoted
+/// rows leave the staged index; interruption preserves the unvisited remainder. Completion is
+/// published only after the drain, and another store caller can enter between pages. Every verified unchanged entity is also
 /// marked planning-dirty for the pairs using the root (existing planning_deferred), while a changed
 /// observation stays protected, is never marked dirty, and creates no content-hash debt.
 /// </summary>
@@ -22,9 +21,9 @@ internal static class GapPromotionBoundChecks
         var product = Path.Combine(root, "gap-promotion-bound-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(product);
         const string rootId = "promotion-bound-root";
-        const string cursor = "0000000000000001:200";
-        const int staged = 2600;
-        const int perPass = SqliteStateStore.GapPromotionPagesPerPass * SqliteStateStore.GapPromotionPageSize;
+        var cursor = new string('0', 15) + "1:200";
+        const int staged = 10000;
+        var pageRows = Fast.GapPromotionPageRows;
         const int changedIndex = 10;
         var rows = Enumerable.Range(1, staged).Select(n => new ItemState("folder/" + n.ToString("D5"),
             ItemKind.File, "object-" + n.ToString("D5"), null, new string('a', 64), 3,
@@ -47,20 +46,35 @@ internal static class GapPromotionBoundChecks
             // One observation changes after discovery: its proof no longer discharges.
             Exec(product, "UPDATE file_state SET mtime=mtime+1 WHERE root_no=(SELECT root_no FROM root WHERE root_id=$r) " +
                 "AND object_id=$o;", ("$r", rootId), ("$o", rows[changedIndex].ObjectId));
+            var pages = 0;
+            var remaining = (long)staged;
+            var peakRows = 0L;
+            store.GapPromotionPageCommittedForTest = () =>
+            {
+                var next = Staged(product);
+                var visited = remaining - next;
+                Require(visited > 0 && visited <= pageRows, "each committed page respects the configured row bound");
+                peakRows = Math.Max(peakRows, visited);
+                remaining = next;
+                if (++pages != 1) return;
+                Require(next == staged - pageRows && GapScalar(product, "SELECT discovery_done FROM local_gap;") == 0,
+                    "the first page commits without publishing the unfinished frontier");
+                var reader = Task.Run(() => store.Pair("p1"));
+                Require(reader.Wait(TimeSpan.FromSeconds(10)) && reader.Result is not null,
+                    "a concurrent store call gets the gate between promotion pages");
+            };
             var watch = System.Diagnostics.Stopwatch.StartNew();
             gaps.PromoteGapDiscovery(rootId);
             watch.Stop();
+            store.GapPromotionPageCommittedForTest = null;
             var admitted = staged - Staged(product);
-            Require(admitted == perPass,
-                $"one promotion pass admits exactly {perPass} of {staged} staged entities (measured {admitted})");
-            Console.WriteLine($"INFO metadata promotion pass: staged={staged}; admitted={admitted}; " +
-                $"remaining={Staged(product)}; elapsed-ms={watch.ElapsedMilliseconds}");
-            Require(GapScalar(product, "SELECT discovery_done FROM local_gap;") == 0,
-                "a capped pass leaves the published discovery frontier unpublished");
-            Require(GapText(product, "SELECT MIN(object_id) FROM local_gap_item WHERE metadata_ready=1;") ==
-                    rows[perPass].ObjectId,
-                "the durable remainder resumes at the oldest unvisited staged entity");
-            Require(DeferredForPair(product, rootId) == perPass - 1,
+            Require(admitted == staged && pages == (staged + pageRows - 1) / pageRows && peakRows == pageRows,
+                "one invocation drains 10000 entities in bounded pages");
+            Console.WriteLine($"INFO metadata promotion: staged={staged}; admitted={admitted}; " +
+                $"pages={pages}; peak-page-rows={peakRows}; elapsed-ms={watch.ElapsedMilliseconds}");
+            Require(GapScalar(product, "SELECT discovery_done FROM local_gap;") == 1,
+                "the invocation publishes the frontier only after draining its captured horizon");
+            Require(DeferredForPair(product, rootId) == staged - 1,
                 "every matching entity is marked planning-dirty once for the pair using the root");
             Require(DeferredForObject(product, rootId, rows[changedIndex].ObjectId) == 0 &&
                 GapScalar(product, "SELECT COUNT(*) FROM local_gap_item WHERE object_id=$o AND metadata_ready=0;",
@@ -73,26 +87,17 @@ internal static class GapPromotionBoundChecks
                 kept.Mtime.UtcTicks == rows[0].Mtime.UtcTicks,
                 "the planning handoff preserves the verified entity's hash, flags and metadata");
             Require(store.ProtectionBatch(rootId, ItemFlags.NeedsRehash, [rows[0].Path, rows[^1].Path])
-                    .All(hit => hit.Covered) &&
+                    .All(hit => !hit.Covered) &&
                 store.ProtectionBatch(rootId, ItemFlags.NeedsRehash, [rows[changedIndex].Path])[0].Covered,
-                "a capped pass keeps the unvisited suffix and the changed observation protected");
+                "the completed drain releases verified rows but keeps the changed observation protected");
         }
         using (var store = SqliteStateStore.Open(product, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
-            // The rows retired by the capped pass are gone; the remainder was committed before the
-            // store closed, so this reopen resumes the same epoch without a new cursor.
-            Require(Staged(product) == staged - perPass, "the staged remainder survives the store reopen");
+            Require(Staged(product) == 0, "the completed drain survives the store reopen");
             var gaps = (ILocalGapStore)store;
-            while (Staged(product) > 0)
-            {
-                var before = Staged(product);
-                gaps.PromoteGapDiscovery(rootId);
-                Require(before - Staged(product) is > 0 and <= perPass,
-                    "each reopened promotion remains bounded by downstream intake capacity");
-            }
             gaps.PromoteGapDiscovery(rootId);
             Require(GapScalar(product, "SELECT discovery_done FROM local_gap;") == 1,
-                "a reopened store drains the durable remainder and only then publishes completion");
+                "a reopened store retains the completed frontier");
             Require(DeferredForPair(product, rootId) == staged - 1 &&
                 GapScalar(product, "SELECT COUNT(*) FROM local_rehash;") == 0,
                 "both passes leave one planning-dirty row per verified entity and no content-hash debt");
@@ -105,8 +110,46 @@ internal static class GapPromotionBoundChecks
             Require(Staged(product) == 0 && GapScalar(product, "SELECT discovery_done FROM local_gap;") == 1,
                 "a repeat pass after a complete drain changes nothing");
         }
-        Console.WriteLine("PASS bounded gap metadata promotion resumes its durable remainder next run");
+        Console.WriteLine("PASS gap metadata promotion drains its horizon in bounded transactions");
+        InterruptedPromotionChecks(root);
         StageGapOrphansPlanChecks(root);
+    }
+
+    private static void InterruptedPromotionChecks(string root)
+    {
+        var product = Path.Combine(root, "gap-promotion-restart-" + Guid.NewGuid().ToString("N"));
+        var settings = Fast with { GapPromotionPageRows = 7 };
+        const string rootId = "restart-root";
+        var rows = Enumerable.Range(0, 31).Select(n => new ItemState("file-" + n.ToString("D3"),
+            ItemKind.File, "object-" + n.ToString("D3"), null, new string('b', 64), 3,
+            DateTimeOffset.UnixEpoch.AddDays(1), ItemFlags.None)).ToArray();
+        using (var store = SqliteStateStore.Open(product, settings, new TestClock(), LocalItems.CaptureOptionalHash))
+        {
+            store.WriteSnapshot(new(rootId, Side.A, store.BeginGeneration(rootId, "full"), "cursor", rows, []));
+            var gaps = (ILocalGapStore)store;
+            gaps.BeginGap(rootId, "cursor", 100, true);
+            var epoch = gaps.GapEpoch(rootId)!;
+            gaps.GapDiscoveredBatch(rootId, epoch, rows.Select(item => (item, false)).ToArray());
+            gaps.GapDiscoveryDone(rootId, epoch);
+            store.GapPromotionPageCommittedForTest = () => throw new OperationCanceledException("test interruption");
+            var interrupted = false;
+            try { gaps.PromoteGapDiscovery(rootId); }
+            catch (OperationCanceledException) { interrupted = true; }
+            Require(interrupted && Staged(product) == rows.Length - settings.GapPromotionPageRows,
+                "interruption retains exactly the unvisited committed-page remainder");
+            Require(GapScalar(product, "SELECT discovery_done FROM local_gap;") == 0 &&
+                store.ProtectionBatch(rootId, ItemFlags.NeedsRehash, [rows[^1].Path])[0].Covered,
+                "interruption retains frontier and suffix protection");
+        }
+        using (var store = SqliteStateStore.Open(product, settings, new TestClock(), LocalItems.CaptureOptionalHash))
+        {
+            Require(Staged(product) == rows.Length - settings.GapPromotionPageRows,
+                "unvisited rows survive reopen");
+            ((ILocalGapStore)store).PromoteGapDiscovery(rootId);
+            Require(Staged(product) == 0 && GapScalar(product, "SELECT discovery_done FROM local_gap;") == 1 &&
+                store.ProtectionBatch(rootId, ItemFlags.NeedsRehash, [rows[^1].Path]).All(hit => !hit.Covered),
+                "one resumed invocation drains and releases the durable remainder");
+        }
     }
 
     // Queue audit STORE+INDEX investigation: StageGapOrphans' correlated NOT EXISTS on

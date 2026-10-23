@@ -1,7 +1,7 @@
 namespace Massdex.SyncShark.V2;
 
 /// <summary>Loads full inventories or touched rows; mapping context never becomes planner item rows.</summary>
-internal sealed class RunScope
+internal sealed partial class RunScope
 {
     // Each item may contribute two mapped spellings; each baseline contributes four.
     // RehashProtection accepts at most 1024 distinct paths, bound as one JSON parameter.
@@ -175,16 +175,7 @@ internal sealed class RunScope
             }
         }
 
-        Scope Load()
-        {
-            var a = _store.LiveUnder(pair.A.RootId, prefixes);
-            var b = _store.LiveUnder(pair.B.RootId, prefixes);
-            // Context ancestors must never discover baselines or widen the item scope.
-            var baselines = _store.BaselinesTouching(pair.PairId, Side.A, a.Select(i => i.ObjectId).Concat(changeIdsA), prefixes)
-                .Concat(_store.BaselinesTouching(pair.PairId, Side.B, b.Select(i => i.ObjectId).Concat(changeIdsB), prefixes))
-                .Distinct().ToArray();
-            return new(a, b, baselines);
-        }
+        Scope Load() => LoadMeasuredScope(pair, prefixes, changeIdsA, changeIdsB, ancestorsA.Count + (long)ancestorsB.Count);
 
     }
 
@@ -253,7 +244,7 @@ internal sealed class RunScope
         IReadOnlyList<Baseline> baselines, IReadOnlyList<ItemState> contextA, IReadOnlyList<ItemState> contextB,
         string provenanceScope = "Touched", IReadOnlyCollection<string>? closureHolds = null)
     {
-        PlanProvenance.Current.Value?.BeginScope(provenanceScope);
+        BeginMeasuredScope(provenanceScope, (long)a.Count + b.Count + baselines.Count + contextA.Count + contextB.Count);
         _cancellationToken.ThrowIfCancellationRequested();
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         _protectionStarted = started;

@@ -4,13 +4,10 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SqliteStateStore : ILocalGapStore
 {
-    /// <summary>Metadata publication cannot outproduce one deferred-planning intake.</summary>
-    internal const int GapPromotionPagesPerPass = 4;
-    internal const int GapPromotionPageSize = DeferredIntakeEntityCap / GapPromotionPagesPerPass;
-
     private readonly System.Collections.Concurrent.ConcurrentDictionary<(string Root, bool Discovery), string> _gapStatus = new();
 
     private readonly Dictionary<long, string> _gapSweepAfter = new();
+    internal Action? GapPromotionPageCommittedForTest { get; set; }
 
     private void StageGapOrphans(long root, string epoch)
     {
@@ -314,15 +311,14 @@ public sealed partial class SqliteStateStore : ILocalGapStore
         var watch = System.Diagnostics.Stopwatch.StartNew();
         long promoted = 0;
         var after = "";
-        // Match the deferred intake's entity capacity across four short transactions.
-        // Promoted rows leave the staged index, so the unvisited remainder is
-        // durable and the next run resumes at its oldest row. The published frontier waits
-        // for a complete drain; the remainder keeps its explicit protection.
+        // Drain the captured horizon in bounded transactions, independently of planning intake.
+        // Promoted rows leave the staged index. An interruption leaves the remainder durable
+        // and protected; the published frontier waits for a complete drain.
         var drained = false;
         try
         {
             var through = start.Through;
-            for (var pageNumber = 0; pageNumber < GapPromotionPagesPerPass; pageNumber++)
+            while (true)
             {
                 // No staged row at or below the captured horizon: this pass finished the drain.
                 if (through is not { } horizon) { drained = true; break; }
@@ -338,7 +334,7 @@ public sealed partial class SqliteStateStore : ILocalGapStore
                         "SELECT MAX(object_id) FROM (SELECT object_id FROM local_gap_item INDEXED BY gap_metadata " +
                         "WHERE root_no=$r AND epoch=$e AND metadata_ready=1 AND object_id>$after AND object_id<=$through " +
                         "ORDER BY object_id LIMIT $limit);", ("$r", rootNo), ("$e", epoch.Epoch),
-                        ("$after", after), ("$through", horizon), ("$limit", GapPromotionPageSize)) as string;
+                        ("$after", after), ("$through", horizon), ("$limit", Math.Max(1, _settings.GapPromotionPageRows))) as string;
                     if (last is null) return (Last: (string?)null, Count: 0L);
                     const string range = " WHERE root_no=$r AND epoch=$e AND metadata_ready=1 AND object_id>$after AND object_id<=$last";
                     // Lifting protection owes planning, not hashing. Hand off the exact matching
@@ -371,6 +367,7 @@ public sealed partial class SqliteStateStore : ILocalGapStore
                 if (page.Last is null) { drained = true; break; }
                 promoted += page.Count;
                 after = page.Last;
+                GapPromotionPageCommittedForTest?.Invoke();
             }
             if (drained)
                 InIndexingStore(() =>
@@ -384,7 +381,7 @@ public sealed partial class SqliteStateStore : ILocalGapStore
         }
         finally
         {
-            RunTrace.Emit($"local gap metadata promotion: root={rootId}; count={promoted}; capped={(drained ? 0 : 1)}; elapsed-ms={watch.ElapsedMilliseconds}");
+            RunTrace.Emit($"local gap metadata promotion: root={rootId}; count={promoted}; drained={(drained ? 1 : 0)}; elapsed-ms={watch.ElapsedMilliseconds}");
         }
     }
 
