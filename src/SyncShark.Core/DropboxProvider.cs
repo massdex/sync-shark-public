@@ -1397,10 +1397,7 @@ public sealed partial class DropboxPilotClient(
                 var display = item.TryGetProperty("path_display", out var pathDisplay)
                     ? pathDisplay.GetString()
                     : item.TryGetProperty("path_lower", out var pathLower) ? pathLower.GetString() : null;
-                if (tag == "folder" && _rootId is not null &&
-                    string.Equals(item.TryGetProperty("id", out var rootId) ? rootId.GetString() : null,
-                        _rootId, StringComparison.Ordinal) &&
-                    string.Equals(display, _root, StringComparison.OrdinalIgnoreCase))
+                if (IsListedRoot(item, _rootId, _root))
                     continue;
                 var relative = ToInventoryRelative(display ?? throw new InvalidDataException("Dropbox path is absent."));
                 if (include is not null && !include(relative)) continue;
@@ -3234,10 +3231,7 @@ public sealed partial class DropboxPilotClient(
                 var tag = item.GetProperty(".tag").GetString();
                 if (tag is not ("file" or "folder"))
                     throw new InvalidDataException("The Dropbox folder contains an item of an unsupported type.");
-                if (tag == "folder" && _rootId is not null &&
-                    string.Equals(item.TryGetProperty("id", out var rootId) ? rootId.GetString() : null,
-                        _rootId, StringComparison.Ordinal) &&
-                    string.Equals(display, _root, StringComparison.OrdinalIgnoreCase))
+                if (IsListedRoot(item, _rootId, _root))
                     continue;
                 var parsed = RemoteEntryFromMetadata(item, inventoryOnly: true);
                 if (canonicalPaths.TryGetValue(key, out var existingPath))

@@ -33,6 +33,49 @@ internal sealed class DeletionEvidenceTable
         return rows;
     }
 
+    public IReadOnlyList<DeletionEvidenceRecord> ReadPaths(long pairNo, long rootNo, IReadOnlyList<string> paths)
+    {
+        using var command = StoreSchema.Command(_connection, null,
+            "SELECT path, deleted_at, basis_cursor, content_hash, failure_json FROM deletion_evidence " +
+            "WHERE pair_no=$p AND root_no=$r AND path_key=$k;");
+        command.Parameters.AddWithValue("$p", pairNo);
+        command.Parameters.AddWithValue("$r", rootNo);
+        var key = command.Parameters.AddWithValue("$k", "");
+        var rows = new List<DeletionEvidenceRecord>();
+        foreach (var path in paths.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            key.Value = PathKey.Of(path);
+            using var reader = command.ExecuteReader();
+            if (reader.Read()) rows.Add(Read(reader));
+        }
+        return rows;
+    }
+
+    public IReadOnlyList<DeletionEvidenceRecord> ReadPage(long pairNo, long rootNo, string? afterPath,
+        int limit, bool? failuresOnly)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
+        using var command = StoreSchema.Command(_connection, null,
+            "SELECT path, deleted_at, basis_cursor, content_hash, failure_json FROM deletion_evidence " +
+            "WHERE pair_no=$p AND root_no=$r " + (afterPath is null ? "" : "AND path_key>$after ") +
+            (failuresOnly is null ? "" : failuresOnly.Value ? "AND failure_json IS NOT NULL " : "AND failure_json IS NULL ") +
+            "ORDER BY path_key LIMIT $limit;");
+        command.Parameters.AddWithValue("$p", pairNo);
+        command.Parameters.AddWithValue("$r", rootNo);
+        if (afterPath is not null) command.Parameters.AddWithValue("$after", PathKey.Of(afterPath));
+        command.Parameters.AddWithValue("$limit", Math.Min(limit, 256));
+        using var reader = command.ExecuteReader();
+        var rows = new List<DeletionEvidenceRecord>();
+        while (reader.Read()) rows.Add(Read(reader));
+        return rows;
+    }
+
+    private static DeletionEvidenceRecord Read(SqliteDataReader reader) => new(reader.GetString(0),
+        reader.IsDBNull(1) ? null : DateTimeOffset.FromUnixTimeMilliseconds(reader.GetInt64(1)),
+        reader.IsDBNull(2) ? null : reader.GetString(2),
+        reader.IsDBNull(3) ? null : reader.GetString(3),
+        reader.IsDBNull(4) ? null : System.Text.Json.JsonSerializer.Deserialize<DeletionEvidenceFailure>(reader.GetString(4)));
+
     public void Remove(long pairNo, long rootNo, IReadOnlyList<string> paths)
     {
         using var batch = new StoreBatch(_connection, _batchRows);

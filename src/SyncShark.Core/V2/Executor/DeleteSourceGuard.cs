@@ -112,10 +112,15 @@ internal static class DeleteSourceGuard
                 var children = new List<ItemState>(page.Count);
                 foreach (var item in page)
                 {
-                    if (item.IncompleteReason is not null || item.Flags != ItemFlags.None) valid = false;
+                    // Owned pointers carry native identity plus remote revision/size/mtime. Their
+                    // metadata participates in the signature; never hydrate them to prove removal.
+                    if (item.IncompleteReason is not null || (item.Flags & ~ItemFlags.OwnedPointer) != ItemFlags.None)
+                        valid = false;
                     if (PairPath.Same(item.Path, action.Path))
                     {
-                        if (rootSeen || item.ObjectId != expected.ObjectId || item.Kind != expected.Kind ||
+                        // get_metadata and list_folder can both describe the requested root.
+                        // Repetition is harmless only when every occurrence matches its frozen identity.
+                        if (item.ObjectId != expected.ObjectId || item.Kind != expected.Kind ||
                             (item.Kind == ItemKind.File && (item.Size != expected.Size ||
                                 Content.SameHash(item.Hash, expected.Hash) != true ||
                                 Content.SideStamp(item) != Content.SideStamp(expected)))) valid = false;

@@ -27,6 +27,7 @@ internal static partial class DropboxChecks
         await RetryWaitPauseAndCancelAsync();
         await DeltaChecksAsync();
         await IntakeChecksAsync();
+        await EvidenceHistoryPagingAsync();
         await DeltaDeletionTimeAsync();
         await PrepareCursorChecksAsync();
         await DeltaFolderRunsAsync();

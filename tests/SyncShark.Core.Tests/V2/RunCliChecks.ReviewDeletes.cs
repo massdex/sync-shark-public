@@ -332,6 +332,7 @@ internal static partial class RunCliChecks
             Require(fx.Store.SyncRetryAt(fx.Pair.PairId, "d/x.txt")?.Match is { } unknownMatch &&
                 unknownMatch.A.StartsWith(aState.ObjectId + "|m:", StringComparison.Ordinal),
                 "the fixture preserves genuinely unknown historical content as a local metadata stamp");
+            var historicalMatch = fx.Store.SyncRetryAt(fx.Pair.PairId, "d/x.txt")!.Match;
             Require(result.Failed == 0 && result.FirstSyncComplete,
                 "an unconfirmed metadata-stamped survivor remains safe after apply gains a hash");
             Require(await fx.A.ObserveAsync("d/x.txt", default) is not null && fx.WriterA.Deletes == 0,
@@ -340,9 +341,22 @@ internal static partial class RunCliChecks
             Require(await fx.A.ObserveAsync("d/x.txt", CancellationToken.None) is not null &&
                 await fx.B.ObserveAsync("d/x.txt", CancellationToken.None) is null && fx.WriterA.Deletes == 0,
                 "unknown prepared hash retains the survivor without false copyback or automatic deletion");
-            Require(fx.Store.OpenNotices(fx.Pair.PairId).Count(notice =>
-                notice.Path == "d/x.txt" && notice.ReasonKey == "content-unconfirmed") == 1,
-                "unknown prepared content has one deduplicated unconfirmed notice");
+            // D85 / RQ-032: "We do not duplicate notices." The prepare-time content-proof failure
+            // owns one sync-retry notice; a generic content-unconfirmed observation must not replace it.
+            var notices = fx.Store.OpenNotices(fx.Pair.PairId).Where(notice => notice.Path == "d/x.txt").ToArray();
+            Require(notices.Length == 1 && notices[0].ReasonKey == "sync-retry",
+                "unknown prepared content has exactly one canonical retry notice at the path");
+            const string contentCause = "Content proof is unavailable, paused, changed, or deferred to indexing; the item remains unsynced.";
+            Require(notices[0].CauseKey == contentCause && notices[0].Detail.Contains(contentCause, StringComparison.Ordinal),
+                "the canonical retry notice preserves the raw unconfirmed-content cause");
+            Require(notices[0].Detail.Contains("Retry", StringComparison.Ordinal) &&
+                notices[0].Detail.Contains("Ignore", StringComparison.Ordinal),
+                "the canonical retry notice explains Retry and Ignore");
+            var retry = fx.Store.SyncRetryAt(fx.Pair.PairId, "d/x.txt");
+            Require(retry is { Match: { } retainedMatch } && retry.LastError == notices[0].CauseKey &&
+                retainedMatch == historicalMatch &&
+                retainedMatch.A.StartsWith(aState.ObjectId + "|m:", StringComparison.Ordinal),
+                "the canonical notice matches durable retry debt with unknown historical content");
         }
         finally
         {

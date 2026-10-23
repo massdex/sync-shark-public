@@ -77,6 +77,8 @@ internal sealed partial class DropboxWire : HttpMessageHandler
     /// <summary>When positive, the deleted-item listing is split into pages of this many entries.</summary>
     public int DeletedPageSize { get; set; }
     public int LivePageSize { get; set; }
+    public int ListedRootCopies { get; set; }
+    public bool ListedRootDifferentIdentity { get; set; }
 
     /// <summary>The limit sent with the most recent include_deleted list_folder request.</summary>
     public int? LastDeletedListingLimit { get; private set; }
@@ -297,6 +299,12 @@ internal sealed partial class DropboxWire : HttpMessageHandler
             if (!recursive) live = live.Where(node => node.Relative[prefix.Length..].IndexOf('/') < 0);
             var entries = live.OrderBy(node => node.Relative, StringComparer.Ordinal)
                 .Select(node => (object)Metadata(node)).ToList();
+            for (var copy = 0; copy < ListedRootCopies; copy++)
+            {
+                var listedRoot = Metadata(_items[baseRelative]);
+                if (ListedRootDifferentIdentity) listedRoot["id"] = "id:different-root";
+                entries.Insert(0, listedRoot);
+            }
             // One-off JSON-shaped entries the typed map cannot express (a malformed item or two distinct
             // live identities at one case-insensitive path). A real listing returns them beside live nodes.
             entries.AddRange(_listingRaw.Where(raw =>

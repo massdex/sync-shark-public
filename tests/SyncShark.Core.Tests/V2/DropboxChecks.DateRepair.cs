@@ -5,6 +5,7 @@ internal static partial class DropboxChecks
     internal static async Task DateRepairMetadataPageAsync()
     {
         await SourceAbsenceBatchAsync();
+        await ReviewedRemovalRootListingAsync();
         using var fixture = new Harness();
         fixture.Wire.SeedFile("a.txt", "a");
         fixture.Wire.SeedFile("b.txt", "b");

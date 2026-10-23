@@ -31,6 +31,9 @@ public sealed record PilotLocalFileFingerprint(
 public sealed class PilotLocalScanner
 {
     internal V2.LocalWalkCheckpoint? WalkCheckpoint { get; init; }
+    // A bounded page from a directory handle whose identity the caller verified. Reuses all
+    // scanner classification without relisting a million-name parent for every 256 children.
+    internal IReadOnlyDictionary<string, DirectoryEntryInfo>? ListedMetadata { get; init; }
     internal Action? BetweenDirectories { get; init; }
     internal Action<string>? DirectoryCompletedForTest { get; init; }
     internal static Action<int>? ParentListingRetainedForTest { get; set; }
@@ -217,6 +220,7 @@ public sealed class PilotLocalScanner
         Dictionary<string, DirectoryEntryInfo[]>? parentListings = null;
         DirectoryEntryInfo? ResolveFromParent(string exactPath)
         {
+            if (ListedMetadata is not null) return ListedMetadata.GetValueOrDefault(exactPath);
             var parent = Path.GetDirectoryName(exactPath) ?? rootLease.Path;
             // Bounded previews resolve one exact child without caching a potentially million-name parent.
             if (maxEntries is not null || !wantedByParent.ContainsKey(parent))

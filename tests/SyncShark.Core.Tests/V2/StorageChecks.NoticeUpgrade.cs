@@ -36,6 +36,18 @@ internal static partial class StorageChecks
             store.SavePairIncluded(pair, pair with { Excluded = [] });
             Require(store.OpenNotices("p1").Any(n => n.NoticeId == newer), "re-including clears actionable Ignore suppression");
         }
+        using (var archive = new SqliteConnection(new SqliteConnectionStringBuilder
+            { DataSource = SqliteStateStore.DatabasePath(folder), Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString()))
+        {
+            archive.Open();
+            StoreSchema.Verify(archive, clock);
+            using var unchanged = archive.CreateCommand();
+            unchanged.CommandText = "SELECT state,choice FROM notice WHERE notice_id=$id;";
+            unchanged.Parameters.AddWithValue("$id", activeId);
+            using var snapshot = unchanged.ExecuteReader();
+            Require(snapshot.Read() && snapshot.GetString(0) == "open" && snapshot.GetString(1) == NoticeChoices.Ignore,
+                "current-schema read-only verification preserves suppressed notice state without replaying migration");
+        }
         using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = SqliteStateStore.DatabasePath(folder), Pooling = false }.ToString());
         connection.Open();
         var notices = new NoticeTable(connection, clock);

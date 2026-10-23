@@ -5,12 +5,13 @@ using System.Security.Principal;
 namespace Massdex.SyncShark.V2;
 
 /// <summary>The local inventory checks: full scans, completeness, cursors and hashing.</summary>
-internal static class LocalInventoryChecks
+internal static partial class LocalInventoryChecks
 {
     public static async Task RunAsync()
     {
         await LocalWalkChecks.RunAsync().ConfigureAwait(false);
         await RemovalSubtreeAsync();
+        await RemovalGuardBothSidesAsync();
         await FullMapsItemsAsync().ConfigureAwait(false);
         await FullIncludePredicateAsync().ConfigureAwait(false);
         await FullExcludedOfflineDirectoryAsync().ConfigureAwait(false);

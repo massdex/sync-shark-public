@@ -597,6 +597,11 @@ public interface IStateStore : IDisposable
 
     /// <summary>Cursor-bound probes, oldest checkpoint first; null deletion time means proven "no evidence".</summary>
     IReadOnlyList<DeletionEvidenceRecord> DeletionEvidenceRows(string pairId, string rootId) => [];
+    /// <summary>Indexed exact path selection; does not enumerate unrelated evidence history.</summary>
+    IReadOnlyList<DeletionEvidenceRecord> DeletionEvidenceRows(string pairId, string rootId, IReadOnlyList<string> paths) => [];
+    /// <summary>Bounded path-key page, exclusively after the previous page's last path. Null filter selects all rows.</summary>
+    IReadOnlyList<DeletionEvidenceRecord> DeletionEvidencePage(string pairId, string rootId, string? afterPath,
+        int limit, bool? failuresOnly = null) => [];
     void RemoveDeletionEvidence(string pairId, string rootId, IReadOnlyList<string> paths) { }
 
     /// <summary>Stores a durable checkpoint of completed probes; a later probe replaces an earlier row.</summary>

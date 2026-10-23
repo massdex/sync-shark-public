@@ -67,10 +67,7 @@ public sealed partial class DropboxPilotClient
             }
             if (tag is not ("file" or "folder"))
                 throw new InvalidDataException("Dropbox returned an unsupported metadata type.");
-            if (tag == "folder" && _rootId is not null &&
-                string.Equals(item.TryGetProperty("id", out var id) ? id.GetString() : null, _rootId,
-                    StringComparison.Ordinal) &&
-                string.Equals(display, _root, StringComparison.OrdinalIgnoreCase))
+            if (IsListedRoot(item, _rootId, _root))
                 continue;
             var entry = RemoteEntryFromMetadata(item, inventoryOnly: true);
             changes.Add(new DropboxChange(entry.RelativePath, entry));

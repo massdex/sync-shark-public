@@ -970,6 +970,15 @@ public sealed partial class SqliteStateStore : IStateStore
         InStore(() => _deletionEvidence.ReadAll(RequirePair(pairId),
             RootNo(rootId) ?? throw new InvalidOperationException($"Unknown root {rootId}")));
 
+    public IReadOnlyList<DeletionEvidenceRecord> DeletionEvidenceRows(string pairId, string rootId, IReadOnlyList<string> paths) =>
+        InStore(() => _deletionEvidence.ReadPaths(RequirePair(pairId),
+            RootNo(rootId) ?? throw new InvalidOperationException($"Unknown root {rootId}"), paths));
+
+    public IReadOnlyList<DeletionEvidenceRecord> DeletionEvidencePage(string pairId, string rootId, string? afterPath,
+        int limit, bool? failuresOnly = null) =>
+        InStore(() => _deletionEvidence.ReadPage(RequirePair(pairId),
+            RootNo(rootId) ?? throw new InvalidOperationException($"Unknown root {rootId}"), afterPath, limit, failuresOnly));
+
     public void RemoveDeletionEvidence(string pairId, string rootId, IReadOnlyList<string> paths) =>
         InStore(() => _deletionEvidence.Remove(RequirePair(pairId),
             RootNo(rootId) ?? throw new InvalidOperationException($"Unknown root {rootId}"), paths));

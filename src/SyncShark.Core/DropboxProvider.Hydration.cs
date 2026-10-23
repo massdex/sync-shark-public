@@ -4,6 +4,15 @@ namespace Massdex.SyncShark;
 
 public sealed partial class DropboxPilotClient
 {
+    // Shared by full inventory, deltas and targeted subtree reads. Recursive Dropbox
+    // listings may repeat their own folder; only the matching identity AND path is skipped.
+    private static bool IsListedRoot(JsonElement item, string? rootId, string rootPath) =>
+        rootId is not null && item.GetProperty(".tag").GetString() == "folder" &&
+        string.Equals(item.TryGetProperty("id", out var id) ? id.GetString() : null, rootId, StringComparison.Ordinal) &&
+        string.Equals(item.TryGetProperty("path_display", out var display) ? display.GetString() :
+            item.TryGetProperty("path_lower", out var lower) ? lower.GetString() : null,
+            rootPath, StringComparison.OrdinalIgnoreCase);
+
     // Uncapped, one provider page at a time. The caller retains the ORIGINAL ROOT change cursor;
     // this listing cursor is only a continuation for this exact subtree.
     internal async Task HydratePrefixAsync(string prefix, Func<IReadOnlyList<DropboxChange>, Task> accept,
@@ -35,6 +44,7 @@ public sealed partial class DropboxPilotClient
             var batch = new List<DropboxChange>(256);
             foreach (var row in page.RootElement.GetProperty("entries").EnumerateArray())
             {
+                if (IsListedRoot(row, first.Entry.Id, prefix.Length == 0 ? _root : _root.TrimEnd('/') + "/" + prefix)) continue;
                 batch.Add(Parse(row));
                 if (batch.Count == 256) { await accept(batch); batch = new(256); }
             }

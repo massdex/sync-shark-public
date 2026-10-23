@@ -66,7 +66,7 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
         _deletedExactFromFull = null;
         _deletedAncestorsFromFull = null;
         _evidenceBasis = null;
-        _validatedThisRun = null;
+        _evidenceValidatedThisRun = false;
         try
         {
             var listing = await ListCheckpointedAsync(p, ct, include, _client.ListingTransientBudget);
@@ -121,7 +121,7 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
         _deletedExactFromFull = null;
         _deletedAncestorsFromFull = null;
         _evidenceBasis = null;
-        _validatedThisRun = null;
+        _evidenceValidatedThisRun = false;
         if (string.IsNullOrEmpty(cursor) || _known is SqliteStateStore sql && sql.HasFullListing(_root)) return invalid;
         var classification = _known.ReadDeletionClassification(_root);
         if (firstSync && classification?.Cursor != cursor)
@@ -151,7 +151,8 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
             _deletedExactFromFull = exact;
             _deletedAncestorsFromFull = ancestors;
         }
-        _validatedThisRun = new(ReuseEvidence(cursor, current, feed), StringComparer.OrdinalIgnoreCase);
+        ReuseEvidence(cursor, current, feed);
+        _evidenceValidatedThisRun = true;
         var (changes, pending, released, incomplete) = await BuildChangesAsync(feed, gen, include, ct, firstSync);
         if (firstSync)
         {
@@ -159,7 +160,8 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
             // Prune only after a targeted provider observation, never from the failure record itself.
             var repaired = new System.Collections.Concurrent.ConcurrentQueue<Change>();
             var feedPaths = feed.Select(change => change.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            await Parallel.ForEachAsync(released.Where(include), new ParallelOptions
+            await Parallel.ForEachAsync(EvidencePages(failuresOnly: true)
+                .Where(row => row.Failure!.Released && include(row.Path)).Select(row => row.Path), new ParallelOptions
                 { MaxDegreeOfParallelism = 4, CancellationToken = ct }, async (path, token) =>
             {
                 if (feedPaths.Contains(path) || _known.LiveSpellings(_root.RootId, path).Count == 0) return;
@@ -331,7 +333,9 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
                     _known.LiveSpellings(oppositeRoot, path).All(row => row.Kind == ItemKind.Folder))
                     noFileVictim.Add(path);
         }
-        var failures = _known.DeletionEvidenceRows(_pairId, _root.RootId).Where(row => row.Failure is not null)
+        var failures = _known.DeletionEvidenceRows(_pairId, _root.RootId,
+            feed.Select(change => change.Path).Concat(deleted.Keys).Distinct(StringComparer.OrdinalIgnoreCase).ToArray())
+            .Where(row => row.Failure is not null)
             .ToDictionary(row => row.Path, StringComparer.OrdinalIgnoreCase);
         // A later incarnation retires obsolete evidence and its decision, including evidence whose
         // successful probe already replaced the failure row. Query only observed upserts, never all retries.
@@ -361,7 +365,7 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
         // blocks ordinary safe downloads. Existing holds are never cleared by this lookup.
         var consumer = _known.Pair(_pairId);
         var survivorRoot = consumer is null ? null : (_side == Side.A ? consumer.B.RootId : consumer.A.RootId);
-        foreach (var failure in failures.Values.Where(row => row.Failure!.Released && include(row.Path)))
+        foreach (var failure in EvidencePages(failuresOnly: true).Where(row => row.Failure!.Released && include(row.Path)))
             if (_known.SyncRetryAt(_pairId, failure.Path) is null &&
                 survivorRoot is not null && _known.Live(survivorRoot, [failure.Path]).Count > 0)
                 _known.SaveSyncRetry(_pairId, new SyncRetry(failure.Path, "deletion-evidence",
@@ -604,26 +608,38 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
         return slots.Where(slot => slot is not null).Select(slot => slot!).ToList();
     }
 
+    private IEnumerable<DeletionEvidenceRecord> EvidencePages(bool failuresOnly)
+    {
+        string? after = null;
+        while (true)
+        {
+            var page = _known.DeletionEvidencePage(_pairId, _root.RootId, after, 256, failuresOnly);
+            if (page.Count == 0) yield break;
+            after = page[^1].Path;
+            foreach (var row in page) yield return row;
+        }
+    }
+
     private IReadOnlyDictionary<string, DeletionEvidenceRecord> ReuseEvidence(string input, string current,
         IReadOnlyList<DropboxChange> feed)
     {
         var changed = feed.Select(change => change.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var ancestors = changed.SelectMany(PairPath.Ancestors).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var valid = new Dictionary<string, DeletionEvidenceRecord>(StringComparer.OrdinalIgnoreCase);
-        var invalid = new List<string>();
-        foreach (var row in _known.DeletionEvidenceRows(_pairId, _root.RootId))
+        foreach (var page in EvidencePages(failuresOnly: false).Chunk(256))
         {
-            if (row.Failure is not null) continue;
-            if (row.BasisCursor != input || changed.Contains(row.Path) || ancestors.Contains(row.Path) ||
-                PairPath.Ancestors(row.Path).Any(changed.Contains))
-                invalid.Add(row.Path);
-            else valid[row.Path] = row with { BasisCursor = current };
+            var valid = new List<DeletionEvidenceRecord>();
+            var invalid = new List<string>();
+            foreach (var row in page)
+                if (row.BasisCursor != input || changed.Contains(row.Path) || ancestors.Contains(row.Path) ||
+                    PairPath.Ancestors(row.Path).Any(changed.Contains))
+                    invalid.Add(row.Path);
+                else valid.Add(row with { BasisCursor = current });
+            // Mutating a page cannot shift the path-key continuation. Release the store gate between pages.
+            _known.RemoveDeletionEvidence(_pairId, _root.RootId, invalid);
+            _known.StoreDeletionEvidence(_pairId, _root.RootId, valid);
         }
-        // Never read another feed merely to rescue a cache: a different basis is cheaply reprobed.
-        // The already-drained feed proves unchanged rows; observation and evidence share its cursor.
-        foreach (var batch in invalid.Chunk(256)) _known.RemoveDeletionEvidence(_pairId, _root.RootId, batch);
-        foreach (var batch in valid.Values.Chunk(256)) _known.StoreDeletionEvidence(_pairId, _root.RootId, batch);
-        return valid;
+        // Validated results stay in SQLite; callers load only the paths they actually probe.
+        return new Dictionary<string, DeletionEvidenceRecord>(StringComparer.OrdinalIgnoreCase);
     }
 
     private async Task<IReadOnlyDictionary<string, SyncRemoteDeletionEvidence>> DeletionEvidenceAsync(
@@ -632,7 +648,7 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
         if (paths.Count == 0) return NoEvidence;
         try
         {
-            var cached = await PrepareEvidenceCacheAsync(ct);
+            var cached = await PrepareEvidenceCacheAsync(paths, ct);
             return await _client.LookupDeletionEvidenceForV2Async(paths,
                 _deletedExactFromFull,
                 _deletedAncestorsFromFull, cached,
@@ -653,7 +669,7 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
     // replays the Dropbox change feed from the oldest checkpoint, which during a first-sync apply includes every upload
     // the run itself made, and stalled the lane for 10+ minutes before failing. The lane's paths are exactly the ones
     // that cache did not answer, so reusing it within the run reuses no stale evidence.
-    private System.Collections.Concurrent.ConcurrentDictionary<string, DeletionEvidenceRecord>? _validatedThisRun;
+    private bool _evidenceValidatedThisRun;
 
     /// <summary>
     /// Takes over a previous inventory's tombstone classification and validated evidence cache for the same root
@@ -666,12 +682,22 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
         _deletedExactFromFull = previous._deletedExactFromFull;
         _deletedAncestorsFromFull = previous._deletedAncestorsFromFull;
         _evidenceBasis = previous._evidenceBasis;
-        _validatedThisRun = previous._validatedThisRun;
+        _evidenceValidatedThisRun = previous._evidenceValidatedThisRun;
+    }
+
+    private async Task<IReadOnlyDictionary<string, DeletionEvidenceRecord>> PrepareEvidenceCacheAsync(
+        IReadOnlyList<string> paths, CancellationToken ct)
+    {
+        await PrepareEvidenceCacheAsync(ct);
+        return _known.DeletionEvidenceRows(_pairId, _root.RootId, paths)
+            .Where(row => row.Failure is null && row.BasisCursor == _evidenceBasis)
+            .ToDictionary(row => row.Path, StringComparer.OrdinalIgnoreCase);
     }
 
     private async Task<IReadOnlyDictionary<string, DeletionEvidenceRecord>> PrepareEvidenceCacheAsync(CancellationToken ct)
     {
-        if (_validatedThisRun is { } validated && _evidenceBasis is not null) return validated;
+        if (_evidenceValidatedThisRun && _evidenceBasis is not null)
+            return new Dictionary<string, DeletionEvidenceRecord>(StringComparer.OrdinalIgnoreCase);
         async Task ReadClassificationAsync()
         {
             var listing = await ListCheckpointedAsync(null, ct);
@@ -682,8 +708,8 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
         }
         if (_evidenceBasis is null) await ReadClassificationAsync();
         var cached = ReuseEvidence(_evidenceBasis!, _evidenceBasis!, []);
-        _validatedThisRun = new(cached, StringComparer.OrdinalIgnoreCase);
-        return _validatedThisRun;
+        _evidenceValidatedThisRun = true;
+        return cached;
     }
 
     public bool IsAtOrUnderExactTombstone(string path) => _deletedExactFromFull is { } exact &&
@@ -704,7 +730,7 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
         var names = paths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         try
         {
-            var cached = await PrepareEvidenceCacheAsync(ct);
+            var cached = await PrepareEvidenceCacheAsync(paths, ct);
             var resolved = new Dictionary<string, SyncRemoteDeletionEvidence>(StringComparer.OrdinalIgnoreCase);
             var pending = new List<string>();
             var matched = 0;
@@ -743,7 +769,7 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
     {
         if (paths.Count == 0) return;
         RunLog.Trace($"deletion evidence lane: {paths.Count:N0} path(s) to resolve");
-        var cached = await PrepareEvidenceCacheAsync(ct);
+        var cached = await PrepareEvidenceCacheAsync(paths, ct);
         await _client.LookupDeletionEvidenceForV2Async(paths,
             _deletedExactFromFull,
             _deletedAncestorsFromFull, cached, StoreProbedEvidence, ct, resolved);
@@ -753,9 +779,7 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
     {
         var stored = batch.Select(row => row with { BasisCursor = _evidenceBasis }).ToArray();
         _known.StoreDeletionEvidence(_pairId, _root.RootId, stored);
-        // Fresh probes share this run's classification basis. Publish only persisted rows, without
-        // replaying the run's own uploads on the next evidence pass; a new full listing resets the memo.
-        if (_validatedThisRun is { } validated)
-            foreach (var row in stored) validated[row.Path] = row;
+        // Fresh probes stay in the store and share this run's validated classification basis.
+        // Subsequent requests select only their own paths, without accumulating the run's history.
     }
 }

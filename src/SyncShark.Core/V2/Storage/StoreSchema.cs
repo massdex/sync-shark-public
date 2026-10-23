@@ -568,6 +568,15 @@ internal static class StoreSchema
 
         Step(23, tx =>
         {
+            // Notice semantics migrate once, not on every compatible (possibly read-only archive)
+            // open. A current-version database is validated without replaying data mutations.
+            if (fromVersion >= 23)
+            {
+                if (Convert.ToInt64(Scalar(connection, tx,
+                    "SELECT COUNT(*) FROM pragma_table_info('notice') WHERE name='closed_at';")) == 0)
+                    throw new StateDamagedException("Current notice schema is missing its closure timestamp column.");
+                return;
+            }
             if (Convert.ToInt64(Scalar(connection, tx,
                 "SELECT COUNT(*) FROM pragma_table_info('notice') WHERE name='closed_at';")) == 0)
             {

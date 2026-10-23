@@ -66,68 +66,108 @@ public sealed partial class LocalInventory : IInventorySource
         IProgress<string>? progress = null)
     {
         using var lease = PilotDirectoryLease.Open(_root.RootPath, _rootIdentity);
-        var scan = await ScanAsync(lease, ct, p => PairPath.IsSelfOrUnder(p, path) || PairPath.IsUnder(path, p), [path], progress);
-        var snapshot = BuildSnapshot(0, _root.RootId, "", scan, p => PairPath.IsSelfOrUnder(p, path));
-        var incomplete = scan.Decisions.GroupBy(d => PairPath.IsSelfOrUnder(d.RelativePath, path) ? d.RelativePath : path,
-                StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(g => g.Key, g => string.Join("; ", g.Select(d => d.Reason).Distinct()), StringComparer.OrdinalIgnoreCase);
-        foreach (var owned in _productOwnedRelative.Where(p => PairPath.IsSelfOrUnder(p, path)))
-            incomplete[owned] = "product-owned path";
-        var missing = incomplete.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
-        string? Incomplete(string itemPath)
+        var budget = new VerificationBudget(VerificationElapsedForTest);
+        long done = 0, reused = 0;
+        if (path.Length == 0)
         {
-            if (incomplete.TryGetValue(itemPath, out var reason)) return reason;
-            foreach (var parent in PairPath.Ancestors(itemPath))
-                if (incomplete.TryGetValue(parent, out reason)) return reason;
-            return null;
+            await accept([new ItemState("", ItemKind.Folder, _root.RootObjectId, null, null, 0,
+                DateTimeOffset.UnixEpoch, ItemFlags.None)]).ConfigureAwait(false);
+            await WalkAsync("", _rootIdentity).ConfigureAwait(false);
         }
-        long done = 0, hashed = 0, reused = 0;
-        var reviewBudget = new VerificationBudget(VerificationElapsedForTest);
-        foreach (var page in snapshot.Items.Chunk(256))
+        else
+        {
+            var roots = await ReadPageAsync([path], null).ConfigureAwait(false);
+            foreach (var folder in roots.Where(CanTraverse))
+                await WalkAsync(folder.Path, Identity(folder)).ConfigureAwait(false);
+        }
+        lease.VerifyBinding();
+
+        static bool CanTraverse(ItemState item) => item.Kind == ItemKind.Folder &&
+            item.Flags == ItemFlags.None && item.IncompleteReason is null;
+        static PilotDirectoryIdentity Identity(ItemState item)
+        {
+            var (volume, id) = LocalItems.ParseObjectId(item.ObjectId);
+            return new(volume, id);
+        }
+        async Task WalkAsync(string directory, PilotDirectoryIdentity identity)
+        {
+            try { await WalkCoreAsync(directory, identity).ConfigureAwait(false); }
+            catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct) == FailureRetryOwner.FailureScope.Item)
+            {
+                await accept([new ItemState(directory, ItemKind.Folder, "", null, null, 0,
+                    DateTimeOffset.UnixEpoch, ItemFlags.Unreadable) { IncompleteReason = error.Message }]).ConfigureAwait(false);
+            }
+        }
+        async Task WalkCoreAsync(string directory, PilotDirectoryIdentity identity)
         {
             ct.ThrowIfCancellationRequested();
-            var hashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            var unknown = new List<ItemState>();
-            foreach (var item in page.Where(i => i.Kind == ItemKind.File && i.Flags == ItemFlags.None))
+            lease.VerifyBinding();
+            var absolute = Path.Combine(_root.RootPath, directory.Replace('/', Path.DirectorySeparatorChar));
+            // Native enumeration retains one 64-KiB buffer. DFS retains only a bounded page per
+            // ancestor, never the whole tree or a breadth-first million-directory frontier.
+            using var entries = WindowsDirectoryListing.List(absolute, identity).GetEnumerator();
+            while (true)
             {
-                if (Incomplete(item.Path) is not null) continue;
-                var prior = _known.ByObject(_root.RootId, item.ObjectId);
-                if (prior is { Hash: not null, Flags: ItemFlags.None } && prior.ObjectId == item.ObjectId &&
-                    prior.Size == item.Size && prior.Mtime.UtcTicks == item.Mtime.UtcTicks)
-                { hashes[item.Path] = prior.Hash; reused++; }
-                else unknown.Add(item);
-            }
-            if (unknown.Count != 0)
-            {
-                ProgressGuard.Report(progress, $"Hashing {hashed:N0} attempted; {unknown.Count:N0} pending in page; {reused:N0} reused", ct);
-                var admitted = new List<ItemState>();
-                foreach (var item in unknown)
+                var listed = new Dictionary<string, DirectoryEntryInfo>(StringComparer.OrdinalIgnoreCase);
+                var paths = new List<string>(256);
+                while (paths.Count < 256 && entries.MoveNext())
                 {
                     ct.ThrowIfCancellationRequested();
-                    var prior = _known.Live(_root.RootId, [item.Path]).FirstOrDefault();
-                    if (_known.DeferIndexObservation(_root.RootId, _side, item, prior,
-                        "review content proof pending; independent indexing continues beyond review budget")) admitted.Add(item);
+                    var entry = entries.Current;
+                    var full = Path.Combine(absolute, entry.Name);
+                    listed.Add(full, entry);
+                    paths.Add(PilotPath.NormalizeRelative(Path.GetRelativePath(_root.RootPath, full)));
                 }
-                await HashProofsAsync(admitted, reviewBudget, hashes, ct).ConfigureAwait(false);
-                hashed = reviewBudget.Items;
+                if (paths.Count == 0) break;
+                var page = await ReadPageAsync(paths, listed).ConfigureAwait(false);
+                foreach (var folder in page.Where(CanTraverse))
+                    await WalkAsync(folder.Path, Identity(folder)).ConfigureAwait(false);
             }
-            await accept(page.Select(i =>
-            {
-                missing.Remove(i.Path);
-                var reason = Incomplete(i.Path);
-                if (reason is null && i.Kind == ItemKind.File && i.Flags == ItemFlags.None && !hashes.ContainsKey(i.Path))
-                    reason = "content could not be verified (unreadable or changed while hashing)";
-                return i with { Hash = i.Kind == ItemKind.File ? hashes.GetValueOrDefault(i.Path) : i.Hash,
-                    Flags = reason is null ? i.Flags : i.Flags | ItemFlags.Unreadable, IncompleteReason = reason };
-            }).ToArray());
-            done += page.Length;
-            ProgressGuard.Report(progress, $"Review {done:N0}/{snapshot.Items.Count:N0} items; hashed {hashed:N0}, reused {reused:N0}", ct);
         }
-        // Enumeration can fail before emitting an entry. Keep an explicit sentinel at that path;
-        // its parents are protected, but independent readable siblings remain reviewable (RQ-032/034).
-        foreach (var page in incomplete.Where(p => missing.Contains(p.Key)).Chunk(256))
-            await accept(page.Select(p => new ItemState(p.Key, ItemKind.Folder, "", null, null, 0,
-                DateTimeOffset.UnixEpoch, ItemFlags.Unreadable) { IncompleteReason = p.Value, ObservationKindUnknown = true }).ToArray());
+        async Task<IReadOnlyList<ItemState>> ReadPageAsync(IReadOnlyList<string> paths,
+            IReadOnlyDictionary<string, DirectoryEntryInfo>? listed)
+        {
+            var exact = paths.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var scan = await ScanAsync(lease, ct, exact.Contains, paths, progress,
+                exactPaths: exact, listedMetadata: listed).ConfigureAwait(false);
+            var snapshot = BuildSnapshot(0, _root.RootId, "", scan, exact.Contains);
+            var rows = snapshot.Items.ToDictionary(item => item.Path, StringComparer.OrdinalIgnoreCase);
+            foreach (var decision in scan.Decisions)
+            {
+                var key = PairPath.IsSelfOrUnder(decision.RelativePath, path) ? decision.RelativePath : path;
+                var item = rows.GetValueOrDefault(key) ?? new ItemState(key, ItemKind.Folder, "", null, null, 0,
+                    DateTimeOffset.UnixEpoch, ItemFlags.None) { ObservationKindUnknown = true };
+                rows[key] = item with { Flags = item.Flags | ItemFlags.Unreadable, IncompleteReason = decision.Reason };
+            }
+            foreach (var owned in paths.Where(p => LocalItems.IsExcluded(p, _productOwnedRelative)))
+                rows[owned] = new ItemState(owned, ItemKind.Folder, "", null, null, 0,
+                    DateTimeOffset.UnixEpoch, ItemFlags.Unreadable) { IncompleteReason = "product-owned path", ObservationKindUnknown = true };
+            var hashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var unknown = new List<ItemState>();
+            foreach (var item in rows.Values.Where(item => item.Kind == ItemKind.File && item.Flags == ItemFlags.None))
+            {
+                var prior = _known.ByObject(_root.RootId, item.ObjectId);
+                if (prior is { Hash: not null, Flags: ItemFlags.None } && prior.Size == item.Size &&
+                    prior.Mtime.UtcTicks == item.Mtime.UtcTicks) { hashes[item.Path] = prior.Hash; reused++; }
+                else
+                {
+                    var previous = _known.Live(_root.RootId, [item.Path]).FirstOrDefault();
+                    if (_known.DeferIndexObservation(_root.RootId, _side, item, previous,
+                        "review content proof pending; independent indexing continues beyond review budget")) unknown.Add(item);
+                }
+            }
+            // VERIFY owns all reads/publication, including previously unseen children. Its budget
+            // leaves durable indexing work; no review path opens content or hydrates a pointer.
+            await HashProofsAsync(unknown, budget, hashes, ct).ConfigureAwait(false);
+            var result = rows.Values.Select(item => item.Kind == ItemKind.File && item.Flags == ItemFlags.None
+                ? hashes.TryGetValue(item.Path, out var hash) ? item with { Hash = hash } :
+                    item with { Flags = ItemFlags.Unreadable, IncompleteReason = "Content proof unavailable; Retry after indexing or Review again." }
+                : item).ToArray();
+            foreach (var page in result.Chunk(256)) await accept(page).ConfigureAwait(false);
+            done += result.Length;
+            ProgressGuard.Report(progress, $"Review {done:N0} items; hashed {budget.Items:N0}, reused {reused:N0}", ct);
+            return result;
+        }
     }
 
     /// <inheritdoc/>
@@ -598,14 +638,15 @@ public sealed partial class LocalInventory : IInventorySource
     }
 
     private Task<PilotLocalScan> ScanAsync(PilotDirectoryLease lease, CancellationToken ct, Func<string, bool> include,
-        IReadOnlyList<string>? refreshPaths, IProgress<string>? p, LocalWalkCheckpoint? walk = null, IReadOnlySet<string>? exactPaths = null)
+        IReadOnlyList<string>? refreshPaths, IProgress<string>? p, LocalWalkCheckpoint? walk = null, IReadOnlySet<string>? exactPaths = null,
+        IReadOnlyDictionary<string, DirectoryEntryInfo>? listedMetadata = null)
     {
         PairPause.Check();
         // Empty is the root-coverage retry sentinel, not a child path. Passing it to
         // explicit-child normalization rejects the retry before any directory is read.
         if (refreshPaths?.Contains(string.Empty) == true) refreshPaths = null;
         return new PilotLocalScanner { MetadataOnly = true, CloudFilesAware = true,
-            ReplaceOnlineOnlyStubs = _settings.ReplaceOnlineOnlyStubs, WalkCheckpoint = walk,
+            ReplaceOnlineOnlyStubs = _settings.ReplaceOnlineOnlyStubs, WalkCheckpoint = walk, ListedMetadata = listedMetadata,
             BetweenDirectories = refreshPaths is null ? PairPause.Check : null,
             DirectoryCompletedForTest = DirectoryCompletedForTest,
             OwnedPlaceholderProbeForTest = OwnedPlaceholderProbeForTest,

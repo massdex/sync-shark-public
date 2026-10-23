@@ -1094,6 +1094,33 @@ internal sealed class InMemoryStateStore : IStateStore
             ? map.Values.ToArray() : [];
     }
 
+    public IReadOnlyList<DeletionEvidenceRecord> DeletionEvidenceRows(string pairId, string rootId, IReadOnlyList<string> paths)
+    {
+        lock (_gate) return _deletionEvidence.TryGetValue(pairId + "\n" + rootId, out var map)
+            ? paths.Distinct(StringComparer.OrdinalIgnoreCase).Where(map.ContainsKey).Select(path => map[path]).ToArray() : [];
+    }
+
+    public IReadOnlyList<DeletionEvidenceRecord> DeletionEvidencePage(string pairId, string rootId, string? afterPath,
+        int limit, bool? failuresOnly = null)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
+        lock (_gate)
+        {
+            if (!_deletionEvidence.TryGetValue(pairId + "\n" + rootId, out var map)) return [];
+            var page = new SortedList<string, DeletionEvidenceRecord>(StringComparer.Ordinal);
+            var after = afterPath is null ? null : PathKey.Of(afterPath);
+            foreach (var row in map.Values)
+            {
+                if (failuresOnly is not null && (row.Failure is not null) != failuresOnly.Value) continue;
+                var key = PathKey.Of(row.Path);
+                if (after is not null && StringComparer.Ordinal.Compare(key, after) <= 0) continue;
+                page.Add(key, row);
+                if (page.Count > Math.Min(limit, 256)) page.RemoveAt(page.Count - 1);
+            }
+            return page.Values.ToArray();
+        }
+    }
+
     public void RemoveDeletionEvidence(string pairId, string rootId, IReadOnlyList<string> paths)
     {
         lock (_gate)

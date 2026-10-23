@@ -57,7 +57,12 @@ public sealed partial class SyncRun
                 }
                 if (hydrated.Count != actions.Count)
                 {
-                    replaced.Add(retry.Path); // No ordinary alternative may reverse the explicit choice.
+                    var notice = DeleteSourceGuard.ReviewedRemovalNotice(pair.PairId, retry.Path, actions);
+                    var failed = _store.SyncRetryAt(pair.PairId, retry.Path) ?? retry;
+                    _store.SaveSyncRetry(pair.PairId, failed with { ReviewedActions = actions, PendingNotice = notice });
+                    WriteNotices([notice]);
+                    changedHolds.Add(retry.Path);
+                    changedNotices.Add(notice);
                     continue;
                 }
                 actions = hydrated;
@@ -131,7 +136,7 @@ public sealed partial class SyncRun
                 var sourceRoot = action.Kind == ActionKind.Move ? target : source;
                 if (!Same(expectedSource, _store.Live(sourceRoot.RootId, [expectedSource.Path]).FirstOrDefault())) return false;
             }
-            if (DeleteSourceGuard.ReviewedRemoval(action))
+            if (DeleteSourceGuard.ReviewedRemoval(action) && action.ExpectedTarget?.Kind == ItemKind.Folder)
                 return await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(action, pair, _store,
                     _endpoints.Inventory(target), ct).ConfigureAwait(false);
             return true;
