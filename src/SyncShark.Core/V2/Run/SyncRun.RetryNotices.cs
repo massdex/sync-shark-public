@@ -331,7 +331,8 @@ public sealed partial class SyncRun
             if (NoticeChoices.IsRemovalAttention(notice))
             {
                 if (choice == NoticeChoices.RetryNow) _store.RequestSyncRetryNow(pairId, notice.Path);
-                if (choice == NoticeChoices.Dismiss) _store.CloseNotice(noticeId, choice);
+                // Dismiss is this catalogue's Ignore label: suppress the cause through the shared owner.
+                if (choice == NoticeChoices.Dismiss) _store.CloseNotice(noticeId, NoticeChoices.Ignore);
                 // Retry only schedules the retained choice; fresh proof is still mandatory next run.
                 return NoticeChoices.Result(choice, notice);
             }

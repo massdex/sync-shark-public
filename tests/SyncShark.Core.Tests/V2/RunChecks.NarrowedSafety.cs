@@ -98,11 +98,15 @@ internal static partial class RunChecks
             if (kind == ActionKind.Delete)
             {
                 var notice = fx.Store.OpenNotices(pair.PairId).Single(item => item.ReasonKey == "reviewed-removal-skipped");
-                Console.WriteLine("NOTICE-MEASURE skipped-removal sides=" + notice.RemovalSides +
+                Console.WriteLine("NOTICE-MEASURE skipped-removal sides=" +
+                    (notice.RemovalSides is null ? "null" : "[" + string.Join(",", notice.RemovalSides) + "]") +
                     " choices=" + string.Join(",", NoticeChoices.Options(notice).Select(option => option.Choice)));
+                Require(notice.RemovalSides is not null && notice.RemovalSides.SequenceEqual(new[] { Side.B }),
+                    "skipped removal retains the reviewed target side B");
+                // RQ-032 requires Retry; E9 Dismiss suppresses this cause without granting removal authority.
                 Require(NoticeChoices.Options(notice).Select(option => option.Choice).SequenceEqual(
-                    new[] { NoticeChoices.ReviewRemoval, NoticeChoices.OpenFolderSettings, NoticeChoices.Dismiss }),
-                    "skipped removal offers a fresh review, settings and dismiss, never unsigned deletion");
+                    new[] { NoticeChoices.RetryNow, NoticeChoices.ReviewRemoval, NoticeChoices.OpenFolderSettings, NoticeChoices.Dismiss }),
+                    "skipped removal offers Retry, a fresh review, settings and dismiss, never unsigned deletion");
                 foreach (var unsignedChoice in new[] { NoticeChoices.DeleteReviewed, NoticeChoices.ConfirmRemoval })
                 {
                     var refused = false;
@@ -113,6 +117,11 @@ internal static partial class RunChecks
                         fx.Store.OpenNotices(pair.PairId).Any(item => item.NoticeId == notice.NoticeId),
                         "an attention notice cannot authorize " + unsignedChoice + " without a frozen review");
                 }
+                await run.ApplyRetryNoticeChoiceAsync(pair.PairId, notice.NoticeId!, NoticeChoices.RetryNow, default);
+                Require(fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0 &&
+                    fx.Store.NoticeById(pair.PairId, notice.NoticeId!) is { Closed: false } &&
+                    fx.Store.Pair(pair.PairId)!.Excluded.Contains("folder"),
+                    "attention Retry only requests another observation and never grants removal consent");
                 await run.IncrementalAsync(pair.PairId, new RecordingProgress(), default);
                 Require(fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0 &&
                     await fx.A.ObserveAsync("folder", default) is not null && await fx.A.ObserveAsync("folder/local.txt", default) is not null &&
@@ -122,8 +131,22 @@ internal static partial class RunChecks
                 await run.ApplyRetryNoticeChoiceAsync(pair.PairId, notice.NoticeId!, NoticeChoices.OpenFolderSettings, default);
                 Require(fx.Store.OpenNotices(pair.PairId).Any(item => item.NoticeId == notice.NoticeId), "settings navigation does not acknowledge removal");
                 await run.ApplyRetryNoticeChoiceAsync(pair.PairId, notice.NoticeId!, NoticeChoices.Dismiss, default);
-                Require(fx.Store.OpenNotices(pair.PairId).All(item => item.NoticeId != notice.NoticeId) && fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0,
-                    "dismiss closes the notice without executing anything");
+                // E9: this Dismiss label uses cause-only Ignore, not terminal resolution or consent.
+                Require(fx.Store.OpenNotices(pair.PairId).All(item => item.NoticeId != notice.NoticeId) &&
+                    fx.Store.NoticeById(pair.PairId, notice.NoticeId!) is { Closed: false } &&
+                    fx.Store.UnresolvedNotices(pair.PairId).Any(item => item.NoticeId == notice.NoticeId) &&
+                    fx.Store.Pair(pair.PairId)!.Excluded.Contains("folder") &&
+                    fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0 &&
+                    await fx.B.ObserveAsync("folder/keep.tmp", default) is not null,
+                    "dismiss suppresses the unresolved cause and preserves the skipped removal and ignored child");
+                fx.Store.AddNotices([notice]);
+                Require(fx.Store.OpenNotices(pair.PairId).All(item => item.NoticeId != notice.NoticeId),
+                    "repeating the same skipped-removal cause stays suppressed");
+                fx.Store.AddNotices([notice with { CauseKey = "new-protected-child" }]);
+                Require(fx.Store.OpenNotices(pair.PairId).Single(item => item.NoticeId == notice.NoticeId).CauseKey == "new-protected-child" &&
+                    fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0 &&
+                    await fx.B.ObserveAsync("folder/keep.tmp", default) is not null,
+                    "a new skipped-removal cause resurfaces the same notice without deleting content");
             }
         }
         {
