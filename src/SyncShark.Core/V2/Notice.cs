@@ -12,4 +12,6 @@ public sealed record Notice(string PairId, int Rule, NoticeKind Kind, string Pat
     FailureRetryOwner.State? DeliveryRetry = null)
 {
     public NoticePlanBound? PlanBound { get; init; }
+    /// <summary>Stable suppression identity, independent of diagnostic cause text and attempt metadata.</summary>
+    public string? CauseIdentity { get; init; }
 }

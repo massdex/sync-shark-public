@@ -233,7 +233,7 @@ internal sealed class PairLoop
         var retry = FailureRetryOwner.Failed(_watchAttempts, now);
         _watchAttempts = retry.Attempts;
         _watchRetryAt = retry.RetryAfter;
-        try { _in.Store.AddNotices([WatchNotice(error.Message) with { FailureRetry = retry, CauseKey = FailureCauseIdentity.Of(error) }]); }
+        try { _in.Store.AddNotices([WatchNotice(error.Message) with { FailureRetry = retry, CauseKey = error.Message, CauseIdentity = FailureCauseIdentity.Of(error) }]); }
         catch (Exception noticeError) { RunOutput.Observe(noticeError); }
     }
 

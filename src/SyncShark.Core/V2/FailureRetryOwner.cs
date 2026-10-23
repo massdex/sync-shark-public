@@ -87,7 +87,7 @@ public static class FailureRetryOwner
                 "Check the stated failure and available storage, then Retry. Automatic retries continue.";
         store.AddNotices([new(pairId, 40, NoticeKind.Info, "",
             "Sync could not finish: " + error.Message + ". " + fix + " Ignore silences this cause without excluding files.",
-            "run-unavailable", id, FailureRetry: state, CauseKey: FailureCauseIdentity.Of(error))]);
+            "run-unavailable", id, FailureRetry: state, CauseKey: error.Message) { CauseIdentity = FailureCauseIdentity.Of(error) }]);
         return state;
     }
 

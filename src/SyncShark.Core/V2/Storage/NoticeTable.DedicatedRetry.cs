@@ -35,7 +35,7 @@ internal sealed partial class NoticeTable
         // Refresh exact scan debt even while its cause is suppressed, rather than duplicating it.
         var id = ShortId.Make("n", notice.PairId, "30", RowCodec.Key(notice.Path), "unreadable");
         return ById(pairNo, id, transaction) is { Closed: false } unreadable
-            ? unreadable.Notice with { Detail = notice.Detail, CauseKey = notice.CauseKey,
+            ? unreadable.Notice with { Detail = notice.Detail, CauseKey = notice.CauseKey, CauseIdentity = notice.CauseIdentity,
                 FailureRetry = notice.FailureRetry ?? unreadable.Notice.FailureRetry }
             : notice;
     }

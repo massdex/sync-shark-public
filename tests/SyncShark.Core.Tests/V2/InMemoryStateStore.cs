@@ -944,7 +944,7 @@ internal sealed class InMemoryStateStore : IStateStore
                 if (same is not null)
                 {
                     // E9: suppression keeps work actionable and refreshes its payload; a new cause resurfaces it.
-                    if (!string.Equals(same.CauseKey, notice.CauseKey, StringComparison.Ordinal))
+                    if (!string.Equals(same.CauseIdentity ?? same.CauseKey, notice.CauseIdentity ?? notice.CauseKey, StringComparison.Ordinal))
                         _suppressedNotices.Remove(same.NoticeId!);
                     if (notice.RetainedVersion is null) _closedNotices.Remove(same.NoticeId!);
                     if (NoticeChoices.IsRetryNotice(notice) || notice.FreeSpace is not null ||

@@ -11,6 +11,7 @@ internal static partial class StorageChecks
         NoticeLookupUpgradeChecks(root);
         ScanNoticeAggregationRetainsDebt(root);
         RunCauseSuppressionChecks(root);
+        DiagnosticCauseRoundTripChecks();
     }
 
     private static void DedicatedRetryPublicationChecks(string root)
@@ -25,7 +26,8 @@ internal static partial class StorageChecks
             var path = reason + (dedicatedFirst ? "/first" : "/last");
             var dedicated = new Notice("p1", reason == "unreadable" ? 30 : 40, NoticeKind.Info,
                 path, "Dedicated explanation", reason);
-            var generic = FailureRetryOwner.RetryNotice("p1", path, "stable-cause", 3);
+            var generic = FailureRetryOwner.RetryNotice("p1", path, "stable-cause", 3) with
+                { FailureRetry = new(3, DateTimeOffset.MaxValue) };
             store.AddNotices(dedicatedFirst ? [dedicated, generic] : [generic, dedicated]);
             var active = store.UnresolvedNotices("p1").Where(n => n.Path == path).ToArray();
             Require(active.Length == 1 && active[0].ReasonKey == reason,
@@ -126,6 +128,19 @@ internal static partial class StorageChecks
         Require(store.NoticeById("p1", summary.NoticeId!) is { Closed: true }, "success retires ignored summary");
     }
 
+    private static void DiagnosticCauseRoundTripChecks()
+    {
+        var error = new IOException("diagnostic disk failure", 1);
+        var identity = FailureCauseIdentity.Of(error);
+        var original = new Notice("p1", 40, NoticeKind.Info, "", error.Message, "run-unavailable",
+            CauseKey: error.Message, FailureRetry: new(2, DateTimeOffset.MaxValue)) { CauseIdentity = identity };
+        var decoded = NoticeDetailCodec.Decode(original with { Detail = NoticeDetailCodec.Encode(original),
+            CauseKey = null, CauseIdentity = null, FailureRetry = null });
+        Require(decoded.CauseKey == error.Message && decoded.Detail == error.Message &&
+            decoded.CauseIdentity == identity && decoded.FailureRetry == original.FailureRetry,
+            "diagnostic cause, display detail and independent suppression identity all survive persistence");
+    }
+
     private static void RunCauseSuppressionChecks(string root)
     {
         var folder = Fresh(root, "run-cause-suppression");
@@ -137,7 +152,9 @@ internal static partial class StorageChecks
         store.CloseNotice(id, NoticeChoices.Ignore);
         FailureRetryOwner.RecordRunFailure(store, "p1", new IOException("attempt two", 1), now.AddMinutes(1), _ => false);
         Require(store.OpenNotices("p1").Count == 0 &&
-            store.NoticeById("p1", id)?.Notice.FailureRetry?.Attempts == 2,
+            store.NoticeById("p1", id)?.Notice.FailureRetry?.Attempts == 2 &&
+            store.NoticeById("p1", id)?.Notice.CauseKey == "attempt two" &&
+            store.NoticeById("p1", id)?.Notice.Detail.Contains("attempt two", StringComparison.Ordinal) == true,
             "run suppression survives variable display text while durable attempts advance");
         FailureRetryOwner.RecordRunFailure(store, "p1", new IOException("attempt three", 2), now.AddMinutes(2), _ => false);
         Require(store.OpenNotices("p1").Single().NoticeId == id, "changed stable error code resurfaces the same run notice");

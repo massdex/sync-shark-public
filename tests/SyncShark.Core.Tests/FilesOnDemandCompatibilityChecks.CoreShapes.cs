@@ -9,6 +9,8 @@ internal static partial class FilesOnDemandCompatibilityChecks
 
     private static readonly IReadOnlyDictionary<string, string> ApprovedCoreShapes = new Dictionary<string, string>
     {
+        // F4 / NOTICE3: indexed pair/reason/path notice probes replace per-item full-population reads.
+        ["index|nt_pair_reason_path"] = """CREATE INDEX nt_pair_reason_path ON notice(pair_no,reason_key,path_key)""",
         ["index|nt_groupable_delete"] = """CREATE INDEX nt_groupable_delete ON notice(pair_no,reason_key,notice_id) WHERE state IN ('open','aggregated')""",
         ["index|nt_restore_hold_path"] = """CREATE INDEX nt_restore_hold_path ON notice(pair_no, path_key) WHERE state IN ('open','aggregated') AND reason_key='recovery-restore-pending' AND restore_hold=1""",
         ["index|nt_restore_page"] = """CREATE INDEX nt_restore_page ON notice(pair_no, notice_id) WHERE state IN ('open','aggregated') AND (reason_key='recovery-restore-pending' OR reason_key='recovery-restore-ready')""",
