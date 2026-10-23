@@ -116,9 +116,9 @@ internal static class RecoveryAdapterChecks
         var run = new SyncRun(store, executor, new FakeEndpointProvider(), Settings, TimeProvider.System);
         var host = new V2SyncHost(store, run, new ObservedExecutor(executor), null!, Settings, TimeProvider.System,
             SqliteStateStore.DatabasePath(Path.Combine(root, "state")));
-        var gate = (SemaphoreSlim)typeof(V2SyncHost)
-            .GetField("_runGate", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(host)!;
-        await gate.WaitAsync().ConfigureAwait(false);
+        var gate = (PairRunAdmission)typeof(SyncRun)
+            .GetField("_admission", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(run)!;
+        var admission = await gate.EnterAsync("missing-pair", CancellationToken.None).ConfigureAwait(false);
         try
         {
             var item = new SyncRecoveryCatalogItem("missing-recovery", "missing-pair", "pair",
@@ -131,12 +131,17 @@ internal static class RecoveryAdapterChecks
             await Task.Yield();
             Require(!restore.IsCompleted,
                 "a GUI restore queues behind the active run instead of being refused");
-            gate.Release();
+            using var cancelled = new CancellationTokenSource();
+            var withdrawn = host.RestoreRecoveryAsync(item, restoreAsCopy: false, cancellationToken: cancelled.Token);
+            cancelled.Cancel();
+            await Expect<OperationCanceledException>(() => withdrawn).ConfigureAwait(false);
+            Require(!restore.IsCompleted, "cancelling a queued restore never releases its predecessor's pair lease");
+            admission.Dispose();
             await Expect<InvalidDataException>(() => restore).ConfigureAwait(false);
         }
         finally
         {
-            if (gate.CurrentCount == 0) gate.Release();
+            admission.Dispose();
         }
     }
 

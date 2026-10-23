@@ -32,6 +32,7 @@
     <Compile Include="../SyncShark.Core.Tests/StorageNoticeLaneChecks.cs" Link="StorageNoticeLaneChecks.cs" />
     <Compile Include="../SyncShark.Core.Tests/StorageQueuePlanChecks.cs" Link="StorageQueuePlanChecks.cs" />
     <Compile Include="../SyncShark.Core.Tests/FilesOnDemandCompatibilityChecks.cs" Link="FilesOnDemandCompatibilityChecks.cs" />
+    <Compile Include="../SyncShark.Core.Tests/FilesOnDemandCompatibilityChecks.CoreShapes.cs" Link="FilesOnDemandCompatibilityChecks.CoreShapes.cs" />
     <Compile Include="../SyncShark.Core.Tests/FilesOnDemandV20Fixture.cs" Link="FilesOnDemandV20Fixture.cs" />
     <Compile Include="../SyncShark.Core.Tests/StorageExplicitRetryChecks.cs" Link="StorageExplicitRetryChecks.cs" />
     <Compile Include="../SyncShark.Core.Tests/V2/PointerUpdateCoordinationChecks.cs" Link="PointerUpdateCoordinationChecks.cs" />

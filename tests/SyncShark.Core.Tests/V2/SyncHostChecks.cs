@@ -15,6 +15,7 @@ internal static class SyncHostChecks
         await SelectPair_Remembered_UnknownRefused();
         await SetPairEnabled_SavesPair();
         await Run_MapsObservedResults();
+        Run_ReportCountsWithoutDisplayRows();
         await Run_RefusedPair_IsItemFailure_NextPairRuns();
         await Run_UnrequestedCancellation_IsItemFailure_NotStopped();
         await Run_Stop_SetsStopped_LaterPairsNotStarted_ActiveCleared();
@@ -145,6 +146,24 @@ internal static class SyncHostChecks
             "enabling a pair that shares another pair's root is refused and leaves it off");
     }
 
+    private static void Run_ReportCountsWithoutDisplayRows()
+    {
+        var report = new RunReport("p1", RunOutcomes.StateDamaged, 6, 2, 3, 2, 1, 3, 0, 0, [])
+            { Uncertain = 4, Skipped = 5, Deferred = 7 };
+        var item = RunResultMapping.ToItem(PairOf("p1", "Alpha"), PairDefOf("p1", "Alpha"), report, []);
+        var result = item.Result!;
+        Require(result.Decisions.Count == 0 && result.TransferTotals is null &&
+            result.Uploaded == 2 && result.Downloaded == 1 && result.AppliedItems == 6 &&
+            result.Counts?.Deleted == 3 && result.Failed == 2 && result.Conflicts == 3 &&
+            result.NeedsVerification == 4 && result.Skipped == 5 && result.NotAttempted == 7 &&
+            result.Pending == report.Pending && item.FailureType == RunOutcomes.StateDamaged,
+            "authoritative report counts survive absent observations without invented per-file rows");
+        var projection = SyncRunOutcomeProjection.FromResult(result);
+        Require(projection.Uploaded == 2 && projection.Downloaded == 1 && projection.Applied == 6 &&
+            projection.Kind == SyncRunOutcomeKind.StateDamaged,
+            "GUI projection uses counted report truth even for fatal reports with no display rows");
+    }
+
     private static async Task Run_MapsObservedResults()
     {
         var store = new InMemoryStateStore();
@@ -171,7 +190,9 @@ internal static class SyncHostChecks
             ]
         };
         var observed = new ObservedExecutor(executor);
-        var run = new ScriptedRun(observed, plan, Report("p1", RunOutcomes.Complete));
+        // Report counters are authoritative; observed rows are display detail only.
+        var run = new ScriptedRun(observed, plan, new RunReport("p1", RunOutcomes.Partial,
+            4, 1, 1, 1, 1, 1, 0, 0, []) { Uncertain = 1, Skipped = 1 });
         var host = Host(store, run, observed);
 
         var batch = await host.RunPairsAsync([PairOf("p1", "Alpha")], "manual");
@@ -187,7 +208,8 @@ internal static class SyncHostChecks
         Require(decisions[5].Kind == SyncDecisionKind.ResponseUnknown, "an uncertain effect needs verification");
         Require(decisions[6].Kind == SyncDecisionKind.Skipped, "a skipped action keeps its reason");
         Require(item.Result.Uploaded == 1 && item.Result.Downloaded == 1, "transfer totals count one each way");
-        Require(!batch.Stopped && item.FailureType is null, "a complete run is not a failure");
+        Require(!batch.Stopped && item.FailureType is null && item.Result.Outcome == RunOutcomes.Partial,
+            "a completed partial attempt retains issues without becoming a batch failure");
     }
 
     private static async Task Run_RefusedPair_IsItemFailure_NextPairRuns()

@@ -235,7 +235,7 @@ public sealed partial class SyncRun
         var generation = activeGeneration ?? _store.BeginGeneration(targetRoot.RootId, RunKind);
         ForgetRecoveryBaselines(pair, destination, generation);
         var retained = new RetainedBytesWriter(action.Source!, bytes);
-        await foreach (var result in _executor.ApplyAsync(new Plan(pair.PairId, generation, [action], []),
+        await foreach (var result in ApplyAdmittedAsync(pair, new Plan(pair.PairId, generation, [action], []),
             record.Side == Side.A ? target : retained, record.Side == Side.B ? target : retained, ct))
         {
             if (result.Outcome == Outcome.Done) return RecoveryResult(record, "RESTORED", destination);

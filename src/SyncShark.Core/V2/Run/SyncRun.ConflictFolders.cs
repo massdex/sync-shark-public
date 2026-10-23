@@ -127,7 +127,7 @@ public sealed partial class SyncRun
                 else stop ??= result; // Still unverified: it stays pending for a later retry.
             }
             if (apply.Count > 0)
-                await foreach (var result in _executor.ApplyAsync(new Plan(pair.PairId, gen, apply, []), a, b, ct)
+                await foreach (var result in ApplyAdmittedAsync(pair, new Plan(pair.PairId, gen, apply, []), a, b, ct)
                     .ConfigureAwait(false))
                 {
                     if (!byAction.TryGetValue(result.ActionId, out var victim)) continue;
@@ -446,7 +446,7 @@ public sealed partial class SyncRun
                     ordinals[restoreId] = ord;
                 }
                 var reader = new RestoreBatchReader(root, writer, recoveries, actions.Select(action => action.Source!).ToArray());
-                await foreach (var result in _executor.ApplyAsync(new Plan(pair.PairId, gen, actions, []),
+                await foreach (var result in ApplyAdmittedAsync(pair, new Plan(pair.PairId, gen, actions, []),
                     removal.Target == Side.A ? writer : reader, removal.Target == Side.B ? writer : reader, ct).ConfigureAwait(false))
                 {
                     if (result.Outcome == Outcome.Done && ordinals.TryGetValue(result.ActionId, out var ord))
@@ -541,7 +541,7 @@ public sealed partial class SyncRun
             started?.Invoke();
             var action = probe with { Source = source };
             var reader = new RetainedBytesWriter(source, bytes);
-            await foreach (var result in _executor.ApplyAsync(new Plan(pair.PairId, gen, [action], []),
+            await foreach (var result in ApplyAdmittedAsync(pair, new Plan(pair.PairId, gen, [action], []),
                 action.Target == Side.A ? writer : reader, action.Target == Side.B ? writer : reader, ct).ConfigureAwait(false))
                 return result.Outcome == Outcome.Done ? null : result;
         }
@@ -614,7 +614,7 @@ public sealed partial class SyncRun
         var check = await CheckRestoreStepAsync(pair, side == Side.A ? pair.A : pair.B, writer, action, gen, ct, observations).ConfigureAwait(false);
         if (check.Done || check.Block is not null) return check.Block;
         started?.Invoke();
-        await foreach (var result in _executor.ApplyAsync(new Plan(pair.PairId, gen, [action], []), writer, writer, ct)
+        await foreach (var result in ApplyAdmittedAsync(pair, new Plan(pair.PairId, gen, [action], []), writer, writer, ct)
             .ConfigureAwait(false))
             return result.Outcome == Outcome.Done ? null : result;
         return new(removalId, Outcome.Skipped, null, null, null, "The folder could not be created.");

@@ -1268,7 +1268,7 @@ public sealed partial class SyncRun
         // Bounded parallel reads prevent unrelated removal scopes waiting on a serial provider round trip.
         var blocked = new List<SyncAction>();
         foreach (var batch in plan.Actions.Where(action => DeleteSourceGuard.ReviewedRemoval(action) &&
-                     action.ExpectedTarget?.Kind == ItemKind.Folder).Chunk(8))
+                     FolderDelete.Expands(action)).Chunk(8))
         {
             var checks = await Task.WhenAll(batch.Select(async action => (Action: action,
                 Unchanged: await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(action, pair, _store,
@@ -1280,10 +1280,7 @@ public sealed partial class SyncRun
             var notices = new List<Notice>();
             foreach (var action in blocked)
             {
-                var notice = DeleteSourceGuard.ReviewedRemovalNotice(pair.PairId, action.Path, [action]);
-                var retry = _store.SyncRetryAt(pair.PairId, action.Path) ??
-                    new SyncRetry(action.Path, "reviewed-removal", 0, notice.Detail, DateTimeOffset.MinValue);
-                _store.SaveSyncRetry(pair.PairId, retry with { ReviewedActions = retry.ReviewedActions ?? [action], PendingNotice = notice });
+                var notice = DeleteSourceGuard.HoldReviewedRemoval(_store, pair.PairId, action);
                 notices.Add(notice);
             }
             WriteNotices(notices);

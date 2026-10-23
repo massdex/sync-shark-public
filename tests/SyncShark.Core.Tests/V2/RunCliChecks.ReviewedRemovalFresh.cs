@@ -34,6 +34,13 @@ internal static partial class RunCliChecks
                 if (change != "legacy")
                     action = action with { FrozenRemovalSignature = await DeleteSourceGuard.CaptureReviewedRemovalAsync(
                         action, pair, store, target, default) };
+                if (carried)
+                {
+                    Require(await DeleteSourceGuard.CaptureDisclosedRemovalAsync(action, pair, store, target,
+                        1, 0, child.Size, default) is not null, "freeze matches disclosed carried totals");
+                    Require(await DeleteSourceGuard.CaptureDisclosedRemovalAsync(action, pair, store, target,
+                        0, 0, 0, default) is null, "undisclosed carried child cannot be silently frozen as approved");
+                }
                 var due = DateTimeOffset.UtcNow.AddMinutes(1);
                 store.SaveSyncRetry(fx.Pair.PairId, new SyncRetry(folder.Path, "reviewed-removal", 1, "retry", due)
                     { ReviewedActions = [action] });

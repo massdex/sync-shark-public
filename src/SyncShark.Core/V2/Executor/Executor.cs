@@ -561,9 +561,11 @@ public sealed partial class Executor : IExecutor
         var rootId = folder.Target == Side.A ? pair.A.RootId : pair.B.RootId;
         var descendants = await GateAsync(() => FolderDelete.SyncedDescendants(_store, pair, rootId, folder.Path, refused), ct)
             .ConfigureAwait(false);
-        if (folder.FrozenVictimSignature is { } frozen &&
-            !string.Equals(frozen, FolderDelete.Signature(descendants), StringComparison.Ordinal))
+        if (!DeleteSourceGuard.ExpansionUnchanged(folder, descendants))
         {
+            if (DeleteSourceGuard.ReviewedRemoval(folder))
+                await StoreAsync(() => _store.AddNotices([
+                    DeleteSourceGuard.HoldReviewedRemoval(_store, pair.PairId, folder)]), ct).ConfigureAwait(false);
             superseded.Add(new ActionResult(folder.ActionId, Outcome.Skipped, null, null, null,
                 EffectResolver.Superseded));
             return;

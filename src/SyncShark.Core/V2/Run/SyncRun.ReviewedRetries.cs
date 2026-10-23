@@ -6,6 +6,11 @@ public sealed partial class SyncRun
         DeleteSourceGuard.CaptureReviewedRemovalAsync(action, pair, _store,
             _endpoints.Inventory(action.Target == Side.A ? pair.A : pair.B), ct);
 
+    internal Task<string?> CaptureDisclosedRemovalAsync(PairDef pair, SyncAction action,
+        long files, long folders, long bytes, CancellationToken ct) =>
+        DeleteSourceGuard.CaptureDisclosedRemovalAsync(action, pair, _store,
+            _endpoints.Inventory(action.Target == Side.A ? pair.A : pair.B), files, folders, bytes, ct);
+
     private async Task<Plan> ApplyReviewedRetriesAsync(PairDef pair, Plan plan, IReadOnlyList<SyncRetry> retries, CancellationToken ct)
     {
         var replacements = new List<SyncAction>();

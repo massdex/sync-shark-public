@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 
 namespace Massdex.SyncShark.V2;
@@ -84,7 +82,7 @@ public sealed partial class SyncRun
                 long ordinal = 0, files = 0, folders = 0, bytes = 0, kept = 0, blockedOrdinal = 0;
                 var maxDepth = 0;
                 var retryNeeded = false;
-                using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                using var hash = new DeleteSourceGuard.ReviewSignature();
                 foreach (var row in Snapshot())
                 {
                     ct.ThrowIfCancellationRequested();
@@ -92,7 +90,7 @@ public sealed partial class SyncRun
                         (row.Item.Flags & (ItemFlags.Unreadable | ItemFlags.Locked | ItemFlags.NeedsRehash)) != 0 ||
                         row.Item.Kind == ItemKind.File && row.Item.Flags == ItemFlags.None && row.Item.Hash is null);
                     var json = JsonSerializer.Serialize(row);
-                    hash.AppendData(Encoding.UTF8.GetBytes(json + "\n"));
+                    hash.Add(json);
                     writer.Add(RemovalRows, ordinal, FolderDelete.VictimKey(row.Side, row.Item.Path), json);
                     var depth = row.Item.Path.Count(ch => ch == '/');
                     maxDepth = Math.Max(maxDepth, depth);
@@ -111,7 +109,7 @@ public sealed partial class SyncRun
                 var origin = NoticeChoices.IsRemovalAttention(notice) ? notice.ReasonKey :
                     notice.RemovalOriginReason ?? (header is not null ? JsonSerializer.Deserialize<RemovalReview>(header.MetadataJson)!.OriginReason : "reviewed-folder-grew");
                 review = new(notice.Path, origin,
-                    sides, Convert.ToHexString(hash.GetHashAndReset()), policy, files, folders, bytes, kept, ordinal, maxDepth, Excluded: pair.Excluded.Any(p => PairPath.Same(p, notice.Path)), RetryNeeded: retryNeeded);
+                    sides, hash.Finish(), policy, files, folders, bytes, kept, ordinal, maxDepth, Excluded: pair.Excluded.Any(p => PairPath.Same(p, notice.Path)), RetryNeeded: retryNeeded);
                 writer.Commit(JsonSerializer.Serialize(review), review.Signature);
             }, SqliteStateStore.RemovalKey(pair, notice.Path));
             review = review! with { ProtectedFolders = db.ProtectedRemovalFolders(published.Generation) };
@@ -122,7 +120,8 @@ public sealed partial class SyncRun
         }
         var approvedHeader = header!;
         var frozen = JsonSerializer.Deserialize<RemovalReview>(approvedHeader.MetadataJson)!;
-        if (frozen.Path != notice.Path || frozen.Policy != policy || frozen.Signature != Signature(Snapshot()))
+        if (frozen.Path != notice.Path || frozen.Policy != policy ||
+            !DeleteSourceGuard.ReviewedRowsUnchanged(frozen.Signature, Snapshot().Select(row => JsonSerializer.Serialize(row))))
         {
             Hold("The folder or its rules changed after review. Nothing was removed. Review the new contents before confirming.");
             return;
@@ -167,7 +166,7 @@ public sealed partial class SyncRun
                 var plan = new Plan(pair.PairId, 0, actions, []);
                 var byId = actions.ToDictionary(a => a.ActionId);
                 var reported = 0;
-                await foreach (var result in _executor.ApplyAsync(plan, _endpoints.Writer(pair.A), _endpoints.Writer(pair.B), ct))
+                await foreach (var result in ApplyAdmittedAsync(pair, plan, _endpoints.Writer(pair.A), _endpoints.Writer(pair.B), ct))
                 {
                     reported++;
                     failed |= result.Outcome != Outcome.Done;
@@ -224,13 +223,6 @@ public sealed partial class SyncRun
                 detail + NoticeChoices.RemovalAttentionHelp, frozen.OriginReason, RemovalSides: frozen.Sides)]);
             _store.CloseNotice(notice.NoticeId!, "held");
         }
-    }
-
-    private static string Signature(IEnumerable<RemovalItem> rows)
-    {
-        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        foreach (var row in rows) hash.AppendData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(row) + "\n"));
-        return Convert.ToHexString(hash.GetHashAndReset());
     }
 
     private static string? ProtectedReason(SqliteStateStore db, PrepareHeader header, RemovalItem row) =>

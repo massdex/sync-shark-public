@@ -62,7 +62,7 @@ public sealed partial class SyncRun
             // Persist the destination BEFORE the effect. A restart cannot choose a second destination.
             _store.AddNotices([notice with { Repair = repair with { Destination = destination } }]);
             var plan = new Plan(pair.PairId, _store.BeginGeneration(root.RootId, RunKind), [action], []);
-            await foreach (var result in _executor.ApplyAsync(plan, a, b, ct))
+            await foreach (var result in ApplyAdmittedAsync(pair, plan, a, b, ct))
                 if (result.Outcome != Outcome.Done)
                 {
                     if (result.Outcome == Outcome.Refused && result.Reason is { } reason)

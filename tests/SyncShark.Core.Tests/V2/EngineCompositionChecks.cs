@@ -420,7 +420,7 @@ internal static class EngineCompositionChecks
         await new SyncTransferSettingsStore(instance.StateAuthority).SaveAsync(
             new SyncTransferSettings(LocalRecoveryRoot: recovery));
         using var composition = EngineComposition.Open(new EngineHostInputs(product, instance.StateAuthority, http,
-            new Credentials(), new FailingHandler()), V2Settings.Default, TimeProvider.System);
+            new Credentials(), new FailingHandler()) { ContentPausedForTest = () => false }, V2Settings.Default, TimeProvider.System);
         var a = new RootDef("rr-a", SyncProviders.Local, null, recovery,
             await composition.Roots.ObjectIdAsync(SyncProviders.Local, null, recovery, default));
         var b = new RootDef("rr-b", SyncProviders.Local, null, other,
@@ -448,6 +448,15 @@ internal static class EngineCompositionChecks
             File.WriteAllText(sourcePath, "kept me");
             File.SetLastWriteTimeUtc(sourcePath, mtime);
             var changed = await composition.Run.PreviewFirstSyncAsync(pair.PairId, progress, default);
+            // D90: observing the journal write and proving its contents are separate runs.
+            var observed = composition.Store.Live(a.RootId, ["x.txt"]).Single();
+            var expectedHash = DropboxContentHash.Compute(LocalChecks.Bytes("kept me"));
+            Require((observed.Hash is null && observed.Flags.HasFlag(ItemFlags.NeedsRehash)) ||
+                (observed.Flags == ItemFlags.None && Content.SameContent(observed, observed with { Hash = expectedHash }) == true),
+                "same-metadata write is protected debt or independently verified, never stale content");
+            Require(composition.Endpoints.Indexing is not null, "production composition supplies the independent indexing owner");
+            await composition.Endpoints.Indexing!.RunAsync(a, default);
+            changed = await composition.Run.PreviewFirstSyncAsync(pair.PairId, progress, default);
             Require(changed.Actions.Count(action => action.Kind == ActionKind.CopyNew) == 2 &&
                     changed.Actions.Single(action => action.Path == "x.txt").Source?.Hash !=
                     plan.Actions.Single(action => action.Path == "x.txt").Source?.Hash,

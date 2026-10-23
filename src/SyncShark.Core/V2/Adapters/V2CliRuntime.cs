@@ -826,7 +826,8 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
             var root = side == Side.A ? pair.A : pair.B;
             var target = _store.Live(root.RootId, [row.Path]).FirstOrDefault();
             var action = new SyncAction("review-observation", 40, ActionKind.Delete, side, row.Path, null, null, target, false, null);
-            var signature = await _run.CaptureReviewedRemovalAsync(pair, action, ct).ConfigureAwait(false);
+            var signature = await _run.CaptureDisclosedRemovalAsync(pair, action,
+                row.Files, row.Folders, row.Bytes, ct).ConfigureAwait(false);
             rows.Add(row with { ReviewedSignature = signature ?? "unproven" });
         }
         return rows;

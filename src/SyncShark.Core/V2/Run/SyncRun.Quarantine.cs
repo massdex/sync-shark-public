@@ -533,7 +533,7 @@ public sealed partial class SyncRun
         if (_store.IntentById(pair.PairId, action.ActionId) is { } pending)
             return (await _executor.ReconcileAsync([pending], gen, _endpoints.Writer(pair.A), _endpoints.Writer(pair.B), ct)).Single();
         ActionResult? result = null;
-        await foreach (var item in _executor.ApplyAsync(new Plan(pair.PairId, gen, [action], []),
+        await foreach (var item in ApplyAdmittedAsync(pair, new Plan(pair.PairId, gen, [action], []),
             _endpoints.Writer(pair.A), _endpoints.Writer(pair.B), ct)) result = item;
         return result ?? new ActionResult(action.ActionId, Outcome.Skipped, null, null, null, "Cancelled; the item stays held.");
     }

@@ -14,8 +14,6 @@ internal static class RunResultMapping
         IReadOnlyList<ObservedExecutor.Observation> observed)
     {
         var decisions = new List<SyncDecision>();
-        var uploaded = new List<string>();
-        var downloaded = new List<string>();
         foreach (var item in observed)
         {
             var decision = item.Outcome is null
@@ -23,14 +21,13 @@ internal static class RunResultMapping
                 : Decision(item, pairDef);
             if (decision is null) continue;
             decisions.Add(decision);
-            if (decision.Kind == SyncDecisionKind.Uploaded) uploaded.Add(decision.RelativePath);
-            else if (decision.Kind == SyncDecisionKind.Downloaded) downloaded.Add(decision.RelativePath);
         }
         var result = new SyncRunResult(pair.Id, decisions)
         {
             Outcome = report.Outcome, Pending = report.Pending, Deferred = report.Deferred,
             IndexingRemainingByRoot = report.IndexingRemainingByRoot,
-            TransferTotals = new SyncRunTransferTotals(uploaded, downloaded)
+            Counts = new SyncRunCounts(report.Done, report.Uploaded, report.Downloaded, report.Deleted,
+                report.Moved, report.KeptBoth, report.Held, report.Failed, report.Uncertain, report.Skipped, report.Deferred)
         };
         var failureType = report.Outcome switch
         {

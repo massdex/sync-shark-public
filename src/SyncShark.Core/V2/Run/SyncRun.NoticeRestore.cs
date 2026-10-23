@@ -141,7 +141,7 @@ public sealed partial class SyncRun
             await using var bytes = retainedBytes;
             var reader = new RetainedBytesWriter(source, bytes);
             var plan = new Plan(pairId, _store.BeginGeneration(targetRoot.RootId, RunKind), [action], []);
-            await foreach (var result in _executor.ApplyAsync(plan,
+            await foreach (var result in ApplyAdmittedAsync(pair, plan,
                 retained.Side == Side.A ? target : reader, retained.Side == Side.B ? target : reader, token))
             {
                 if (result.Outcome != Outcome.Done && result.Reason is { } reason)

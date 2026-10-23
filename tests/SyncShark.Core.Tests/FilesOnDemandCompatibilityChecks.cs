@@ -2,7 +2,7 @@ using Massdex.SyncShark;
 using Massdex.SyncShark.V2;
 using Microsoft.Data.Sqlite;
 
-internal static class FilesOnDemandCompatibilityChecks
+internal static partial class FilesOnDemandCompatibilityChecks
 {
     internal static void Run(string root)
     {
@@ -26,13 +26,8 @@ internal static class FilesOnDemandCompatibilityChecks
             while (reader.Read()) names.Add(reader.GetString(0));
             return names.ToArray();
         }
-        static string TypeOf(string row) => row.Split('|')[0];
         static string NameOf(string row) => row.Split('|')[1];
-        // The integrated v2 build legitimately migrates final26.2 notice, recovery and local_gap tables and adds
-        // these recovery indexes on every compatible open. They are part of this build's own baseline; Files
-        // On-Demand must still add nothing of its own until it is enabled.
-        string[] RecoveryIndexes = ["rc_page", "rc_path", "rc_path_missing", "nt_restore_page",
-            "nt_restore_path", "nt_restore_path_ready", "nt_restore_hold_path", "nt_restore_reason_page"];
+        // Core migrations are asserted against measured exact shapes, independently of FoD opt-in.
         var before = Schema();
         var beforeNoticeColumns = Columns("notice");
         var beforeRecoveryColumns = Columns("recovery");
@@ -43,20 +38,12 @@ internal static class FilesOnDemandCompatibilityChecks
             Require(!store.HasStorageWork() && !store.HasOwnedPointers("fixture-root") && store.StorageRegistrations().Count == 0 &&
                 store.StorageSettlementPage().Count == 0 && store.ChangedStoragePointers().Count == 0 && store.StorageHydrationPage().Count == 0,
                 "disabled feature APIs return defaults without creating schema");
-            // The no-command open produces the integrated build's v2 schema: final26.2 plus the approved
-            // recovery additions and the forward-only v22 gap obligation. Neither is a FoD opt-in.
+            // The no-command open performs approved core migrations through v27, independently of FoD.
+            // Exact measured definitions live in CoreShapes; no broad table-name exemptions apply.
             // The pre-FoD backup restores this integrated baseline, not the older core schema.
             var integrated = Schema();
             var addedOpen = integrated.Except(before, StringComparer.Ordinal).ToArray();
-            var removedOpen = before.Except(integrated, StringComparer.Ordinal).ToArray();
-            Require(removedOpen.All(row => TypeOf(row) == "table" && (NameOf(row) is "notice" or "recovery" or "local_gap" or "pending_effect" or "root" or "local_rehash" or "local_gap_item")),
-                "no-command open only redefines the approved notice, recovery and local_gap tables");
-            Require(addedOpen.All(row => (TypeOf(row) == "table" && (NameOf(row) is "notice" or "recovery" or "local_gap" or "pending_effect" or "root" or "local_rehash" or "local_gap_item" or "planning_deferred")) ||
-                (TypeOf(row) == "index" && (RecoveryIndexes.Contains(NameOf(row), StringComparer.Ordinal) || NameOf(row) is "planning_deferred_pair" or "planning_deferred_pair_version" or "planning_deferred_root_version"))),
-                "no-command open adds only approved core recovery, gap and deferred planning changes");
-            Require(addedOpen.Where(row => TypeOf(row) == "table").Select(NameOf).OrderBy(name => name, StringComparer.Ordinal)
-                .SequenceEqual(new[] { "local_gap", "local_gap_item", "local_rehash", "notice", "pending_effect", "planning_deferred", "recovery", "root" }),
-                "the only redefined tables are local_gap, notice and recovery, plus the added deferred planning table");
+            AssertApprovedCoreMigration(before, integrated);
             var openedGapColumns = Columns("local_gap");
             Require(openedGapColumns.Take(beforeGapColumns.Length).SequenceEqual(beforeGapColumns) &&
                 openedGapColumns.Skip(beforeGapColumns.Length).SequenceEqual(new[] { "inventory_pending" }),
@@ -66,8 +53,8 @@ internal static class FilesOnDemandCompatibilityChecks
             var openedNoticeColumns = Columns("notice");
             var openedRecoveryColumns = Columns("recovery");
             Require(openedNoticeColumns.Take(beforeNoticeColumns.Length).SequenceEqual(beforeNoticeColumns) &&
-                openedNoticeColumns.Skip(beforeNoticeColumns.Length).SequenceEqual(new[] { "path_key", "restore_hold" }),
-                "notice keeps every final26.2 column and gains only the approved recovery columns");
+                openedNoticeColumns.Skip(beforeNoticeColumns.Length).SequenceEqual(new[] { "path_key", "restore_hold", "closed_at" }),
+                "notice keeps every final26.2 column and gains only the approved recovery and terminal-retention columns");
             Require(openedRecoveryColumns.Take(beforeRecoveryColumns.Length).SequenceEqual(beforeRecoveryColumns) &&
                 openedRecoveryColumns.Skip(beforeRecoveryColumns.Length).SequenceEqual(new[] { "path_key" }),
                 "recovery keeps every final26.2 column and gains only the approved path key");

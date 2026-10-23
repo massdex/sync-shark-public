@@ -73,6 +73,41 @@ internal static class DeleteSourceGuard
             actions.Any(action => action.ExpectedTarget?.Kind == ItemKind.Folder) ? "reviewed-folder-grew" : "reviewed-removal-skipped",
             RemovalSides: actions.Select(action => action.Target).Distinct().ToArray());
 
+    // The executor's conservative expansion veto belongs to this owner too. It is additional
+    // to fresh target admission, never a replacement for it and never bypassed by a cached stamp.
+    internal static bool ExpansionUnchanged(SyncAction action, IReadOnlyList<ItemState> descendants) =>
+        action.FrozenVictimSignature is not { } frozen ||
+        string.Equals(frozen, FolderDelete.Signature(descendants), StringComparison.Ordinal);
+
+    internal static Notice HoldReviewedRemoval(IStateStore store, string pairId, SyncAction action)
+    {
+        var existing = store.SyncRetryAt(pairId, action.Path);
+        var actions = (existing?.ReviewedActions ?? []).Append(action).DistinctBy(item => item.ActionId).ToArray();
+        var notice = ReviewedRemovalNotice(pairId, action.Path, actions);
+        var retry = existing ??
+            new SyncRetry(action.Path, "reviewed-removal", 0, notice.Detail, DateTimeOffset.MinValue);
+        store.SaveSyncRetry(pairId, retry with { ReviewedActions = actions, PendingNotice = notice });
+        return notice;
+    }
+
+    // Preserve the persisted removal-review format while keeping its comparison under the same
+    // destructive-action owner. JSON rows include side, item and protected status.
+    internal sealed class ReviewSignature : IDisposable
+    {
+        private readonly System.Security.Cryptography.IncrementalHash _hash =
+            System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+        internal void Add(string json) => _hash.AppendData(System.Text.Encoding.UTF8.GetBytes(json + "\n"));
+        internal string Finish() => Convert.ToHexString(_hash.GetHashAndReset());
+        public void Dispose() => _hash.Dispose();
+    }
+
+    internal static bool ReviewedRowsUnchanged(string frozen, IEnumerable<string> rows)
+    {
+        using var hash = new ReviewSignature();
+        foreach (var row in rows) hash.Add(row);
+        return string.Equals(frozen, hash.Finish(), StringComparison.Ordinal);
+    }
+
     // The frozen signature is authority; current sync inventory and cursors are NOT fresh proof.
     // Listing is targeted even when ordinary sync excludes this path or consumed its change while sleeping.
     internal static async Task<bool> ReviewedRemovalUnchangedAsync(SyncAction action, PairDef pair,
@@ -90,10 +125,18 @@ internal static class DeleteSourceGuard
         IStateStore store, IInventorySource inventory, CancellationToken ct) =>
         (await ObserveReviewedRemovalAsync(action, pair, store, inventory, ct).ConfigureAwait(false)).Signature;
 
-    private static async Task<(string? Signature, bool HasCarried)> ObserveReviewedRemovalAsync(SyncAction action,
+    internal static async Task<string?> CaptureDisclosedRemovalAsync(SyncAction action, PairDef pair,
+        IStateStore store, IInventorySource inventory, long files, long folders, long bytes, CancellationToken ct)
+    {
+        var observed = await ObserveReviewedRemovalAsync(action, pair, store, inventory, ct).ConfigureAwait(false);
+        return observed.Files == files && observed.Folders == folders && observed.Bytes == bytes ? observed.Signature : null;
+    }
+
+    private static async Task<(string? Signature, bool HasCarried, long Files, long Folders, long Bytes)> ObserveReviewedRemovalAsync(SyncAction action,
         PairDef pair, IStateStore store, IInventorySource inventory, CancellationToken ct)
     {
-        if (action.ExpectedTarget is not { } expected) return (null, false);
+        if (action.ExpectedTarget is not { } expected) return (null, false, 0, 0, 0);
+        long files = 0, folders = 0, bytes = 0;
         var folder = expected.Kind == ItemKind.Folder;
         var hasCarried = false;
         var session = "delete-check-" + Guid.NewGuid().ToString("N");
@@ -129,7 +172,13 @@ internal static class DeleteSourceGuard
                     else if (!folder || !PairPath.IsUnder(item.Path, action.Path)) valid = false;
                     else
                     {
-                        hasCarried |= refused.Contains(item) || SyncIgnorePolicy.IsIgnored(item.Path, item.Kind == ItemKind.Folder, rules);
+                        var carried = refused.Contains(item) || SyncIgnorePolicy.IsIgnored(item.Path, item.Kind == ItemKind.Folder, rules);
+                        hasCarried |= carried;
+                        if (carried)
+                        {
+                            if (item.Kind == ItemKind.File) { files++; bytes += item.Size; }
+                            else folders++;
+                        }
                         children.Add(item);
                     }
                 }
@@ -139,10 +188,10 @@ internal static class DeleteSourceGuard
             }, ct).ConfigureAwait(false);
             return (valid && rootSeen ? FolderDelete.SignatureOrdered(db is not null
                 ? db.RemovalObservation(session, action.Target)
-                : memory!.OrderBy(item => item.Path, StringComparer.Ordinal)) : null, hasCarried);
+                : memory!.OrderBy(item => item.Path, StringComparer.Ordinal)) : null, hasCarried, files, folders, bytes);
         }
         catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct) == FailureRetryOwner.FailureScope.Item)
-        { return (null, hasCarried); }
+        { return (null, hasCarried, files, folders, bytes); }
         catch (Exception error)
         {
             damaged = FailureRetryOwner.ScopeOf(error, ct) == FailureRetryOwner.FailureScope.State;

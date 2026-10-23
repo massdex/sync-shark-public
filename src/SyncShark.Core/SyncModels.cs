@@ -567,6 +567,10 @@ public sealed record SyncRunTransferTotals
         paths.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 }
 
+/// <summary>Authoritative aggregate result counts, independent of bounded or absent display rows.</summary>
+public sealed record SyncRunCounts(int Applied, int Uploaded, int Downloaded, int Deleted, int Moved,
+    int KeptBoth, int Held, int Failed, int Uncertain, int Skipped, int Deferred);
+
 public sealed record SyncRunResult(string PairId, IReadOnlyList<SyncDecision> Decisions)
 {
     /// <summary>The v2 run owner's final disposition; null only for legacy results.</summary>
@@ -581,24 +585,27 @@ public sealed record SyncRunResult(string PairId, IReadOnlyList<SyncDecision> De
     /// </summary>
     public SyncRunTransferTotals? TransferTotals { get; init; }
 
-    public int Uploaded => TransferTotals?.Uploaded ?? Decisions.Count(item => item.Kind == SyncDecisionKind.Uploaded);
-    public int Downloaded => TransferTotals?.Downloaded ?? Decisions.Count(item => item.Kind == SyncDecisionKind.Downloaded);
+    /// <summary>Present for v2 reports; display observations never replace these counted facts.</summary>
+    public SyncRunCounts? Counts { get; init; }
+
+    public int Uploaded => Counts?.Uploaded ?? TransferTotals?.Uploaded ?? Decisions.Count(item => item.Kind == SyncDecisionKind.Uploaded);
+    public int Downloaded => Counts?.Downloaded ?? TransferTotals?.Downloaded ?? Decisions.Count(item => item.Kind == SyncDecisionKind.Downloaded);
     // Applied actions include successful metadata-only effects (notably moves),
     // not just transferred bytes. Keep this shared first-sync/retry projection
     // out of serialized run objects; their existing receipt field owns the count.
     [System.Text.Json.Serialization.JsonIgnore]
-    public int AppliedItems => Uploaded + Downloaded + Decisions.Count(item => !item.NotAttempted &&
-        item.Kind is SyncDecisionKind.Recovered or SyncDecisionKind.Archived or SyncDecisionKind.OnlineOnly);
-    public int Identical => Decisions.Count(item => item.Kind == SyncDecisionKind.Identical);
-    public int Conflicts => Decisions.Count(item => item.Kind == SyncDecisionKind.Conflict);
-    public int Recovered => Decisions.Count(item => item.Kind == SyncDecisionKind.Recovered);
-    public int Blocked => Decisions.Count(item => item.Kind == SyncDecisionKind.Blocked);
-    public int Failed => Decisions.Count(item => item.Kind == SyncDecisionKind.Blocked && !item.NotAttempted);
-    public int NotAttempted => Decisions.Count(item => item.NotAttempted);
-    public int NeedsVerification => Decisions.Count(item => item.Kind is SyncDecisionKind.ResponseUnknown or SyncDecisionKind.CleanupPending);
-    public int Skipped => Decisions.Count(item => item.Kind == SyncDecisionKind.Skipped);
-    public int OnlineOnly => Decisions.Count(item => item.Kind == SyncDecisionKind.OnlineOnly);
-    public bool Stopped => Decisions.Any(item => item.Kind == SyncDecisionKind.Stopped);
+    public int AppliedItems => Counts?.Applied ?? (Uploaded + Downloaded + Decisions.Count(item => !item.NotAttempted &&
+        item.Kind is SyncDecisionKind.Recovered or SyncDecisionKind.Archived or SyncDecisionKind.OnlineOnly));
+    public int Identical => Counts is not null ? 0 : Decisions.Count(item => item.Kind == SyncDecisionKind.Identical);
+    public int Conflicts => Counts?.Held ?? Decisions.Count(item => item.Kind == SyncDecisionKind.Conflict);
+    public int Recovered => Counts is not null ? 0 : Decisions.Count(item => item.Kind == SyncDecisionKind.Recovered);
+    public int Blocked => Counts?.Failed ?? Decisions.Count(item => item.Kind == SyncDecisionKind.Blocked);
+    public int Failed => Counts?.Failed ?? Decisions.Count(item => item.Kind == SyncDecisionKind.Blocked && !item.NotAttempted);
+    public int NotAttempted => Counts?.Deferred ?? Decisions.Count(item => item.NotAttempted);
+    public int NeedsVerification => Counts?.Uncertain ?? Decisions.Count(item => item.Kind is SyncDecisionKind.ResponseUnknown or SyncDecisionKind.CleanupPending);
+    public int Skipped => Counts?.Skipped ?? Decisions.Count(item => item.Kind == SyncDecisionKind.Skipped);
+    public int OnlineOnly => Counts is not null ? 0 : Decisions.Count(item => item.Kind == SyncDecisionKind.OnlineOnly);
+    public bool Stopped => Outcome is not null ? Outcome == V2.RunOutcomes.Stopped : Decisions.Any(item => item.Kind == SyncDecisionKind.Stopped);
 }
 
 public sealed record SyncDownloadResult(string FileId, string Revision, long Size, string ContentHash);

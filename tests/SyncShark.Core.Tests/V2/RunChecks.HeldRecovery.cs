@@ -40,7 +40,9 @@ internal static partial class RunChecks
         Require(!fx.Store.FirstSyncDone(fx.Pair.PairId) && fx.WriterA.Puts == 1 && fx.WriterB.Puts == 0,
             "evidence outage keeps reviewed pending while unrelated download completes");
         fx.Provider.AddInventory(fx.Pair.B, new DeferredInventory(fx.B));
-        await runtime.ApplyFirstSyncAsync(fx.Pair.PairId, null, true, null, _ => { }, default);
+        var resumed = await runtime.ApplyFirstSyncAsync(fx.Pair.PairId, null, true, null, _ => { }, default);
+        Console.WriteLine($"HELD-RESUME done={fx.Store.FirstSyncDone(fx.Pair.PairId)}; puts-a={fx.WriterA.Puts}; puts-b={fx.WriterB.Puts}; " +
+            $"result={System.Text.Json.JsonSerializer.Serialize(resumed)}; retry={System.Text.Json.JsonSerializer.Serialize(fx.Store.SyncRetryAt(fx.Pair.PairId, "held.txt"))}");
         Require(fx.Store.FirstSyncDone(fx.Pair.PairId) && fx.WriterA.Puts == 1 && fx.WriterB.Puts == 1,
             "same prepare resumes evidence without duplicate ordinary download");
         Console.WriteLine("PASS HeldRecovery_EvidenceOutageRerun");

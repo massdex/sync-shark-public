@@ -349,7 +349,7 @@ public static class NoticeChoices
             : notice.FolderInspection
             ? [new(ShowRemaining, "Show remaining items"), new(RetryNow, "Review removal again"), new(Ignore, "Ignore this cause; keep folder protected")]
             : IsRemovalAttention(notice)
-            ? [new(ReviewRemoval, "Review removal"), new(OpenFolderSettings, "Open folder settings"), new(Dismiss, "Dismiss")]
+            ? [new(RetryNow, "Retry"), new(ReviewRemoval, "Review again"), new(OpenFolderSettings, "Open folder settings"), new(Dismiss, "Dismiss")]
             : notice.ReasonKey == "deletion-review" && notice.Rule == DeletionReviewRestoreOnlyRule
             ? [new(KeepRestore, "Keep / restore"), new(Ignore, "Ignore this cause")]
             : notice.ReasonKey == "deletion-review"

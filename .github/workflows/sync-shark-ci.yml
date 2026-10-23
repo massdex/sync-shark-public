@@ -128,9 +128,11 @@ jobs:
           - suite: nested-pair
             flag: --excluded-nested-pair-partition-checks
             takes-root: true
+            drive: c
           - suite: corresponding-overlap
             flag: --corresponding-included-overlap-checks
             takes-root: true
+            drive: c
           - suite: quarantine
             flag: --quarantine-checks
             takes-root: true
@@ -138,57 +140,75 @@ jobs:
           - suite: retry-protection
             flag: --retry-protection-checks
             takes-root: false
+            drive: c
           - suite: first-sync-completion
             flag: --first-sync-completion-checks
             takes-root: false
+            drive: c
           - suite: removal-review
             flag: --v2-removal-review-checks
             takes-root: false
+            drive: c
           - suite: resumable-listing
             flag: --v2-resumelist-checks
             takes-root: true
+            drive: c
           - suite: conflict-choices
             flag: --v2-conflict-choice-checks
             takes-root: false
+            drive: c
           - suite: planning-protection
             flag: --v2-planning-protection-checks
             takes-root: true
+            drive: c
           - suite: interrupted-delete
             flag: --v2-interrupted-delete-checks
             takes-root: true
+            drive: c
           - suite: gap-verification
             flag: --v2-gap-checks
             takes-root: true
+            drive: c
           - suite: snapshot-memory
             flag: --v2-snapshot-million-memory-checks
             takes-root: true
+            drive: c
           - suite: prepare-memory
             flag: --v2-million-memory-checks
             takes-root: false
+            drive: c
           - suite: storage
             flag: --v2-storage-checks
             takes-root: true
+            drive: c
           - suite: files-on-demand-storage
             flag: --fod-storage-checks
             takes-root: true
+            drive: c
           - suite: dropbox
             flag: --v2-dropbox-checks
             takes-root: true
+            drive: c
           - suite: cli
             flag: --cli-checks
             takes-root: true
+            drive: c
           - suite: recovery-restore
             flag: --v2-recovery-restore-checks
             takes-root: false
+            drive: c
           - suite: recovery-reader
             flag: --v2-recovery-reader-checks
             takes-root: false
+            drive: c
           - suite: recovery-query
             flag: --v2-recovery-query-checks
             takes-root: true
+            drive: c
           - suite: runcli
             flag: --v2-runcli-checks
             takes-root: false
+            drive: c
           - suite: run
             flag: --v2-run-checks
             takes-root: false
@@ -196,27 +216,35 @@ jobs:
           - suite: executor
             flag: --v2-executor-checks
             takes-root: false
+            drive: c
           - suite: conflict-transition
             flag: --v2-conflict-transition-checks
             takes-root: false
+            drive: c
           - suite: conflict-retirement
             flag: --v2-conflict-retirement-checks
             takes-root: false
+            drive: c
           - suite: collision-baseline
             flag: --v2-collision-baseline-checks
             takes-root: false
+            drive: c
           - suite: recovery-first-restart
             flag: --v2-recovery-first-restart-checks
             takes-root: true
+            drive: c
           - suite: planner
             flag: --v2-planner-checks
             takes-root: false
+            drive: c
           - suite: held
             flag: --v2-held-recovery
             takes-root: false
+            drive: c
           - suite: notices
             flag: --v2-notice-restore-checks
             takes-root: false
+            drive: c
           - suite: dates
             flag: --v2-dates-checks
             takes-root: true
@@ -224,9 +252,11 @@ jobs:
           - suite: blockers
             flag: --blocker-checks
             takes-root: false
+            drive: c
           - suite: reincluded-evidence
             flag: --reincluded-evidence-checks
             takes-root: false
+            drive: c
           - suite: local-offline
             flag: --v2-local-offline-checks
             takes-root: true
@@ -240,21 +270,27 @@ jobs:
           - suite: autosync
             flag: --v2-autosync-checks
             takes-root: false
+            drive: c
           - suite: run-history
             flag: --v2-run-history-checks
             takes-root: true
+            drive: c
           - suite: autosync-phase3
             flag: --v2-autosync-phase3-checks
             takes-root: false
+            drive: c
           - suite: autosync-process
             flag: --v2-autosync-process-checks
             takes-root: false
+            drive: c
           - suite: sync-host
             flag: --v2-host-checks
             takes-root: false
+            drive: c
           - suite: review-deletes
             flag: --v2-review-deletes-checks
             takes-root: false
+            drive: c
     steps:
       - name: Download test binaries
         uses: actions/download-artifact@v4

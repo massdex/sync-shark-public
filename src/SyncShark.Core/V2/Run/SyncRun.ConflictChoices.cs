@@ -389,7 +389,7 @@ public sealed partial class SyncRun
             Content.SameContent(mergeSource.Size, mergeSource.Hash, bytes.LongLength, DropboxContentHash.Compute(bytes)) != true))
             return Result(Outcome.Skipped, "The saved merge checkpoint failed verification; originals remain unchanged.");
         var sourceWriter = mergedStream is null ? b : new RetainedBytesWriter(operation.Actions[0].Source!, mergedStream);
-        await foreach (var result in _executor.ApplyAsync(new Plan(pair.PairId, gen, retry, []), a, sourceWriter, ct))
+        await foreach (var result in ApplyAdmittedAsync(pair, new Plan(pair.PairId, gen, retry, []), a, sourceWriter, ct))
         {
             if (result.Outcome != Outcome.Done) failure ??= result;
             else if (owned.Contains(result.ActionId)) { completed.Add(result.ActionId); Save(); }
