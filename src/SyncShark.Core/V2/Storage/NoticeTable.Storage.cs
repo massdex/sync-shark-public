@@ -9,13 +9,13 @@ internal sealed partial class NoticeTable
     {
         if (notice.Storage is null || !notice.ReasonKey.StartsWith(family, StringComparison.Ordinal))
             throw new ArgumentException("A storage notice must belong to its supplied family.", nameof(notice));
-        var args = new (string, object?)[] { ("$p", pair), ("$reason", notice.ReasonKey),
+        var args = new (string, object?)[] { ("$p", pair), ("$reason", notice.ReasonKey), ("$legacy", notice.LegacyReasonKey),
             ("$lo", family), ("$hi", family + "￿") };
         // An ignored cause keeps its row. Otherwise preserve the current visible family's identity,
         // including legacy random ids, and let Add refresh the explanation and episode evidence.
         var id = StoreSchema.Scalar(_connection, tx,
-            "SELECT notice_id FROM notice INDEXED BY nt_pair_reason WHERE pair_no=$p AND reason_key=$reason AND " +
-            ActionableSql("state") + " AND " + IgnoredSql("choice") + " LIMIT 1;", args) as string;
+            "SELECT notice_id FROM notice INDEXED BY nt_pair_reason WHERE pair_no=$p AND reason_key IN ($reason,$legacy) AND " +
+            ActionableSql("state") + " AND " + IgnoredSql("choice") + " ORDER BY reason_key=$reason DESC LIMIT 1;", args) as string;
         id ??= StoreSchema.Scalar(_connection, tx,
             "SELECT notice_id FROM notice INDEXED BY nt_pair_reason WHERE pair_no=$p AND reason_key>=$lo AND reason_key<$hi AND " +
             VisibleSql("state") + " AND NOT (" + IgnoredSql("choice") + ") LIMIT 1;", args) as string;

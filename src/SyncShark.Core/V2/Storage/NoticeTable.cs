@@ -188,7 +188,7 @@ internal sealed partial class NoticeTable
     // Display text, attempt count and retry deadline are not cause identity. Providers/failure owners
     // supply CauseIdentity independently of diagnostic CauseKey; legacy rows retain their prior key.
     private static bool SameEpisode(Notice? previous, Notice incoming) => previous is not null &&
-        ((incoming.CauseIdentity ?? incoming.CauseKey) is not { } cause || cause == (previous.CauseIdentity ?? previous.CauseKey)) &&
+        FailureCauseIdentity.Same(previous, incoming) &&
         (incoming.FolderDeleteEpisode is null || incoming.FolderDeleteEpisode == previous.FolderDeleteEpisode) &&
         (incoming.UploadSuspended is null || incoming.UploadSuspended == previous.UploadSuspended);
 

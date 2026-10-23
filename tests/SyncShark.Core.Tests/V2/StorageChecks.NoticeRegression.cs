@@ -12,6 +12,7 @@ internal static partial class StorageChecks
         ScanNoticeAggregationRetainsDebt(root);
         RunCauseSuppressionChecks(root);
         DiagnosticCauseRoundTripChecks();
+        LegacyCauseSuppressionChecks(root);
     }
 
     private static void DedicatedRetryPublicationChecks(string root)

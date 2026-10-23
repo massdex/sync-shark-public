@@ -14,4 +14,6 @@ public sealed record Notice(string PairId, int Rule, NoticeKind Kind, string Pat
     public NoticePlanBound? PlanBound { get; init; }
     /// <summary>Stable suppression identity, independent of diagnostic cause text and attempt metadata.</summary>
     public string? CauseIdentity { get; init; }
+    /// <summary>Transient pre-upgrade storage reason used only to find and migrate an existing suppression.</summary>
+    public string? LegacyReasonKey { get; init; }
 }

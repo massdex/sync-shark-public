@@ -12,12 +12,15 @@ internal static partial class LocalJournalChecks
         var product = Path.Combine(folder, "gap-reasons-" + Guid.NewGuid().ToString("N"));
         var root = new RootDef("gap-root", SyncProviders.Local, null, folder, SyncLocalEndpointStore.ObjectId(1, 1));
         const string cursor = "0000000000000001:200";
-        string[] reasons = ["proved-unchanged", "usn>=boundary", "metadata-mismatch", "journal-mismatch", "open-failed(5)", "ioctl-failed(1)"];
+        string[] reasons = ["proved-unchanged", "usn>=boundary", "metadata-mismatch", "journal-mismatch", "open-failed(87)", "ioctl-failed(1)"];
         var rows = reasons.Select((reason, i) => new ItemState(reason, ItemKind.File,
             SyncLocalEndpointStore.ObjectId(1, (ulong)i + 10), null, new string('a', 64), 3,
             DateTimeOffset.UtcNow, ItemFlags.None)).ToArray();
         using (var store = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
+            var remote = new RootDef("probe-remote", SyncProviders.Dropbox, "account", "/remote", "id:remote");
+            var pair = new PairDef("probe-pair", "Pair A", root, remote, [], [], true);
+            store.SavePair(pair);
             store.WriteSnapshot(new(root.RootId, Side.A, store.BeginGeneration(root.RootId, "full"), cursor, rows, []));
             var gaps = (ILocalGapStore)store;
             gaps.BeginGap(root.RootId, cursor, 100, true);
@@ -27,6 +30,11 @@ internal static partial class LocalJournalChecks
             LocalChecks.Require(store.ProtectionBatch(root.RootId, ItemFlags.NeedsRehash, [rows[0].Path])[0].Covered,
                 "diagnostic unchanged proof remains protected until next run");
             gaps.PromoteGapDiscovery(root.RootId);
+            LocalChecks.Require(gaps.GapHashPage(root.RootId, epoch, 128).Count == 3 &&
+                store.OpenNotices(pair.PairId).Count == 1 && gaps.GapProgress(root.RootId).Contains("open-failed(87)") &&
+                store.ProtectionBatch(root.RootId, ItemFlags.NeedsRehash, rows.Skip(4).Select(row => row.Path).ToArray()).All(hit => hit.Covered),
+                "paused hashing still exposes one root notice and exact native probe reason; failed entities stay protected");
+            store.RequestIndexRetry(root.RootId);
             LocalChecks.Require(gaps.GapHashPage(root.RootId, epoch, 128).Count == 5 &&
                 store.RehashWatermark(root.RootId) == 0 && !store.ProtectionBatch(root.RootId,
                     ItemFlags.NeedsRehash, [rows[0].Path])[0].Covered,
@@ -118,11 +126,15 @@ internal static partial class LocalJournalChecks
             gaps.GapProgress(root.RootId).Contains("make offline/cloud content available", StringComparison.Ordinal),
             "unsupported proof has bounded attempts, explains retry, and retains path protection");
         var beforeRetry = io.Reads;
+        io.Reason = "open-failed(87)";
         gaps.RetryGapFailures(root.RootId);
         await worker.HashPage(root, epoch, default);
         await worker.HashPage(root, epoch, default);
         LocalChecks.Require(io.Reads > beforeRetry && io.Reads <= beforeRetry + 2 && gaps.HasGapProtection(root.RootId),
             "explicit next-run retry allows one new attempt without reopening a hot loop");
+        LocalChecks.Require(gaps.GapProgress(root.RootId).Contains("open-failed(87)") &&
+            store.ByObject(root.RootId, item.ObjectId) is not null,
+            "hash failure retains the IO-owned native reason and never interprets 87 as deletion");
     }
 
     private static async Task GapShutdownResumeChecks(string folder)
@@ -206,15 +218,21 @@ internal static partial class LocalJournalChecks
     {
         public LocalGapHashOutcome Outcome = LocalGapHashOutcome.Unverifiable;
         public int Reads;
+        public string? Reason;
         public bool Paused => false;
         public string? LastFailureReason => "metadata-unsupported";
         public ILocalGapProbe OpenProbes(RootDef root) => this;
-        public LocalGapProof? Probe(RootDef root, ItemState item) => null;
-        public LocalGapProof? Probe(ItemState item) => null;
+        public LocalGapProof? Probe(RootDef root, ItemState item) => Probe(item);
+        public LocalGapProof? Probe(ItemState item)
+        {
+            var identity = LocalItems.ParseObjectId(item.ObjectId);
+            return new(new NtfsUsnCheckpoint(1, 0, 200, 0).Cursor,
+                new(identity.Volume, identity.FileId, 100, item.Size, item.Mtime.UtcDateTime.ToFileTimeUtc()));
+        }
         public Task<LocalGapHashResult> HashAsync(RootDef root, ItemState item, CancellationToken ct)
         {
             Reads++;
-            return Task.FromResult(new LocalGapHashResult(Outcome));
+            return Task.FromResult(new LocalGapHashResult(Outcome, Reason: Reason));
         }
         public void Dispose() { }
     }

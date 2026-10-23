@@ -137,6 +137,7 @@ internal sealed partial class LocalGapWorker(ILocalGapStore store, ILocalGapIo i
                     VerificationBudget.RequiresHash(item, proof.File) ? "content-proof-required" :
                     !Matches(item, proof.File) ? "metadata-mismatch" :
                     proof.File.Usn >= epoch.Boundary ? "usn>=boundary" : "proved-unchanged";
+                if (epoch.TrustFileUsn && proof is null) failures.Add((item, reason));
                 discovered.Add((item, reason != "proved-unchanged"));
                 Record(item, reason);
             }
@@ -149,10 +150,9 @@ internal sealed partial class LocalGapWorker(ILocalGapStore store, ILocalGapIo i
                 RunTrace.Emit($"local gap item discovery retained: {item.Path}: {error}");
             }
         }
-        // Once observed, a bounded completed prefix is durable even when stop races admission.
+        // Even a poison item advances discovery; persist the protected prefix even when stop races admission.
         using (StoreAdmission.WithCancellation(CancellationToken.None))
         {
-            // Even a poison item advances discovery. Its protected, entity-owned work is retried separately.
             store.GapDiscoveredBatch(root.RootId, epoch, discovered);
             foreach (var failure in failures) store.FailGapItem(root.RootId, epoch, failure.Item, failure.Reason);
             // Diagnostics are best effort and must never skip poison-item accounting or
@@ -213,14 +213,14 @@ internal sealed partial class LocalGapWorker(ILocalGapStore store, ILocalGapIo i
                     ct.ThrowIfCancellationRequested();
                     // The IO owns the observed cause. Never re-read live pause state to
                     // reinterpret an interrupted or disabled read as a verification failure.
+                    var reason = result.Reason ?? "file/journal proof unavailable or changed; make offline/cloud content available, then retry sync";
                     if (result.Outcome == LocalGapHashOutcome.Unverifiable)
-                        store.FailGapItem(root.RootId, epoch, item,
-                            "file/journal proof unavailable or changed; make offline/cloud content available, then retry sync");
+                        store.FailGapItem(root.RootId, epoch, item, reason);
                     store.SetGapStatus(root.RootId, false, result.Outcome switch
                     {
                         LocalGapHashOutcome.Paused => "content verification paused during read; retry when activity/power allows",
                         LocalGapHashOutcome.Disabled => "content verification disabled by byte-rate setting",
-                        _ => $"file/journal proof unavailable or changed for {item.Path}; retry pending"
+                        _ => $"{reason} for {item.Path}; retry pending"
                     });
                     RunTrace.Emit($"local gap verification interrupted or changed; retained for restart: {item.Path}");
                 }

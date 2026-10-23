@@ -57,17 +57,17 @@ public sealed partial class SyncRun
             .Select(item => item.Path).ToArray();
         var files = localItems.Where(item => item.Kind == ItemKind.File && candidates.Contains(item.Path))
             .Select(item => item.Path).ToArray();
-        // Establish the complete shared classification first. Folder classification then needs
-        // no network lane: the same cursor-bound tombstones answer it with indexed path reads.
+        // Establish shared classification before answering folders from indexed cursor-bound tombstones.
         var prepared = await deferred.PrepareDeletionEvidenceAsync(files, ct);
+        foreach (var (path, answer) in prepared.Resolved)
+            if (!answer.LookupFailed) CompleteEvidenceLookup(pair.PairId, path);
         var times = prepared.Resolved.Where(entry => entry.Value.DeletedUtc is not null)
             .ToDictionary(entry => entry.Key, entry => entry.Value.DeletedUtc, StringComparer.OrdinalIgnoreCase);
         scan = sides.Cloud == Side.A ? scan with { A = scan.A with { Deleted = times } }
             : scan with { B = scan.B with { Deleted = times } };
         var pending = prepared.Pending.ToHashSet(StringComparer.OrdinalIgnoreCase);
-        // Cached deletion evidence must use the same held resolver as fresh evidence: the ordinary
-        // scan carries deletion times only and would lose the revision hash needed by decision 78.
-        // The resolver also observes/hashes the current local file before deciding.
+        // Cached evidence uses the held resolver to preserve revision hashes (decision 78)
+        // and observe/hash the current local file, rather than passing deletion times alone.
         pending.UnionWith(localItems.Where(item => item.Kind == ItemKind.File &&
             times.TryGetValue(item.Path, out var deleted) && deleted > item.Mtime).Select(item => item.Path));
         // Tombstone folders wait for child outcomes even when every file result was cached.
@@ -544,6 +544,7 @@ public sealed partial class SyncRun
                         !isFolder ? [] : held.Values.ToArray(),
                         !isFolder ? [] : completedDeletes.Values.ToArray(), deleteFolder, token);
                     if (one is null) { lock (sync) pending.Add(rule.Path); return; }
+                    CompleteEvidenceLookup(pair.PairId, rule.Path);
                     var resolved = one.Plan;
                     var guard = HeldGuard();
                     resolved = ApplySafetyFilter(pair, guard,
@@ -606,9 +607,7 @@ public sealed partial class SyncRun
                         return;
                     }
                     resolved = HoldUnreviewedAtApply(pair, resolved, reviewedDeletes);
-                    // A reviewed held victim is explicit per-item authority, not inferred source absence.
-                    // Persist that authority in the intent; never grant it merely from a tombstone or
-                    // from approval of another path (ordinary post-prepare propagation stays guarded).
+                    // Persist reviewed per-item authority; neither a tombstone nor another path's approval grants it.
                     var consented = new List<SyncAction>(resolved.Actions.Count);
                     foreach (var action in resolved.Actions)
                         consented.Add(action.Kind == ActionKind.Delete &&

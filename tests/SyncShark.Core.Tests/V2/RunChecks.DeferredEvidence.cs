@@ -16,6 +16,7 @@ internal static partial class RunChecks
         await DeferredEvidence_TokenlessCancellationStaysPendingAsync();
         await DeferredEvidence_CallerCancellationEscapesAsync();
         await DeferredEvidence_AnsweredEffectFailureKeepsRetryNoticeAsync();
+        await EvidenceNoticeLifecycleAsync();
         await DeferredEvidence_UnreviewedStaysPendingAsync();
         await DeferredEvidence_NewFolderUsesOrdinaryPlannerAsync();
         await DeferredEvidence_NestedFolderAndCachedChildAsync();

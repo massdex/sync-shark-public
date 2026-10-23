@@ -50,6 +50,11 @@ internal static partial class LocalJournalChecks
             LocalChecks.Require(store.ProtectionBatch(root.RootId, ItemFlags.NeedsRehash, [rows[0].Path])[0].Covered,
                 "unchanged metadata discovery stays protected until next-run promotion");
             gaps.PromoteGapDiscovery(root.RootId);
+            LocalChecks.Require(gaps.GapHashPage(root.RootId, epoch, 128).Count == 1 &&
+                store.NextIndexRetry(root.RootId) > DateTimeOffset.UtcNow &&
+                store.ProtectionBatch(root.RootId, ItemFlags.NeedsRehash, [rows[2].Path])[0].Covered,
+                "failed metadata probe is deferred behind its deadline and remains protected before explicit retry");
+            store.RequestIndexRetry(root.RootId);
             var summary = new RehashProtection(store, new PairDef("gap-pair", "gap", root, root, [], [], true)).Summary("gap-pair");
             LocalChecks.Require(summary.Detail.Contains("hashed 0/2") && summary.Detail.Contains("Options:") &&
                 summary.Detail.Contains("Sync Now"), "gap notice reports honest queue progress and existing-framework options");
