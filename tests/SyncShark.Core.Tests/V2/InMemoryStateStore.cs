@@ -494,10 +494,13 @@ internal sealed partial class InMemoryStateStore : IStateStore
         }
     }
 
+    // Counted so a check can prove which items paid a per-item store lookup.
+    internal long ByObjectCalls;
     public ItemState? ByObject(string rootId, string objectId)
     {
         lock (_gate)
         {
+            ByObjectCalls++;
             if (_objectPaths.TryGetValue(rootId, out var map) && map.TryGetValue(objectId, out var path) &&
                 _live.TryGetValue(rootId, out var live) && live.TryGetValue(path, out var row))
                 return row.State;

@@ -11,6 +11,7 @@ internal sealed class VerificationBudget
     internal const ItemFlags SettlementBlocked = VerificationPolicy.SettlementBlocked;
     internal static bool CanAcknowledge(string? hash, ItemFlags flags) => VerificationPolicy.CanAcknowledge(hash, flags);
     internal static bool NeedsWriteProof(ItemState state, ItemState? prior, bool written) => VerificationPolicy.NeedsWriteProof(state, prior, written);
+    internal static bool NeedsWriteProof(ItemState state, Func<ItemState?> prior, bool written) => VerificationPolicy.NeedsWriteProof(state, prior, written);
     internal static bool NeedsVerification(ItemState item) => VerificationPolicy.NeedsVerification(item);
     internal static bool RequiresHash(ItemState item, NtfsFileUsn proof) => VerificationPolicy.RequiresHash(item, proof);
     internal static bool AlreadyVerified(ItemState current, ItemState expected, string hash) => VerificationPolicy.AlreadyVerified(current, expected, hash);

@@ -8,6 +8,7 @@ internal sealed class LocalJournalNames
 {
     private readonly RootDef _root;
     private readonly IStateStore _known;
+    private readonly LocalCatchUpCounters? _counters;
     private readonly HashSet<ulong> _wanted;
     private readonly HashSet<ulong> _ambiguousNames = [];
     private readonly Dictionary<string, Dictionary<ulong, string>> _parents = new(StringComparer.Ordinal);
@@ -18,10 +19,12 @@ internal sealed class LocalJournalNames
     private long _scopeCharacters;
     internal bool ScopeOverflow { get; private set; }
 
-    public LocalJournalNames(RootDef root, IStateStore known, IReadOnlyList<NtfsUsnChange> changes, int limit)
+    public LocalJournalNames(RootDef root, IStateStore known, IReadOnlyList<NtfsUsnChange> changes, int limit,
+        LocalCatchUpCounters? counters = null)
     {
         _root = root;
         _known = known;
+        _counters = counters;
         _wanted = changes.Select(change => change.FileId).ToHashSet();
         _limit = limit;
     }
@@ -33,6 +36,7 @@ internal sealed class LocalJournalNames
 
     public bool Ambiguous(ulong id, ItemState? known, bool requirePresent)
     {
+        _counters?.NameLookup();
         if (_known.HasMultipleNames(_root.RootId, SyncLocalEndpointStore.ObjectId(LocalItems.ParseObjectId(_root.RootObjectId).Volume, id)))
         {
             LastFailure = $"multiple stored hard-link names for object {id:x16}";

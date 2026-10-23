@@ -52,12 +52,32 @@ internal static partial class DropboxChecks
         var folder = (await writer.ObserveAsync("Folder", CancellationToken.None))!;
         h.Wire.SeedFolder("folder");
         var remoteFolder = (await remote.ObserveAsync("folder", CancellationToken.None))!;
+        Require(folder.Kind == ItemKind.Folder && remoteFolder.Kind == ItemKind.Folder &&
+            folder.Path == "Folder" && remoteFolder.Path == "folder",
+            "folder case rename starts with observed folders and differing exact spelling");
         var folderMove = new SyncAction("folder-case", 25, ActionKind.Move, Side.A, "folder", "Folder",
             remoteFolder, folder, false, "folder-key");
         await foreach (var result in executor.ApplyAsync(new Plan(pair.PairId, 4, [folderMove], []), writer, remote, CancellationToken.None))
-            Require(result.Outcome == Outcome.Done, "real NTFS folder case rename completes once");
+            Require(result.Outcome == Outcome.Done,
+                $"real NTFS folder case rename completes once: {result.Outcome}; {result.Reason}");
         Require(Directory.GetDirectories(local).Select(Path.GetFileName).Contains("folder") &&
             File.Exists(Path.Combine(local, "folder", "child.txt")), "native folder rename carries child content");
+        var renamedFolder = (await writer.ObserveAsync("folder", CancellationToken.None))!;
+        Require(renamedFolder.ObjectId == folder.ObjectId, "folder case rename retains native identity");
+        Directory.CreateDirectory(Path.Combine(local, "Occupied"));
+        await File.WriteAllTextAsync(Path.Combine(local, "Occupied", "kept.txt"), "retained");
+        var occupiedFolder = (await writer.ObserveAsync("Occupied", CancellationToken.None))!;
+        var occupiedMove = folderMove with
+        {
+            ActionId = "folder-occupied", FromPath = "folder", Path = "Occupied", ExpectedTarget = renamedFolder
+        };
+        await foreach (var result in executor.ApplyAsync(new Plan(pair.PairId, 5, [occupiedMove], []), writer, remote, CancellationToken.None))
+            Require(result.Outcome == Outcome.Failed, "distinct occupied folder is not replaced");
+        Require((await writer.ObserveAsync("Occupied", CancellationToken.None))!.ObjectId == occupiedFolder.ObjectId &&
+            await File.ReadAllTextAsync(Path.Combine(local, "Occupied", "kept.txt")) == "retained" &&
+            await File.ReadAllTextAsync(Path.Combine(local, "folder", "child.txt")) == "child",
+            "refused folder move retains both original trees and occupant identity");
+        await CaseSensitiveFolderOccupancyAsync(local, writer);
         var conflict = Planner.Decide(pair.PairId, 4,
             [new PlanRow(conflictBase, changedLocal, newerRemote, new Evidence(false, false, false, false))], options);
         Require(conflict.Actions.Single().Kind == ActionKind.Move && conflict.Actions.Single().Target == Side.A &&

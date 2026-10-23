@@ -121,6 +121,31 @@ internal static partial class LocalJournalChecks
                 "current delta cannot publish stale content before independent indexing");
             store.WriteDelta(pending);
         }
+        // Write-proof eligibility is one shared predicate. A folder or a blocked file must short-circuit
+        // on kind/flags BEFORE the per-item store lookup; only an eligible file pays that lookup.
+        var counted = new InMemoryStateStore();
+        var debt = new ItemState("debt.txt", ItemKind.File, SyncLocalEndpointStore.ObjectId(1, 71), null, null, 4,
+            DateTimeOffset.UnixEpoch, ItemFlags.NeedsRehash);
+        var folderOnly = new ItemState("folder", ItemKind.Folder, SyncLocalEndpointStore.ObjectId(1, 72), null, null, 0,
+            DateTimeOffset.UnixEpoch, ItemFlags.None);
+        var blockedFile = new ItemState("locked.txt", ItemKind.File, SyncLocalEndpointStore.ObjectId(1, 73), null, null, 9,
+            DateTimeOffset.UnixEpoch, ItemFlags.Locked);
+        counted.WriteSnapshot(new(def.RootId, Side.A, counted.BeginGeneration(def.RootId, "full"), "", [debt, folderOnly, blockedFile], []));
+        counted.RequireRehash(def.RootId, debt, "write-proof fixture");
+        var proofDelta = new Delta(def.RootId, Side.A, counted.BeginGeneration(def.RootId, "delta"), "", "",
+            [new Change(ChangeKind.Upsert, folderOnly.ObjectId, folderOnly.Path, folderOnly, null),
+             new Change(ChangeKind.Upsert, blockedFile.ObjectId, blockedFile.Path, blockedFile, null),
+             new Change(ChangeKind.Upsert, debt.ObjectId, debt.Path, debt with { Flags = ItemFlags.None }, null)],
+            false, []);
+        counted.ByObjectCalls = 0;
+        var proofInventory = new LocalInventory(def, Side.A, counted, new HashSet<string>(), V2Settings.Default,
+            TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var proof = await proofInventory.RehashAsync(null!, proofDelta, new HashSet<string>(StringComparer.Ordinal), default);
+        LocalChecks.Require(counted.ByObjectCalls == 1,
+            $"only the eligible file pays a ByObject lookup (observed {counted.ByObjectCalls})");
+        LocalChecks.Require(proof.Changes.Count(change => change.State!.Flags.HasFlag(ItemFlags.NeedsRehash)) == 1 &&
+            proof.Changes.Single(change => change.State!.Flags.HasFlag(ItemFlags.NeedsRehash)).Path == debt.Path,
+            "write-proof debt is recorded for the eligible file only, never for a folder or blocked file");
         await inventory.VerifyPendingAsync(_ => true, _ => throw new InvalidOperationException("unverified touch"), default);
         LocalChecks.Require(store.HasPendingRehashVerification(def.RootId), "durable unverified wake remains after sync");
         foreach (IStateStore contractStore in new IStateStore[] { store, new InMemoryStateStore() })
@@ -252,7 +277,7 @@ internal static partial class LocalJournalChecks
             var prior = item with { Flags = ItemFlags.NeedsRehash };
             LocalChecks.Require(VerificationPolicy.NeedsWriteProof(item, prior, false) ==
                 (kind == ItemKind.File && (mask & 1055) == 0), "write proof uses its independent mask");
-            LocalChecks.Require(!VerificationPolicy.NeedsWriteProof(item, null, true), "missing prior never fabricates write proof");
+            LocalChecks.Require(!VerificationPolicy.NeedsWriteProof(item, (ItemState?)null, true), "missing prior never fabricates write proof");
         }
     }
 }

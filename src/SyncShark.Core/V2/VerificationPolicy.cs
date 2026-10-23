@@ -10,8 +10,14 @@ internal static class VerificationPolicy
     internal const ItemFlags SettlementBlocked = BlockedFlags | ItemFlags.NeedsRehash | ItemFlags.Locked | ItemFlags.Unreadable;
     internal static bool CanAcknowledge(string? hash, ItemFlags flags) => hash is not null && (flags & SettlementBlocked) == 0;
     internal static bool NeedsWriteProof(ItemState state, ItemState? prior, bool written) =>
-        state.Kind == ItemKind.File && (state.Flags & WriteEvidenceBlocked) == 0 && prior is not null &&
+        CouldNeedWriteProof(state) && prior is not null &&
         ((prior.Flags & ItemFlags.NeedsRehash) != 0 || written && prior.Size == state.Size && prior.Mtime == state.Mtime);
+    // The cheap, store-free half of the rule. Only an ordinary file can ever need a proof, so the
+    // lazy overload below can skip the per-item store lookup for folders and blocked files.
+    internal static bool CouldNeedWriteProof(ItemState state) =>
+        state.Kind == ItemKind.File && (state.Flags & WriteEvidenceBlocked) == 0;
+    internal static bool NeedsWriteProof(ItemState state, Func<ItemState?> prior, bool written) =>
+        CouldNeedWriteProof(state) && NeedsWriteProof(state, prior(), written);
     internal static bool NeedsVerification(ItemState item) => item.Hash is null || (item.Flags & ItemFlags.NeedsRehash) != 0;
     internal static bool RequiresHash(ItemState item, NtfsFileUsn proof) => proof.RequiresHash || NeedsVerification(item);
     // Idempotent readback only: a concurrent owner already accepted this exact content proof.
