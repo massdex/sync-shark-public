@@ -1,0 +1,44 @@
+{
+  "templates": {
+    "command": "{what} is not in core v2 yet. The legacy compatibility engine requires explicit --core v1 and uses separate legacy state.",
+    "notice": "{what} is not in core v2 yet."
+  },
+  "what": {
+    "storageInventory": "Storage inventory",
+    "interruptedPublication": "Interrupted publication repair",
+    "retirePair": "Removing a pair",
+    "bindPair": "Creating or rebinding a pair",
+    "pairPreview": "Pair preview",
+    "folderSelection": "Folder selection",
+    "onlineOnlyStorage": "Online-only storage",
+    "recoveryFolder": "Recovery folder setup",
+    "ignorePreview": "Ignore-rule preview",
+    "firstSyncReview": "First-sync review in the app",
+    "copyMoveRepair": "Copy-move repair",
+    "runRetry": "Run retry and verification",
+    "recoveryRestore": "Recovery restore and cleanup",
+    "rewind": "Rewind",
+    "sharing": "Sharing a folder pair",
+    "applyingChoice": "Applying a chosen version",
+    "pausingRun": "Pausing a running sync",
+    "contentPreview": "Content preview",
+    "discoveryCheck": "The fast discovery check"
+  },
+  "messages": {
+    "decisionNeeded": "This item needs your decision; nothing was done to it yet. Choosing a version is not in core v2 yet.",
+    "progressNotShown": "Sync Shark could not show sync progress: {detail}",
+    "runDiagnostics": "Throughput: {detail}",
+    "progressAbandoned": "The window did not take the last sync progress in time; that progress was not shown.",
+    "firstSyncIncomplete": "First sync not complete: {detail} reviewed effects deferred — run prepare and apply again with the same choices."
+  },
+  "monitor": {
+    "kind": "continuous",
+    "monitoring": "Monitoring",
+    "idle": "Watching for changes",
+    "waiting": "Waiting for changes to settle",
+    "running": "Syncing",
+    "paused": "Paused",
+    "off": "Off",
+    "held": "Needs attention"
+  }
+}

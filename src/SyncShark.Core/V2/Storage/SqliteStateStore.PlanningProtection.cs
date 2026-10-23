@@ -1,0 +1,130 @@
+using Microsoft.Data.Sqlite;
+
+namespace Massdex.SyncShark.V2;
+
+public sealed partial class SqliteStateStore
+{
+    // Scoped to synchronous RunScope materialization, NEVER retained across hashing,
+    // planning awaits or execution. This does not pin the WAL for a long running plan.
+    internal PlanningProtection OpenPlanningProtection(PairDef pair)
+    {
+        var snapshot = OpenProtectionSnapshot(pair.A.RootId);
+        try
+        {
+            return new PlanningProtection(snapshot.Connection, snapshot.Transaction, snapshot.Root,
+                ProtectionRootNumber(snapshot.Connection, snapshot.Transaction, pair.B.RootId), _storageEnabled);
+        }
+        catch
+        {
+            snapshot.Transaction.Dispose();
+            snapshot.Connection.Dispose();
+            throw;
+        }
+    }
+
+    internal sealed class PlanningProtection : IDisposable
+    {
+        private readonly SqliteConnection _connection;
+        private readonly SqliteTransaction _transaction;
+        private readonly long? _a;
+        private readonly long? _b;
+        private readonly bool _storageEnabled;
+
+        internal PlanningProtection(SqliteConnection connection, SqliteTransaction transaction, long? a, long? b,
+            bool storageEnabled)
+        { _connection = connection; _transaction = transaction; _a = a; _b = b; _storageEnabled = storageEnabled; }
+
+        internal ProtectionStream Stream() =>
+            new(_connection, _transaction, _a, _b, ItemFlags.NeedsRehash, _storageEnabled);
+
+        internal IReadOnlyList<ProtectionMatch> Read(IReadOnlyList<string> paths)
+        {
+            if (paths.Count > 1024) throw new ArgumentOutOfRangeException(nameof(paths));
+            var a = ReadProtectionBatch(_connection, _transaction, _a, ItemFlags.NeedsRehash, paths, _storageEnabled);
+            var b = ReadProtectionBatch(_connection, _transaction, _b, ItemFlags.NeedsRehash, paths, _storageEnabled);
+            return a.Zip(b, (left, right) => new ProtectionMatch(left.Covered || right.Covered,
+                left.Contains || right.Contains)).ToArray();
+        }
+
+        // Read once from the same pinned snapshot as protection. Large backlogs retain
+        // the existing bounded fallback; ordinary retries never require per-item SQL.
+        internal Func<string, bool, bool> RetryLookup(string pairId, IReadOnlySet<string> active,
+            bool restoredOnly, Action? onRead = null) => RetryProtection.Create(RetryPaths(pairId, restoredOnly), active,
+                (path, descendants) =>
+                {
+                    onRead?.Invoke();
+                    return RetryProtected(pairId, path, descendants, active, restoredOnly);
+                });
+
+        private IEnumerable<string> RetryPaths(string pairId, bool restoredOnly)
+        {
+            using var command = StoreSchema.Command(_connection, _transaction,
+                "SELECT path_key FROM sync_retry WHERE pair_no=(SELECT pair_no FROM pair WHERE pair_id=$id)" +
+                RetryProtectionPredicate.Sql(restoredOnly) + ";");
+            command.Parameters.AddWithValue("$id", pairId);
+            using var reader = command.ExecuteReader();
+            while (reader.Read()) yield return reader.GetString(0);
+        }
+
+        internal bool RetryProtected(string pairId, string path, bool descendants,
+            IReadOnlySet<string> active, bool restoredOnly)
+        {
+            var pair = StoreSchema.Scalar(_connection, _transaction,
+                "SELECT pair_no FROM pair WHERE pair_id=$id;", ("$id", pairId));
+            if (pair is null) return false;
+            var filter = RetryProtectionPredicate.Sql(restoredOnly);
+            if (!descendants)
+            {
+                foreach (var ancestor in new[] { path }.Concat(PairPath.Ancestors(path)))
+                {
+                    if (active.Contains(ancestor)) continue;
+                    using var command = Command("SELECT 1 FROM sync_retry WHERE pair_no=$p AND path_key=$k" + filter + ";");
+                    command.Parameters.AddWithValue("$k", RowCodec.Key(ancestor));
+                    if (command.ExecuteScalar() is not null) return true;
+                }
+                return false;
+            }
+            var key = RowCodec.Key(path);
+            using var range = Command("SELECT path_key FROM sync_retry WHERE pair_no=$p AND path_key >= $lo AND path_key < $hi" +
+                filter + " ORDER BY path_key LIMIT $limit;");
+            range.Parameters.AddWithValue("$lo", key.Length == 0 ? "" : key + "/");
+            range.Parameters.AddWithValue("$hi", key.Length == 0 ? "￿" : key + "0");
+            range.Parameters.AddWithValue("$limit", (long)active.Count + 1);
+            using var reader = range.ExecuteReader();
+            while (reader.Read()) if (!active.Contains(reader.GetString(0))) return true;
+            return false;
+
+            SqliteCommand Command(string sql)
+            {
+                var command = StoreSchema.Command(_connection, _transaction, sql);
+                command.Parameters.AddWithValue("$p", pair);
+                    return command;
+            }
+        }
+
+        // Restore protection must share this planning read transaction. Consulting the live writer connection
+        // here could expose the two halves of a pending-to-ready transition to opposite sides of the join.
+        internal bool RecoveryRestoreProtected(string pairId, string path, bool descendants)
+        {
+            var pair = StoreSchema.Scalar(_connection, _transaction,
+                "SELECT pair_no FROM pair WHERE pair_id=$id;", ("$id", pairId));
+            if (pair is null) return false;
+            var pending = "SELECT 1 FROM notice WHERE pair_no=$p " +
+                "AND reason_key='recovery-restore-pending' AND " + NoticeTable.ActionableSql("state") + " AND restore_hold=1 ";
+            foreach (var ancestor in new[] { path }.Concat(PairPath.Ancestors(path)))
+                if (StoreSchema.Scalar(_connection, _transaction, pending + "AND path_key=$key LIMIT 1;",
+                    ("$p", pair), ("$key", PathKey.Of(ancestor))) is not null) return true;
+            if (!descendants) return false;
+            var key = PathKey.Of(path);
+            return StoreSchema.Scalar(_connection, _transaction,
+                pending + "AND path_key >= $lo AND path_key < $hi LIMIT 1;", ("$p", pair),
+                ("$lo", key.Length == 0 ? "" : key + "/"), ("$hi", key.Length == 0 ? "￿" : key + "0")) is not null;
+        }
+
+        public void Dispose()
+        {
+            try { _transaction.Dispose(); }
+            finally { _connection.Dispose(); }
+        }
+    }
+}

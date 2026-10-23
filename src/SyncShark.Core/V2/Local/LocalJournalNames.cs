@@ -1,0 +1,153 @@
+using System.ComponentModel;
+
+namespace Massdex.SyncShark.V2;
+
+/// <summary>Names redacted from non-admin USN records, resolved by streaming direct-parent metadata.
+/// Retains only IDs in this bounded journal batch, never a directory or root inventory.</summary>
+internal sealed class LocalJournalNames
+{
+    private readonly RootDef _root;
+    private readonly IStateStore _known;
+    private readonly HashSet<ulong> _wanted;
+    private readonly HashSet<ulong> _ambiguousNames = [];
+    private readonly Dictionary<string, Dictionary<ulong, string>> _parents = new(StringComparer.Ordinal);
+    private readonly int _limit;
+    private int _retained;
+    private readonly Dictionary<string, Dictionary<ulong, List<string>>?> _scopeParents = new(StringComparer.Ordinal);
+    private int _scopeRetained;
+    private long _scopeCharacters;
+    internal bool ScopeOverflow { get; private set; }
+
+    public LocalJournalNames(RootDef root, IStateStore known, IReadOnlyList<NtfsUsnChange> changes, int limit)
+    {
+        _root = root;
+        _known = known;
+        _wanted = changes.Select(change => change.FileId).ToHashSet();
+        _limit = limit;
+    }
+
+    internal static Action? LookupForTest { get; set; }
+    public string? LastFailure { get; private set; }
+    private IReadOnlyList<string>? Failed(string reason) { LastFailure = reason; return null; }
+    public bool Ambiguous(ulong id, ItemState? known) => Ambiguous(id, known, false);
+
+    public bool Ambiguous(ulong id, ItemState? known, bool requirePresent)
+    {
+        if (_known.HasMultipleNames(_root.RootId, SyncLocalEndpointStore.ObjectId(LocalItems.ParseObjectId(_root.RootObjectId).Volume, id)))
+        {
+            LastFailure = $"multiple stored hard-link names for object {id:x16}";
+            return true;
+        }
+        return known is { Kind: ItemKind.File } && !SingleLink(known.Path, id, requirePresent);
+    }
+
+    private bool SingleLink(string relative, ulong id, bool requirePresent = false)
+    {
+        var path = Path.Combine(_root.RootPath, relative.Replace('/', Path.DirectorySeparatorChar));
+        using var handle = OpenMetadata(path, 0, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            var error = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+            if (!requirePresent && error is 2 or 3) return true; // disappearance is rechecked by the guarded refresh
+            LastFailure = $"metadata open failed for {relative}: Windows error {error}";
+            return false;
+        }
+        if (!PilotDirectoryLease.GetFileInformationByHandle(handle, out var info))
+        {
+            LastFailure = $"metadata identity read failed for {relative}: Windows error {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}";
+            return false;
+        }
+        if (info.VolumeSerialNumber != LocalItems.ParseObjectId(_root.RootObjectId).Volume ||
+            (((ulong)info.FileIndexHigh << 32) | info.FileIndexLow) != id)
+        { LastFailure = $"metadata identity changed for {relative}"; return false; }
+        if (info.NumberOfLinks != 1)
+        { LastFailure = $"{relative} has {info.NumberOfLinks} live hard links"; return false; }
+        return true;
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern Microsoft.Win32.SafeHandles.SafeFileHandle OpenMetadata(string path, uint access, uint share,
+        IntPtr security, uint disposition, uint flags, IntPtr template);
+
+    // Ambiguous identities are read as retry scopes, never authoritative delta upserts.
+    // In particular, a redacted hard-link rename must discover the new alias as well
+    // as retaining the old stored names. Do not require a single-link handle here.
+    internal IReadOnlyList<string>? FindAmbiguous(NtfsUsnChange change, string parent, CancellationToken ct)
+    {
+        if (ScopeOverflow) return null;
+        if (_scopeParents.TryGetValue(parent, out var cached))
+            return cached is null ? null : cached.GetValueOrDefault(change.FileId) ?? [];
+        if (_scopeParents.Count >= _limit) { ScopeOverflow = true; return null; }
+        _scopeParents[parent] = null;
+        try
+        {
+            var child = parent.Length == 0 ? ".journal-name-probe" : parent + "/.journal-name-probe";
+            using var guard = LocalItems.GuardRefreshPaths(_root.RootPath, _root.RootId, _known, [child]);
+            if (guard.Incomplete.Count != 0 || guard.Safe.Count != 1) return null;
+            var directory = parent.Length == 0 ? _root.RootPath :
+                Path.Combine(_root.RootPath, parent.Replace('/', Path.DirectorySeparatorChar));
+            var result = new Dictionary<ulong, List<string>>();
+            foreach (var entry in WindowsDirectoryListing.List(directory))
+            {
+                ct.ThrowIfCancellationRequested();
+                var id = unchecked((ulong)entry.FileId);
+                if (!_wanted.Contains(id)) continue;
+                var path = parent.Length == 0 ? entry.Name : parent + "/" + entry.Name;
+                _scopeCharacters += path.Length;
+                if (++_scopeRetained > Math.Min(_limit, PathProtectionIndex.DefaultPathLimit) || _scopeCharacters > PathProtectionIndex.DefaultCharacterLimit)
+                { ScopeOverflow = true; return null; }
+                if (!result.TryGetValue(id, out var paths)) result[id] = paths = [];
+                paths.Add(path);
+            }
+            _scopeParents[parent] = result;
+            return result.GetValueOrDefault(change.FileId) ?? [];
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or Win32Exception or ArgumentException)
+        { return null; }
+    }
+
+    // null is never absence evidence. Caller falls back on any inaccessible/replaced parent or ambiguous ID.
+    public IReadOnlyList<string>? Find(NtfsUsnChange change, string parent, CancellationToken ct)
+    {
+        LookupForTest?.Invoke();
+        if (_ambiguousNames.Contains(change.FileId)) return Failed("ambiguous identity in parent listing");
+        if (!_parents.TryGetValue(parent, out var names))
+        {
+            if (_parents.Count >= _limit) { ScopeOverflow = true; return Failed($"parent lookup limit reached at {parent}"); }
+            try
+            {
+                // GuardRefreshPaths holds every ancestor, including the requested parent, through enumeration.
+                // The synthetic child is not opened; the outer inventory already holds the root identity lease.
+                var child = parent.Length == 0 ? ".journal-name-probe" : parent + "/.journal-name-probe";
+                using var guard = LocalItems.GuardRefreshPaths(_root.RootPath, _root.RootId, _known, [child]);
+                if (guard.Incomplete.Count != 0 || guard.Safe.Count != 1) return Failed($"parent identity unavailable or changed at {parent}");
+                names = new Dictionary<ulong, string>();
+                var directory = parent.Length == 0 ? _root.RootPath :
+                    Path.Combine(_root.RootPath, parent.Replace('/', Path.DirectorySeparatorChar));
+                foreach (var entry in WindowsDirectoryListing.List(directory))
+                {
+                    ct.ThrowIfCancellationRequested();
+                    var id = unchecked((ulong)entry.FileId);
+                    if (!_wanted.Contains(id)) continue;
+                    var path = parent.Length == 0 ? entry.Name : parent + "/" + entry.Name;
+                    if ((entry.Attributes & FileAttributes.Directory) == 0 && !SingleLink(path, id))
+                    {
+                        _ambiguousNames.Add(id);
+                        if (_ambiguousNames.Count > _limit) { ScopeOverflow = true; return Failed("ambiguous-name limit reached"); }
+                        continue; // Another record's ambiguous identity cannot invalidate this name lookup.
+                    }
+                    if (++_retained > _limit) { ScopeOverflow = true; return Failed($"retained-name limit reached at {parent}"); }
+                    if (!names.TryAdd(id, path)) return Failed($"multiple names for object {id:x16} under {parent}");
+                }
+                _parents.Add(parent, names);
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or
+                Win32Exception or ArgumentException)
+            {
+                return Failed($"parent listing failed at {parent}: {error.Message}");
+            }
+        }
+        if (_ambiguousNames.Contains(change.FileId)) return Failed("ambiguous identity in parent listing");
+        return names.TryGetValue(change.FileId, out var foundPath) ? [foundPath] : [];
+    }
+}
