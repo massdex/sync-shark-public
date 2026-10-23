@@ -2,9 +2,6 @@ using System.Text;
 
 namespace Massdex.SyncShark.V2;
 
-/// <summary>Preserves the existing CLI envelope and exit code across the shared host boundary.</summary>
-public sealed record HostCliOutput(int ExitCode, string Stdout, string Stderr);
-
 internal sealed class HostCliWriter(int maximumCharacters) : TextWriter
 {
     private char[] _buffer = new char[Math.Min(256, maximumCharacters)];

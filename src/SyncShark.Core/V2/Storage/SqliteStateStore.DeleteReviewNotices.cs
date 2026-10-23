@@ -3,9 +3,6 @@ using Microsoft.Data.Sqlite;
 
 namespace Massdex.SyncShark.V2;
 
-public sealed record DeleteNoticeItem(string Path, string Detail, string? NoticeId);
-public sealed record DeleteNoticePage(IReadOnlyList<DeleteNoticeItem> Items, string? NextToken);
-
 public sealed partial class SqliteStateStore
 {
     internal const string UncertainDeleteSummary = "uncertain-delete-summary";

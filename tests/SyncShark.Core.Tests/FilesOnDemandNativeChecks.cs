@@ -314,7 +314,7 @@ internal static class FilesOnDemandNativeChecks
             if (!failedIo) throw new IOException("Failed hydration did not fail Windows I/O.");
             var hydrationNotice = await WaitForHydrationNoticeAsync(verifyStore, pair.PairId);
             source.FailReads = false;
-            await StorageNotices.ApplyAsync(verifyStore, verifyLifetime, hydrationNotice, NoticeChoices.RetryNow, CancellationToken.None);
+            await StorageNoticeChoices.ApplyAsync(verifyStore, verifyLifetime, hydrationNotice, NoticeChoices.RetryNow, CancellationToken.None);
             await WaitUntilHydrationNoticesClosedAsync(verifyStore, pair.PairId);
             if (!(await File.ReadAllBytesAsync(path)).SequenceEqual(nextBytes))
                 throw new IOException("Updated pointer did not hydrate the new exact revision.");
@@ -336,7 +336,7 @@ internal static class FilesOnDemandNativeChecks
             if (!failedIo) throw new IOException("Third failed hydration did not fail Windows I/O.");
             hydrationNotice = await WaitForHydrationNoticeAsync(verifyStore, pair.PairId);
             var readsBeforeIgnore = source.Reads;
-            await StorageNotices.ApplyAsync(verifyStore, verifyLifetime, hydrationNotice, NoticeChoices.Ignore, CancellationToken.None);
+            await StorageNoticeChoices.ApplyAsync(verifyStore, verifyLifetime, hydrationNotice, NoticeChoices.Ignore, CancellationToken.None);
             await WaitUntilHydrationNoticesClosedAsync(verifyStore, pair.PairId);
             if (!verifyStore.StorageCauseIgnored(pair.PairId, hydrationNotice.ReasonKey) ||
                 !WindowsCloudFilesProvider.TryReadOwnedPlaceholder(path, out var ignoredPointer) || ignoredPointer is null ||

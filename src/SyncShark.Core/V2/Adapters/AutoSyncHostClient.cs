@@ -60,10 +60,3 @@ public sealed class AutoSyncHostClient
         int? minutes = null, int limit = 50, long after = 0) =>
         new(AutoSyncHostProtocol.Version, Guid.NewGuid().ToString("N"), command, pairId, all, minutes, limit, after);
 }
-
-public sealed class AutoSyncHostUncertainException(string requestId, Exception inner)
-    : IOException("Stopped waiting for AutoSync request " + requestId +
-        ". It may still be running. Inspect status/history before deciding whether to retry; it was not replayed.", inner)
-{
-    public string RequestId { get; } = requestId;
-}

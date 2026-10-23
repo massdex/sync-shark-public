@@ -422,7 +422,7 @@ internal static class StorageExplicitRetryChecks
             }
         }
 
-        internal Task ApplyRetryAsync(Notice notice) => StorageNotices.ApplyAsync(Store, _connections,
+        internal Task ApplyRetryAsync(Notice notice) => StorageNoticeChoices.ApplyAsync(Store, _connections,
             notice, NoticeChoices.RetryNow, CancellationToken.None);
 
         internal StorageSettlementService Service(bool targeted = false) => new(Store, _connections,

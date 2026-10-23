@@ -126,7 +126,7 @@ public sealed partial class V2SyncHost
             {
                 ReconnectCloudFiles(cancellationToken);
                 if (_cloudFiles is null) throw new IOException("Storage provider is unavailable; Retry later.");
-                await StorageNotices.ApplyAsync(storage, _cloudFiles, notice, choice, cancellationToken);
+                await StorageNoticeChoices.ApplyAsync(storage, _cloudFiles, notice, choice, cancellationToken);
                 continue;
             }
             if (JournalSizing.IsNotice(notice))

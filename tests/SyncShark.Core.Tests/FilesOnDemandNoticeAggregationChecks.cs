@@ -50,7 +50,7 @@ internal static class FilesOnDemandNoticeAggregationChecks
         Require(!PlanNotices.HasPathScope(notices[0]), "the pair summary carries no path hold");
         Require(notices[0].Detail.Contains("More than 20", StringComparison.Ordinal), "summary states the threshold");
 
-        await StorageNotices.ApplyAsync(store, null, notices[0], NoticeChoices.RetryNow, CancellationToken.None);
+        await StorageNoticeChoices.ApplyAsync(store, null, notices[0], NoticeChoices.RetryNow, CancellationToken.None);
         foreach (var state in states)
         {
             var hydration = store.StorageHydrationFor(localRoot.RootId, state.ObjectId);
@@ -78,7 +78,7 @@ internal static class FilesOnDemandNoticeAggregationChecks
         notices = store.OpenNotices(pair.PairId).Where(notice => notice.Storage is not null).ToArray();
         Require(notices.Length == 1 && notices[0].Storage!.Operation == StorageNotices.PointerVerificationPairOperation,
             "the summary is re-raised while the debt stays above the limit");
-        await StorageNotices.ApplyAsync(store, null, notices[0], NoticeChoices.Ignore, CancellationToken.None);
+        await StorageNoticeChoices.ApplyAsync(store, null, notices[0], NoticeChoices.Ignore, CancellationToken.None);
         Require(!store.OpenNotices(pair.PairId).Any(notice => notice.Storage is not null),
             "Ignore closes the pair summary");
         store.RequestPointerVerification(pair.PairId, localRoot.RootId, states[0].ObjectId, states[0].Path, receipts[0]);

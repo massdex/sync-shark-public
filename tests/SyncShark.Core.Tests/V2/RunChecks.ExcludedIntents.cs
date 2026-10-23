@@ -13,6 +13,7 @@ internal static partial class RunChecks
             fx.Store.MarkFirstSyncDone(fx.Pair.PairId);
             fx.Store.SavePair(fx.Pair with { Excluded = ["private"] });
             var target = fx.B.Seed("private/item", "same", folder ? ItemKind.Folder : ItemKind.File);
+            var child = folder ? fx.B.Seed("private/item/child.txt", "keep child") : null;
             var intent = new SyncAction("pending-excluded", 23, ActionKind.Delete, Side.B, "private/item",
                 null, null, target, false, "pending-key")
             {
@@ -28,6 +29,8 @@ internal static partial class RunChecks
                 "pending excluded effect is explicitly reported rather than silently stalled");
             Capture(!fx.Store.OpenNotices(fx.Pair.PairId).Any(n => n.ReasonKey == SyncRun.ExcludedIntentNoticeKey),
                 "uncertain effect is not described as not applied");
+            var pairExcluded = fx.Store.UnresolvedNotices(fx.Pair.PairId)
+                .Where(n => n.ReasonKey == "pair-excluded").ToArray();
             fx.Store.RecordIntent(fx.Pair.PairId, intent with
             {
                 ProviderEffect = intent.ProviderEffect! with { RecordedAtUtc = DateTimeOffset.UtcNow - TimeSpan.FromDays(1) }
@@ -43,9 +46,32 @@ internal static partial class RunChecks
                 target = await fx.B.ObserveAsync(intent.Path, CancellationToken.None),
                 callsA = fx.WriterA.Calls, callsB = fx.WriterB.Calls
             }));
-            Capture(fx.Store.UnresolvedIntents(fx.Pair.PairId).Count == 1,
-                "an aged delete submission without a job id remains protected");
+            Capture(aged.Outcome == "complete" && fx.Store.UnresolvedIntents(fx.Pair.PairId).Count == 0 &&
+                !fx.Store.ReadSyncRetries(fx.Pair.PairId).Any(),
+                "an aged unchanged delete submission settles observation-only without outstanding work");
+            Capture(await fx.B.ObserveAsync(intent.Path, CancellationToken.None) == target &&
+                fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0 && aged.Deleted == 0,
+                "aged delete settlement preserves the exact target identity, version and hash without writes");
+            var settlements = fx.Store.UnresolvedNotices(fx.Pair.PairId)
+                .Where(n => n.ReasonKey == SyncRun.ExcludedIntentNoticeKey).ToArray();
+            Capture(settlements.Length == 1 && settlements[0].Detail.Split('\n')[0] ==
+                SyncRun.ExcludedIntentReason + ". Options: include the folder and resync / leave excluded.",
+                "one settlement notice explains not-applied with exactly include-and-resync or leave-excluded options");
+            Capture(pairExcluded.Length == 1 && pairExcluded.SequenceEqual(
+                fx.Store.UnresolvedNotices(fx.Pair.PairId).Where(n => n.ReasonKey == "pair-excluded")),
+                "the separate pair-excluded notice remains unchanged after settlement");
+            if (child is not null)
+                Capture(await fx.B.ObserveAsync(child.Path, CancellationToken.None) == child,
+                    "aged folder submission preserves its child identity, version and hash");
 
+            // The settled no-job notice persists correctly; test live jobs on an independent identical pair.
+            fx = Build();
+            fx.Store.MarkFirstSyncDone(fx.Pair.PairId);
+            fx.Store.SavePair(fx.Pair with { Excluded = ["private"] });
+            target = fx.B.Seed("private/item", "same", folder ? ItemKind.Folder : ItemKind.File);
+            if (folder) fx.B.Seed("private/item/child.txt", "keep child");
+            intent = intent with { ExpectedTarget = target };
+            run = fx.Run();
             var jobWriter = new ExcludedDeleteJobWriter(fx.WriterB);
             fx.Provider.AddWriter(fx.Pair.B, jobWriter);
             var jobIntent = intent with

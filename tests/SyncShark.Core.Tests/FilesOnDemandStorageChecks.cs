@@ -109,7 +109,7 @@ internal static class FilesOnDemandStorageChecks
                 "durable storage metadata and Retry/Ignore options survive restart");
             var savedSettlement = store.StorageSettlementFor(local.RootId, "file-object", "remote");
             using (var connections = new CloudFilesLifetime((_, _, _) => throw new InvalidOperationException("Ignore must not connect"), _ => false))
-                await StorageNotices.ApplyAsync(store, connections, savedNotice, NoticeChoices.Ignore, CancellationToken.None);
+                await StorageNoticeChoices.ApplyAsync(store, connections, savedNotice, NoticeChoices.Ignore, CancellationToken.None);
             // E9: Ignore retains open/actionable authority, hiding only the cause's presentation.
             Require(store.StorageSettlementPage().Count == 1 &&
                 store.StorageSettlementFor(local.RootId, "file-object", "remote") == savedSettlement &&

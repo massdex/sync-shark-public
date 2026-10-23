@@ -204,7 +204,7 @@ internal static class FilesOnDemandSettlementChecks
         store.RequestPointerVerification(pair.PairId, localRoot.RootId, moved.ObjectId, "Again/file.txt", movedReceipt);
         var verification = store.OpenNotices(pair.PairId).Single(n => n.Storage?.Operation == "pointer-verify");
         store.SetPairPaused(pair.PairId, true);
-        await StorageNotices.ApplyAsync(store, null, verification, NoticeChoices.RetryNow, CancellationToken.None);
+        await StorageNoticeChoices.ApplyAsync(store, null, verification, NoticeChoices.RetryNow, CancellationToken.None);
         var hydration = store.StorageHydrationFor(localRoot.RootId, moved.ObjectId);
         Require(hydration is not null && store.IsStorageHydrationRequested(hydration),
             "verification Retry persists existing hydration sentinel while paused");

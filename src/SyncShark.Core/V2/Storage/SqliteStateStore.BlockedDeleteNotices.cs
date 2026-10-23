@@ -2,9 +2,6 @@ using Microsoft.Data.Sqlite;
 
 namespace Massdex.SyncShark.V2;
 
-public sealed record BlockedDeleteItem(string Path, string Detail);
-public sealed record BlockedDeletePage(IReadOnlyList<BlockedDeleteItem> Items, string? NextToken);
-
 public sealed partial class SqliteStateStore
 {
     internal const string BlockedDeleteSummary = "blocked-delete-summary";
