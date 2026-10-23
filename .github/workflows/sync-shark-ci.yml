@@ -291,6 +291,26 @@ jobs:
             flag: --v2-review-deletes-checks
             takes-root: false
             drive: c
+          - suite: store-gate
+            flag: --v2-store-gate-checks
+            takes-root: true
+            drive: c
+          - suite: outcome-ownership
+            flag: --v2-outcome-ownership-checks
+            takes-root: false
+            drive: c
+          - suite: root-relist-scoped
+            flag: --v2-root-relist-scoped-checks
+            takes-root: true
+            drive: c
+          - suite: name-mapping
+            flag: --v2-name-mapping-checks
+            takes-root: false
+            drive: c
+          - suite: name-mapping-review
+            flag: --v2-name-mapping-review-checks
+            takes-root: false
+            drive: c
     steps:
       - name: Download test binaries
         uses: actions/download-artifact@v4
