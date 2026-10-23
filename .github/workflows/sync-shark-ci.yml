@@ -37,6 +37,14 @@ jobs:
         shell: pwsh
         run: ./tools/ci/check-short-id-prefixes.ps1
 
+      - name: Ratchet engineering-spec debt
+        shell: pwsh
+        run: |
+          python -I tools/ci/test-spec-ratchet.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -I tools/ci/check-spec-ratchet.py
+          exit $LASTEXITCODE
+
       - name: Set up .NET 8
         uses: actions/setup-dotnet@v4
         with:
