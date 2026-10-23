@@ -9,6 +9,9 @@ internal static partial class FilesOnDemandCompatibilityChecks
 
     private static readonly IReadOnlyDictionary<string, string> ApprovedCoreShapes = new Dictionary<string, string>
     {
+        // INDEX24: per-root retry deadlines for gap items and rehash work (fdbce7fe).
+        ["index|gap_retry_due"] = """CREATE INDEX gap_retry_due ON local_gap_item(root_no,retry_after) WHERE retry_after>0""",
+        ["index|rehash_retry_due"] = """CREATE INDEX rehash_retry_due ON local_rehash(root_no,retry_after) WHERE retry_after>0""",
         // F4 / NOTICE3: indexed pair/reason/path notice probes replace per-item full-population reads.
         ["index|nt_pair_reason_path"] = """CREATE INDEX nt_pair_reason_path ON notice(pair_no,reason_key,path_key)""",
         ["index|nt_groupable_delete"] = """CREATE INDEX nt_groupable_delete ON notice(pair_no,reason_key,notice_id) WHERE state IN ('open','aggregated')""",
