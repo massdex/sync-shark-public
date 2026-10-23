@@ -50,10 +50,17 @@ internal static class DateRepairReviewChecks
         LocalChecks.Require(dry.Examined == 132 && dry.Eligible == 130 && dry.Skipped == 2 && calls == 132,
             "SQL candidates only; read-only and implausible dates skipped in dry run");
         var pages = 0;
+        var releases = 0;
         async Task Gate(Func<Task> work)
         {
             pages++;
-            await work();
+            Console.Error.WriteLine($"dates-review gate acquired={pages} released={releases}");
+            try { await work(); }
+            finally
+            {
+                releases++;
+                Console.Error.WriteLine($"dates-review gate acquired={pages} released={releases}");
+            }
         }
         store.BeforeDateRepairCommitForTest = _ =>
         {
@@ -64,6 +71,13 @@ internal static class DateRepairReviewChecks
         };
         var done = await DateRepair.RunAsync(store, pair, Observe, root, false, [], CancellationToken.None, [], [], false, StorageFailureClassifier.IsStateDamage, StorageFailureClassifier.IsDirectStateDamage, StorageFailureClassifier.IsBusy, date, withPageLock: Gate);
         store.BeforeDateRepairCommitForTest = null;
+        Console.Error.WriteLine($"dates-review dry examined={dry.Examined} eligible={dry.Eligible} changed={dry.Changed} skipped={dry.Skipped}; real examined={done.Examined} eligible={done.Eligible} changed={done.Changed} skipped={done.Skipped}; acquired={pages} released={releases}");
+        foreach (var line in File.ReadLines(done.ReportFile))
+        {
+            using var row = System.Text.Json.JsonDocument.Parse(line);
+            if (row.RootElement.TryGetProperty("Outcome", out var outcome) && outcome.GetString() == "skipped")
+                Console.Error.WriteLine("dates-review skipped " + line);
+        }
         LocalChecks.Require(pages == 3 && done.Eligible == dry.Eligible && done.Skipped == dry.Skipped,
             "gate released each 128-row page; real and dry-run counts agree");
         LocalChecks.Require(store.Baselines(pair.PairId, ["000"]).Single().A.Mtime == target,

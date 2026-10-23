@@ -76,6 +76,13 @@ internal static partial class StorageChecks
         var automatic = new Notice("pair", 4, NoticeKind.AutoConflict, "Parent/file.txt", "Decided automatically.",
             PlanNotices.AutoConflict.Key);
         Require(NoticeOptions.Options(automatic).Count == 0, "an automatic decision notice never offers Retry or Ignore");
+        foreach (var kind in new[] { NoticeKind.KeepBoth, NoticeKind.EditBeatsDelete, NoticeKind.AutoConflict })
+        {
+            var outcome = new Notice("pair", 7, kind, "Parent/file.txt", "Completed outcome.", "test-reason");
+            Require(NoticeOptions.Options(outcome).Count == 0 && !NoticeChoices.IsRetryNotice(outcome),
+                kind + " with an unknown legacy reason retains acknowledgement instead of acquiring failure actions");
+            Require(NoticeChoices.For(kind).Contains(Accept), kind + " retains its existing Accept acknowledgement");
+        }
         var review = new Notice("pair", 40, NoticeKind.UserDecision, "Parent/file.txt", "Review the deletion.", "deletion-review");
         Require(NoticeOptions.Options(review).All(option => option.Choice != RetryNow),
             "a deletion-review decision notice never offers Retry");

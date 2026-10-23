@@ -56,9 +56,11 @@ internal static partial class ExecutorChecks
                     new RemovalCapabilityInventory(folder, child, failure), default, StorageFailureClassifier.IsStateDamage);
             }
             catch (Exception error) { caught = error; }
-            using var connection = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
-                { DataSource = SqliteStateStore.DatabasePath(root) }.ToString());
-            connection.Open();
+            // removal_observation is TEMP and belongs to the store's connection, not the database file.
+            // Inspect that connection after the awaited operation; never dispose the store-owned connection.
+            var connection = (Microsoft.Data.Sqlite.SqliteConnection)typeof(SqliteStateStore)
+                .GetField("_connection", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .GetValue(store)!;
             using var command = connection.CreateCommand();
             command.CommandText = "SELECT COUNT(*) FROM removal_observation;";
             var retained = (long)command.ExecuteScalar()!;

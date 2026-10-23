@@ -83,14 +83,32 @@ public sealed partial class SyncRun
             var paths = FolderDelete.SplitVictims(_store, pair, plan, reviewed).Guarded
                 .Select(key => key[2..]).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             var held = ApplySafetyFilter(pair, ActionPredicates(pair, LeftAlone(pair).WithPending(paths)), plan);
+            const string reason = "Deletion was not reviewed. Review the item or Ignore it; nothing was deleted.";
             foreach (var path in paths)
-                SaveFailedRetry(pair, path, "Deletion was not reviewed. Review the item or Ignore it; nothing was deleted.",
-                    _store.SyncRetryAt(pair.PairId, path));
+            {
+                var previous = _store.SyncRetryAt(pair.PairId, path);
+                if (previous is null)
+                {
+                    // Missing review retires this proposed delete, not the new content. Replan it
+                    // as ordinary work next run without granting the discarded deletion authority.
+                    _store.SaveSyncRetry(pair.PairId, new(path, "post-preview", 0, reason, DateTimeOffset.MinValue));
+                    WriteNotices([FailureRetryOwner.RetryNotice(pair.PairId, path, reason,
+                        folderInspection: _store.Live(pair.A.RootId, [path]).Concat(_store.Live(pair.B.RootId, [path]))
+                            .Any(item => item.Kind == ItemKind.Folder))]);
+                }
+                else if (previous.DeleteBlockedDetail is null && !previous.ReprobeEvidence &&
+                    previous.LastError != DropboxQuota.Detail && previous.Kind is not ("planning" or "recovery" or "decision"))
+                    // Review authority is not a failed attempt at the existing evidence/read/effect work.
+                    // Its owner retains the deadline, counter, frozen inputs and specialized explanation.
+                    WriteNotices([FailureRetryOwner.RetryNotice(pair.PairId, path, reason, previous.Attempts,
+                        folderInspection: _store.Live(pair.A.RootId, [path]).Concat(_store.Live(pair.B.RootId, [path]))
+                            .Any(item => item.Kind == ItemKind.Folder))]);
+            }
             var alreadySkipped = plan.SkippedActions.Select(action => action.ActionId).ToHashSet(StringComparer.Ordinal);
             var heldPaths = held.SkippedActions.Where(action => !alreadySkipped.Contains(action.ActionId))
                 .Select(action => action.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
             foreach (var path in heldPaths.Except(paths, StringComparer.OrdinalIgnoreCase))
-                if (_store.SyncRetryAt(pair.PairId, path)?.Kind != "decision")
+                if (_store.SyncRetryAt(pair.PairId, path) is null)
                     _store.SaveSyncRetry(pair.PairId, new(path, "post-preview", 0, "", DateTimeOffset.MinValue));
             heldPaths.UnionWith(paths);
             RefuseUnreviewedDeletes(pair, held, reviewed); // Keep the absolute deletion assertion on the executable remainder.

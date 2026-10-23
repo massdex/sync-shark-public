@@ -156,7 +156,9 @@ public static class NoticeChoices
     public static bool IsGenericFailure(Notice notice)
     {
         var reason = notice.ReasonKey;
-        return notice.Kind != NoticeKind.UserDecision && notice.Storage is null && notice.Quarantine is null &&
+        // Outcome kinds retain their existing acknowledgement path even when a legacy/custom reason is unknown.
+        // Only informational problem notices are eligible for the unknown-failure fallback.
+        return notice.Kind == NoticeKind.Info && notice.Storage is null && notice.Quarantine is null &&
             notice.DefenderHistory is null && notice.RetainedVersion is null && notice.ConflictVersions is null &&
             notice.ConflictOperation is null && notice.Repair is null && notice.RebuildableRule is null &&
             notice.FreeSpace is null && reason != "permanent-boundary" &&

@@ -662,8 +662,8 @@ public sealed partial class SyncRun : ISyncRun
         // destructive effect is re-checked against the local filesystem (its path and ancestors, listing only) and
         // dropped when it reaches one; the standing notice says so.
         var reviewed = approved.Actions.Count;
-        approved = DropUnderNewLocalLinks(pair, approved, actionPredicates);
-        var dropped = reviewed - approved.Actions.Count;
+        approved = DropUnderNewLocalLinks(pair, approved, actionPredicates, out var supersededDeletes);
+        var dropped = reviewed - approved.Actions.Count - supersededDeletes;
         await _endpoints.PrepareAsync(pair, continuation, ct);
         await RefreshDropboxQuotaAsync(pair, ct);
         var throttle = new ProgressThrottle(progress, _time, _settings.ProgressInterval);
@@ -1252,8 +1252,13 @@ public sealed partial class SyncRun : ISyncRun
     //   otherwise be expanded from stored descendants. The next run re-plans these paths.
     // An approved rebuildable cloud-only delete (see IsApprovedRebuildableDelete) skips only the "now a local link"
     // drop: it never touches the local side. A new stub or a path that cannot be inspected still drops it.
-    private Plan DropUnderNewLocalLinks(PairDef pair, Plan approved, ActionGuard? guard = null)
+    private Plan DropUnderNewLocalLinks(PairDef pair, Plan approved, ActionGuard? guard = null) =>
+        DropUnderNewLocalLinks(pair, approved, guard, out _);
+
+    private Plan DropUnderNewLocalLinks(PairDef pair, Plan approved, ActionGuard? guard, out int supersededDeletes)
     {
+        supersededDeletes = 0;
+        var superseded = new HashSet<string>(StringComparer.Ordinal);
         var stubs = !_settings.ReplaceOnlineOnlyStubs;
         var locals = new[] { (Root: pair.A, Side: Side.A), (Root: pair.B, Side: Side.B) }
             .Where(local => string.Equals(local.Root.Provider, SyncProviders.Local, StringComparison.OrdinalIgnoreCase))
@@ -1265,6 +1270,7 @@ public sealed partial class SyncRun : ISyncRun
         {
             if (action.Kind is not (ActionKind.Delete or ActionKind.Move or ActionKind.Update)) return false;
             var rebuildable = guard is not null && IsApprovedRebuildableDelete(guard, action);
+            var oppositeAppeared = false;
             foreach (var local in locals)
             {
                 foreach (var path in new[] { action.Path, action.FromPath })
@@ -1280,12 +1286,16 @@ public sealed partial class SyncRun : ISyncRun
                     if (state == LocalLeftAloneProbe.State.Linked && !rebuildable) return true;
                     if (state == LocalLeftAloneProbe.State.Present && action is { Kind: ActionKind.Delete, OppositeAbsent: true } &&
                         action.Target != local.Side)
-                        return true;
+                        oppositeAppeared = true;
                 }
             }
-            return false;
+            // A disproved absence retires the old delete; it is not an unfinished removal.
+            // Probe all local endpoints first: unknown/protected paths still own pending work.
+            if (oppositeAppeared) superseded.Add(action.ActionId);
+            return oppositeAppeared;
         }
         var dropped = approved.Actions.Where(Drops).Select(action => action.ActionId).ToHashSet(StringComparer.Ordinal);
+        supersededDeletes = superseded.Count;
         var lockNotices = new List<Notice>();
         if (dropped.Count == 0) return approved;
         // A lock does not revoke a reviewed removal. Keep its original stamps/signature;

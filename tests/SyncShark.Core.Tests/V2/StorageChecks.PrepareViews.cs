@@ -122,9 +122,10 @@ internal static partial class StorageChecks
                 catch (Exception error) { failure = error; }
                 var expected = publicationFailure
                     ? "The first-sync prepare could not be published: Pair p1 was removed during prepare. Review the pair and run prepare again."
-                    : "The retained first-sync prepare could not be parsed: Expected prepare array. â€” run prepare again.";
+                    : "The retained first-sync prepare could not be parsed: Expected prepare array. \u2014 run prepare again.";
                 Require(failure is SyncCliReviewException && failure.Message == expected && opened is { CanRead: false },
-                    "Edge retains exact error wording and disposes the stream on parse/publication failure");
+                    "Edge retains exact error wording and disposes the stream on parse/publication failure" +
+                    $"; publicationFailure={publicationFailure}; actual={failure?.GetType().Name}: {failure?.Message}; streamCanRead={opened?.CanRead}");
             }
         }
         finally { FirstSyncChoicesState.OpenReadForTest = priorOpen; }

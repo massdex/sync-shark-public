@@ -10,6 +10,7 @@ internal static partial class RunCliChecks
         Cli_Choices_HeldDeletionDigest();
         Cli_Choices_HeldDeletionReviewGuard();
         await Cli_Choices_UnreviewedDeletesHeldAsync();
+        await Cli_Choices_AuthorityHoldPreservesExistingRetryAsync();
         await Cli_Choices_ReviewedParentKeepsRetryAsync();
         await Cli_Choices_FailedPrepareAuthorizesNothingAsync();
         await Cli_Choices_MalformedPrepareAuthorizesNothingAsync();
@@ -619,6 +620,49 @@ internal static partial class RunCliChecks
         Require(notices.Count == 1 && notices[0].Path == "folder/child.txt" && notices[0].ReasonKey == "sync-retry",
             "one child authority notice explains the hold without a false area-exclusion notice");
         Console.WriteLine("PASS Cli_Choices_ReviewedParentKeepsRetry");
+    }
+
+    private static async Task Cli_Choices_AuthorityHoldPreservesExistingRetryAsync()
+    {
+        var existing = new SyncRetry("folder", "sync", 7, "existing failure", DateTimeOffset.UnixEpoch.AddDays(3));
+        foreach (var previous in new[]
+        {
+            existing,
+            existing with { DeleteBlockedDetail = "blocked deletion" },
+            existing with { ReprobeEvidence = true },
+            existing with { LastError = DropboxQuota.Detail },
+            existing with { Kind = "planning" },
+            existing with { Kind = "recovery" },
+            existing with { Kind = "decision" }
+        })
+        {
+            var fx = Build();
+            fx.A.Seed("folder", "", ItemKind.Folder);
+            fx.B.Seed("folder", "", ItemKind.Folder);
+            var run = fx.Run();
+            var plan = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            var folder = await fx.A.ObserveAsync("folder", default);
+            fx.Store.SaveSyncRetry(fx.Pair.PairId, previous);
+            // Invoke the existing owner directly so sleeping/specialized retry protection cannot
+            // short-circuit the authority branch before the preservation assertions exercise it.
+            var held = run.DeferUnreviewedDeletes(fx.Pair,
+                plan with { Actions = [UnreviewedDelete("existing-debt", Side.A, "folder", folder)] },
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+            Require(!held.Actions.Any(action => action.Kind == ActionKind.Delete),
+                "existing debt never grants an unreviewed deletion authority");
+            Require(fx.Store.SyncRetryAt(fx.Pair.PairId, "folder") == previous,
+                "authority holds preserve the entire existing retry including attempts and deadline");
+            var generic = fx.Store.UnresolvedNotices(fx.Pair.PairId)
+                .Where(notice => notice.Path == "folder" && notice.ReasonKey == "sync-retry").ToArray();
+            if (previous == existing)
+                Require(generic.Length == 1 && generic[0].FolderInspection &&
+                    generic[0].Detail.Contains("Attempts: 7", StringComparison.Ordinal),
+                    "ordinary existing debt gets one folder explanation carrying its unchanged attempts");
+            else
+                Require(generic.Length == 0,
+                    "specialized existing debt does not acquire a duplicate generic authority notice");
+        }
+        Console.WriteLine("PASS Cli_Choices_AuthorityHoldPreservesExistingRetry");
     }
 
     private static SyncAction UnreviewedDelete(string id, Side side, string path, ItemState? expected) =>

@@ -100,7 +100,9 @@ internal static class LinkExclusionChecks
         info.SetAccessControl(security);
         try
         {
-            await fx.Run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), CancellationToken.None);
+            var lockedReport = await fx.Run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), CancellationToken.None);
+            Require(lockedReport.Deferred > 0,
+                "an unknown local path remains deferred rather than being classified as a superseded delete");
             Require(await fx.B.ObserveAsync("locked/x.txt", CancellationToken.None) is not null,
                 "a local folder that cannot be listed at apply time drops the delete under it");
             Require(fx.Store.FirstSyncDone(fx.Pair.PairId) &&
@@ -168,6 +170,10 @@ internal static class LinkExclusionChecks
         Require(await fx.B.ObserveAsync("q/x.txt", CancellationToken.None) is not null && report.Deferred == 0 &&
                 fx.Store.FirstSyncDone(fx.Pair.PairId) && await fx.A.ObserveAsync("q/x.txt", default) is not null,
             "a stale reviewed delete is dropped after an interleaved preview; first sync completes with both survivors");
+        Require(fx.Store.SyncRetryAt(fx.Pair.PairId, "q/x.txt") is
+            { Kind: "post-preview", Attempts: 0, ReviewedActions: null } ordinary &&
+            ordinary.RetryAfter == DateTimeOffset.MinValue,
+            "a superseded delete retains immediately due ordinary replan input, never replay authority");
     }
 
     // Astra fix 3: a known link tag wins over online-only bits; a cloud stub is still an online-only file.

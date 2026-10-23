@@ -555,6 +555,14 @@ internal static partial class RunCliChecks
             if (!both)
             {
                 Require(fx.Store.SyncRetryAt(fx.Pair.PairId, "d/new") is not null, "the unreviewed local child is deferred");
+                var newChildRetry = fx.Store.SyncRetryAt(fx.Pair.PairId, "d/new")!;
+                Require(newChildRetry.Kind == "post-preview" && newChildRetry.Attempts == 0 &&
+                    newChildRetry.RetryAfter == DateTimeOffset.MinValue &&
+                    newChildRetry.ReviewedActions is not { Count: > 0 } && newChildRetry.Held is null,
+                    "a fresh unreviewed choice victim is immediately due ordinary work without deletion authority");
+                Require(fx.Store.OpenNotices(fx.Pair.PairId).Count(notice =>
+                    notice.Path == "d/new" && notice.ReasonKey == "sync-retry") == 1,
+                    "the fresh authority hold retains exactly one explanation independently of retry timing");
                 await fx.Run().IncrementalAsync(fx.Pair.PairId, new Progress<RunProgress>(), default);
                 Require(await fx.A.ObserveAsync("d/new", default) is not null && await fx.B.ObserveAsync("d/new", default) is not null,
                     "ordinary sync subsequently copies the new local child rather than deleting it");

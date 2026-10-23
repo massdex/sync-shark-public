@@ -75,11 +75,28 @@ internal static partial class DropboxChecks
         Require(h.Known.Cursor(RootId) == "bound-after",
             "unreadable history releases the cursor immediately; the evidence hold, not the cursor, protects the path");
         var held = h.Known.SyncRetryAt("p1", "held.txt");
-        Require(held is { Kind: "deletion-evidence", Held: not null } &&
-            h.Known.ReadSyncRetries("p1").Count() == 1,
+        // docs/design/dropbox-inventory.md: permanent malformed answers go straight to review;
+        // transient outages retain the evidence hold and do not spend the answered-run budget.
+        Require(held is { Held: not null } && h.Known.ReadSyncRetries("p1").Count() == 1,
             "failed history leaves exactly one durable sync_retry hold, with no duplicate evidence row or notice");
-        Require(!h.Known.OpenNotices("p1").Any(n => n.ReasonKey is "deletion-history-unavailable" or "deletion-review"),
-            "failed history is a hold, not an automatic deletion or a stale lifecycle notice");
+        Require(h.Known.DeletionEvidenceRows("p1", RootId).Count() == 1,
+            "failed history leaves exactly one evidence row");
+        var initialNotices = h.Known.OpenNotices("p1").ToArray();
+        if (mode == "permanent")
+        {
+            Require(held is { Kind: "decision", EvidenceReleased: true },
+                "permanent malformed history releases the held item directly to a decision");
+            Require(initialNotices.Length == 1 && initialNotices[0] is
+                { Path: "held.txt", Rule: NoticeChoices.DeletionReviewRule, ReasonKey: "deletion-review" },
+                "permanent history failure has exactly one rule-40 review notice, not duplicate lifecycle notices");
+        }
+        else
+        {
+            Require(held is { Kind: "deletion-evidence", EvidenceReleased: false },
+                "transient history failure retains its unreleased deletion-evidence hold");
+            Require(!initialNotices.Any(n => n.ReasonKey is "deletion-history-unavailable" or "deletion-review"),
+                "failed history is a hold, not an automatic deletion or a stale lifecycle notice");
+        }
         Require(local.WriteCalls == localWritesBeforeHold && CloudWrites() == cloudWritesBeforeHold &&
             !h.Wire.AttemptedWritePaths.Contains("held.txt"),
             "no delete or upload is authorized before an explicit evidence choice");
