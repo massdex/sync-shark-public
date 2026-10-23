@@ -180,20 +180,11 @@ public sealed partial class Executor : IExecutor
             if (pairId is not null && intent.RecoveryFirst)
                 await StoreAsync(() => preserved = RecoverySafety.PreservedReceipt(_store, pairId, intent),
                     token).ConfigureAwait(false);
-            var previousProviderContext = ProviderEffectContext.Current.Value;
-            ActionResult result;
             var providerCommitter = pairId is not null && resumesProviderEffect
                 ? new StoreCommitter(_store, _storeGate, pairId, gen) : null;
-            try
-            {
-                if (providerCommitter is not null)
-                    ProviderEffectContext.Current.Value = providerCommitter.CreateProviderContext(intent);
-                result = await EffectResolver.ResolveAsync(intent, target, source, token, isStateDamage: _isStateDamage,
-                    _settings.UnknownCommitGracePeriod, jobChecks: jobChecks, materializationBlock: materializationBlock,
-                    historicalDeleteSource: historicalDeleteSource, preserved: preserved, deleteRestorePending: deleteRestorePending).ConfigureAwait(false);
-            }
-            finally { ProviderEffectContext.Current.Value = previousProviderContext; }
-            result = await ResultVerification.NormalizeAsync(intent, result, source, token, _isStateDamage).ConfigureAwait(false);
+            var result = await ResultVerification.ResolveAsync(intent, target, source, token, _isStateDamage,
+                _settings.UnknownCommitGracePeriod, jobChecks, materializationBlock, historicalDeleteSource,
+                preserved, deleteRestorePending, providerCommitter).ConfigureAwait(false);
             if (providerCommitter is not null) intent = providerCommitter.LatestAction(intent);
             if (pairId is not null)
             {

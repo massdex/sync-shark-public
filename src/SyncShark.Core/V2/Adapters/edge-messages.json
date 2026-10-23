@@ -25,6 +25,9 @@
     "discoveryCheck": "The fast discovery check"
   },
   "messages": {
+    "conflict-successors-missing": "Conflict correspondence cannot be forgotten without its successors. Retry replans both copies; originals remain protected.",
+    "baseline-unconfirmed": "The completed operation lacks matching file content evidence. No baseline was saved; Retry verifies the item again.",
+    "delete-source-moved": "The original source survived at another path after an interrupted deletion. The delete was not acknowledged; Retry replans from the surviving identity.",
     "decisionNeeded": "This item needs your decision; nothing was done to it yet. Choosing a version is not in core v2 yet.",
     "progressNotShown": "Sync Shark could not show sync progress: {detail}",
     "runDiagnostics": "Throughput: {detail}",

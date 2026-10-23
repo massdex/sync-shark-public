@@ -1,7 +1,7 @@
 namespace Massdex.SyncShark.V2;
 
 /// <summary>Resolves an uncertain or previously interrupted effect by observing the endpoint (executor.md section 6).</summary>
-internal static class EffectResolver
+internal static partial class EffectResolver
 {
     internal const string NotApplied = EffectReasons.NotApplied;
     internal const string RestoreAbandoned = EffectReasons.RestoreAbandoned;
@@ -19,9 +19,8 @@ internal static class EffectResolver
         ArgumentNullException.ThrowIfNull(isStateDamage);
         // Restore creates only: without the atomic receipt we cannot claim ownership. Abandon the
         // intent, not the Recovery copy or notice, even if observation/provider lookup is unavailable.
-        if (ResultEvidence.CommitOnly(x)) return Skipped(x, NotApplied);
-        if (x.ConflictRestore)
-            return Skipped(x, RestoreAbandoned);
+        if (ResolveWithoutObservation(x) is { } immediate)
+            return immediate;
         var now = (timeProvider ?? TimeProvider.System).GetUtcNow();
         var providerReportsInProgress = false;
         var providerTemporarilyUnavailable = false;
@@ -205,23 +204,6 @@ internal static class EffectResolver
         }
     }
 
-    private static async Task<ActionResult> ResolveAbsentDeleteAsync(SyncAction action, IEndpointWriter target,
-        IEndpointWriter source, ItemState? historical, RecoveryRef? preserved, CancellationToken ct, bool restorePending, Func<Exception, bool> isStateDamage)
-    {
-        ArgumentNullException.ThrowIfNull(isStateDamage);
-        try
-        {
-            var blocked = await DeleteSourceGuard.CheckReconcileAsync(action, source, historical, restorePending, ct, isStateDamage: isStateDamage)
-                .ConfigureAwait(false);
-            return blocked ?? await DoneAsync(action, null, target, ct, preserved).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-        catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct, isStateDamage: isStateDamage) == FailureRetryOwner.FailureScope.Item)
-        {
-            return Unverified(action, "Interrupted deletion source check: " + Describe(error)) with
-                { RetryAfterSeconds = ProviderTransientFailure.VerificationRetrySeconds };
-        }
-    }
 
     // True when a submitted provider effect may still be running, so its intent is retained under the grace policy
     // until a definite read (or the grace's own end) can close it: an upload commit whose bytes have not landed, a

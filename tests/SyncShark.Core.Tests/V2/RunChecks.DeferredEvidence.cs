@@ -119,9 +119,15 @@ internal static partial class RunChecks
         var run = fx.Run();
         var plan = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), deadline.Token);
         var report = await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), deadline.Token, ReviewedHeld(plan));
-        Require(report.Deferred == 0 && fx.Store.FirstSyncDone(fx.Pair.PairId) &&
-            fx.Store.SyncRetryAt(fx.Pair.PairId, "held.txt")?.Held is not null,
+        // docs/design/run.md:329-334: the first-sync marker never erases unfinished-work accounting.
+        Require(report.Deferred == 1 && report.Failed == 0 && report.Done == 0 && report.Outcome == "partial" &&
+            report.DeletionEvidencePending.SequenceEqual(["held.txt"]) && fx.Store.FirstSyncDone(fx.Pair.PairId) &&
+            fx.Store.SyncRetryAt(fx.Pair.PairId, "held.txt")?.Held?.Path == "held.txt",
             "item-level evidence failure completes first sync with durable held retry input");
+        Require(fx.Store.CountSyncRetries(fx.Pair.PairId) == 1 &&
+            fx.Store.UnresolvedIntents(fx.Pair.PairId).Count == 0 &&
+            await fx.A.ObserveAsync("held.txt", deadline.Token) is not null,
+            "the single deferred item retains its survivor and held input, not a second blocked effect");
         Require(fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0,
             "failed evidence neither guesses upload nor deletes");
         Console.WriteLine("PASS DeferredEvidence_FailureRemainsPending");

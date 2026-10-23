@@ -311,6 +311,13 @@ internal static partial class DropboxChecks
             var applied = await runtime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { },
                 CancellationToken.None);
             var pending = store.SyncRetryAt(pair.PairId, "held.txt");
+            Console.WriteLine($"PrepareCursorDeferred: Deferred={applied.Deferred}; " +
+                $"Pending=[{string.Join(",", applied.DeletionEvidencePending)}]; " +
+                $"Cursor={store.Cursor(RootId)}; ExpectedCursor=deferred-refreshed; " +
+                $"FirstSyncDone={store.FirstSyncDone(pair.PairId)}; Held={pending?.Held?.Path}; " +
+                $"Done={applied.Done}; Failed={applied.Failed}; Outcome={applied.Outcome}; " +
+                $"RetryCount={store.CountSyncRetries(pair.PairId)}; " +
+                $"UnresolvedIntents={store.UnresolvedIntents(pair.PairId).Count}");
             Require(applied.Failed == 0 && applied.Deferred == 0 && store.FirstSyncDone(pair.PairId) &&
                 store.Cursor(RootId) == "deferred-refreshed" && pending is not null &&
                 await local.ObserveAsync("ordinary.txt", CancellationToken.None) is not null &&

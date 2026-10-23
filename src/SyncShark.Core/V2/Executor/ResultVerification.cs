@@ -3,6 +3,27 @@
 /// <summary>Refreshes missing source evidence after a confirmed effect; never repeats the effect.</summary>
 internal static class ResultVerification
 {
+    internal static async Task<ActionResult> ResolveAsync(SyncAction action, IEndpointWriter target,
+        IEndpointWriter source, CancellationToken ct, Func<Exception, bool> isStateDamage,
+        TimeSpan? unknownCommitGracePeriod, ProviderJobCheckCache? jobChecks, string? materializationBlock,
+        ItemState? historicalDeleteSource, RecoveryRef? preserved, bool deleteRestorePending,
+        StoreCommitter? providerCommitter)
+    {
+        var previousProviderContext = ProviderEffectContext.Current.Value;
+        ActionResult result;
+        try
+        {
+            if (providerCommitter is not null)
+                ProviderEffectContext.Current.Value = providerCommitter.CreateProviderContext(action);
+            result = await EffectResolver.ResolveAsync(action, target, source, ct, isStateDamage,
+                unknownCommitGracePeriod, jobChecks: jobChecks, materializationBlock: materializationBlock,
+                historicalDeleteSource: historicalDeleteSource, preserved: preserved,
+                deleteRestorePending: deleteRestorePending).ConfigureAwait(false);
+        }
+        finally { ProviderEffectContext.Current.Value = previousProviderContext; }
+        return await NormalizeAsync(action, result, source, ct, isStateDamage).ConfigureAwait(false);
+    }
+
     internal static async Task<ActionResult> NormalizeAsync(SyncAction action, ActionResult result,
         IEndpointWriter source, CancellationToken ct, Func<Exception, bool> isStateDamage)
     {

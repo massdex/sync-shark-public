@@ -384,7 +384,7 @@ public static class NoticeChoices
             : notice.ReasonKey == "recovery-unavailable"
             ? [(RetryNow, "Retry now", false), (OpenRecoverySettings, "Recovery settings", false), (Ignore, "Ignore this cause", false)]
             : notice.ReasonKey == ExecutionReasons.ConflictCopyBlocked
-            ? [(RetryNow, "Retry keep-both copy", false), (Ignore, "Ignore this cause", false)]
+            ? [(RetryNow, "Retry keep-both copy", false), (Ignore, string.Empty, false)]
             : notice.ReasonKey == "planning-degraded"
             ? [(RetryNow, "Retry now", false), (OpenFolderSettings, "Details / folder settings", false), (Ignore, "Ignore this cause", false)]
             // A pair-level transient summary has no one path to exclude: Retry makes its durable debts due again,

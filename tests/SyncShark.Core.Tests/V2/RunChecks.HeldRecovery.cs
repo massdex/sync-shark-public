@@ -312,8 +312,17 @@ internal static partial class RunChecks
             var plan = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
             var report = await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), CancellationToken.None,
                 ReviewedHeld(plan));
-            Require(report.Deferred == 0 && fx.Store.FirstSyncDone(fx.Pair.PairId) &&
+            // docs/design/run.md:329-334: the first-sync marker never erases unfinished-work accounting.
+            Require(report.Deferred == deferred && fx.Store.FirstSyncDone(fx.Pair.PairId) &&
                 report.DeletionEvidencePending.Count == deferred && fx.WriterA.Deletes == deletes && fx.WriterA.Preserves == 0, message);
+            if (deferred == 1)
+                Require(report.Failed == 0 && report.Done == 0 && report.Outcome == "partial" &&
+                    report.DeletionEvidencePending.SequenceEqual(["held.txt"]) &&
+                    fx.Store.CountSyncRetries(fx.Pair.PairId) == 1 &&
+                    fx.Store.SyncRetryAt(fx.Pair.PairId, "held.txt")?.Held?.Path == "held.txt" &&
+                    fx.Store.UnresolvedIntents(fx.Pair.PairId).Count == 0 &&
+                    fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0,
+                    "missing history retains exactly one held retry, without an executable effect or remote write");
             Require(fx.WriterB.Puts == (restored ? 1 : 0) &&
                 fx.Store.OpenNotices(fx.Pair.PairId).Any(n => n.Kind == NoticeKind.EditBeatsDelete) == restored,
                 "only a differing known hash restores with an EditBeatsDelete notice");
