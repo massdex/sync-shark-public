@@ -137,8 +137,8 @@ internal static partial class ExecutorChecks
         using var store = new InMemoryStateStore();
         store.SavePair(Pair());
         var writer = new DropboxWriter(new RootDef("rb", "Dropbox", "acc", "/Pilot", DropboxWire.RootId),
-            Side.B, client, "unused", settings);
-        var results = await Apply(new Executor(store, settings, Admission()), Plan(action), source, writer)
+            Side.B, client, "unused", isStateDamage: StorageFailureClassifier.IsStateDamage, settings);
+        var results = await Apply(new Executor(store, settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), Plan(action), source, writer)
             .WaitAsync(HeldEffectTimeout);
         Require(results.Count == 1 && results[0].Outcome == Outcome.Uncertain,
             "post-send HttpClient timeout through pacing is Uncertain, never Failed");

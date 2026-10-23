@@ -28,13 +28,13 @@ public sealed partial class V2CliRuntime
                 using var ledger = new EffectsLedger(export, simulated: true);
                 using var provenanceWriter = provenanceExport is null ? null : new StreamWriter(
                     new FileStream(provenanceExport, FileMode.CreateNew, FileAccess.Write, FileShare.Read), new UTF8Encoding(false));
-                using var provenance = provenanceWriter is null ? null : new PlanProvenance(
+                using var provenance = provenanceWriter is null ? null : new SqlitePlanProvenance(
                     Path.Combine(_productRoot, "v2", "provenance-" + Guid.NewGuid().ToString("N") + ".db"), provenanceWriter);
                 PlanProvenance.Current.Value = provenance;
                 var current = 0;
                 var logGate = new object();
                 var counts = new Dictionary<string, long>(StringComparer.Ordinal);
-                using var overlay = new RehearsalOverlay(Path.Combine(_productRoot, "v2", "rehearsal-" + Guid.NewGuid().ToString("N") + ".db"));
+                using var overlay = new SqliteRehearsalOverlay(Path.Combine(_productRoot, "v2", "rehearsal-" + Guid.NewGuid().ToString("N") + ".db"));
                 await using var endpoints = new RehearsalEndpoints(_run.RehearsalSource, overlay, effect =>
                 {
                     lock (logGate)

@@ -115,7 +115,7 @@ public sealed partial class SqliteStateStore : IStateStore
         {
             if (_disposed) return;
             _disposed = true;
-            _connection.Dispose();
+            DamageBoundary(_connection.Dispose);
         }
     }
 
@@ -410,7 +410,7 @@ public sealed partial class SqliteStateStore : IStateStore
                 try { subscriber(committedPair, committedResults); }
                 catch (Exception error)
                 {
-                    RunLog.Trace("Committed-result diagnostic observer failed: " + error);
+                    RunTrace.Emit("Committed-result diagnostic observer failed: " + error);
                     try
                     {
                         AddNotices([new Notice(pairId, 0, NoticeKind.Info, string.Empty,
@@ -420,7 +420,7 @@ public sealed partial class SqliteStateStore : IStateStore
                     }
                     catch (Exception noticeError)
                     {
-                        RunLog.Trace("Committed-result diagnostic notice could not be saved: " + noticeError);
+                        RunTrace.Emit("Committed-result diagnostic notice could not be saved: " + noticeError);
                     }
                 }
             }

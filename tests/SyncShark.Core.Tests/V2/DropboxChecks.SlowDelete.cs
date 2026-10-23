@@ -27,7 +27,7 @@ internal static partial class DropboxChecks
     {
         var uniqueBinding = Binding() with { ConnectionId = Guid.NewGuid().ToString() };
         using var h = new Harness(uniqueBinding);
-        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"),
+        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"), isStateDamage: StorageFailureClassifier.IsStateDamage,
             V2Settings.Default with { DeleteBatchSize = 1, BatchPollInterval = TimeSpan.FromMilliseconds(1) });
         var firstCheck = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var secondCheck = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

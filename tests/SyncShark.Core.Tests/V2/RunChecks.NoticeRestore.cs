@@ -61,7 +61,7 @@ internal static partial class RunChecks
                         // before publication, even when the subsequent result commit is interrupted.
                         using var gate = new SemaphoreSlim(1, 1);
                         var committer = new StoreCommitter(store, gate, fx.Pair.PairId, gen);
-                        var context = new ProviderEffectContext(pending, committer, _ => Task.CompletedTask);
+                        var context = committer.CreateProviderContext(pending);
                         await context.RecordRecoveryAsync(pending.ActionId, winnerA.Path, receipt,
                             fx.Pair.PairId, CancellationToken.None);
                         Require(store.RecoveryForAction(fx.Pair.PairId, pending.ActionId)?.Location == receipt.Location,

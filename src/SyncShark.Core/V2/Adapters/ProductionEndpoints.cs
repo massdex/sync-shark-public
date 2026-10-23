@@ -90,10 +90,10 @@ public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatc
         if (store.SupportsIndexPlanning && store is ILocalGapStore gaps)
         {
             _gapIo = new LocalGapIo(store, settings, paths.ProductOwnedPaths(paths.RecoveryRoot), contentPausedForTest);
-            _gapWorker = new LocalGapWorker(gaps, _gapIo);
+            _gapWorker = new LocalGapWorker(gaps, _gapIo, StorageFailureClassifier.IsStateDamage);
             Indexing = new LocalIndexingRuns(store, (root, ct) => new LocalInventory(root, Side.A, store,
                 paths.ProductOwnedPaths(paths.RecoveryRoot),
-                settings, time, new DefenderHistory()) { GapIo = _gapIo }.VerifyIndexingPassAsync(ct), _gapWorker, _gapIo);
+                settings, time, isStateDamage: StorageFailureClassifier.IsStateDamage, new DefenderHistory()) { GapIo = _gapIo }.VerifyIndexingPassAsync(ct), _gapWorker, _gapIo);
         }
         var floor = settings.MinSafetyPoll;
         SafetyPoll = () => floor;
@@ -112,7 +112,7 @@ public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatc
             var checkedSide = await CheckSideAsync(root, ct).ConfigureAwait(false);
             return checkedSide.Client is { } client
                 ? new DropboxInventory(root, side, client, _store, pair.PairId)
-                : new LocalInventory(root, side, _store, OwnedInside(root, checkedSide.Recovery!), _settings, _time, pairId: pair.PairId);
+                : new LocalInventory(root, side, _store, OwnedInside(root, checkedSide.Recovery!), _settings, _time, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId);
         }
     }
 
@@ -266,10 +266,10 @@ public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatc
             if (continuation is not null && _open.TryGetValue(root.RootId, out var previous) &&
                 previous.Preview == continuation && previous.Inventory is DropboxInventory earlier)
                 dropbox.AdoptClassificationFrom(earlier);
-            return (dropbox, new DropboxWriter(root, side, client, _paths.Spool, _settings, PairInclude.IgnoreRules(pair), pair.PairId));
+            return (dropbox, new DropboxWriter(root, side, client, _paths.Spool, isStateDamage: StorageFailureClassifier.IsStateDamage, _settings, PairInclude.IgnoreRules(pair), pair.PairId));
         }
         var recovery = checkedSide.Recovery!;
-        var inventory = new LocalInventory(root, side, _store, OwnedInside(root, recovery), _settings, _time, new DefenderHistory(), pair.PairId)
+        var inventory = new LocalInventory(root, side, _store, OwnedInside(root, recovery), _settings, _time, isStateDamage: StorageFailureClassifier.IsStateDamage, new DefenderHistory(), pair.PairId)
         { GapWorker = _gapWorker, GapIo = _gapIo, ObserveOnly = readOnlyOpen };
         // Direct downloads use a target-volume partial, with no product-spool demand.
         var writer = await OpenLocalWriterAsync(_store, root, side, pair, checkedSide.Installation!, recovery, ct,
@@ -436,7 +436,7 @@ public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatc
     internal static Task<LocalWriter> OpenLocalWriterAsync(IStateStore store, RootDef root, Side side, PairDef pair,
         string installation, string recovery, CancellationToken ct, V2Settings settings,
         string? databasePath = null, TimeProvider? time = null, string? recoveryUnavailable = null, bool readOnlyOpen = false) =>
-        LocalWriter.OpenAsync(root, side, pair.PairId, installation, recovery, ct, settings,
+        LocalWriter.OpenAsync(root, side, pair.PairId, installation, recovery, ct, isStateDamage: StorageFailureClassifier.IsStateDamage, settings,
             databasePath: databasePath, time: time, ignoreRules: PairInclude.IgnoreRules(pair),
             providerNameRefused: item => ProviderRefusedPaths.SourceContains(store, root.RootId, item),
             recoveryUnavailable: recoveryUnavailable,

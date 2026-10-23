@@ -47,7 +47,7 @@ internal static partial class RunChecks
         var notice = fx.Store.OpenNotices(fx.Pair.PairId).Single(item => item.ReasonKey == NoticeChoices.RebuildableRuleKey);
         Require(notice.RebuildableRule == new NoticeRebuildableRule("js-packages", "b") && notice.Path == "b",
             "one durable notice carries the rule's category and prefix as its identity");
-        Require(NoticeChoices.Options(notice).Select(option => option.Choice).SequenceEqual(
+        Require(NoticeOptions.Options(notice).Select(option => option.Choice).SequenceEqual(
             [NoticeChoices.RetryNow, NoticeChoices.PreviewMatches, NoticeChoices.ChooseFolder, NoticeChoices.RemoveRule, NoticeChoices.KeepRule]),
             "the notice offers check again, preview, choose folder, remove and keep");
         var run = fx.Run();
@@ -373,11 +373,11 @@ internal static partial class RunChecks
         fx.Store.AddNotices([new(fx.Pair.PairId, 30, NoticeKind.Info, "Doc.paper", "export", "export-required",
             ExportInfo: info)]);
         var notice = fx.Store.OpenNotices(fx.Pair.PairId).Single();
-        Require(NoticeChoices.Options(notice).Where(option => NoticeChoices.ExportFormat(option.Choice) is not null)
+        Require(NoticeOptions.Options(notice).Where(option => NoticeChoices.ExportFormat(option.Choice) is not null)
                 .Select(option => option.Choice).SequenceEqual([NoticeChoices.ExportMarkdown, NoticeChoices.ExportHtml]),
             "the notice offers exactly the provider's markdown and html formats, never DOCX or PDF");
         fx.Store.AddNotices([notice with { ExportInfo = new NoticeExportInfo(null, []) }]);
-        Require(!NoticeChoices.Options(fx.Store.OpenNotices(fx.Pair.PairId).Single())
+        Require(!NoticeOptions.Options(fx.Store.OpenNotices(fx.Pair.PairId).Single())
                 .Any(option => NoticeChoices.ExportFormat(option.Choice) is not null),
             "a provider list with no supported format offers no speculative export button");
 
@@ -439,7 +439,7 @@ internal static partial class RunChecks
             PilotPath.DropboxNamespaceRootIdentity("root-namespace"));
         var spool = Path.Combine(Path.GetTempPath(), "export-spool-" + Guid.NewGuid().ToString("N"));
         var writer = new DropboxWriter(new RootDef("rb", SyncProviders.Dropbox, "acc", "/b", "id:rb"), Side.B,
-            client, spool, Settings);
+            client, spool, isStateDamage: StorageFailureClassifier.IsStateDamage, Settings);
         // The provider returns a file_metadata block whose revision is not the observed one.
         wire.Respond("files/export", HttpStatusCode.OK, bytes: [1, 2, 3],
             apiResult: """{"file_metadata":{"id":"id:doc","rev":"rev:other"}}""");

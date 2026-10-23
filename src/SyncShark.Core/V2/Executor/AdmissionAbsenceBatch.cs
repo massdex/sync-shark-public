@@ -4,6 +4,14 @@ namespace Massdex.SyncShark.V2;
 // phases or runs: every request belongs to this guard invocation immediately before its intent.
 internal sealed class AdmissionAbsenceBatch
 {
+    private readonly Func<Exception, bool> _isStateDamage;
+
+    internal AdmissionAbsenceBatch(Func<Exception, bool> isStateDamage)
+    {
+        ArgumentNullException.ThrowIfNull(isStateDamage);
+        _isStateDamage = isStateDamage;
+    }
+
     private readonly object _gate = new();
     private readonly Dictionary<ISourceAbsenceProbe, List<Request>> _pending = new();
     private sealed record Request(ItemState Historical, string Path, TaskCompletionSource<AbsenceObservation> Result);
@@ -27,7 +35,7 @@ internal sealed class AdmissionAbsenceBatch
                 ready = page;
             }
         }
-        if (ready is not null) _ = FlushAsync(probe, ready, ct);
+        if (ready is not null) _ = FlushAsync(probe, ready, ct, _isStateDamage);
         return request.Result.Task;
     }
 
@@ -39,14 +47,16 @@ internal sealed class AdmissionAbsenceBatch
             if (!_pending.TryGetValue(probe, out var current) || !ReferenceEquals(page, current)) return;
             _pending.Remove(probe);
         }
-        await FlushAsync(probe, page, ct).ConfigureAwait(false);
+        await FlushAsync(probe, page, ct, _isStateDamage).ConfigureAwait(false);
     }
 
-    private static async Task FlushAsync(ISourceAbsenceProbe probe, List<Request> page, CancellationToken ct)
+    private static async Task FlushAsync(ISourceAbsenceProbe probe, List<Request> page, CancellationToken ct,
+        Func<Exception, bool> isStateDamage)
     {
+        ArgumentNullException.ThrowIfNull(isStateDamage);
         try
         {
-            var results = await probe.IsAbsentBatchAsync(page.Select(x => (x.Historical, x.Path)).ToArray(), ct)
+            var results = await SourceAbsenceBatch.ObserveAsync(probe, page.Select(x => (x.Historical, x.Path)).ToArray(), ct, isStateDamage)
                 .ConfigureAwait(false);
             // Malformed evidence is inconclusive for the entire page, never inferred absence.
             // Keep a reason so the blocked item's notice can say why it could not be verified.

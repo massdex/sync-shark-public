@@ -4,14 +4,8 @@ namespace Massdex.SyncShark.V2;
 // immediately, including when the current holder cannot yet release its transaction.
 internal sealed class FairStoreGate
 {
-    private static readonly AsyncLocal<CancellationToken> AdmissionCancellation = new();
-    internal static CancellationToken CurrentCancellation => AdmissionCancellation.Value;
-    internal static IDisposable WithCancellation(CancellationToken ct)
-    {
-        var previous = AdmissionCancellation.Value;
-        AdmissionCancellation.Value = ct;
-        return new CancellationScope(previous);
-    }
+    internal static CancellationToken CurrentCancellation => StoreAdmission.CurrentCancellation;
+    internal static IDisposable WithCancellation(CancellationToken ct) => StoreAdmission.WithCancellation(ct);
     // Only cleanup calls use this independent admission deadline. It must never wrap effects
     // or completed-effect commits. A blocked cleanup remains pending and reaches the normal
     // failure owner; trying to write a notice through the same blocked gate would deadlock.
@@ -40,7 +34,7 @@ internal sealed class FairStoreGate
 
         bool RetainFatal(Exception secondary)
         {
-            if (primaryError is null || FailureRetryOwner.ScopeOf(primaryError, CancellationToken.None) !=
+            if (primaryError is null || StorageFailureClassifier.ScopeOf(primaryError, CancellationToken.None) !=
                 FailureRetryOwner.FailureScope.State) return false;
             // The original throw retains its type/stack and remains the failure owner's authority.
             // Cleanup diagnostics are secondary; they must never downgrade state damage to retryable IO.
@@ -49,11 +43,6 @@ internal sealed class FairStoreGate
                 ? new AggregateException(prior, secondary) : secondary;
             return true;
         }
-    }
-
-    private sealed class CancellationScope(CancellationToken previous) : IDisposable
-    {
-        public void Dispose() => AdmissionCancellation.Value = previous;
     }
 
     private readonly object _sync = new();

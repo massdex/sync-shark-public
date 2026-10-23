@@ -121,7 +121,7 @@ public sealed partial class V2CliRuntime
                         NeedsVerification = retryReport.Uncertain, Diagnostics = retryReport.Diagnostics
                     };
                 }
-                if (notice is null || !NoticeChoices.Options(notice).Any(option => option.Choice == choice))
+                if (notice is null || !NoticeChoices.IsAdmissible(notice, choice))
                     throw new SyncCliReviewException("That choice is unavailable. Refresh conflicts list; nothing was changed.");
                 if (notice.ConflictVersions is not null)
                 {

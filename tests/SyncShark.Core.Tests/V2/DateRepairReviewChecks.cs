@@ -46,7 +46,7 @@ internal static class DateRepairReviewChecks
             return Task.FromResult<ItemState?>(remote[path]);
         }
         var date = new DateOnly(2026, 10, 18);
-        var dry = await DateRepair.RunAsync(store, pair, Observe, root, true, [], CancellationToken.None, date);
+        var dry = await DateRepair.RunAsync(store, pair, Observe, root, true, [], CancellationToken.None, StorageFailureClassifier.IsStateDamage, date);
         LocalChecks.Require(dry.Examined == 132 && dry.Eligible == 130 && dry.Skipped == 2 && calls == 132,
             "SQL candidates only; read-only and implausible dates skipped in dry run");
         var pages = 0;
@@ -55,7 +55,7 @@ internal static class DateRepairReviewChecks
             pages++;
             await work();
         }
-        var done = await DateRepair.RunAsync(store, pair, Observe, root, false, [], CancellationToken.None, date, withPageLock: Gate);
+        var done = await DateRepair.RunAsync(store, pair, Observe, root, false, [], CancellationToken.None, StorageFailureClassifier.IsStateDamage, date, withPageLock: Gate);
         LocalChecks.Require(pages == 3 && done.Eligible == dry.Eligible && done.Skipped == dry.Skipped,
             "gate released each 128-row page; real and dry-run counts agree");
         LocalChecks.Require(store.Baselines(pair.PairId, ["000"]).Single().A.Mtime == target,
@@ -65,7 +65,7 @@ internal static class DateRepairReviewChecks
             "live timestamp and hash updated in baseline transaction");
         // Exercise the merged local refresh and hash-carry path without requiring a volume journal.
         var refresher = new LocalInventory(pair.A, Side.A, store,
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase), V2Settings.Default, TimeProvider.System);
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase), V2Settings.Default, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage);
         var refreshGen = store.BeginGeneration("a", "delta");
         var refreshed = await refresher.ChangesForPathsAsync(["000"], "review-cursor", refreshGen, _ => true,
             CancellationToken.None);
@@ -96,20 +96,20 @@ internal static class DateRepairReviewChecks
             options);
         LocalChecks.Require(plan.Actions.Count == 0, "next sync planner emits no actions even if a scan omits cached hash");
         var offline = await DateRepair.RunAsync(store, pair, (_, _) => throw new HttpRequestException("offline"), root, true,
-            [], CancellationToken.None, date, "129");
+            [], CancellationToken.None, StorageFailureClassifier.IsStateDamage, date, "129");
         LocalChecks.Require(offline.Skipped == 2 && File.ReadAllText(offline.ReportFile).Contains("Dropbox lookup: offline"),
             "per-item network failures are reported and the page completes");
         var failed = false;
         try
         {
-            await DateRepair.RunAsync(store, pair, Observe, root, true, [], CancellationToken.None, date, "129",
+            await DateRepair.RunAsync(store, pair, Observe, root, true, [], CancellationToken.None, StorageFailureClassifier.IsStateDamage, date, "129",
                 withPageLock: _ => throw new SyncCliBusyException("exclusive run lock unavailable"));
         }
         catch (SyncCliBusyException) { failed = true; }
         LocalChecks.Require(failed && Directory.EnumerateFiles(Path.Combine(root, "v2", "logs"))
             .Any(path => File.ReadAllText(path).Contains("\"Outcome\":\"aborted\",\"After\":\"129\"")),
             "unavailable exclusive gate records a clear resumable cursor");
-        var resumed = await DateRepair.RunAsync(store, pair, Observe, root, true, [], CancellationToken.None, date, "130");
+        var resumed = await DateRepair.RunAsync(store, pair, Observe, root, true, [], CancellationToken.None, StorageFailureClassifier.IsStateDamage, date, "130");
         LocalChecks.Require(resumed.Examined == 1 && resumed.Skipped == 1, "resume cursor skips prior completed candidates");
         var originalError = new IOException("original failure");
         try

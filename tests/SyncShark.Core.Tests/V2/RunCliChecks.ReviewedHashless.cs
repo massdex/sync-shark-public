@@ -23,7 +23,7 @@ internal static partial class RunCliChecks
                     { ReviewedActions = [action] };
                 store.SaveSyncRetry(fx.Pair.PairId, retry);
                 if (unavailable) target.Unhashable.Add(item.Path);
-                var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission()), fx.Provider, Settings, TimeProvider.System);
+                var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), fx.Provider, Settings, TimeProvider.System);
                 var replay = typeof(SyncRun).GetMethod("ApplyReviewedRetriesAsync",
                     System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
                 var plan = await (Task<Plan>)replay.Invoke(run,

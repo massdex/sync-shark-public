@@ -4,16 +4,16 @@ public sealed partial class SyncRun
 {
     internal Task<string?> CaptureReviewedRemovalAsync(PairDef pair, SyncAction action, CancellationToken ct) =>
         DeleteSourceGuard.CaptureReviewedRemovalAsync(action, pair, _store,
-            _endpoints.Inventory(action.Target == Side.A ? pair.A : pair.B), ct);
+            _endpoints.Inventory(action.Target == Side.A ? pair.A : pair.B), ct, isStateDamage: StorageFailureClassifier.IsStateDamage);
 
     internal Task<string?> CaptureDisclosedRemovalAsync(PairDef pair, SyncAction action,
         long files, long folders, long bytes, CancellationToken ct) =>
         DeleteSourceGuard.CaptureDisclosedRemovalAsync(action, pair, _store,
-            _endpoints.Inventory(action.Target == Side.A ? pair.A : pair.B), files, folders, bytes, ct);
+            _endpoints.Inventory(action.Target == Side.A ? pair.A : pair.B), files, folders, bytes, ct, isStateDamage: StorageFailureClassifier.IsStateDamage);
 
     private Task<SyncAction> RecordRemovalConsentAsync(PairDef pair, SyncAction action, CancellationToken ct) =>
         DeleteSourceGuard.RecordRemovalConsentAsync(action, pair, _store,
-            _endpoints.Inventory(action.Target == Side.A ? pair.A : pair.B), ct);
+            _endpoints.Inventory(action.Target == Side.A ? pair.A : pair.B), ct, isStateDamage: StorageFailureClassifier.IsStateDamage);
 
     private async Task<Plan> ApplyReviewedRetriesAsync(PairDef pair, Plan plan, IReadOnlyList<SyncRetry> retries, CancellationToken ct)
     {
@@ -151,7 +151,7 @@ public sealed partial class SyncRun
             }
             if (DeleteSourceGuard.ReviewedRemoval(action) && action.ExpectedTarget?.Kind == ItemKind.Folder)
                 return await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(action, pair, _store,
-                    _endpoints.Inventory(target), ct).ConfigureAwait(false);
+                    _endpoints.Inventory(target), ct, isStateDamage: StorageFailureClassifier.IsStateDamage).ConfigureAwait(false);
             return true;
         }
         static bool Same(ItemState? expected, ItemState? current) => expected is null ? current is null :

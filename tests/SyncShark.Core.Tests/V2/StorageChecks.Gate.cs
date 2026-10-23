@@ -6,6 +6,37 @@ internal static partial class StorageChecks
 {
     public static async Task GateChecksAsync(string root)
     {
+        var originalAdmission = StoreAdmission.CurrentCancellation;
+        using var outerAdmission = new CancellationTokenSource();
+        using var innerAdmission = new CancellationTokenSource();
+        using (StoreAdmission.WithCancellation(outerAdmission.Token))
+        {
+            Require(FairStoreGate.CurrentCancellation == outerAdmission.Token,
+                "lower admission scope is visible through the storage forwarder");
+            using (FairStoreGate.WithCancellation(innerAdmission.Token))
+            {
+                Require(StoreAdmission.CurrentCancellation == innerAdmission.Token,
+                    "storage forwarder replaces the same lower admission slot");
+                await Task.Run(() =>
+                {
+                    Require(StoreAdmission.CurrentCancellation == innerAdmission.Token,
+                        "admission token flows to a child execution context");
+                    using (StoreAdmission.WithCancellation(CancellationToken.None))
+                        Require(FairStoreGate.CurrentCancellation == CancellationToken.None,
+                            "child noncancellable admission uses the shared slot");
+                    Require(StoreAdmission.CurrentCancellation == innerAdmission.Token,
+                        "child scope restores its captured admission token");
+                });
+                Require(StoreAdmission.CurrentCancellation == innerAdmission.Token,
+                    "child admission changes do not leak to parent context");
+            }
+            Require(StoreAdmission.CurrentCancellation == outerAdmission.Token,
+                "storage scope restores the enclosing lower admission scope");
+        }
+        Require(StoreAdmission.CurrentCancellation == originalAdmission &&
+            FairStoreGate.CurrentCancellation == originalAdmission,
+            "both admission entry points restore the original token");
+
         Directory.CreateDirectory(root);
         using var store = SqliteStateStore.Open(root, Fast, TimeProvider.System);
         var pair = Pair("p1");
@@ -83,7 +114,7 @@ internal static partial class StorageChecks
             }
             catch (Exception error) { retained = error; }
             Require(ReferenceEquals(retained, fatal) && fatal.Data["StoreCleanupFailure"] is TimeoutException &&
-                FailureRetryOwner.ScopeOf(retained!, default) == FailureRetryOwner.FailureScope.State && gate.Waiting == 0,
+                StorageFailureClassifier.ScopeOf(retained!, default) == FailureRetryOwner.FailureScope.State && gate.Waiting == 0,
                 "finally cleanup timeout retains original fatal exception and attaches secondary failure without downgrading state damage");
         }
         finally { ownerRelease.Set(); await owner; }

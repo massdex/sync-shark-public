@@ -108,7 +108,7 @@ internal static partial class StorageChecks
     {
         var admission = new SyncTransferResourceController(new SyncTransferSettings(ResourceMode: "Performance"),
             TimeProvider.System, () => new SyncResourcePressure(0, 0.1, 8L << 30));
-        var executor = new Executor(store, Fast, admission);
+        var executor = new Executor(store, Fast, admission, isStateDamage: StorageFailureClassifier.IsStateDamage);
         var results = new List<ActionResult>();
         await foreach (var result in executor.ApplyAsync(new Plan("p1", 1, actions, []), a, b,
                            CancellationToken.None))

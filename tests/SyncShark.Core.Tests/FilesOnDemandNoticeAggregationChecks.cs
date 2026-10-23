@@ -38,8 +38,9 @@ internal static class FilesOnDemandNoticeAggregationChecks
         // collapse it too, not only a newly encountered twenty-first entity.
         store.AddNotices(states.Select((state, index) =>
         {
+            var receipt = receipts[index];
             var metadata = new StorageNotice(localRoot.RootId, state.ObjectId, remoteRoot.RootId,
-                StorageNotices.PointerVerificationOperation, StorageNotices.ReceiptScope(receipts[index]));
+                StorageNotices.PointerVerificationOperation, StorageNotices.ReceiptScope(receipt.Id, receipt.Revision, receipt.ContentHash));
             return new Notice(pair.PairId, 42, NoticeKind.Info, state.Path, "Verification pending",
                 StorageNotices.Prefix(metadata) + "existing", Storage: metadata);
         }));
@@ -101,7 +102,7 @@ internal static class FilesOnDemandNoticeAggregationChecks
         store.AddNotices([summary]);
         Require(store.OwnedPointerObservationSummaryState(pair.PairId) == ObservationSummaryState.Open,
             "an open pair summary is visible to the next scan");
-        var options = NoticeChoices.Options(summary);
+        var options = NoticeOptions.Options(summary);
         Require(options.Count == 2 && options.Any(option => option.Choice == NoticeChoices.RetryNow) &&
             options.Any(option => option.Choice == NoticeChoices.Ignore),
             "pair summary offers Retry and Ignore without a path exclusion");

@@ -49,7 +49,7 @@ internal static class CollisionBaselineChecks
         var retryAdopt = retried.Actions.Single(action => action.Kind == ActionKind.Adopt);
         Require(retryAdopt.ObsoleteBaselineKey == "k2", "the cold-reopened plan retains the same obsolete authority");
 
-        var results = await ApplyAsync(new Executor(store, Settings, Admission()), retried, rig.WriterA, rig.WriterB);
+        var results = await ApplyAsync(new Executor(store, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), retried, rig.WriterA, rig.WriterB);
         Require(results.Count(result => result.Outcome == Outcome.Done) == 2 &&
             results.All(result => result.Outcome == Outcome.Done),
             "Adopt and its vacating Delete both commit");
@@ -105,7 +105,7 @@ internal static class CollisionBaselineChecks
 
         rig.Store.Dispose();
         using var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
-        var executor = new Executor(store, Settings, Admission());
+        var executor = new Executor(store, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
         var results = await executor.ReconcileAsync(store.UnresolvedIntents(PairId),
             store.BeginGeneration(rig.Pair.A.RootId, "test"), rig.WriterA, rig.WriterB, CancellationToken.None);
         var reconciled = results.Single();

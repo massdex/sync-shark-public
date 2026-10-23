@@ -22,7 +22,7 @@ internal static partial class AutoSyncChecks
                     "watch failure persists one notice");
                 var notice = store.OpenNotices(pair.PairId).Single(n => n.ReasonKey == "autosync-watch-unavailable");
                 id = notice.NoticeId!;
-                Require(NoticeChoices.Options(notice).Select(option => option.Choice).SequenceEqual(new[] { NoticeChoices.RetryNow, NoticeChoices.Ignore }),
+                Require(NoticeOptions.Options(notice).Select(option => option.Choice).SequenceEqual(new[] { NoticeChoices.RetryNow, NoticeChoices.Ignore }),
                     "watch failure offers Retry and Ignore");
                 clock.Advance(Settings.AutoRetryDelay);
                 await Until(() => store.NoticeById(pair.PairId, id)?.Notice.FailureRetry?.Attempts == 2 && clock.ActiveTimers == 1,
@@ -32,7 +32,7 @@ internal static partial class AutoSyncChecks
 
                 var provider = new FakeEndpointProvider().Add(pair.A, new FakeEndpoint(Side.A, pair.A.RootId))
                     .Add(pair.B, new FakeEndpoint(Side.B, pair.B.RootId));
-                var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission()), provider, Settings, clock);
+                var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider, Settings, clock);
                 await run.IncrementalAsync(pair.PairId, new RecordingProgress(), default);
                 Require(store.NoticeById(pair.PairId, id) is { Closed: false }, "ordinary run success never closes a dead-watch notice");
                 store.CloseNotice(id, NoticeChoices.Ignore);

@@ -81,7 +81,7 @@ internal static class DeleteReviewNoticeChecks
         var reviewPage = store.ReadDeleteNoticeItems(pair.PairId, true);
         var item = reviewPage.Items[0];
         LocalChecks.Require(store.NoticeById(pair.PairId, item.NoticeId!) is { Closed: false }, "aggregated item remains actionable by id");
-        var run = new SyncRun(store, new Executor(store, V2Settings.Default, ExecutorChecks.Admission()),
+        var run = new SyncRun(store, new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
             new FakeEndpointProvider(), V2Settings.Default, TimeProvider.System);
         var shown = run.ApplyRetryNoticeChoiceAsync(pair.PairId, summary.NoticeId!, NoticeChoices.ShowRemaining, default).GetAwaiter().GetResult();
         LocalChecks.Require(shown.Contains(item.NoticeId!, StringComparison.Ordinal) && shown.Contains(NoticeChoices.DeleteReviewed, StringComparison.Ordinal),

@@ -77,7 +77,7 @@ internal static partial class RunChecks
         catch (InvalidOperationException) { }
         Require(preview.WriterA.Calls + preview.WriterB.Calls == before, "write-denying facade never delegates an effect");
         // A null route client proves this reconciliation-only reference needs no provider call.
-        var cloud = new DropboxWriter(preview.Pair.B, Side.B, null!, string.Empty, Settings);
+        var cloud = new DropboxWriter(preview.Pair.B, Side.B, null!, string.Empty, isStateDamage: StorageFailureClassifier.IsStateDamage, Settings);
         var readCloud = new PlanOnlyEndpoints(new FakeEndpointProvider().AddWriter(preview.Pair.B, cloud));
         var victim = (await preview.B.ObserveAsync("download.txt", CancellationToken.None))!;
         var recovery = await readCloud.Writer(preview.Pair.B).PreserveAsync(victim, "pending", CancellationToken.None);
@@ -276,15 +276,15 @@ internal static partial class RunChecks
         try
         {
             await LocalWriter.OpenAsync(definition, Side.A, LocalChecks.PairId, LocalChecks.InstallationId,
-                recovery, default, readOnlyOpen: true);
+                recovery, default, isStateDamage: StorageFailureClassifier.IsStateDamage, readOnlyOpen: true);
             throw new Exception("Missing namespace accepted");
         }
         catch (SyncRunRefusedException) { }
         Require(!Directory.Exists(recovery), "read-only open never creates Recovery");
         await LocalWriter.OpenAsync(definition, Side.A, LocalChecks.PairId, LocalChecks.InstallationId,
-            recovery, default, recoveryUnavailable: "fixture skips recovery allocation");
+            recovery, default, isStateDamage: StorageFailureClassifier.IsStateDamage, recoveryUnavailable: "fixture skips recovery allocation");
         await LocalWriter.OpenAsync(definition, Side.A, LocalChecks.PairId, LocalChecks.InstallationId,
-            recovery, default, readOnlyOpen: true);
+            recovery, default, isStateDamage: StorageFailureClassifier.IsStateDamage, readOnlyOpen: true);
         Require(!Directory.Exists(recovery), "existing namespace read-only open does not allocate Recovery");
     }
 

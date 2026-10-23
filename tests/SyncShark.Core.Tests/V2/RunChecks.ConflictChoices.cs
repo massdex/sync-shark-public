@@ -179,7 +179,7 @@ internal static partial class RunChecks
             Require(fx.WriterA.Calls + fx.WriterB.Calls > callsBefore, "folder choice performs real effects");
             var saved = store.NoticeById(fx.Pair.PairId, notice.NoticeId!)!.Value;
             Require(result.Outcome == Outcome.Done, $"folder {choice} completes: {result.Reason}");
-            Require(choice == NoticeChoices.KeepA ? saved.Closed : !saved.Closed && NoticeChoices.Options(saved.Notice)
+            Require(choice == NoticeChoices.KeepA ? saved.Closed : !saved.Closed && NoticeOptions.Options(saved.Notice)
                     .Select(option => option.Choice).SequenceEqual([NoticeChoices.RestoreExisting, NoticeChoices.RestoreAsCopy, NoticeChoices.Dismiss]),
                 "keep-only closes; replace stays open awaiting the incoming item and offers restore");
             async Task<bool> Has(FakeEndpoint side, string path) => await side.ObserveAsync(path, CancellationToken.None) is not null;

@@ -7,10 +7,10 @@ namespace Massdex.SyncShark.V2;
 /// <summary>Page-sized durable replay for the existing parallel listing, never inventory authority.</summary>
 internal sealed class ListingCheckpoint
 {
-    private readonly SqliteStateStore _store;
+    private readonly IStateStore _store;
     private readonly RootDef _root;
     private readonly string _pair;
-    internal ListingCheckpoint(SqliteStateStore store, RootDef root, string pair, string mode)
+    internal ListingCheckpoint(IStateStore store, RootDef root, string pair, string mode)
     {
         _store = store;
         _root = root;

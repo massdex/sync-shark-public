@@ -22,7 +22,7 @@ internal static partial class RunChecks
             Require(fx.Store.SyncRetryAt(fx.Pair.PairId, survivor.Path) is
                 { Kind: "decision", MissingDeleteIdentityReview: true, ReviewedActions: null },
                 "missing identity persists a deduplicated decision, not transient retry authority");
-            Require(NoticeChoices.Options(notice).Select(option => option.Choice).ToHashSet().IsSupersetOf(
+            Require(NoticeOptions.Options(notice).Select(option => option.Choice).ToHashSet().IsSupersetOf(
                 [NoticeChoices.DeleteReviewed, NoticeChoices.KeepRestore, NoticeChoices.Ignore]),
                 "review offers recovery delete, sync-back, and ignore");
             await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, notice.NoticeId!, choice, default);

@@ -19,7 +19,7 @@ internal static partial class RunChecks
             Interlocked.Increment(ref refusedAttempts);
             return new ProviderNameRefusedException(new IOException("structured test refusal"));
         };
-        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission()), fx.Provider,
+        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), fx.Provider,
             settings, clock);
         var first = await FirstSyncAsync(run, fx);
         Require(first.Failed == 1 && first.Uploaded == 0 && first.Skipped == 30 && first.Done == 0 &&

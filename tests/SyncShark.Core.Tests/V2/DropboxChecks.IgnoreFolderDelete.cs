@@ -21,7 +21,7 @@ internal static partial class DropboxChecks
     }
 
     private static DropboxWriter IgnoreDeleteWriter(Harness h) => new(Root(), Side.B, h.Client,
-        Path.Combine(_root, "spool"),
+        Path.Combine(_root, "spool"), isStateDamage: StorageFailureClassifier.IsStateDamage,
         V2Settings.Default with { DeleteBatchSize = 1, UploadBatchSize = 1, MkDirBatchSize = 1 },
         [new(SyncIgnoreKind.FileExtension, ".tmp"), new(SyncIgnoreKind.FolderName, "cache")]);
 

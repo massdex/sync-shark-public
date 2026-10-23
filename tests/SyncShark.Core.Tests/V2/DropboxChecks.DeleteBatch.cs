@@ -6,7 +6,7 @@ internal static partial class DropboxChecks
     private static async Task DeleteBatchRaceAsync()
     {
         using var h = new Harness();
-        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"),
+        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"), isStateDamage: StorageFailureClassifier.IsStateDamage,
             V2Settings.Default with { DeleteBatchSize = 2 });
         h.Wire.SeedFile("raced.txt", "keep");
         h.Wire.SeedFile("delete.txt", "remove");
@@ -83,7 +83,7 @@ internal static partial class DropboxChecks
     private static async Task DeleteRejectionJournalWriteFailsAsync()
     {
         using var h = new Harness();
-        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"),
+        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"), isStateDamage: StorageFailureClassifier.IsStateDamage,
             V2Settings.Default with { DeleteBatchSize = 1 });
         h.Wire.SeedFile("journal.txt", "content");
         h.Wire.DeleteWriteRefusals["journal.txt"] = 1;
@@ -109,7 +109,7 @@ internal static partial class DropboxChecks
         using var h = new Harness();
         // A generous max age keeps the 200 ms default from flushing a partial batch mid-arrival, which is the only way
         // this test could ever see the batch split below the cap.
-        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"),
+        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"), isStateDamage: StorageFailureClassifier.IsStateDamage,
             V2Settings.Default with { DeleteBatchMaxAge = TimeSpan.FromSeconds(30) });
         var items = new List<ItemState>();
         for (var index = 0; index < count; index++)
@@ -132,7 +132,7 @@ internal static partial class DropboxChecks
     private static async Task DeleteBatchTimeoutAsync()
     {
         using var h = new Harness();
-        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"),
+        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"), isStateDamage: StorageFailureClassifier.IsStateDamage,
             V2Settings.Default with { DeleteBatchSize = 2, BatchOperationTimeout = TimeSpan.FromMilliseconds(300) });
         h.Wire.SeedFile("hold-a.txt", "a");
         h.Wire.SeedFile("hold-b.txt", "b");
@@ -158,7 +158,7 @@ internal static partial class DropboxChecks
             using var h = new Harness();
             using var firstStop = new CancellationTokenSource();
             using var secondStop = new CancellationTokenSource();
-            var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"),
+            var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"), isStateDamage: StorageFailureClassifier.IsStateDamage,
                 V2Settings.Default with { DeleteBatchSize = 2,
                     BatchPollInterval = stopBoth ? TimeSpan.FromHours(1) : TimeSpan.FromMilliseconds(1) });
             h.Wire.DeleteBatchAsyncJob = true;
@@ -212,7 +212,7 @@ internal static partial class DropboxChecks
         foreach (var refusals in new[] { 1, 2 })
         {
             using var h = new Harness();
-            var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"),
+            var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"), isStateDamage: StorageFailureClassifier.IsStateDamage,
                 V2Settings.Default with { DeleteBatchSize = 2, DropboxWriteOperationRetryCount = retryLimit });
             h.Wire.SeedFile("retry.txt", "retry");
             h.Wire.SeedFile("success.txt", "success");
@@ -235,7 +235,7 @@ internal static partial class DropboxChecks
     {
         using var h = new Harness();
         var settings = V2Settings.Default with { DeleteBatchSize = 2 };
-        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"), settings);
+        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"), isStateDamage: StorageFailureClassifier.IsStateDamage, settings);
         var items = new List<ItemState>();
         for (var index = 0; index < 6; index++)
         {

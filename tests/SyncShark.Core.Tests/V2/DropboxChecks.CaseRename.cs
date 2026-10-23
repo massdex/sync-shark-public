@@ -14,7 +14,7 @@ internal static partial class DropboxChecks
         var pair = new PairDef("case-local-pair", "Case local", root, Root(), [], [], true);
         store.SavePair(pair);
         var writer = await LocalWriter.OpenAsync(root, Side.A, pair.PairId, LocalChecks.InstallationId,
-            Path.Combine(directory, "recovery"), CancellationToken.None, StorageChecks.Fast);
+            Path.Combine(directory, "recovery"), CancellationToken.None, isStateDamage: StorageFailureClassifier.IsStateDamage, StorageChecks.Fast);
         var original = (await writer.ObserveAsync("Doc.txt", CancellationToken.None))!;
         h.Wire.SeedFile("doc.txt", "content");
         var remote = h.Writer();
@@ -25,7 +25,7 @@ internal static partial class DropboxChecks
         var plan = Planner.Decide(pair.PairId, 2,
             [new PlanRow(basis, original, source, new Evidence(false, false, false, false))], options);
         Require(plan.Actions.Single().Kind == ActionKind.Move, "Dropbox case change plans a local Move");
-        var executor = new Executor(store, StorageChecks.Fast, ExecutorChecks.Admission());
+        var executor = new Executor(store, StorageChecks.Fast, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
         await foreach (var result in executor.ApplyAsync(plan, writer, remote, CancellationToken.None))
             Require(result.Outcome == Outcome.Done, "native NTFS case rename completes");
         var observed = (await writer.ObserveAsync("doc.txt", CancellationToken.None))!;
@@ -131,7 +131,7 @@ internal static partial class DropboxChecks
                 if (scenario == "edited") h.Wire.EditFile(temporary, "new content");
                 if (scenario == "occupied") h.Wire.SeedFile("doc.txt", "other identity");
             }
-            var executor = new Executor(store, StorageChecks.Fast, ExecutorChecks.Admission());
+            var executor = new Executor(store, StorageChecks.Fast, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
             var reconciled = await executor.ReconcileAsync(store.UnresolvedIntents(pair.PairId), 2, a, writer, CancellationToken.None);
             if (scenario is "moved" or "deleted")
             {

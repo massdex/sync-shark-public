@@ -176,7 +176,7 @@ internal static partial class LocalInventoryChecks
                 var inventory = new LocalInventory(
                     new RootDef("root-local", SyncProviders.Local, null, root, LocalChecks.ObjectIdOf(root)),
                     Side.A, known, new HashSet<string>(StringComparer.OrdinalIgnoreCase), V2Settings.Default,
-                    TimeProvider.System, pairId: "pair-local-0001");
+                    TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: "pair-local-0001");
                 return inventory;
             }
             var probes = new List<string>();

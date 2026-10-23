@@ -74,7 +74,7 @@ internal sealed class StoreCommitter
                 await RunOperations.WaitAsync(_storeGate, "store commit gate").ConfigureAwait(false);
                 try
                 {
-                    using var admission = FairStoreGate.WithCancellation(CancellationToken.None);
+                    using var admission = StoreAdmission.WithCancellation(CancellationToken.None);
                     // Positive evidence from this apply clears a prior-run availability cause only when every
                     // open pair cause is connectivity (network/auth/provider), exactly as CompleteSuccess
                     // decides for the storage lanes. A binding, host, volume, backlog or unknown cause survives
@@ -90,7 +90,7 @@ internal sealed class StoreCommitter
 
     internal async Task DeferPointerUpdateAsync(SyncAction action, StoragePairException error)
     {
-        using var admission = FairStoreGate.WithCancellation(CancellationToken.None);
+        using var admission = StoreAdmission.WithCancellation(CancellationToken.None);
         await RunOperations.WaitAsync(_storeGate, "store commit gate").ConfigureAwait(false);
         try
         {
@@ -131,7 +131,7 @@ internal sealed class StoreCommitter
     internal async Task CommitConflictTransitionAsync(SyncAction forget, ActionResult result,
         IReadOnlyList<SyncAction> successors)
     {
-        using var admission = FairStoreGate.WithCancellation(CancellationToken.None);
+        using var admission = StoreAdmission.WithCancellation(CancellationToken.None);
         await RunOperations.WaitAsync(_storeGate, "store commit gate").ConfigureAwait(false);
         try { _store.CommitConflictTransition(_pairId, _gen, forget, result, successors); }
         finally { _storeGate.Release(); }
@@ -153,7 +153,7 @@ internal sealed class StoreCommitter
     /// <summary>Completes once the result is durable; never abandoned by cancellation, since the effect happened.</summary>
     internal async Task CommitAsync(SyncAction action, ActionResult result)
     {
-        using var admission = FairStoreGate.WithCancellation(CancellationToken.None);
+        using var admission = StoreAdmission.WithCancellation(CancellationToken.None);
         await Enqueue(LatestAction(action), result).ConfigureAwait(false);
         if (result.Outcome is Outcome.Done or Outcome.Skipped or Outcome.Refused)
             _providerActions.TryRemove(action.ActionId, out _);
@@ -168,7 +168,7 @@ internal sealed class StoreCommitter
     /// </summary>
     internal async Task AddNoticeAsync(Notice notice)
     {
-        using var admission = FairStoreGate.WithCancellation(CancellationToken.None);
+        using var admission = StoreAdmission.WithCancellation(CancellationToken.None);
         await RunOperations.WaitAsync(_storeGate, "store commit gate").ConfigureAwait(false);
         try
         {
@@ -181,7 +181,10 @@ internal sealed class StoreCommitter
     }
 
     /// <summary>Reuses grouped intent writes for provider evidence, keeping SQL and transaction ownership in Storage.</summary>
-    internal ProviderEffectContext CreateProviderContext(SyncAction action) => new(action, this, async checkpoint =>
+    internal ProviderEffectContext CreateProviderContext(SyncAction action) => new(action,
+        new ProviderEffectOwner(this, _pairId,
+            (actionId, path, recovery, pairId, ct) => RecordRecoveryAsync(actionId, path, recovery, ct),
+            RecordProviderCheckpointsAsync), async checkpoint =>
     {
         var updated = action with { ProviderEffect = checkpoint };
         await Enqueue(updated, null).ConfigureAwait(false);
@@ -238,7 +241,7 @@ internal sealed class StoreCommitter
     {
         // Admitted writes include provider checkpoints and completed effects, not just
         // cancellable pre-effect intents. The caller waits for their durable handoff.
-        using var admission = FairStoreGate.WithCancellation(CancellationToken.None);
+        using var admission = StoreAdmission.WithCancellation(CancellationToken.None);
         while (true)
         {
             List<Write> batch;

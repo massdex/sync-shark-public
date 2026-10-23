@@ -52,7 +52,7 @@ internal static partial class DropboxChecks
                 "refused names never fabricate a synced baseline");
             var notices = store.OpenNotices("p1").Where(n => n.ReasonKey == ProviderNameRefusedException.NoticeKey).ToArray();
             Require(notices.Length == 25 && notices.All(n => n.Repair is not null &&
-                NoticeChoices.Options(n).Any(option => option.Choice == NoticeChoices.Rename)),
+                NoticeOptions.Options(n).Any(option => option.Choice == NoticeChoices.Rename)),
                 "each refused entity gets one identity-bound actionable notice");
             Require(writerA.Calls == 0 && h.Wire.WholeFolderDeletes == 0 &&
                 !h.Wire.Calls.Any(call => call.Contains("delete") || call.Contains("move")),
@@ -129,7 +129,7 @@ internal static partial class DropboxChecks
             var provider = new FakeEndpointProvider().Add(pair.A, a).AddWriter(pair.A, writerA)
                 .AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, store, "p1"))
                 .AddWriter(pair.B, h.Writer());
-            return new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission()), provider,
+            return new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider,
                 settings, TimeProvider.System);
         }
     }

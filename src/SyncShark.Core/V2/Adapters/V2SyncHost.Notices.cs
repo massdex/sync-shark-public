@@ -100,7 +100,7 @@ public sealed partial class V2SyncHost
             var pair = _store.Pair(projected ? request.Conflict.PairId : notice.PairId);
             if (pair is null || !InScope(pair, connectionId))
                 throw new InvalidOperationException("The selected pair is unavailable in this account. Refresh notices.");
-            var options = NoticeChoices.Options(notice);
+            var options = NoticeOptions.Options(notice);
             if (request.NoticeChoice is { } choice)
             {
                 if (!options.Any(option => option.Choice == choice))

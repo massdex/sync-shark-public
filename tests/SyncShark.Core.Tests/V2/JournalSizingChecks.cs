@@ -49,7 +49,7 @@ internal static class JournalSizingChecks
             void Observe(string pair = "p1") => store.ObserveJournal(pair, "C:", 123, 1, 100, 32 * 1024 * 1024, 100 * gb, true, clock.GetUtcNow());
             Observe(); Observe(); Observe("p2");
             var notice = store.OpenNotices(null).Single();
-            Require(notice.PairId == "p1" && NoticeChoices.Options(notice).Count == 3, "one volume notice across two pairs");
+            Require(notice.PairId == "p1" && NoticeOptions.Options(notice).Count == 3, "one volume notice across two pairs");
             var fake = new PendingElevation();
             var apply = JournalSizing.ApplyCoreAsync(store, notice, JournalSizing.Enlarge, fake, CancellationToken.None, _ => [1, 0, 0, 0, gb, SyncSharkJournalNative.Delta, 100 * gb, 123]);
             Require(!apply.IsCompleted && fake.Calls == 1, "resize waits only on explicit choice");
@@ -160,7 +160,7 @@ internal static class JournalSizingChecks
                 "partial growth reports observed and requested capacity without resolving the notice");
             await JournalSizing.MaintainAsync(store, pending, rootIdentity, (_, _) => Task.FromResult<uint?>(1), Query);
             var notice = store.OpenNotices(null).Single();
-            Require(NoticeChoices.Options(notice).Count == 3 && notice.Detail.Contains("failed"), "failure retains UAC Not now Never choices");
+            Require(NoticeOptions.Options(notice).Count == 3 && notice.Detail.Contains("failed"), "failure retains UAC Not now Never choices");
             await JournalSizing.MaintainAsync(store, pending, rootIdentity,
                 async (_, _) => await SyncDiscoveryClient.ReadJournalReplyAsync(new MemoryStream(), CancellationToken.None), Query);
             Require(store.OpenNotices(null).Count == 1, "old worker fallback keeps one notice");
@@ -261,7 +261,7 @@ internal static class JournalSizingChecks
             var queries = 0;
             var growthQueued = 0;
             var local = new LocalInventory(pair.A, Side.A, store, new HashSet<string>(), StorageChecks.Fast,
-                clock, pairId: pair.PairId)
+                clock, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId)
             {
                 CapacityQueryForTest = _ => { queries++; return [1, 0, 200, 0, gb, SyncSharkJournalNative.Delta, 1000 * gb, 123]; },
                 CapacityQueueForTest = (_, _, _) => growthQueued++

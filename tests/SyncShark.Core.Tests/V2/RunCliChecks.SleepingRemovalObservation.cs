@@ -39,7 +39,7 @@ internal static partial class RunCliChecks
                     var child = target.Seed("reviewed/new.txt", "new during sleep");
                     target.Seed("reviewed/private/hidden.txt", "selectively excluded");
                     target.Seed("selective/hidden.txt", "unrelated exclusion");
-                    var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission()), fx.Provider, Settings, clock);
+                    var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), fx.Provider, Settings, clock);
                     var interrupted = false;
                     run.AfterReviewedRemovalObservationsForTest = () =>
                     {
@@ -64,7 +64,7 @@ internal static partial class RunCliChecks
                     var targetRoot = side == Side.A ? fx.Pair.A.RootId : fx.Pair.B.RootId;
                     Require(reopened.Cursor(targetRoot) == cursor && reopened.DeferredPlanningDisplayPage(fx.Pair.PairId)
                         .Any(row => row.Path == "reviewed/new.txt"), "cold reopen retains both the old cursor and dirty child");
-                    var resumed = new SyncRun(reopened, new Executor(reopened, Settings, ExecutorChecks.Admission()), fx.Provider, Settings, clock);
+                    var resumed = new SyncRun(reopened, new Executor(reopened, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), fx.Provider, Settings, clock);
                     await resumed.IncrementalAsync(fx.Pair.PairId, new Progress<RunProgress>(), default);
                     Require(reopened.Live(targetRoot, ["reviewed/new.txt"]).Count == 1 &&
                         fx.WriterA.Deletes == 0 && fx.WriterB.Deletes == 0,

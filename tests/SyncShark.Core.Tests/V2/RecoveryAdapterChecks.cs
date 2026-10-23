@@ -24,11 +24,11 @@ internal static class RecoveryAdapterChecks
         var pending = new Notice("p1", 0, NoticeKind.Info, "file.txt", "existing destination left unchanged",
             SyncRun.RecoveryRestorePending,
             ConflictOperation: new ConflictNoticeOperation("recovery-1", "file.txt", [], []));
-        Require(NoticeChoices.Options(pending).Select(option => option.Choice).SequenceEqual(
+        Require(NoticeOptions.Options(pending).Select(option => option.Choice).SequenceEqual(
                 new[] { NoticeChoices.RetryNow, NoticeChoices.RestoreAsCopy, NoticeChoices.Ignore, NoticeChoices.Dismiss }),
             "actionless restore offers Retry, Restore as a copy, Ignore and Dismiss with no durable hold");
         var unavailable = pending with { ConflictOperation = new ConflictNoticeOperation("recovery-1", null, [], []) };
-        Require(NoticeChoices.Options(unavailable).Select(option => option.Choice).SequenceEqual(
+        Require(NoticeOptions.Options(unavailable).Select(option => option.Choice).SequenceEqual(
                 new[] { NoticeChoices.RetryNow, NoticeChoices.Ignore, NoticeChoices.Dismiss }),
             "an actionless failure with no destination does not offer Restore as a copy");
         var intent = new SyncAction(ShortId.Make("rrs", "p1", "recovery-1"), 0, ActionKind.CopyNew, Side.A,
@@ -36,7 +36,7 @@ internal static class RecoveryAdapterChecks
                 DateTimeOffset.UnixEpoch, ItemFlags.None), null, false, null) { SuppressReconciledBaseline = true };
         var frozen = pending with { ConflictOperation = new ConflictNoticeOperation("recovery-1", "file.txt",
             [intent], []) };
-        Require(NoticeChoices.Options(frozen).Select(option => option.Choice).SequenceEqual(
+        Require(NoticeOptions.Options(frozen).Select(option => option.Choice).SequenceEqual(
                 new[] { NoticeChoices.RetryNow, NoticeChoices.Ignore }),
             "a frozen restore intent keeps only Retry and Ignore, so Dismiss never abandons written bytes");
         Require(NoticeChoices.IsRetryChoice(NoticeChoices.RestoreAsCopy),
@@ -69,7 +69,7 @@ internal static class RecoveryAdapterChecks
             .Add(pair.A, endpointA)
             .Add(pair.B, new FakeEndpoint(Side.B, pair.B.RootId))
             .AddWriter(pair.A, writer));
-        var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission()), provider, Settings,
+        var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider, Settings,
             TimeProvider.System);
         var runtime = new V2CliRuntime(null, store, run, new EndpointRootProbe(provider), root);
 
@@ -112,7 +112,7 @@ internal static class RecoveryAdapterChecks
     {
         var root = LocalChecks.FreshRoot("recovery-host-gate-" + Guid.NewGuid().ToString("N"));
         using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System);
-        var executor = new Executor(store, Settings, ExecutorChecks.Admission());
+        var executor = new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
         var run = new SyncRun(store, executor, new FakeEndpointProvider(), Settings, TimeProvider.System);
         var host = new V2SyncHost(store, run, new ObservedExecutor(executor), null!, Settings, TimeProvider.System,
             SqliteStateStore.DatabasePath(Path.Combine(root, "state")));

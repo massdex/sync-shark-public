@@ -149,7 +149,7 @@ internal static partial class RunChecks
         fx.A.Seed("saved.txt", "effect before fatal completion");
         probe.Failure = failure;
         var report = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
-        Require(report.Outcome == RunOutcomes.StateDamaged && report.Done == 1 && report.HaltedBy is { } cause && FailureRetryOwner.ScopeOf(cause, default) == FailureRetryOwner.FailureScope.State &&
+        Require(report.Outcome == RunOutcomes.StateDamaged && report.Done == 1 && report.HaltedBy is { } cause && StorageFailureClassifier.ScopeOf(cause, default) == FailureRetryOwner.FailureScope.State &&
             probe.AccessAfterDamage == 0,
             "fatal state returns counted in-memory report with no later store access: " + failure.GetType().Name);
         var projected = SyncRunOutcomeProjection.Classify(new SyncRunOutcomeInput { Outcome = report.Outcome });

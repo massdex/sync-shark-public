@@ -109,7 +109,7 @@ public sealed class EngineComposition : IDisposable
         }
         try
         {
-            var observed = new ObservedExecutor(new Executor(store, settings, limiter.Resources));
+            var observed = new ObservedExecutor(new Executor(store, settings, limiter.Resources, isStateDamage: StorageFailureClassifier.IsStateDamage));
             var endpoints = new ProductionEndpoints(store, settings, time, paths, installationId,
                 dropbox, host.ContentPausedForTest);
             var run = new SyncRun(store, observed, endpoints, settings, time, endpoints.ProductOwnedRelative);

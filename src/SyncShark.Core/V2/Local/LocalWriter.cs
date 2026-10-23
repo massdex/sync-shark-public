@@ -29,11 +29,14 @@ public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResource
     private readonly string _rootId;
     string ISyncTransferResourceEndpoint.TransferResourceKey => "local:" + Path.GetPathRoot(_rootPath)!.ToUpperInvariant();
 
+    private readonly Func<Exception, bool> _isStateDamage;
     private LocalWriter(SyncLocalEndpointStore store, string rootPath, string rootId, Side side, string pairId,
         string recoveryRoot, PilotDirectoryIdentity rootIdentity, LocalFreeSpaceGuard freeSpace,
         IReadOnlyList<SyncIgnoreRule> ignoreRules, Func<ItemState, bool>? providerNameRefused,
-        Func<string, ItemState, bool>? verifyCarriedChoice)
+        Func<string, ItemState, bool>? verifyCarriedChoice, Func<Exception, bool> isStateDamage)
     {
+        ArgumentNullException.ThrowIfNull(isStateDamage);
+        _isStateDamage = isStateDamage;
         _store = store;
         _rootPath = rootPath;
         _rootId = rootId;
@@ -56,12 +59,13 @@ public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResource
     /// <param name="time">The clock for the database-size cache; the system clock is used when null.</param>
     /// <param name="ignoreRules">The pair policy, used only to carry ignored remnants with a folder deletion.</param>
     public static async Task<LocalWriter> OpenAsync(RootDef root, Side side, string pairId, string installationId,
-        string recoveryRoot, CancellationToken ct, V2Settings? settings = null, IVolumeSpaceProbe? volumeSpace = null,
+        string recoveryRoot, CancellationToken ct, Func<Exception, bool> isStateDamage, V2Settings? settings = null, IVolumeSpaceProbe? volumeSpace = null,
         string? databasePath = null, TimeProvider? time = null,
         IReadOnlyList<SyncIgnoreRule>? ignoreRules = null, Func<ItemState, bool>? providerNameRefused = null,
         string? recoveryUnavailable = null,
         Func<string, ItemState, bool>? verifyCarriedChoice = null, bool readOnlyOpen = false)
     {
+        ArgumentNullException.ThrowIfNull(isStateDamage);
         ArgumentNullException.ThrowIfNull(root);
         ArgumentNullException.ThrowIfNull(recoveryRoot);
         ct.ThrowIfCancellationRequested();
@@ -90,7 +94,7 @@ public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResource
             new SyncControlNamespaceBinding(installationId, namespaceId, local), SyncProviders.Local);
         return new LocalWriter(store, root.RootPath, root.RootId, side, pairId, recovery, identity,
             new LocalFreeSpaceGuard(volumeSpace ?? new DriveVolumeSpaceProbe(), settings ?? V2Settings.Default,
-                databasePath, time), SyncIgnorePolicy.Normalize(ignoreRules), providerNameRefused, verifyCarriedChoice)
+                databasePath, time), SyncIgnorePolicy.Normalize(ignoreRules), providerNameRefused, verifyCarriedChoice, isStateDamage: isStateDamage)
             { RecoveryUnavailable = recoveryUnavailable };
     }
 
@@ -576,7 +580,7 @@ public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResource
             ct.ThrowIfCancellationRequested();
             try { identities[i] = absence.Check(requests[i].Historical); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-            catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct) == FailureRetryOwner.FailureScope.Item)
+            catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct, isStateDamage: _isStateDamage) == FailureRetryOwner.FailureScope.Item)
             { identities[i] = FileAbsence.Unknown; reasons[i] = AbsenceObservation.Cause(error); }
         }
         await Parallel.ForEachAsync(Enumerable.Range(0, requests.Count), new ParallelOptions
@@ -593,7 +597,7 @@ public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResource
                 else results[index] = new(identities[index] == FileAbsence.Gone ? true : null, reasons[index]);
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-            catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct) == FailureRetryOwner.FailureScope.Item)
+            catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct, isStateDamage: _isStateDamage) == FailureRetryOwner.FailureScope.Item)
             { results[index] = new(null, AbsenceObservation.Cause(error)); }
         }).ConfigureAwait(false);
         return results;

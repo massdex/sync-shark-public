@@ -6,6 +6,7 @@ public sealed partial class DropboxWriter : IEndpointWriter, ISyncTransferResour
 {
     internal Task<bool> HasUploadSpaceAsync(long needBytes, CancellationToken ct) => _client.HasUploadSpaceAsync(needBytes, ct);
 
+    private readonly Func<Exception, bool> _isStateDamage;
     private readonly Side _side;
     private readonly string? _pairId;
     private readonly DropboxPilotClient _client;
@@ -15,9 +16,11 @@ public sealed partial class DropboxWriter : IEndpointWriter, ISyncTransferResour
     string ISyncTransferResourceEndpoint.TransferResourceKey =>
         ((ISyncTransferResourceEndpoint)_client).TransferResourceKey;
 
-    public DropboxWriter(RootDef root, Side side, DropboxPilotClient client, string spoolDirectory,
+    public DropboxWriter(RootDef root, Side side, DropboxPilotClient client, string spoolDirectory, Func<Exception, bool> isStateDamage,
         V2Settings? settings = null, IReadOnlyList<SyncIgnoreRule>? ignoreRules = null, string? pairId = null)
     {
+        ArgumentNullException.ThrowIfNull(isStateDamage);
+        _isStateDamage = isStateDamage;
         _side = side;
         _pairId = pairId;
         _client = client;

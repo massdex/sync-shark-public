@@ -88,7 +88,7 @@ internal static class FilesOnDemandStorageChecks
                 new ActionResult(upload.ActionId, Outcome.Uncertain, null, null, null, "response lost"));
             Require(store.StorageSettlementPage().Count == 0, "uncertain upload cannot authorize conversion");
             var executor = new Executor(store, V2Settings.Default,
-                new SyncTransferResourceController(new SyncTransferSettings()));
+                new SyncTransferResourceController(new SyncTransferSettings()), isStateDamage: StorageFailureClassifier.IsStateDamage);
             var reconciled = await executor.ReconcileAsync([upload], generation, endpoint, endpoint, CancellationToken.None);
             Require(reconciled.Single().Outcome == Outcome.Done && endpoint.UploadCalls == 1,
                 "lost response reconciles remote identity without a second upload");
@@ -105,7 +105,7 @@ internal static class FilesOnDemandStorageChecks
         {
             Require(store.StorageSettlementPage().Count == 1, "receipt survives restart before conversion");
             var savedNotice = store.OpenNotices("pair").Single(n => n.Storage is not null);
-            Require(savedNotice.Storage!.ObjectId == "file-object" && NoticeChoices.Options(savedNotice).Count == 2,
+            Require(savedNotice.Storage!.ObjectId == "file-object" && NoticeOptions.Options(savedNotice).Count == 2,
                 "durable storage metadata and Retry/Ignore options survive restart");
             var savedSettlement = store.StorageSettlementFor(local.RootId, "file-object", "remote");
             using (var connections = new CloudFilesLifetime((_, _, _) => throw new InvalidOperationException("Ignore must not connect"), _ => false))

@@ -37,19 +37,19 @@ internal static partial class RunCliChecks
                 };
                 if (change != "legacy")
                     action = action with { FrozenRemovalSignature = await DeleteSourceGuard.CaptureReviewedRemovalAsync(
-                        action, pair, store, target, default) };
+                        action, pair, store, target, default, isStateDamage: StorageFailureClassifier.IsStateDamage) };
                 if (carried)
                 {
                     Require(await DeleteSourceGuard.CaptureDisclosedRemovalAsync(action, pair, store, target,
-                        1, 0, child.Size, default) is not null, "freeze matches disclosed carried totals");
+                        1, 0, child.Size, default, isStateDamage: StorageFailureClassifier.IsStateDamage) is not null, "freeze matches disclosed carried totals");
                     Require(await DeleteSourceGuard.CaptureDisclosedRemovalAsync(action, pair, store, target,
-                        0, 0, 0, default) is null, "undisclosed carried child cannot be silently frozen as approved");
+                        0, 0, 0, default, isStateDamage: StorageFailureClassifier.IsStateDamage) is null, "undisclosed carried child cannot be silently frozen as approved");
                 }
                 var due = DateTimeOffset.UtcNow.AddMinutes(1);
                 store.SaveSyncRetry(fx.Pair.PairId, new SyncRetry(folder.Path, "reviewed-removal", 1, "retry", due)
                     { ReviewedActions = [action] });
                 var clock = new ReviewedRemovalRetryClock { Now = due.AddTicks(-1) };
-                var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission()), fx.Provider, Settings, clock);
+                var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), fx.Provider, Settings, clock);
                 if (change == "new") target.Seed("reviewed/new.tmp", "unreviewed");
                 if (change == "changed") target.Seed(child.Path, "changed and longer bytes");
                 if (change == "missing")

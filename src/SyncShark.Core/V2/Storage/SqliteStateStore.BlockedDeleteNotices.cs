@@ -4,7 +4,7 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SqliteStateStore
 {
-    internal const string BlockedDeleteSummary = "blocked-delete-summary";
+    internal const string BlockedDeleteSummary = NoticeVocabulary.BlockedDeleteSummary;
     private const string BlockedDeleteWhere = "pair_no=$p AND json_extract(json,'$.DeleteBlockedDetail') IS NOT NULL";
 
     public BlockedDeletePage ReadBlockedDeletes(string pairId, string? after = null, int limit = 50) => InStore(() =>

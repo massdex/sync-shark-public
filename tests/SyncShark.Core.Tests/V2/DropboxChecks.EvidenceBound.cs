@@ -16,7 +16,7 @@ internal static partial class DropboxChecks
         var settings = V2Settings.Default with { ProgressInterval = TimeSpan.Zero, MaxWorkers = 1 };
         var provider = new FakeEndpointProvider().Add(pair.A, local)
             .AddInventory(pair.B, h.Inventory).AddWriter(pair.B, h.Writer());
-        var run = new SyncRun(h.Known, new Executor(h.Known, settings, ExecutorChecks.Admission()),
+        var run = new SyncRun(h.Known, new Executor(h.Known, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
             provider, settings, TimeProvider.System);
         var preview = await run.PreviewFirstSyncAsync("p1", new Progress<RunProgress>(), CancellationToken.None);
         Require((await run.ApplyAsync("p1", preview, new Progress<RunProgress>(), CancellationToken.None)).Failed == 0,
@@ -89,7 +89,7 @@ internal static partial class DropboxChecks
             local.WriteCalls == localWritesBeforeHold && CloudWrites() == cloudWritesBeforeHold,
             "released history evidence forbids every delete and upload until the user chooses");
         var decision = h.Known.OpenNotices("p1").Single(n => n.Path == "held.txt" && n.ReasonKey == "deletion-review");
-        Require(NoticeChoices.Options(decision).Select(option => option.Choice).SequenceEqual(
+        Require(NoticeOptions.Options(decision).Select(option => option.Choice).SequenceEqual(
             new[] { NoticeChoices.DeleteReviewed, NoticeChoices.KeepRestore, NoticeChoices.Ignore }),
             "unreviewed history evidence offers exactly delete / keep-restore / ignore");
         var proposed = h.Known.SyncRetryAt("p1", "held.txt");

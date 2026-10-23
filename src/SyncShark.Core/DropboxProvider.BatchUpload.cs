@@ -152,8 +152,8 @@ public sealed partial class DropboxPilotClient
     private static async Task RecordUploadCommitCheckpointsAsync(IReadOnlyList<DropboxUploadCommit> batch)
     {
         foreach (var group in batch.Where(item => item.Context is { Owner: not null })
-                     .GroupBy(item => item.Context!.Owner!))
-            await group.Key.RecordProviderCheckpointsAsync(group
+                     .GroupBy(item => item.Context!.Owner!.Key, ReferenceEqualityComparer.Instance))
+            await group.First().Context!.Owner!.RecordCheckpoints(group
                 .Select(item => (item.Context!.Action!,
                     new V2.ProviderEffectCheckpoint("upload-commit", item.SessionId, DateTimeOffset.UtcNow)))
                 .ToArray()).ConfigureAwait(false);

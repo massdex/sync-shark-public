@@ -13,7 +13,7 @@ internal static partial class RunChecks
         var local = LocalChecks.RootOf(root, "ra");
         var pair = fx.Pair with { A = local };
         store.SavePair(pair);
-        LocalInventory Inventory() => new(local, Side.A, store, new HashSet<string>(), Settings, TimeProvider.System);
+        LocalInventory Inventory() => new(local, Side.A, store, new HashSet<string>(), Settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage);
         var inventory = Inventory();
         var before = await inventory.FullAsync(store.BeginGeneration("ra", "full"), _ => true, null!, CancellationToken.None);
         var old = before.Items.Single(item => item.Path == "old.txt") with { Hash = "known-old-content" };

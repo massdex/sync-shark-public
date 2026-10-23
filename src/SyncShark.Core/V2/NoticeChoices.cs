@@ -81,12 +81,12 @@ public static class NoticeChoices
         _ => format
     };
 
-    private static IReadOnlyList<SyncNoticeOption> ExportOptions(Notice notice)
+    private static IReadOnlyList<(string Choice, string Label, bool RequestsName)> ExportOptions(Notice notice)
     {
         var formats = notice.ExportInfo is { } info ? info.Formats : LegacyExportFormats;
         return formats.Select(format => (Format: format, Choice: ExportChoice(format)))
             .Where(item => item.Choice is not null)
-            .Select(item => new SyncNoticeOption(item.Choice!, "Export as " + ExportLabel(item.Format) + "…")).ToArray();
+            .Select(item => (item.Choice!, "Export as " + ExportLabel(item.Format) + "…", false)).ToArray();
     }
 
     public const string CheckHistoryAgain = "check-history-again";
@@ -132,7 +132,7 @@ public static class NoticeChoices
 
     /// <summary>The one physical root-indexing notice, whichever pair (or projection) is showing it.</summary>
     public static bool IsIndexFailure(Notice notice) =>
-        notice.ReasonKey is not null && notice.ReasonKey.StartsWith(SqliteStateStore.IndexFailurePrefix, StringComparison.Ordinal);
+        notice.ReasonKey is not null && notice.ReasonKey.StartsWith(NoticeVocabulary.IndexFailurePrefix, StringComparison.Ordinal);
 
     /// <summary>A root-indexing retry made every durable deadline due; nothing was excluded or paused.</summary>
     public const string IndexRetryResult =
@@ -148,11 +148,11 @@ public static class NoticeChoices
     public static bool IsRecoveryRestoreNotice(Notice notice) =>
         notice.ReasonKey is "recovery-restore-pending" or "recovery-restore-ready";
 
-    public static bool IsRetryNotice(Notice notice) => IsRecoveryRestoreNotice(notice) || notice.RetainedVersion is null && (notice.FreeSpace is not null || notice.Repair is not null || notice.RebuildableRule is not null || notice.ReasonKey is ExecutionReasons.ConflictCopyBlocked or "folder-delete-unrestored" or "held-intents" or "permanent-boundary" or "plan-bound-exceeded" or "deletion-history-unavailable" or "deletion-evidence-pending" or "links-excluded" or "link-item" or "stubs-left-alone" or "online-only-item" or "unreadable" or ItemBlocked or "dropbox-storage-full" or "export-required" or RehashProtection.Reason or PointerObservationSummary || IsPairRetryNotice(notice) || IsIndexFailure(notice) || notice.ReasonKey is SqliteStateStore.DeleteReviewSummary or SqliteStateStore.UncertainDeleteSummary or SqliteStateStore.BlockedDeleteSummary or DeleteSourceGuard.ReasonKey or "sync-retry" or "content-unconfirmed" or "interrupted-delete-unverified" or "deletion-review" or "planning-degraded" or "recovery-unavailable" || IsRemovalAttention(notice) || IsRemovalReview(notice));
+    public static bool IsRetryNotice(Notice notice) => IsRecoveryRestoreNotice(notice) || notice.RetainedVersion is null && (notice.FreeSpace is not null || notice.Repair is not null || notice.RebuildableRule is not null || notice.ReasonKey is ExecutionReasons.ConflictCopyBlocked or "folder-delete-unrestored" or "held-intents" or "permanent-boundary" or "plan-bound-exceeded" or "deletion-history-unavailable" or "deletion-evidence-pending" or "links-excluded" or "link-item" or "stubs-left-alone" or "online-only-item" or "unreadable" or ItemBlocked or "dropbox-storage-full" or "export-required" or NoticeVocabulary.RehashReason or PointerObservationSummary || IsPairRetryNotice(notice) || IsIndexFailure(notice) || notice.ReasonKey is NoticeVocabulary.DeleteReviewSummary or NoticeVocabulary.UncertainDeleteSummary or NoticeVocabulary.BlockedDeleteSummary or NoticeVocabulary.DeleteSourceReasonKey or "sync-retry" or "content-unconfirmed" or "interrupted-delete-unverified" or "deletion-review" or "planning-degraded" or "recovery-unavailable" || IsRemovalAttention(notice) || IsRemovalReview(notice));
 
     /// <summary>The combined background-verification summary (M3), including the legacy held-intents summary.</summary>
     internal static bool IsVerificationSummary(Notice notice) =>
-        notice.ReasonKey == RehashProtection.Reason && notice.Rule == RehashProtection.Rule ||
+        notice.ReasonKey == NoticeVocabulary.RehashReason && notice.Rule == NoticeVocabulary.RehashRule ||
         notice.ReasonKey == "held-intents";
 
     // RestoreAsCopy is a retry-family choice: it re-runs the same frozen Recovery selection with a copy destination,
@@ -188,7 +188,7 @@ public static class NoticeChoices
         !IsPairRetryNotice(notice) && !IsRecoveryRestoreNotice(notice) &&
         notice.ReasonKey is not ("permanent-boundary" or "folder-delete-unrestored") && IsRetryNotice(notice) &&
         !string.IsNullOrEmpty(path) && PairPath.Same(notice.Path, path) &&
-        Options(notice).Any(option => option.Choice == choice);
+        IsAdmissible(notice, choice);
 
     public const string ItemBlocked = "item-blocked";
 
@@ -198,7 +198,7 @@ public static class NoticeChoices
     public static bool IsExplicitNoticeChoice(string choice)
     {
         var name = choice.Split('=', 2)[0].ToLowerInvariant();
-        return JournalSizing.IsChoice(name) || IsRetainedVersionChoice(name) || IsRetryChoice(name) || IsQuarantineChoice(name) ||
+        return NoticeVocabulary.IsJournalChoice(name) || IsRetainedVersionChoice(name) || IsRetryChoice(name) || IsQuarantineChoice(name) ||
             name is Compare or Merge or KeepA or KeepB or KeepBoth or RenameIncoming or ReplaceExisting or RestoreExisting or RestoreAsCopy;
     }
 
@@ -213,28 +213,28 @@ public static class NoticeChoices
     /// written effect. An actionless failure wrote nothing, so Retry re-observes, Restore as a copy is offered when
     /// a destination was chosen, and Ignore/Dismiss both close the notice while the durable Recovery record stays.
     /// </summary>
-    private static IReadOnlyList<SyncNoticeOption> RecoveryRestoreOptions(Notice notice)
+    private static IReadOnlyList<(string Choice, string Label, bool RequestsName)> RecoveryRestoreOptions(Notice notice)
     {
         if (RecoveryRestoreHold.HasFrozenIntent(notice.ConflictOperation))
-            return [new(RetryNow, "Retry Recovery restore"),
-                    new(Ignore, "Pause Recovery retries (keep both sides protected)")];
-        var options = new List<SyncNoticeOption> { new(RetryNow, "Retry Recovery restore") };
+            return [(RetryNow, "Retry Recovery restore", false),
+                    (Ignore, "Pause Recovery retries (keep both sides protected)", false)];
+        var options = new List<(string Choice, string Label, bool RequestsName)> { (RetryNow, "Retry Recovery restore", false) };
         if (!string.IsNullOrEmpty(notice.ConflictOperation?.Destination))
-            options.Add(new(RestoreAsCopy, "Restore as a copy"));
+            options.Add((RestoreAsCopy, "Restore as a copy", false));
         // Ignore stays visible because notice-choice validation requires the rendered set to contain the choice;
         // on an actionless failure both Ignore and Dismiss close (nothing was written, so no hold is retained).
-        options.Add(new(Ignore, "Ignore this notice (no file changes)"));
-        options.Add(new(Dismiss, "Dismiss (no file changes)"));
+        options.Add((Ignore, "Ignore this notice (no file changes)", false));
+        options.Add((Dismiss, "Dismiss (no file changes)", false));
         return options;
     }
 
-    private static IReadOnlyList<SyncNoticeOption> FolderRestoreOptions(Notice notice)
+    private static IReadOnlyList<(string Choice, string Label, bool RequestsName)> FolderRestoreOptions(Notice notice)
     {
-        var options = new List<SyncNoticeOption> { new(RetryNow, "Verify again (unknown restores are not replayed)") };
+        var options = new List<(string Choice, string Label, bool RequestsName)> { (RetryNow, "Verify again (unknown restores are not replayed)", false) };
         if (notice.FolderRecoveryAnchor is not null)
-            options.Add(new(RestoreAgain, "Restore again (authorise the same revision restore)"));
-        options.Add(new(OpenDropbox, "Open Dropbox to review deleted files / version history"));
-        options.Add(new(Ignore, "Ignore this notice (keep unresolved recovery protected)"));
+            options.Add((RestoreAgain, "Restore again (authorise the same revision restore)", false));
+        options.Add((OpenDropbox, "Open Dropbox to review deleted files / version history", false));
+        options.Add((Ignore, "Ignore this notice (keep unresolved recovery protected)", false));
         return options;
     }
 
@@ -244,152 +244,156 @@ public static class NoticeChoices
         notice.Path.Length != 0 && IsRetryNotice(notice) && !IsPairRetryNotice(notice) &&
         !IsRecoveryRestoreNotice(notice) && notice.RebuildableRule is null && notice.Storage is null &&
         notice.ReasonKey is not ("permanent-boundary" or "folder-delete-unrestored" or "plan-bound-exceeded" or DropboxQuota.NoticeKey) &&
-        OptionsCore(notice).Any(option => option.Choice == Ignore);
+        CatalogueCore(notice).Any(option => option.Choice == Ignore);
+
+    /// <summary>Admission uses the final catalogue with exact, ordinal choice identity.</summary>
+    public static bool IsAdmissible(Notice notice, string? choice) =>
+        choice is not null && Catalogue(notice).Any(option => string.Equals(option.Choice, choice, StringComparison.Ordinal));
 
     /// <summary>The one rendered catalogue for both CLI and UI.</summary>
-    public static IReadOnlyList<SyncNoticeOption> Options(Notice notice)
+    public static IReadOnlyList<(string Choice, string Label, bool RequestsName)> Catalogue(Notice notice)
     {
-        var options = OptionsCore(notice).Select(option => IsIgnoreChoice(option.Choice)
-            ? option with { Label = notice.Quarantine is not null
-                ? "Ignore this cause (keep protection)" : "Ignore this cause (keep retrying safely)" } : option).ToList();
+        var options = CatalogueCore(notice).Select(option => IsIgnoreChoice(option.Choice)
+            ? (option.Choice, Label: notice.Quarantine is not null
+                ? "Ignore this cause (keep protection)" : "Ignore this cause (keep retrying safely)", option.RequestsName) : option).ToList();
         if (CanStopSyncing(notice) && options.All(option => option.Choice != Exclude))
-            options.Add(new(Exclude, "Stop syncing this file"));
+            options.Add((Exclude, "Stop syncing this file", false));
         return options;
     }
 
-    private static IReadOnlyList<SyncNoticeOption> OptionsCore(Notice notice) =>
+    private static IReadOnlyList<(string Choice, string Label, bool RequestsName)> CatalogueCore(Notice notice) =>
         notice.ReasonKey == "effects-ledger-incomplete"
-            ? [new(RetryNow, "Retry sync (does not repair the prior export)"), new(Ignore, "Ignore this cause"),
-               new(RepairHelp, "Check destination permissions / space; rerun with a new export path")]
+            ? [(RetryNow, "Retry sync (does not repair the prior export)", false), (Ignore, "Ignore this cause", false),
+               (RepairHelp, "Check destination permissions / space; rerun with a new export path", false)]
             : notice.ReasonKey == "plan-bound-exceeded"
-            ? [new(RetryNow, "Retry with the same plan bound"), new(ApprovePlanSize, "Approve this plan size"),
-               new(Ignore, "Ignore this cause"), new(RepairHelp, "Review preview / provenance and the plan bound")]
-            : (notice.ReasonKey is SqliteStateStore.BlockedDeleteSummary or SqliteStateStore.UncertainDeleteSummary or SqliteStateStore.DeleteReviewSummary)
-            ? [new(ShowRemaining, "Show remaining blocked deletions (50 per page)")]
+            ? [(RetryNow, "Retry with the same plan bound", false), (ApprovePlanSize, "Approve this plan size", false),
+               (Ignore, "Ignore this cause", false), (RepairHelp, "Review preview / provenance and the plan bound", false)]
+            : (notice.ReasonKey is NoticeVocabulary.BlockedDeleteSummary or NoticeVocabulary.UncertainDeleteSummary or NoticeVocabulary.DeleteReviewSummary)
+            ? [(ShowRemaining, "Show remaining blocked deletions (50 per page)", false)]
             : IsRecoveryRestoreNotice(notice)
             ? RecoveryRestoreOptions(notice)
             : notice.ReasonKey == "folder-delete-unrestored"
             ? FolderRestoreOptions(notice)
             : notice.ReasonKey == "held-intents"
-            ? [new(ShowRemaining, "Show remaining changes (50 per page)")]
-            : notice.ReasonKey == RehashProtection.Reason
-            ? [new(ShowRemaining, "Show remaining changes (50 per page)")]
+            ? [(ShowRemaining, "Show remaining changes (50 per page)", false)]
+            : notice.ReasonKey == NoticeVocabulary.RehashReason
+            ? [(ShowRemaining, "Show remaining changes (50 per page)", false)]
             : notice.ReasonKey == "permanent-boundary"
-            ? [new(Ignore, "Ignore this information (keep boundary protected)")]
+            ? [(Ignore, "Ignore this information (keep boundary protected)", false)]
             : notice.Storage is not null
-            ? [new(RetryNow, "Retry verification / settlement"), new(Ignore, "Ignore (leave unchanged)")]
-            : JournalSizing.IsNotice(notice)
-            ? [new(JournalSizing.Enlarge, "Enlarge (UAC)"), new(JournalSizing.NotNow, "Not now"), new(JournalSizing.Never, "Never")]
-            : notice.DefenderHistory is { Cause: DefenderReview.SharedReleaseCause, SharedRelease: { } shared }
-            ? [new(DefenderReleaseAllPairs, "Release in all pairs (also held by: " + (shared.OtherPairNames.Length == 0 ? "no other pairs" : shared.OtherPairNames) + ")"),
-               new(DefenderKeepShared, "Keep held")]
-            : notice.DefenderHistory is { Cause: DefenderReview.HeldCause }
-            ? [new(DefenderReleaseHeld, "Release all (allow these deletions)"), new(DefenderReleaseItem, "Review release of one item…"),
-               new(DefenderExcludeHeld, "Stop syncing one item (exclude; keep both copies)…")]
+            ? [(RetryNow, "Retry verification / settlement", false), (Ignore, "Ignore (leave unchanged)", false)]
+            : NoticeVocabulary.IsJournalNotice(notice)
+            ? [(NoticeVocabulary.JournalEnlarge, "Enlarge (UAC)", false), (NoticeVocabulary.JournalNotNow, "Not now", false), (NoticeVocabulary.JournalNever, "Never", false)]
+            : notice.DefenderHistory is { Cause: NoticeVocabulary.DefenderSharedReleaseCause, SharedRelease: { } shared }
+            ? [(DefenderReleaseAllPairs, "Release in all pairs (also held by: " + (shared.OtherPairNames.Length == 0 ? "no other pairs" : shared.OtherPairNames) + ")", false),
+               (DefenderKeepShared, "Keep held", false)]
+            : notice.DefenderHistory is { Cause: NoticeVocabulary.DefenderHeldCause }
+            ? [(DefenderReleaseHeld, "Release all (allow these deletions)", false), (DefenderReleaseItem, "Review release of one item…", false),
+               (DefenderExcludeHeld, "Stop syncing one item (exclude; keep both copies)…", false)]
             : notice.DefenderHistory is not null
-            ? [new(DefenderProceed, "Proceed with deletions"), new(DefenderHold, "Keep held")]
+            ? [(DefenderProceed, "Proceed with deletions", false), (DefenderHold, "Keep held", false)]
             : notice.Quarantine is not null
             ? QuarantineOptions(notice.Quarantine)
             : AwaitsArrival(notice)
-            ? [new(RestoreExisting, "Restore the replaced item"), new(RestoreAsCopy, "Restore as a copy"), new(Dismiss, "Dismiss")]
+            ? [(RestoreExisting, "Restore the replaced item", false), (RestoreAsCopy, "Restore as a copy", false), (Dismiss, "Dismiss", false)]
             : notice.ConflictVersions?.Incoming is not null
-            ? [new(RenameIncoming, "Rename incoming item"), new(ReplaceExisting, "Replace existing item (Recovery first)"), new(Dismiss, "Dismiss")]
+            ? [(RenameIncoming, "Rename incoming item", false), (ReplaceExisting, "Replace existing item (Recovery first)", false), (Dismiss, "Dismiss", false)]
             : notice.ConflictVersions is not null && notice.Rule == 27
-            ? [new(Compare, "Compare"), new(Merge, "Merge text (keep originals)"),
-               new(KeepA, "Keep this version (A)"), new(KeepB, "Keep that version (B)"), new(KeepBoth, "Keep both")]
+            ? [(Compare, "Compare", false), (Merge, "Merge text (keep originals)", false),
+               (KeepA, "Keep this version (A)", false), (KeepB, "Keep that version (B)", false), (KeepBoth, "Keep both", false)]
             : notice.ConflictVersions is not null && notice.Rule is 10 or 11
-            ? [new(KeepA, "Keep only at A's location"), new(KeepB, "Keep only at B's location"), new(KeepBoth, "Keep both")]
+            ? [(KeepA, "Keep only at A's location", false), (KeepB, "Keep only at B's location", false), (KeepBoth, "Keep both", false)]
             : notice.RetainedVersion is not null
-            ? [new(UseOtherVersion, "Use the other version"),
-               new(SaveOtherVersionAsCopy, "Save the other version as a copy"), new(Dismiss, "Dismiss")]
+            ? [(UseOtherVersion, "Use the other version", false),
+               (SaveOtherVersionAsCopy, "Save the other version as a copy", false), (Dismiss, "Dismiss", false)]
             : notice.Rule == 38 && notice.ReasonKey == PlanNotices.CloudFilesBindingNeedsReview.Key
-            ? [new(ReviewRebind, "Review / rebind to verified new path"),
-               new(PausePair, "Pause the pair"), new(LeaveAsIs, "Leave as is")]
+            ? [(ReviewRebind, "Review / rebind to verified new path", false),
+               (PausePair, "Pause the pair", false), (LeaveAsIs, "Leave as is", false)]
             : IsRemovalReview(notice)
-            ? [new(ConfirmRemoval, "Confirm removal with Recovery"), new(RemovalPreviousPage, "Previous page"),
-               new(RemovalNextPage, "Next page"), new(ReviewRemoval, "Refresh review"), new(Dismiss, "Cancel review")]
+            ? [(ConfirmRemoval, "Confirm removal with Recovery", false), (RemovalPreviousPage, "Previous page", false),
+               (RemovalNextPage, "Next page", false), (ReviewRemoval, "Refresh review", false), (Dismiss, "Cancel review", false)]
             : IsRemovalAttention(notice) && notice.RemovalSides is null
-            ? [new(ReviewRemoval, "Review removal"), new(ReviewRemovalA, "Review removal on A (left)"),
-               new(ReviewRemovalB, "Review removal on B (right)"), new(OpenFolderSettings, "Open folder settings"), new(Dismiss, "Dismiss")]
+            ? [(ReviewRemoval, "Review removal", false), (ReviewRemovalA, "Review removal on A (left)", false),
+               (ReviewRemovalB, "Review removal on B (right)", false), (OpenFolderSettings, "Open folder settings", false), (Dismiss, "Dismiss", false)]
             : IsPairRetryNotice(notice)
-            ? [new(RetryNow, "Retry now"), new(Ignore, "Ignore this notice; keep syncing")]
+            ? [(RetryNow, "Retry now", false), (Ignore, "Ignore this notice; keep syncing", false)]
             : notice.Repair is not null && notice.ReasonKey is "provider-name-refused" or "windows-name-invalid"
             ? notice.Repair.Destination is null
-                ? [new(Rename, "Rename…", RequestsName: true), new(Ignore, "Ignore this cause"), new(RetryNow, "Retry this item")]
-                : [new(Rename, "Resume / verify rename"), new(RepairHelp, "Rename awaiting sync"), new(RetryNow, "Retry this item"), new(Ignore, "Ignore this cause")]
+                ? [(Rename, "Rename…", true), (Ignore, "Ignore this cause", false), (RetryNow, "Retry this item", false)]
+                : [(Rename, "Resume / verify rename", false), (RepairHelp, "Rename awaiting sync", false), (RetryNow, "Retry this item", false), (Ignore, "Ignore this cause", false)]
             : notice.FreeSpace is not null
-            ? [new(OpenStorage, "Open storage"), new(ReviewReserve, "Review the reserve"),
-               new(OpenRecoverySettings, "Choose another Recovery location"), new(OpenFolderSettings, "Review destination folder"),
-               new(RetryNow, "Check space again"), new(Ignore, "Ignore this cause")]
+            ? [(OpenStorage, "Open storage", false), (ReviewReserve, "Review the reserve", false),
+               (OpenRecoverySettings, "Choose another Recovery location", false), (OpenFolderSettings, "Review destination folder", false),
+               (RetryNow, "Check space again", false), (Ignore, "Ignore this cause", false)]
             : notice.RebuildableRule is not null
-            ? [new(RetryNow, "Check again"), new(PreviewMatches, "Preview matches"), new(ChooseFolder, "Choose folder…", RequestsName: true),
-               new(RemoveRule, "Remove rule"), new(KeepRule, "Keep rule (ignore this notice)")]
+            ? [(RetryNow, "Check again", false), (PreviewMatches, "Preview matches", false), (ChooseFolder, "Choose folder…", true),
+               (RemoveRule, "Remove rule", false), (KeepRule, "Keep rule (ignore this notice)", false)]
             : notice.ReasonKey == "deletion-evidence-pending"
-            ? [new(CheckHistoryAgain, "Check history again"), new(ReviewDeletion, "Review deletion evidence"),
-               new(Ignore, "Ignore this cause; keep this copy protected")]
+            ? [(CheckHistoryAgain, "Check history again", false), (ReviewDeletion, "Review deletion evidence", false),
+               (Ignore, "Ignore this cause; keep this copy protected", false)]
             : notice.ReasonKey == "links-excluded"
-            ? [new(ShowRemaining, "Review links (50 per page; optional cursor)", RequestsName: true)]
+            ? [(ShowRemaining, "Review links (50 per page; optional cursor)", true)]
             : notice.ReasonKey == "link-item"
-            ? [new(ShowTarget, "Show target"), new(SyncTargetSeparately, "Sync target separately"),
-               new(CopyLink, "Create regular copy"), new(CopyLinkOutsideRoot, "Create regular copy — confirm target access (exact target path)", RequestsName: true),
-               new(CopyLinkAgain, "Copy again (exact target path if excluded/outside)", RequestsName: true),
-               new(RemoveLinkStaging, "Remove staging (manual cleanup guidance)"),
-               new(RetryNow, "Retry copy (rebuild; re-confirm excluded target)"), new(Ignore, "Ignore this cause; leave link protected")]
+            ? [(ShowTarget, "Show target", false), (SyncTargetSeparately, "Sync target separately", false),
+               (CopyLink, "Create regular copy", false), (CopyLinkOutsideRoot, "Create regular copy — confirm target access (exact target path)", true),
+               (CopyLinkAgain, "Copy again (exact target path if excluded/outside)", true),
+               (RemoveLinkStaging, "Remove staging (manual cleanup guidance)", false),
+               (RetryNow, "Retry copy (rebuild; re-confirm excluded target)", false), (Ignore, "Ignore this cause; leave link protected", false)]
             : notice.ReasonKey == "stubs-left-alone"
-            ? [new(ShowRemaining, "Review online-only files (50 per page)"), new(RetryNow, "Check again"), new(Ignore, "Leave all online-only")]
+            ? [(ShowRemaining, "Review online-only files (50 per page)", false), (RetryNow, "Check again", false), (Ignore, "Leave all online-only", false)]
             : notice.ReasonKey == "online-only-item"
-            ? [new(notice.Repair?.Item.Size > OnlineOnlyHydration.ConfirmationBytes && notice.Detail.StartsWith("This downloads ", StringComparison.Ordinal) ? ConfirmLargeDownload : MakeAvailableOffline,
-                   notice.Repair?.Item.Size > OnlineOnlyHydration.ConfirmationBytes && notice.Detail.StartsWith("This downloads ", StringComparison.Ordinal) ? "Confirm large download" : "Make available offline"), new(Ignore, "Leave online-only"),
-               new(RetryNow, "Check this file again")]
+            ? [(notice.Repair?.Item.Size > NoticeVocabulary.HydrationConfirmationBytes && notice.Detail.StartsWith("This downloads ", StringComparison.Ordinal) ? ConfirmLargeDownload : MakeAvailableOffline,
+                   notice.Repair?.Item.Size > NoticeVocabulary.HydrationConfirmationBytes && notice.Detail.StartsWith("This downloads ", StringComparison.Ordinal) ? "Confirm large download" : "Make available offline", false), (Ignore, "Leave online-only", false),
+               (RetryNow, "Check this file again", false)]
             : notice.ReasonKey == DropboxQuota.NoticeKey
-            ? [new(RetryNow, "Retry uploads"), new(Ignore, "Ignore; keep uploads suspended")]
+            ? [(RetryNow, "Retry uploads", false), (Ignore, "Ignore; keep uploads suspended", false)]
             : notice.ReasonKey == "export-required"
-            ? [.. ExportOptions(notice), new(OpenDropbox, "Open in Dropbox"), new(RepairHelp, "Why / repair guidance"),
-               new(RetryNow, "Retry this item"), new(Ignore, "Ignore this cause")]
+            ? [.. ExportOptions(notice), (OpenDropbox, "Open in Dropbox", false), (RepairHelp, "Why / repair guidance", false),
+               (RetryNow, "Retry this item", false), (Ignore, "Ignore this cause", false)]
             : notice.FolderInspection
-            ? [new(ShowRemaining, "Show remaining items"), new(RetryNow, "Review removal again"), new(Ignore, "Ignore this cause; keep folder protected")]
+            ? [(ShowRemaining, "Show remaining items", false), (RetryNow, "Review removal again", false), (Ignore, "Ignore this cause; keep folder protected", false)]
             : IsRemovalAttention(notice)
-            ? [new(RetryNow, "Retry"), new(ReviewRemoval, "Review again"), new(OpenFolderSettings, "Open folder settings"), new(Dismiss, "Dismiss")]
+            ? [(RetryNow, "Retry", false), (ReviewRemoval, "Review again", false), (OpenFolderSettings, "Open folder settings", false), (Dismiss, "Dismiss", false)]
             : notice.ReasonKey == "deletion-review" && notice.Rule == DeletionReviewRestoreOnlyRule
-            ? [new(KeepRestore, "Keep / restore"), new(Ignore, "Ignore this cause")]
+            ? [(KeepRestore, "Keep / restore", false), (Ignore, "Ignore this cause", false)]
             : notice.ReasonKey == "deletion-review"
-            ? [new(DeleteReviewed, "Delete with recovery"), new(KeepRestore, "Keep / restore"), new(Ignore, "Ignore this cause")]
+            ? [(DeleteReviewed, "Delete with recovery", false), (KeepRestore, "Keep / restore", false), (Ignore, "Ignore this cause", false)]
             : notice.ReasonKey == "recovery-unavailable"
-            ? [new(RetryNow, "Retry now"), new(OpenRecoverySettings, "Recovery settings"), new(Ignore, "Ignore this cause")]
+            ? [(RetryNow, "Retry now", false), (OpenRecoverySettings, "Recovery settings", false), (Ignore, "Ignore this cause", false)]
             : notice.ReasonKey == ExecutionReasons.ConflictCopyBlocked
-            ? [new(RetryNow, "Retry keep-both copy")]
+            ? [(RetryNow, "Retry keep-both copy", false)]
             : notice.ReasonKey == "planning-degraded"
-            ? [new(RetryNow, "Retry now"), new(OpenFolderSettings, "Details / folder settings"), new(Ignore, "Ignore this cause")]
+            ? [(RetryNow, "Retry now", false), (OpenFolderSettings, "Details / folder settings", false), (Ignore, "Ignore this cause", false)]
             // A pair-level transient summary has no one path to exclude: Retry makes its durable debts due again,
             // Ignore silences the summary while every per-entity retry keeps running.
             : notice.ReasonKey == PointerObservationSummary
-            ? [new(RetryNow, "Retry now"), new(Ignore, "Ignore; keep retrying silently")]
+            ? [(RetryNow, "Retry now", false), (Ignore, "Ignore; keep retrying silently", false)]
             // Retry makes the root's durable deadlines due now; Ignore hides this episode only. Neither pauses
             // retries nor excludes a path, and only verified success clears the failure evidence.
             : IsIndexFailure(notice)
-            ? [new(RetryNow, "Retry indexing now"), new(Ignore, "Ignore this episode; indexing keeps retrying silently")]
+            ? [(RetryNow, "Retry indexing now", false), (Ignore, "Ignore this episode; indexing keeps retrying silently", false)]
             : IsRetryNotice(notice)
-            ? [new(RepairHelp, "Why / repair guidance"), new(RetryNow, "Retry this item"),
-               new(Ignore, "Ignore this cause")]
+            ? [(RepairHelp, "Why / repair guidance", false), (RetryNow, "Retry this item", false),
+               (Ignore, "Ignore this cause", false)]
             : [];
 
     // Security exception: quarantine Retry is explicit only. Automatically re-reading quarantined
     // bytes may re-trigger antivirus; Ignore suppresses presentation while the file stays held/unsynced.
-    private static IReadOnlyList<SyncNoticeOption> QuarantineOptions(QuarantineNotice hold)
+    private static IReadOnlyList<(string Choice, string Label, bool RequestsName)> QuarantineOptions(QuarantineNotice hold)
     {
-        var options = new List<SyncNoticeOption> { new(QuarantineRetry, "Retry this item once"),
-            new(QuarantineIgnore, "Ignore notice; keep held"), new(QuarantineExclude, "Exclude from sync; keep both copies") };
+        var options = new List<(string Choice, string Label, bool RequestsName)> { (QuarantineRetry, "Retry this item once", false),
+            (QuarantineIgnore, "Ignore notice; keep held", false), (QuarantineExclude, "Exclude from sync; keep both copies", false) };
         if (hold.ConflictingGrantId is not null)
         {
             if ((hold.ExpectedTarget ?? hold.Source)?.Kind == ItemKind.File)
-                options.Add(new(DefenderKeep, "Keep the Defender exclusion for the new file"));
-            options.Add(new(DefenderVerify, "Verify exclusion removal with admin (read-only UAC)"));
+                options.Add((DefenderKeep, "Keep the Defender exclusion for the new file", false));
+            options.Add((DefenderVerify, "Verify exclusion removal with admin (read-only UAC)", false));
             return options;
         }
         if ((hold.ExpectedTarget ?? hold.Source)?.Kind == ItemKind.File)
         {
-            options.Add(new(QuarantineDeleteDropbox, "Delete reviewed Dropbox file (recoverable in Dropbox history)"));
-            options.Add(new(DefenderExclude, "Exclude exact file AND deterministic sibling download stage from Defender (Windows approval required)"));
+            options.Add((QuarantineDeleteDropbox, "Delete reviewed Dropbox file (recoverable in Dropbox history)", false));
+            options.Add((DefenderExclude, "Exclude exact file AND deterministic sibling download stage from Defender (Windows approval required)", false));
         }
         return options;
     }
@@ -407,9 +411,9 @@ public static class NoticeChoices
         ReviewRemoval or ReviewRemovalA or ReviewRemovalB => "Frozen removal review saved. Inspect its counts and pages in notices; nothing was deleted.",
         ConfirmRemoval => "Removal confirmation processed. Refresh notices for completion or held changes; protected content stays.",
         RemovalNextPage or RemovalPreviousPage => "Review page shown (at a boundary, the current page stays); nothing was deleted.",
-        JournalSizing.Enlarge => "Windows change-history resize completed; sync continues.",
-        JournalSizing.NotNow => "Deferred for seven days; sync continues with safe full-scan fallback.",
-        JournalSizing.Never => "Automatic resize notices disabled for this volume; sync continues.",
+        NoticeVocabulary.JournalEnlarge => "Windows change-history resize completed; sync continues.",
+        NoticeVocabulary.JournalNotNow => "Deferred for seven days; sync continues with safe full-scan fallback.",
+        NoticeVocabulary.JournalNever => "Automatic resize notices disabled for this volume; sync continues.",
         OpenFolderSettings => "Open this pair's folder settings to inspect selection and ignore rules. The notice remains open; no files changed.",
         RetryNow => "Retry requested. Existing evidence and deletion safeguards remain in force.",
         Exclude => "Excluded from future sync on both sides; no files were deleted.",

@@ -21,7 +21,7 @@ internal static partial class DropboxChecks
     {
         const int count = 8;
         using var h = new Harness();
-        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"),
+        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"), isStateDamage: StorageFailureClassifier.IsStateDamage,
             V2Settings.Default with { MkDirBatchSize = count, MkDirBatchMaxAge = MkDirFlushGrace });
         var created = await Task.WhenAll(Enumerable.Range(0, count)
                 .Select(index => writer.MkDirAsync("job-once-" + index, CancellationToken.None)))
@@ -55,7 +55,7 @@ internal static partial class DropboxChecks
     {
         const int count = 6;
         using var h = new Harness();
-        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"),
+        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"), isStateDamage: StorageFailureClassifier.IsStateDamage,
             V2Settings.Default with { DeleteBatchSize = count });
         var items = new List<ItemState>(count);
         for (var index = 0; index < count; index++)
@@ -145,7 +145,7 @@ internal static partial class DropboxChecks
     private static async Task<IReadOnlyList<ActionResult>> ReconcileCheckedAsync(Harness h, DropboxWriter writer,
         IReadOnlyList<SyncAction> intents, IEndpointWriter? source = null)
     {
-        var executor = new Executor(h.Known, V2Settings.Default, ExecutorChecks.Admission());
+        var executor = new Executor(h.Known, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
         return await executor.ReconcileAsync(intents, 1, source ?? writer, writer, CancellationToken.None)
             .WaitAsync(TimeSpan.FromSeconds(60));
     }

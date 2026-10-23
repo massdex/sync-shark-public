@@ -40,8 +40,8 @@ internal static partial class RunChecks
             notice.Detail.Contains("Retry", StringComparison.Ordinal) && notice.Detail.Contains("Automatic retries", StringComparison.Ordinal) &&
             !notice.Detail.Contains("Check endpoint access", StringComparison.Ordinal),
             "completion notice names the exact bookkeeping failure and automatic repair path without inventing an access failure");
-        Require(NoticeChoices.Options(notice).Any(o => o.Choice == NoticeChoices.RetryNow) &&
-            NoticeChoices.Options(notice).Any(o => o.Choice == NoticeChoices.Ignore),
+        Require(NoticeOptions.Options(notice).Any(o => o.Choice == NoticeChoices.RetryNow) &&
+            NoticeOptions.Options(notice).Any(o => o.Choice == NoticeChoices.Ignore),
             "run completion notice provides Retry and Ignore");
         await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
         Require(store.OpenNotices(fx.Pair.PairId).Count(n => n.ReasonKey == "run-unavailable") == 1,
@@ -102,8 +102,8 @@ internal static partial class RunChecks
             result.HaltedBy is EndpointAccessException && accessNotice.NoticeId == FailureRetryOwner.RunNoticeId(fx.Pair.PairId) &&
             accessNotice.CauseKey == "injected lost account access" && accessNotice.FailureRetry is { Attempts: 2 } &&
             accessNotice.Detail.Contains("Reconnect", StringComparison.Ordinal) &&
-            NoticeChoices.Options(accessNotice).Any(option => option.Choice == NoticeChoices.RetryNow) &&
-            NoticeChoices.Options(accessNotice).Any(option => option.Choice == NoticeChoices.Ignore),
+            NoticeOptions.Options(accessNotice).Any(option => option.Choice == NoticeChoices.RetryNow) &&
+            NoticeOptions.Options(accessNotice).Any(option => option.Choice == NoticeChoices.Ignore),
             "lost completion authority retains exact counts and cause with one durable actionable reconnect notice");
         store.PruneError = null;
         var executionStore = new RecordingStore(new InMemoryStateStore());

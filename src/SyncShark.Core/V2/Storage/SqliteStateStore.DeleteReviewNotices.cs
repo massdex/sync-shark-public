@@ -5,8 +5,8 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SqliteStateStore
 {
-    internal const string UncertainDeleteSummary = "uncertain-delete-summary";
-    internal const string DeleteReviewSummary = "deletion-review-summary";
+    internal const string UncertainDeleteSummary = NoticeVocabulary.UncertainDeleteSummary;
+    internal const string DeleteReviewSummary = NoticeVocabulary.DeleteReviewSummary;
     private const string UncertainDeleteWhere = "pair_no=$p AND state='uncertain' AND json_extract(action_json,'$.Kind')='Delete'";
     private const string DeleteReviewWhere = "pair_no=$p AND json_extract(json,'$.MissingDeleteIdentityReview')=1";
 

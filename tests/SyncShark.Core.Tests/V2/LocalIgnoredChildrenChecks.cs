@@ -38,7 +38,7 @@ internal static class LocalIgnoredChildrenChecks
         store.CompleteGeneration(gen, snapshot.CursorAfter, true);
         var folder = snapshot.Items.Single(item => item.Path == "folder");
         var writer = await LocalWriter.OpenAsync(localRoot, Side.A, LocalChecks.PairId, LocalChecks.InstallationId,
-            recovery, CancellationToken.None, ignoreRules: rules);
+            recovery, CancellationToken.None, isStateDamage: StorageFailureClassifier.IsStateDamage, ignoreRules: rules);
         await LocalWriterChecks.AuthorizedDeleteAsync(writer, new SyncAction("delete-paged", 6, ActionKind.Delete, Side.A, "folder",
             null, null, folder, false, null), CancellationToken.None);
         LocalChecks.Require(!Directory.Exists(Path.Combine(root, "folder")),
@@ -63,7 +63,7 @@ internal static class LocalIgnoredChildrenChecks
             .AddWriter(localRoot, setup.Writer)
             .AddInventory(localRoot, LocalChecks.Inventory(setup.Root, store, TimeProvider.System));
         var settings = V2Settings.Default with { MaxWorkers = 1, ProgressInterval = TimeSpan.Zero };
-        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission()),
+        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
             provider, settings, TimeProvider.System);
         var progress = new RecordingProgress();
         var plan = await run.PreviewFirstSyncAsync(pair.PairId, progress, CancellationToken.None);
@@ -101,7 +101,7 @@ internal static class LocalIgnoredChildrenChecks
         var provider = new FakeEndpointProvider().Add(remoteRoot, remote)
             .AddWriter(localRoot, setup.Writer).AddInventory(localRoot, inventory);
         var settings = V2Settings.Default with { MaxWorkers = 1, ProgressInterval = TimeSpan.Zero };
-        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission()),
+        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
             provider, settings, TimeProvider.System);
         var progress = new RecordingProgress();
         var plan = await run.PreviewFirstSyncAsync(pair.PairId, progress, CancellationToken.None);
@@ -234,7 +234,7 @@ internal static class LocalIgnoredChildrenChecks
         store.MarkChoiceVictims(operation, rows.Select(row => (row.Ord, ChoiceVictimState.Carried)).ToArray());
         var failParent = true;
         var writer = await LocalWriter.OpenAsync(local, Side.A, pair.PairId, LocalChecks.InstallationId,
-            recovery, CancellationToken.None, ignoreRules: [new SyncIgnoreRule(SyncIgnoreKind.FileName, "desktop.ini")],
+            recovery, CancellationToken.None, isStateDamage: StorageFailureClassifier.IsStateDamage, ignoreRules: [new SyncIgnoreRule(SyncIgnoreKind.FileName, "desktop.ini")],
             verifyCarriedChoice: (op, item) =>
             {
                 if (failParent) { failParent = false; throw new IOException("injected parent-removal failure"); }
@@ -282,7 +282,7 @@ internal static class LocalIgnoredChildrenChecks
             var fileChecks = 0;
             var stopped = false;
             var writer = await LocalWriter.OpenAsync(local, Side.A, pair.PairId, LocalChecks.InstallationId,
-                recovery, CancellationToken.None, ignoreRules: [new SyncIgnoreRule(SyncIgnoreKind.FolderName, "cache")],
+                recovery, CancellationToken.None, isStateDamage: StorageFailureClassifier.IsStateDamage, ignoreRules: [new SyncIgnoreRule(SyncIgnoreKind.FolderName, "cache")],
                 verifyCarriedChoice: (op, item) =>
                 {
                     if (interrupt && !stopped && item.Kind == ItemKind.File && ++fileChecks == 2)
@@ -321,7 +321,7 @@ internal static class LocalIgnoredChildrenChecks
         LocalChecks.Seed(root, "folder/first.tmp", "preserve me");
         var injected = false;
         var writer = await LocalWriter.OpenAsync(LocalChecks.RootOf(root, "root-local"), Side.A,
-            LocalChecks.PairId, LocalChecks.InstallationId, recovery, CancellationToken.None,
+            LocalChecks.PairId, LocalChecks.InstallationId, recovery, CancellationToken.None, isStateDamage: StorageFailureClassifier.IsStateDamage,
             ignoreRules: [new SyncIgnoreRule(SyncIgnoreKind.FileExtension, "tmp")],
             providerNameRefused: item =>
             {
@@ -421,7 +421,7 @@ internal static class LocalIgnoredChildrenChecks
         var root = LocalChecks.FreshRoot(name);
         var recovery = Path.Combine(Path.GetDirectoryName(root)!, "recovery");
         var writer = await LocalWriter.OpenAsync(LocalChecks.RootOf(root, "root-local"), Side.A,
-            LocalChecks.PairId, LocalChecks.InstallationId, recovery, CancellationToken.None, ignoreRules: rules);
+            LocalChecks.PairId, LocalChecks.InstallationId, recovery, CancellationToken.None, isStateDamage: StorageFailureClassifier.IsStateDamage, ignoreRules: rules);
         return new(root, recovery, writer);
     }
 }

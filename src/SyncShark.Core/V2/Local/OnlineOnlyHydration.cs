@@ -7,7 +7,7 @@ namespace Massdex.SyncShark.V2;
 /// <summary>Explicit single-file Cloud Files hydration. Never called by inventory or hashing.</summary>
 internal static class OnlineOnlyHydration
 {
-    internal const long ConfirmationBytes = 256L * 1024 * 1024;
+    internal const long ConfirmationBytes = NoticeVocabulary.HydrationConfirmationBytes;
 
     internal static long HydrationLength(ItemState item) => item.Size == 0 ? -1 : item.Size;
 

@@ -1277,7 +1277,7 @@ public sealed partial class SyncRun
         {
             var checks = await Task.WhenAll(batch.Select(async action => (Action: action,
                 Unchanged: await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(action, pair, _store,
-                    _endpoints.Inventory(action.Target == Side.A ? pair.A : pair.B), ct).ConfigureAwait(false)))).ConfigureAwait(false);
+                    _endpoints.Inventory(action.Target == Side.A ? pair.A : pair.B), ct, isStateDamage: StorageFailureClassifier.IsStateDamage).ConfigureAwait(false)))).ConfigureAwait(false);
             blocked.AddRange(checks.Where(check => !check.Unchanged).Select(check => check.Action));
         }
         if (blocked.Count > 0)
@@ -1332,7 +1332,7 @@ public sealed partial class SyncRun
         }
         finally
         {
-            if (executionFailure is null || FailureRetryOwner.ScopeOf(executionFailure, ct) != FailureRetryOwner.FailureScope.State)
+            if (executionFailure is null || StorageFailureClassifier.ScopeOf(executionFailure, ct) != FailureRetryOwner.FailureScope.State)
                 FairStoreGate.Cleanup(() => AddProviderNameRefusalNotice(pair));
         }
         return tally;

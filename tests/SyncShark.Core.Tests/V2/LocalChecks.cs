@@ -114,11 +114,11 @@ internal static class LocalChecks
     internal static LocalInventory Inventory(string root, string rootObjectId, IStateStore known, TimeProvider clock,
         IReadOnlySet<string>? productOwned = null, V2Settings? settings = null) =>
         new(new RootDef("root-local", SyncProviders.Local, null, root, rootObjectId), Side.A, known,
-            productOwned ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase), settings ?? V2Settings.Default, clock)
+            productOwned ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase), settings ?? V2Settings.Default, clock, isStateDamage: StorageFailureClassifier.IsStateDamage)
         { GapIo = new LocalGapIo(known, settings ?? V2Settings.Default, productOwned ?? new HashSet<string>(), () => false) };
 
     internal static Task<LocalWriter> OpenWriter(string root, string recoveryRoot, CancellationToken ct) =>
-        LocalWriter.OpenAsync(RootOf(root, "root-local"), Side.A, PairId, InstallationId, recoveryRoot, ct);
+        LocalWriter.OpenAsync(RootOf(root, "root-local"), Side.A, PairId, InstallationId, recoveryRoot, ct, isStateDamage: StorageFailureClassifier.IsStateDamage);
 
     internal static byte[] Bytes(string text) => Encoding.UTF8.GetBytes(text);
 

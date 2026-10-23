@@ -52,7 +52,7 @@ internal static class LocalWriterChecks
         var root = LocalChecks.FreshRoot("recovery-unavailable");
         var recovery = Path.Combine(Path.GetDirectoryName(root)!, "missing-recovery");
         var writer = await LocalWriter.OpenAsync(LocalChecks.RootOf(root, "root-local"), Side.A,
-            LocalChecks.PairId, LocalChecks.InstallationId, recovery, default, recoveryUnavailable: "removable drive missing");
+            LocalChecks.PairId, LocalChecks.InstallationId, recovery, default, isStateDamage: StorageFailureClassifier.IsStateDamage, recoveryUnavailable: "removable drive missing");
         var bytes = LocalChecks.Bytes("safe copy");
         var action = new SyncAction("recovery-create", 1, ActionKind.CopyNew, Side.A, "new.txt", null, Source(bytes), null, false, null);
         var admitted = await writer.AdmitFreeSpaceAsync(action, default);
@@ -78,7 +78,7 @@ internal static class LocalWriterChecks
         // Room above the 4 MiB floor for the metadata-only reservation, not for the file's own bytes.
         probe.Free[root] = 5 * MiB;
         var writer = await LocalWriter.OpenAsync(LocalChecks.RootOf(root, "root-online-only"), Side.A,
-            LocalChecks.PairId, LocalChecks.InstallationId, recovery, CancellationToken.None,
+            LocalChecks.PairId, LocalChecks.InstallationId, recovery, CancellationToken.None, isStateDamage: StorageFailureClassifier.IsStateDamage,
             V2Settings.Default with { FreeSpaceFloorBytes = 4 * MiB }, probe);
         writer.NewPointers = new NewPointerDownload(_ => true, null,
             _ => throw new InvalidOperationException("the stream route never acquires a provider"),
@@ -117,7 +117,7 @@ internal static class LocalWriterChecks
         // Room above the 4 MiB floor for the metadata-only reservation, not for the file's own bytes.
         probe.Free[root] = 5 * MiB;
         var writer = await LocalWriter.OpenAsync(LocalChecks.RootOf(root, "root-download-online-only"), Side.A,
-            LocalChecks.PairId, LocalChecks.InstallationId, recovery, CancellationToken.None,
+            LocalChecks.PairId, LocalChecks.InstallationId, recovery, CancellationToken.None, isStateDamage: StorageFailureClassifier.IsStateDamage,
             V2Settings.Default with { FreeSpaceFloorBytes = 4 * MiB }, probe);
         // Online-only policy is off, so no pointer is created; the new file's real bytes need admission.
         writer.NewPointers = new NewPointerDownload(_ => false, null,

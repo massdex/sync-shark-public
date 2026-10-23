@@ -58,7 +58,7 @@ internal static partial class RunChecks
         var start = new NtfsUsnCheckpoint(1, 0, cause == "ahead" ? 900 : 100, 0);
         var checkpoint = new NtfsUsnCheckpoint(cause == "replaced" ? 2UL : 1UL,
             cause == "retained" ? 150 : 0, 200, 0);
-        var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings, TimeProvider.System, pairId: pair.PairId)
+        var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId)
         { WalkCheckpointForTest = () => (start, false) };
         var gen = store.BeginGeneration(root.RootId, "full");
         var snapshot = await inventory.FullAsync(gen, _ => true, null!, default);
@@ -168,7 +168,7 @@ internal static partial class RunChecks
             // A newly discovered entity has no prior rehash handoff to mask lost root planning debt.
             LocalChecks.Seed(directory, "gap-added.txt", "gap-created");
             fx.Provider.AddWriter(root, await LocalWriter.OpenAsync(root, Side.A, pair.PairId,
-                LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default));
+                LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default, isStateDamage: StorageFailureClassifier.IsStateDamage));
             cloud = new ScriptedInventory(fx.B) { FullError = new IOException("cloud root unavailable"),
                 ChangesError = new IOException("cloud root unavailable") };
             fx.Provider.AddInventory(pair.B, cloud);
@@ -229,7 +229,7 @@ internal static partial class RunChecks
         var before = new NtfsUsnCheckpoint(1, 0, 100, 0);
         var covered = before with { NextUsn = 200 };
         var through = before with { NextUsn = 300 };
-        var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings, TimeProvider.System)
+        var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage)
             { WalkCheckpointForTest = () => (before, false) };
         var gen = store.BeginGeneration(root.RootId, "full");
         var snapshot = await inventory.FullAsync(gen, _ => true, null!, default);
@@ -303,14 +303,14 @@ internal static partial class RunChecks
             store.MarkFirstSyncDone(pair.PairId);
             var checkpoint = new NtfsUsnCheckpoint(1, 0, 200, 0);
             var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings,
-                TimeProvider.System, pairId: pair.PairId) { WalkCheckpointForTest = () => (checkpoint, false) };
+                TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId) { WalkCheckpointForTest = () => (checkpoint, false) };
             // Native content proof stays real; fixture progress must not depend on desktop activity/power.
             inventory.GapIo = new LocalGapIo(store, Settings, new HashSet<string>(), () => false);
             inventory.JournalReadForTest = NoJournalChanges;
             fx.Provider.AddInventory(root, inventory);
             // The healthy sibling is uploaded from the real disk, not from the fake endpoint.
             fx.Provider.AddWriter(root, await LocalWriter.OpenAsync(root, Side.A, pair.PairId,
-                LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default));
+                LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default, isStateDamage: StorageFailureClassifier.IsStateDamage));
             var report = await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
             Require(report.Failed == 0,
                 "an unreadable subfolder on the catch-up path is never a run failure (failed=" + report.Failed +
@@ -377,10 +377,10 @@ internal static partial class RunChecks
         // child instead of re-uploading it for a hash-algorithm difference.
         fx.A.DropboxHashes = fx.B.DropboxHashes = true;
         fx.Provider.AddWriter(root, await LocalWriter.OpenAsync(root, Side.A, pair.PairId,
-            LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default));
+            LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default, isStateDamage: StorageFailureClassifier.IsStateDamage));
         // Seed the baseline: the child is synced earlier and still exists in the cloud.
         var firstInventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings,
-            TimeProvider.System, pairId: pair.PairId)
+            TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId)
             { WalkCheckpointForTest = () => (new NtfsUsnCheckpoint(1, 0, 100, 0), false) };
         // Native content proof stays real; fixture progress must not depend on desktop activity/power.
         firstInventory.GapIo = new LocalGapIo(store, Settings, new HashSet<string>(), () => false);
@@ -399,7 +399,7 @@ internal static partial class RunChecks
         var moved = directory + "-moved";
         var movedOnce = false;
         var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings,
-            TimeProvider.System, pairId: pair.PairId)
+            TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId)
             { WalkCheckpointForTest = () => (new NtfsUsnCheckpoint(1, 0, 200, 0), false) };
         inventory.JournalReadForTest = NoJournalChanges;
         // The root has already listed 'd' and queued its identity when this callback runs: move the
@@ -461,7 +461,7 @@ internal static partial class RunChecks
             store.MarkFirstSyncDone(pair.PairId);
             var checkpoint = new NtfsUsnCheckpoint(1, 0, 200, 0);
             var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings,
-                TimeProvider.System, pairId: pair.PairId) { WalkCheckpointForTest = () => (checkpoint, false) };
+                TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId) { WalkCheckpointForTest = () => (checkpoint, false) };
             // The catch-up replay itself is unavailable, which selects the fresh-fallback branch.
             inventory.JournalReadForTest = OverLimitJournal;
             fx.Provider.AddInventory(root, inventory);
@@ -469,7 +469,7 @@ internal static partial class RunChecks
             // agree so an uploaded sibling carries the hash the planner compared.
             fx.A.DropboxHashes = fx.B.DropboxHashes = true;
             fx.Provider.AddWriter(root, await LocalWriter.OpenAsync(root, Side.A, pair.PairId,
-                LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default));
+                LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default, isStateDamage: StorageFailureClassifier.IsStateDamage));
             var report = await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
             Require(report.Failed == 0, "the fresh-fallback catch-up path is never a run failure (failed=" + report.Failed +
                 (report.Failures.Count > 0 ? ": " + report.Failures[0].Reason : "") + ")");
@@ -590,7 +590,7 @@ internal static partial class RunChecks
             store.MarkFirstSyncDone(pair.PairId);
             var checkpoint = new NtfsUsnCheckpoint(1, 0, 200, 0);
             var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings,
-                TimeProvider.System, pairId: pair.PairId) { WalkCheckpointForTest = () => (checkpoint, false) };
+                TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId) { WalkCheckpointForTest = () => (checkpoint, false) };
             // Native content proof stays real; fixture progress must not depend on desktop activity/power.
             inventory.GapIo = new LocalGapIo(store, Settings, new HashSet<string>(), () => false);
             inventory.JournalReadForTest = NoJournalChanges;
@@ -599,7 +599,7 @@ internal static partial class RunChecks
             // agree so a later upload can be compared with the local scan's hash.
             fx.A.DropboxHashes = fx.B.DropboxHashes = true;
             fx.Provider.AddWriter(root, await LocalWriter.OpenAsync(root, Side.A, pair.PairId,
-                LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default));
+                LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default, isStateDamage: StorageFailureClassifier.IsStateDamage));
             var first = await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
             Require(first.Failed == 0, "the fixture syncs the folder before the gap (failed=" + first.Failed +
                 (first.Failures.Count > 0 ? ": " + first.Failures[0].Reason : "") + ")");
@@ -748,11 +748,11 @@ internal static partial class RunChecks
             store.MarkFirstSyncDone(pair.PairId);
             var checkpoint = new NtfsUsnCheckpoint(1, 0, 200, 0);
             var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings,
-                TimeProvider.System, pairId: pair.PairId) { WalkCheckpointForTest = () => (checkpoint, false) };
+                TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId) { WalkCheckpointForTest = () => (checkpoint, false) };
             inventory.JournalReadForTest = NoJournalChanges;
             fx.Provider.AddInventory(root, inventory);
             fx.Provider.AddWriter(root, await LocalWriter.OpenAsync(root, Side.A, pair.PairId,
-                LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default));
+                LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default, isStateDamage: StorageFailureClassifier.IsStateDamage));
             var first = await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
             Require(first.Outcome == RunOutcomes.Partial && store.SyncRetryAt(pair.PairId, "locked") is { Kind: "scan" },
                 "the first catch-up run creates the unread folder's retry");
@@ -789,11 +789,11 @@ internal static partial class RunChecks
         store.MarkFirstSyncDone(pair.PairId);
         var checkpoint = new NtfsUsnCheckpoint(1, 0, 100, 0);
         var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings,
-            TimeProvider.System, pairId: pair.PairId) { WalkCheckpointForTest = () => (checkpoint, false) };
+            TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId) { WalkCheckpointForTest = () => (checkpoint, false) };
         inventory.JournalReadForTest = NoJournalChanges;
         fx.Provider.AddInventory(root, inventory);
         fx.Provider.AddWriter(root, await LocalWriter.OpenAsync(root, Side.A, pair.PairId,
-            LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default));
+            LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default, isStateDamage: StorageFailureClassifier.IsStateDamage));
         var first = await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
         Require(first.Failed == 0 && store.Cursor(root.RootId) is { Length: > 0 },
             "the fixture commits a local cursor before the sleeping-retry run");
@@ -831,17 +831,17 @@ internal static partial class RunChecks
         var checkpoint = new NtfsUsnCheckpoint(1, 0, 100, 0);
         var journalLostB = false;
         var inventoryA = new LocalInventory(rootA, Side.A, store, new HashSet<string>(), Settings,
-            TimeProvider.System, pairId: pair.PairId)
+            TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId)
             { WalkCheckpointForTest = () => (checkpoint, false), JournalReadForTest = NoJournalChanges };
         var inventoryB = new LocalInventory(rootB, Side.B, store, new HashSet<string>(), Settings,
-            TimeProvider.System, pairId: pair.PairId)
+            TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId)
             { WalkCheckpointForTest = () => (journalLostB ? null : checkpoint, false), JournalReadForTest = NoJournalChanges };
         fx.Provider.AddInventory(rootA, inventoryA);
         fx.Provider.AddInventory(rootB, inventoryB);
         fx.Provider.AddWriter(rootA, await LocalWriter.OpenAsync(rootA, Side.A, pair.PairId,
-            LocalChecks.InstallationId, Path.Combine(folder, "recovery-a"), default));
+            LocalChecks.InstallationId, Path.Combine(folder, "recovery-a"), default, isStateDamage: StorageFailureClassifier.IsStateDamage));
         fx.Provider.AddWriter(rootB, await LocalWriter.OpenAsync(rootB, Side.B, pair.PairId,
-            LocalChecks.InstallationId, Path.Combine(folder, "recovery-b"), default));
+            LocalChecks.InstallationId, Path.Combine(folder, "recovery-b"), default, isStateDamage: StorageFailureClassifier.IsStateDamage));
         var baseline = await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
         Require(baseline.Failed == 0 && store.Cursor(rootA.RootId) is { Length: > 0 } &&
             store.Cursor(rootB.RootId) is { Length: > 0 },
@@ -979,12 +979,12 @@ internal static partial class RunChecks
         store.MarkFirstSyncDone(pair.PairId);
         var checkpoint = new NtfsUsnCheckpoint(1, 0, 100, 0);
         var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings,
-            TimeProvider.System, pairId: pair.PairId) { WalkCheckpointForTest = () => (checkpoint, false) };
+            TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId) { WalkCheckpointForTest = () => (checkpoint, false) };
         inventory.JournalReadForTest = NoJournalChanges;
         fx.Provider.AddInventory(root, inventory);
         // The fixture's file is read from the real disk, not from the fake endpoint.
         fx.Provider.AddWriter(root, await LocalWriter.OpenAsync(root, Side.A, pair.PairId,
-            LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default));
+            LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default, isStateDamage: StorageFailureClassifier.IsStateDamage));
         var first = await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
         Require(first.Failed == 0,
             "fixture run reports no failure (failed=" + first.Failed +

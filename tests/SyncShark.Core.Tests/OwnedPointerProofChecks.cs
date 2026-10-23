@@ -103,7 +103,7 @@ internal static class OwnedPointerProofChecks
         var generation = store.BeginGeneration(localRoot.RootId, "full");
         store.WriteSnapshot(new Snapshot(localRoot.RootId, Side.A, generation, "cursor", [stored], []));
         var inventory = new LocalInventory(localRoot, Side.A, store, new HashSet<string>(),
-            V2Settings.Default, TimeProvider.System);
+            V2Settings.Default, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage);
         var failedProbe = new PilotLocalScan(new Dictionary<string, PilotLocalEntry>(),
             [new PilotDecision(stored.Path, PilotDecisionKind.Blocked, OwnedPointerProof.ObservationMessage),
              new PilotDecision("new/file.txt", PilotDecisionKind.Blocked, OwnedPointerProof.ObservationMessage)], 0);

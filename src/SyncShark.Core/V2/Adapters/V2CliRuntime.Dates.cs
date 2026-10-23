@@ -28,7 +28,7 @@ public sealed partial class V2CliRuntime
         }
         return await DateRepair.RunAsync(sqlite, pair,
             (_, _) => throw new InvalidOperationException("Date repair uses bounded metadata pages, not individual root checks."),
-            _productRoot, dryRun, _composition?.Endpoints.ProductOwnedRelative(pair) ?? [], ct, localDate, after, PageLock,
+            _productRoot, dryRun, _composition?.Endpoints.ProductOwnedRelative(pair) ?? [], ct, StorageFailureClassifier.IsStateDamage, localDate, after, PageLock,
             async (paths, failed, token) =>
             {
                 var entries = await client.ReadMetadataPageAsync(paths, token, failed);
@@ -45,6 +45,6 @@ public sealed partial class V2CliRuntime
             await _run.WithPairAdmissionAsync(pair.PairId, async () => { await body(); return true; }, ct, Console.Error.WriteLine);
         }
         return await DateRepair.RestoreAsync(sqlite, pair, audit, _productRoot, dryRun,
-            _composition?.Endpoints.ProductOwnedRelative(pair) ?? [], ct, PageLock).ConfigureAwait(false);
+            _composition?.Endpoints.ProductOwnedRelative(pair) ?? [], ct, StorageFailureClassifier.IsStateDamage, PageLock).ConfigureAwait(false);
     }
 }

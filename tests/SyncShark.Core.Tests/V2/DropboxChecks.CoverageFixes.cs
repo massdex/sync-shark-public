@@ -55,13 +55,13 @@ internal static partial class DropboxChecks
         var pair = new PairDef("crash", "production inventory crash", LocalChecks.RootOf(localPath, "local"), Root(), hydrate ? ["nested"] : [], [], true);
         store.SavePair(pair); store.MarkFirstSyncDone(pair.PairId);
         var localWriter = await LocalWriter.OpenAsync(pair.A, Side.A, pair.PairId, LocalChecks.InstallationId,
-            Path.Combine(product, "recovery"), CancellationToken.None, settings);
+            Path.Combine(product, "recovery"), CancellationToken.None, isStateDamage: StorageFailureClassifier.IsStateDamage, settings);
         var endpoints = new FakeEndpointProvider().AddWriter(pair.A, localWriter)
-            .AddInventory(pair.A, new LocalInventory(pair.A, Side.A, store, new HashSet<string>(), settings, TimeProvider.System))
+            .AddInventory(pair.A, new LocalInventory(pair.A, Side.A, store, new HashSet<string>(), settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage))
             .AddInventory(pair.B, new DropboxInventory(pair.B, Side.B, h.Client, store, pair.PairId))
             .AddWriter(pair.B, h.Writer());
         var fault = new CrashAfterScanProvider(endpoints, store, RootId);
-        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission()), fault, settings, TimeProvider.System);
+        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), fault, settings, TimeProvider.System);
         h.Wire.LatestCursor = "crash-c0"; h.Wire.SeedChangePage("crash-c0", [], false, "crash-c0");
         await run.IncrementalAsync(pair.PairId, new RecordingProgress(), CancellationToken.None);
         if (hydrate) store.SavePairIncluded(pair, pair with { Excluded = [] });

@@ -6,9 +6,9 @@ namespace Massdex.SyncShark.V2;
 /// </summary>
 internal static class DefenderReview
 {
-    internal const string HeldCause = "held";
+    internal const string HeldCause = NoticeVocabulary.DefenderHeldCause;
     internal const string ReviewChanged = "review-changed";
-    internal const string SharedReleaseCause = "shared-release";
+    internal const string SharedReleaseCause = NoticeVocabulary.DefenderSharedReleaseCause;
 
     internal static string SharedReleaseKey(string rootId, string objectId) => "defender-held-release:" + rootId + ":" + objectId;
 

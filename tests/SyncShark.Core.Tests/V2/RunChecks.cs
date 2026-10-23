@@ -313,7 +313,7 @@ internal static partial class RunChecks
         var report = await FirstSyncAsync(fx.Run(), fx);
         Require(report.Outcome == RunOutcomes.Complete && report.Done == 1, "history failure leaves the successful run outcome unchanged");
         var notice = store.OpenNotices(fx.Pair.PairId).Single(n => n.ReasonKey == "run-history-unavailable");
-        Require(NoticeChoices.Options(notice).Any(o => o.Choice == NoticeChoices.RetryNow), "history failure offers a retry notice");
+        Require(NoticeOptions.Options(notice).Any(o => o.Choice == NoticeChoices.RetryNow), "history failure offers a retry notice");
         await MirrorAsync(fx);
         var empty = await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
         Require(empty.Done == 0 && store.OpenNotices(fx.Pair.PairId).Any(n => n.ReasonKey == "run-history-unavailable"),
@@ -1958,8 +1958,8 @@ internal static partial class RunChecks
             new Notice(fx.Pair.PairId, 30, NoticeKind.Info, "f.txt", PlanNotices.ContentUnconfirmed.Detail,
                 PlanNotices.ContentUnconfirmed.Key),
             () => measuredRetry?.DeleteBlockedDetail is not null,
-            () => measuredNotices.Any(notice => notice.Path == "f.txt" && notice.ReasonKey == "sync-retry"),
-            () => supersededPlanner = true);
+            (rule, reason) => measuredNotices.FirstOrDefault(notice => notice.Path == "f.txt" && notice.Rule == rule && notice.ReasonKey == reason),
+            _ => supersededPlanner = true);
         Console.WriteLine($"KEEPBOTH-HOLD outcome={report.Outcome}; held={report.Held}; deferred={report.Deferred}; done={report.Done}; " +
             $"retry={System.Text.Json.JsonSerializer.Serialize(measuredRetry)}; " +
             $"notices={System.Text.Json.JsonSerializer.Serialize(measuredNotices)}; " +
@@ -2135,7 +2135,7 @@ internal static partial class RunChecks
         Console.WriteLine("PASS hash checkpoints stay atomic: no chunk exceeds StoreBatchRows");
     }
 
-    private static Executor NewExecutor(IStateStore store) => new(store, Settings, ExecutorChecks.Admission());
+    private static Executor NewExecutor(IStateStore store) => new(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
 
     private static Fixture Build(bool enabled = true, bool record = false, string pairId = "p1", IStateStore? suppliedStore = null, bool localLocal = false, string accountId = "acc", bool displayRoot = false)
     {

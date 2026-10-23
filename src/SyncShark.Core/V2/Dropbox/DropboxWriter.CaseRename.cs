@@ -28,7 +28,7 @@ public sealed partial class DropboxWriter
             await MoveCaseAsync(action with { ExpectedTarget = current }, ct).ConfigureAwait(false);
             return true;
         }
-        catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct) == FailureRetryOwner.FailureScope.Item)
+        catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct, isStateDamage: _isStateDamage) == FailureRetryOwner.FailureScope.Item)
         {
             throw new UncertainEffectException("Case rename identity lookup/resume failed. Last retained locations: " +
                 checkpoint.From + " or " + checkpoint.Temporary + "; destination: " + checkpoint.To + ". " + error.Message, error);
@@ -77,7 +77,7 @@ public sealed partial class DropboxWriter
         bool requireRevision, CancellationToken ct)
     {
         try { return await _client.MoveRevisionAsync(expected, destination, requireRevision, ct).ConfigureAwait(false); }
-        catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct) == FailureRetryOwner.FailureScope.Item)
+        catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct, isStateDamage: _isStateDamage) == FailureRetryOwner.FailureScope.Item)
         {
             throw new UncertainEffectException("The case rename checkpoint requires reconciliation: " + error.Message, error);
         }

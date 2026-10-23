@@ -29,18 +29,20 @@ internal static partial class DateRepair
         return (start is { } first ? Utc(first) : 0, end is { } last ? Utc(last) : DateTime.MaxValue.Ticks);
     }
 
-    internal static bool ItemFailure(Exception error) => error is not OperationCanceledException &&
+    internal static bool ItemFailure(Exception error, Func<Exception, bool> isStateDamage) =>
+        !(isStateDamage ?? throw new ArgumentNullException(nameof(isStateDamage)))(error) && error is not OperationCanceledException &&
         error is not OutOfMemoryException && error is not StateDamagedException && error is not SyncCliBusyException &&
         error is not Microsoft.Data.Sqlite.SqliteException { SqliteErrorCode: 11 or 26 };
 
     internal static async Task<DateRepairReport> RunAsync(SqliteStateStore store, PairDef pair,
         Func<string, CancellationToken, Task<ItemState?>> remote, string productRoot, bool dryRun,
-        IReadOnlyList<string> productOwned, CancellationToken ct, DateOnly? localDate = null, string afterKey = "",
+        IReadOnlyList<string> productOwned, CancellationToken ct, Func<Exception, bool> isStateDamage, DateOnly? localDate = null, string afterKey = "",
         Func<Func<Task>, Task>? withPageLock = null,
         Func<IReadOnlyList<string>, Action<string, Exception>, CancellationToken, Task<IReadOnlyDictionary<string, ItemState?>>>? remotePage = null,
         DateRepairBound? from = null, DateRepairBound? to = null, string? excludeList = null, bool reportMismatch = false,
         IReadOnlyList<DateProvenanceSource>? provenanceSources = null)
     {
+        ArgumentNullException.ThrowIfNull(isStateDamage);
         _ = UtcRange(localDate, from, to, TimeZoneInfo.Local);
         store.PrepareDateRepairExclusions(excludeList);
         store.PrepareDateWriteEvidence(pair.PairId, provenanceSources);
@@ -86,7 +88,7 @@ internal static partial class DateRepair
                 var page = store.DateRepairPage(pair.PairId, after, side: side, localDate: localDate, from: from, to: to, mismatch: reportMismatch);
                 if (page.Count == 0) { finished = true; return; }
                 try { store.PrepareDateRepair(pair.PairId); }
-                catch (Exception error) when (ItemFailure(error))
+                catch (Exception error) when (ItemFailure(error, isStateDamage))
                 {
                     foreach (var baseline in page)
                     {
@@ -113,7 +115,7 @@ internal static partial class DateRepair
                             (side == Side.A ? baseline.A : baseline.B).Hash) is null))
                             lookupPaths.Add((side == Side.A ? baseline.B : baseline.A).Path);
                     }
-                    catch (Exception error) when (ItemFailure(error)) { localErrors[path] = error.Message; }
+                    catch (Exception error) when (ItemFailure(error, isStateDamage)) { localErrors[path] = error.Message; }
                 }
                 var paths = lookupPaths.ToArray();
                 var errors = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
@@ -123,7 +125,7 @@ internal static partial class DateRepair
                 else if (remotePage is not null)
                 {
                     try { metadata = await remotePage(paths, Failed, ct); }
-                    catch (Exception error) when (ItemFailure(error))
+                    catch (Exception error) when (ItemFailure(error, isStateDamage))
                     {
                         foreach (var path in paths) Failed(path, error);
                         metadata = new Dictionary<string, ItemState?>();
@@ -136,7 +138,7 @@ internal static partial class DateRepair
                         { MaxDegreeOfParallelism = 4, CancellationToken = ct }, async (path, token) =>
                     {
                         try { rows[path] = await remote(path, token); }
-                        catch (Exception error) when (ItemFailure(error)) { Failed(path, error); }
+                        catch (Exception error) when (ItemFailure(error, isStateDamage)) { Failed(path, error); }
                     });
                     metadata = rows;
                 }
@@ -244,7 +246,7 @@ internal static partial class DateRepair
                         }
                         lock (logGate) if (examples.Count < 10) examples.Add(example);
                     }
-                    catch (Exception error) when (ItemFailure(error))
+                    catch (Exception error) when (ItemFailure(error, isStateDamage))
                     {
                         Interlocked.Increment(ref skipped);
                         Record(new { Path = local.Path, Outcome = "skipped", Evidence = evidence, Reason = error.Message });

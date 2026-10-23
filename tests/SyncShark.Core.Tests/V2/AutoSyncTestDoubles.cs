@@ -363,13 +363,13 @@ internal sealed class FakeSyncRun : ISyncRun
         if (FailureStore is not { } store) return report;
         if (report.HaltedBy is { } halted)
         {
-            FailureRetryOwner.RecordRunFailure(store, report.PairId, halted, FailureClock.GetUtcNow());
-            if (FailureRetryOwner.ScopeOf(halted, CancellationToken.None) == FailureRetryOwner.FailureScope.State)
+            FailureRetryOwner.RecordRunFailure(store, report.PairId, halted, FailureClock.GetUtcNow(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+            if (StorageFailureClassifier.ScopeOf(halted, CancellationToken.None) == FailureRetryOwner.FailureScope.State)
                 return report with { Outcome = RunOutcomes.StateDamaged };
         }
         else if (report.Outcome == RunOutcomes.Failed || report.CompletionFailed)
             FailureRetryOwner.RecordRunFailure(store, report.PairId,
-                new IOException(report.Failures.FirstOrDefault()?.Reason ?? "Synthetic run failure"), FailureClock.GetUtcNow());
+                new IOException(report.Failures.FirstOrDefault()?.Reason ?? "Synthetic run failure"), FailureClock.GetUtcNow(), isStateDamage: StorageFailureClassifier.IsStateDamage);
         else if (report.Outcome is RunOutcomes.Complete or RunOutcomes.Partial)
             store.CloseNotice(FailureRetryOwner.RunNoticeId(report.PairId), "resolved");
         return report;

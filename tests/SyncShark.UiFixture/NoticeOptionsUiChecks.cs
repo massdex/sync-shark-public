@@ -88,13 +88,13 @@ internal static class NoticeOptionsUiChecks
             var bindingNotice = new Notice("pair-notice", 38, NoticeKind.AutoConflict,
                 "Reports/2026 Q3.pdf", PlanNotices.CloudFilesBindingNeedsReview.Detail,
                 PlanNotices.CloudFilesBindingNeedsReview.Key);
-            var options = NoticeChoices.Options(bindingNotice);
+            var options = NoticeOptions.Options(bindingNotice);
             Check(options.Count == 3 &&
                   options.Select(option => option.Choice).SequenceEqual(
                       [NoticeChoices.ReviewRebind, NoticeChoices.PausePair, NoticeChoices.LeaveAsIs]),
                 "The production notice mapping supplies the three named choices the row renders");
 
-            var restoreOptions = NoticeChoices.Options(new Notice("pair-restore", 32, NoticeKind.Info,
+            var restoreOptions = NoticeOptions.Options(new Notice("pair-restore", 32, NoticeKind.Info,
                 "Folder", "Recovery pending", "folder-delete-unrestored", FolderRecoveryAnchor: "anchor"));
             Check(restoreOptions.Any(option => option.Choice == NoticeChoices.RestoreAgain),
                 "Pending folder recovery exposes Restore again through the shared UI vocabulary");
@@ -102,9 +102,9 @@ internal static class NoticeOptionsUiChecks
             // (3) A regular notice maps to no choices, exactly as NoticeMapping attaches an empty list.
             var regularNotice = new Notice("pair-regular", 4, NoticeKind.AutoConflict,
                 "Docs/ordinary.txt", "Both versions are retained.", "auto-conflict");
-            var regularOptions = NoticeChoices.Options(regularNotice);
+            var regularOptions = NoticeOptions.Options(regularNotice);
             Check(regularOptions.Count == 0, "A regular notice maps to no choices");
-            var linkOptions = NoticeChoices.Options(new Notice("pair-link", 36, NoticeKind.Info,
+            var linkOptions = NoticeOptions.Options(new Notice("pair-link", 36, NoticeKind.Info,
                 "Link", "Link left untouched", "link-item"));
             Check(linkOptions.Single(option => option.Choice == NoticeChoices.CopyLinkOutsideRoot).RequestsName &&
                   linkOptions.Single(option => option.Choice == NoticeChoices.CopyLinkAgain).RequestsName,

@@ -57,7 +57,7 @@ internal static class DirectDownloadInterruptionChecks
                 File.Move(Path.Combine(fixture, "local", "file.bin"), Path.Combine(fixture, "original-retained.bin"));
             var writer = await LocalChecks.OpenWriter(localPath,
                 Path.Combine(fixture, phase == "moved-root" ? "new-recovery" : "recovery"), CancellationToken.None);
-            var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission());
+            var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
             var result = (await executor.ReconcileAsync([action], 1, writer, new Source(false), CancellationToken.None)).Single();
             var completes = phase is "preserved" or "published" or "missing-recovery" or "new-published";
             LocalChecks.Require(result.Outcome == (completes ? Outcome.Done : Outcome.Skipped),
@@ -97,7 +97,7 @@ internal static class DirectDownloadInterruptionChecks
             if (phase == "missing-recovery")
                 LocalChecks.Require(result.Recovery is null && store.OpenNotices(LocalChecks.PairId).Any(n =>
                     n.ReasonKey == "local-download-recovery"), "missing Recovery settles Done with a durable notice");
-            var repeated = await EffectResolver.ResolveAsync(action, writer, writer, CancellationToken.None);
+            var repeated = await EffectResolver.ResolveAsync(action, writer, writer, CancellationToken.None, isStateDamage: StorageFailureClassifier.IsStateDamage);
             LocalChecks.Require(repeated.Outcome == result.Outcome, phase + " resume is idempotent");
             if (completes && phase is not ("missing-recovery" or "new-published"))
                 LocalChecks.Require(result.Recovery is not null && File.ReadAllBytes(result.Recovery.Location).SequenceEqual(Old),
@@ -130,7 +130,7 @@ internal static class DirectDownloadInterruptionChecks
         if (phase is "preserved" or "moved-root" or "absent-recovery" or "moved-pair" or "changed-stage") SyncLocalRecovery.SourceRemovedBeforeRecoveryCloseForTest = _ => Environment.Exit(73);
         if (phase is "published" or "missing-recovery" or "new-published") SyncLocalEndpointStore.PublishedBeforeCloseForTest = () => Environment.Exit(73);
         if (phase == "rollback") SyncLocalRecovery.SourceRemovedBeforeRecoveryCloseForTest = _ => throw new OperationCanceledException();
-        var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission());
+        var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
         await foreach (var _ in executor.ApplyAsync(new Plan(LocalChecks.PairId, gen, [action], []), writer,
             new Source(phase is "downloading" or "new-downloading"), CancellationToken.None)) { }
         if (phase == "rollback") Environment.Exit(73);

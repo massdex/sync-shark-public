@@ -132,7 +132,7 @@ internal sealed class LocalIndexingRuns : IAsyncDisposable
 
     private async Task<string> RunRootAsync(RootDef root, CancellationToken ct, bool continuous)
     {
-        using var admission = FairStoreGate.WithCancellation(ct);
+        using var admission = StoreAdmission.WithCancellation(ct);
         try
         {
             do

@@ -18,7 +18,7 @@ internal static partial class PlannerChecks
         Require(notice.ConflictVersions!.CopyOnA == plan.Actions.Single(action => action.Target == Side.A).Path &&
             notice.ConflictVersions.CopyOnB == plan.Actions.Single(action => action.Kind == ActionKind.KeepBoth && action.Target == Side.B).Path,
             "copy provenance contains actual generated names");
-        Require(NoticeChoices.Options(notice).Select(option => option.Choice).SequenceEqual(
+        Require(NoticeOptions.Options(notice).Select(option => option.Choice).SequenceEqual(
             new[] { "compare", "merge", "keep-a", "keep-b", "keep-both" }), "rule27 exposes every explicit choice");
         var roundTrip = NoticeDetailCodec.Decode(notice with { Detail = NoticeDetailCodec.Encode(notice), ConflictVersions = null });
         Require(roundTrip.ConflictVersions == notice.ConflictVersions, "baseline and copy identities persist through notice codec");
@@ -31,7 +31,7 @@ internal static partial class PlannerChecks
                 "rules10/11 still copy both locations");
             Require(places.Notices.Single().ConflictVersions is { } versions && versions.A == left && versions.B == right,
                 "rules10/11 choices bind exact original locations");
-            Require(NoticeChoices.Options(places.Notices.Single()).Select(option => option.Choice).SequenceEqual(
+            Require(NoticeOptions.Options(places.Notices.Single()).Select(option => option.Choice).SequenceEqual(
                 new[] { "keep-a", "keep-b", "keep-both" }), "rules10/11 expose all location choices");
         }
         var mover = Row(baseline, a with { Path = "occupied.txt", Hash = "base" }, baseline.B);
@@ -42,7 +42,7 @@ internal static partial class PlannerChecks
         Require(held.Rule == 14 && held.Kind == NoticeKind.UserDecision &&
             held.ConflictVersions?.Incoming?.Target == Side.B && held.ConflictVersions.B.ObjectId == "unrelated",
             "rule14 notice binds incoming action and actual occupant");
-        Require(NoticeChoices.Options(held).Select(option => option.Choice).SequenceEqual(
+        Require(NoticeOptions.Options(held).Select(option => option.Choice).SequenceEqual(
             new[] { "rename-incoming", "replace-existing", "dismiss" }), "rule14 exposes exact entity choices");
         var kinds = Decide(Row(null, F("same", "new-file", "bytes"), D("SAME", "folder")));
         Require(kinds.Actions.All(action => action.Kind == ActionKind.Hold) && kinds.Notices.Single().ConflictVersions?.B.Kind == ItemKind.Folder,

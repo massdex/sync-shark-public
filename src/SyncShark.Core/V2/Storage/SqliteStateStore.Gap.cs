@@ -400,7 +400,7 @@ public sealed partial class SqliteStateStore : ILocalGapStore
         }
         finally
         {
-            RunLog.Trace($"local gap metadata promotion: root={rootId}; count={promoted}; capped={(drained ? 0 : 1)}; elapsed-ms={watch.ElapsedMilliseconds}");
+            RunTrace.Emit($"local gap metadata promotion: root={rootId}; count={promoted}; capped={(drained ? 0 : 1)}; elapsed-ms={watch.ElapsedMilliseconds}");
         }
     }
 

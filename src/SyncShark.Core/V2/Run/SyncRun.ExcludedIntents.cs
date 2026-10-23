@@ -43,7 +43,7 @@ public sealed partial class SyncRun
                  intent.Kind == ActionKind.MkDir) && grace < TimeSpan.FromHours(2))
                 grace = TimeSpan.FromHours(2);
             var observed = await EffectResolver.ResolveAsync(intent with { RecoveryFirst = false }, target, source,
-                ct, grace, _time, jobChecks);
+                ct, isStateDamage: StorageFailureClassifier.IsStateDamage, grace, _time, jobChecks);
             ct.ThrowIfCancellationRequested();
             if (observed.Outcome == Outcome.Done)
                 _store.CommitResult(pair.PairId, gen, intent, observed);

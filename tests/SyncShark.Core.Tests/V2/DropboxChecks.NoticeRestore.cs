@@ -37,7 +37,7 @@ internal static partial class DropboxChecks
             if (mode == "bad-download") h.Wire.DownloadMetadataRevisionOverride = "wrong-download-revision";
             var writes = h.Wire.AttemptedWritePaths.Count;
             var provider = new FakeEndpointProvider().Add(pair.A, local).AddWriter(pair.B, writer);
-            var run = new SyncRun(store, new Executor(store, V2Settings.Default, ExecutorChecks.Admission()),
+            var run = new SyncRun(store, new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
                 provider, V2Settings.Default, TimeProvider.System);
             var result = await run.RestoreNoticeVersionAsync(pair.PairId, noticeId, false, CancellationToken.None);
             if (mode != "swap")

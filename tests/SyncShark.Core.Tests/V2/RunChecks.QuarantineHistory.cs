@@ -28,7 +28,7 @@ internal static partial class RunChecks
         Require(store.QuarantineBaselineItems("ra").Any(i => i.ObjectId == known.ObjectId), "baseline existence does not require generation time");
         var localRoot = fx.Pair.A with { RootPath = "C:\\fake-history", RootObjectId = "id:local:00000001:0000000000000001" };
         var history = new FakeDefenderHistory();
-        var inventory = new LocalInventory(localRoot, Side.A, store, new HashSet<string>(), Settings, TimeProvider.System, history);
+        var inventory = new LocalInventory(localRoot, Side.A, store, new HashSet<string>(), Settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, history);
         var empty = new PilotLocalScan(new Dictionary<string, PilotLocalEntry>(), [], 0);
         history.Detections = [new("file:_C:\\fake-history\\blocked.txt", DateTimeOffset.MinValue)];
         var scan = await inventory.ApplyHistoryAsync(empty, _ => true, default);
@@ -92,7 +92,7 @@ internal static partial class RunChecks
         await FirstSyncAsync(run, fx);
         var child = store.Live("ra", ["held/child.txt"]).Single();
         var inventory = new LocalInventory(fx.Pair.A with { RootPath = "F:/fixture", RootObjectId = "id:local:00000001:0000000000000001" },
-            Side.A, store, new HashSet<string>(), Settings, TimeProvider.System);
+            Side.A, store, new HashSet<string>(), Settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage);
         var blocked = new BlockedFolderInventory(inventory, fx.A);
         fx.Provider.AddInventory(fx.Pair.A, blocked);
         await run.IncrementalAsync("p1", new RecordingProgress(), default);
@@ -207,7 +207,7 @@ internal static partial class RunChecks
             await fx.A.DeleteAsync(new SyncAction("fake-missing", 30, ActionKind.Delete, Side.A, item.Path, null, null, item, false, null), default);
             var history = new FakeDefenderHistory { Fail = mode == "unavailable", Complete = mode != "partial" };
             var localRoot = fx.Pair.A with { RootPath = @"C:\fake-history", RootObjectId = "id:local:00000001:0000000000000001" };
-            var inventory = new LocalInventory(localRoot, Side.A, store, new HashSet<string>(), Settings, TimeProvider.System, history);
+            var inventory = new LocalInventory(localRoot, Side.A, store, new HashSet<string>(), Settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, history);
             var empty = new PilotLocalScan(new Dictionary<string, PilotLocalEntry>(), [], 0);
             var scan = await inventory.ApplyHistoryAsync(empty, _ => true, default);
             Require(mode == "empty" ? scan.Decisions.Count == 0 : scan.Decisions.Count == 1 && scan.Decisions[0].DefenderHistoryUnknown,
@@ -242,7 +242,7 @@ internal static partial class RunChecks
         await FirstSyncAsync(fx.Run(), fx);
         var history = new FakeDefenderHistory { Complete = false, Availability = DefenderAvailability.Active };
         var inventory = new LocalInventory(fx.Pair.A with { RootPath = @"C:\fake-history", RootObjectId = "id:local:00000001:0000000000000001" },
-            Side.A, store, new HashSet<string>(), Settings, TimeProvider.System, history);
+            Side.A, store, new HashSet<string>(), Settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, history);
         var empty = new PilotLocalScan(new Dictionary<string, PilotLocalEntry>(), [], 0);
         for (var attempt = 0; attempt < 4; attempt++)
             Require((await inventory.ApplyHistoryAsync(empty, _ => true, default)).Decisions.Single().DefenderHistoryUnknown,
@@ -290,9 +290,9 @@ internal static partial class RunChecks
             var historyAudit = (FolderHistoryStore)(object)historyStore;
             historyAudit.Inner = store;
             historyAudit.ForbidDescendants = false;
-            var inventory = new LocalInventory(localRoot, Side.A, historyStore, new HashSet<string>(), Settings, TimeProvider.System, history);
+            var inventory = new LocalInventory(localRoot, Side.A, historyStore, new HashSet<string>(), Settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, history);
             var weekLater = new LocalInventory(localRoot, Side.A, store, new HashSet<string>(), Settings,
-                new ShiftedClock(DefenderReview.KeepRecheck + TimeSpan.FromDays(1)), history);
+                new ShiftedClock(DefenderReview.KeepRecheck + TimeSpan.FromDays(1)), isStateDamage: StorageFailureClassifier.IsStateDamage, history);
             var empty = new PilotLocalScan(new Dictionary<string, PilotLocalEntry>(), [], 0);
             // later.txt is synced before this pass (a later case needs its baseline row), but it is still
             // present here: the first review must aggregate only the deleted missing.txt.
@@ -304,7 +304,7 @@ internal static partial class RunChecks
             for (var i = 0; i < (mode is "cap" or "age" ? 1 : 3); i++) await inventory.ApplyHistoryAsync(laterPresent, _ => true, default);
             var notice = store.OpenNotices("p1").SingleOrDefault(n => n.DefenderHistory is not null);
             Require(notice?.Kind == NoticeKind.UserDecision && notice.DefenderHistory?.Count == 1 &&
-                NoticeChoices.Options(notice).Select(o => o.Choice).SequenceEqual(new[] { NoticeChoices.DefenderProceed, NoticeChoices.DefenderHold }),
+                NoticeOptions.Options(notice).Select(o => o.Choice).SequenceEqual(new[] { NoticeChoices.DefenderProceed, NoticeChoices.DefenderHold }),
                 mode + " bounded history creates one aggregate app decision with proceed and keep choices");
             var reviewed = notice!;
             await inventory.ApplyHistoryAsync(laterPresent, _ => true, default);
@@ -316,7 +316,7 @@ internal static partial class RunChecks
                 SyncAuthorityConflictResolutionKind.PreserveBoth, NoticeChoices.DefenderHold)]);
             var held = store.OpenNotices("p1").SingleOrDefault(n => n.DefenderHistory?.Cause == DefenderReview.HeldCause)!;
             Require(store.NoticeById("p1", reviewed.NoticeId!)!.Value.Closed && held?.DefenderHistory is { Count: 1 } &&
-                NoticeChoices.Options(held).Select(o => o.Choice).SequenceEqual(new[] { NoticeChoices.DefenderReleaseHeld,
+                NoticeOptions.Options(held).Select(o => o.Choice).SequenceEqual(new[] { NoticeChoices.DefenderReleaseHeld,
                     NoticeChoices.DefenderReleaseItem, NoticeChoices.DefenderExcludeHeld }) &&
                 (await inventory.ApplyHistoryAsync(laterPresent, _ => true, default)).Decisions.Single().DefenderHistoryUnknown,
                 mode + " actual app keep-held resolves the review into one standing held notice; the deletion stays protected");
@@ -396,7 +396,7 @@ internal static partial class RunChecks
         await FirstSyncAsync(queueFx.Run(), queueFx);
         var items = queueStore.QuarantineBaselineItems("ra").ToArray();
         queueStore.DeferDefenderHistory(items.Select(i => i.ObjectId).ToArray(), "queue", DateTimeOffset.UtcNow.AddMinutes(-1));
-        var queued = new LocalInventory(queueFx.Pair.A with { RootPath = @"C:\fake-history", RootObjectId = "id:local:00000001:0000000000000001" }, Side.A, queueStore, new HashSet<string>(), Settings with { LocalDeltaMaxPaths = 3 }, TimeProvider.System, new FakeDefenderHistory { Complete = false });
+        var queued = new LocalInventory(queueFx.Pair.A with { RootPath = @"C:\fake-history", RootObjectId = "id:local:00000001:0000000000000001" }, Side.A, queueStore, new HashSet<string>(), Settings with { LocalDeltaMaxPaths = 3 }, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, new FakeDefenderHistory { Complete = false });
         var visited = new HashSet<string>();
         for (var i = 0; i < 4; i++)
         {
@@ -531,7 +531,7 @@ internal static partial class RunChecks
         store.AssignDefenderBatch([rows["dir/kept.txt"].ObjectId, rows["held"].ObjectId], "full-kept");
         store.DecideDefenderBatch("full-kept", false, "ra");
         var inventory = new LocalInventory(fx.Pair.A with { RootPath = @"C:\fake-history", RootObjectId = "id:local:00000001:0000000000000001" },
-            Side.A, store, new HashSet<string>(), Settings, TimeProvider.System, new FakeDefenderHistory { Complete = false });
+            Side.A, store, new HashSet<string>(), Settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, new FakeDefenderHistory { Complete = false });
         var full = new FullScanHistoryInventory(inventory, fx.A);
         fx.Provider.AddInventory(fx.Pair.A, full);
         var cursorBefore = store.Cursor("ra");
@@ -571,7 +571,7 @@ internal static partial class RunChecks
         foreach (var item in items)
             await fx.A.DeleteAsync(new SyncAction("remove-" + item.Path, 30, ActionKind.Delete, Side.A, item.Path, null, null, item, false, null), default);
         var inventory = new LocalInventory(fx.Pair.A with { RootObjectId = "id:local:00000001:0000000000000001" },
-            Side.A, store, new HashSet<string>(), Settings, TimeProvider.System,
+            Side.A, store, new HashSet<string>(), Settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage,
             new FakeDefenderHistory { Complete = false, LimitReached = true });
         var empty = new PilotLocalScan(new Dictionary<string, PilotLocalEntry>(), [], 0);
         await inventory.ApplyHistoryAsync(empty, path => path == "first.txt", default);
@@ -620,7 +620,7 @@ internal static partial class RunChecks
         var second = store.DefenderNotices("p2", "ra").Single();
         var sharedRelease = await fx.Run().ResolveQuarantineAsync("p1", first.NoticeId!, NoticeChoices.DefenderReleaseItem, default, itemPath: item.Path);
         var sharedReview = store.DefenderNotices("p1", "ra").Single(n => n.DefenderHistory?.Cause == DefenderReview.SharedReleaseCause);
-        var options = NoticeChoices.Options(sharedReview);
+        var options = NoticeOptions.Options(sharedReview);
         Require(sharedRelease.Outcome == Outcome.Done &&
             store.DefenderDeferralConsent([item.ObjectId])[item.ObjectId] == DefenderConsent.Keep &&
             store.DefenderNotices("p2", "ra").Single() == second &&
@@ -646,7 +646,7 @@ internal static partial class RunChecks
             store.DefenderDeferralConsent([item.ObjectId])[item.ObjectId] == DefenderConsent.Keep,
             "stale excluded-pair release cannot release the remaining pair's hold");
         var inventory = new LocalInventory(fx.Pair.A with { RootObjectId = "id:local:00000001:0000000000000001" },
-            Side.A, store, new HashSet<string>(), Settings, TimeProvider.System, new FakeDefenderHistory { Complete = true });
+            Side.A, store, new HashSet<string>(), Settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, new FakeDefenderHistory { Complete = true });
         var scan = await inventory.ApplyHistoryAsync(new PilotLocalScan(new Dictionary<string, PilotLocalEntry>(), [], 0), _ => true, default);
         Require(scan.Decisions.Any(d => d.RelativePath == item.Path && d.DefenderHistoryUnknown),
             "the remaining pair still holds the shared item even with complete history");
@@ -689,7 +689,7 @@ internal static partial class RunChecks
         foreach (var item in items)
             await fx.A.DeleteAsync(new SyncAction("gone-" + item.Path, 30, ActionKind.Delete, Side.A, item.Path, null, null, item, false, null), default);
         var inventory = new LocalInventory(fx.Pair.A with { RootPath = @"C:\fake-history", RootObjectId = "id:local:00000001:0000000000000001" },
-            Side.A, store, new HashSet<string>(), Settings, TimeProvider.System, new FakeDefenderHistory { Complete = false });
+            Side.A, store, new HashSet<string>(), Settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, new FakeDefenderHistory { Complete = false });
         var empty = new PilotLocalScan(new Dictionary<string, PilotLocalEntry>(), [], 0);
         for (var i = 0; i < 3; i++) await inventory.ApplyHistoryAsync(empty, _ => true, default);
         Notice Review() => store.OpenNotices("p1").Single(n => n.DefenderHistory is { Cause: not DefenderReview.HeldCause });
@@ -755,7 +755,7 @@ internal static partial class RunChecks
             "retention prunes only proceeded, released or gone-on-both-sides deferrals; Keep-held and pending rows of live entities survive");
         var history = new FakeDefenderHistory { Complete = true };
         var inventory = new LocalInventory(fx.Pair.A with { RootPath = @"C:\fake-history", RootObjectId = "id:local:00000001:0000000000000001" },
-            Side.A, store, new HashSet<string>(), Settings, clock, history);
+            Side.A, store, new HashSet<string>(), Settings, clock, isStateDamage: StorageFailureClassifier.IsStateDamage, history);
         var empty = new PilotLocalScan(new Dictionary<string, PilotLocalEntry>(), [], 0);
         Func<string, bool> keptOnly = path => path == "kept.txt";
         var scan = await inventory.ApplyHistoryAsync(empty, keptOnly, default);
@@ -819,7 +819,7 @@ internal static partial class RunChecks
         audit.Inner = store;
         var history = new FakeDefenderHistory { Complete = false };
         var inventory = new LocalInventory(fx.Pair.A with { RootPath = @"C:\fake-history", RootObjectId = "id:local:00000001:0000000000000001" },
-            Side.A, proxy, new HashSet<string>(), Settings with { LocalDeltaMaxPaths = 2 }, TimeProvider.System, history);
+            Side.A, proxy, new HashSet<string>(), Settings with { LocalDeltaMaxPaths = 2 }, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, history);
         PilotLocalScan Empty() => new(new Dictionary<string, PilotLocalEntry>(), [], 0);
         async Task<PilotLocalScan> Recheck() => await inventory.ApplyHistoryAsync(Empty(), _ => true, default, [], ["foo"]);
         var scan = await Recheck();

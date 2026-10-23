@@ -2,6 +2,11 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SqliteStateStore
 {
+    string? IStateStore.ReportStorageNotice(string pairId, Notice notice, string familyPrefix) =>
+        ReportStorageNotice(pairId, notice, familyPrefix);
+    IReadOnlyList<StorageNotice> IStateStore.OpenStoragePairCauses(string pairId, string rootId, string remoteBinding) =>
+        OpenStoragePairCauses(pairId, rootId, remoteBinding);
+
     /// <summary>Open pair-cause rows for exactly the two storage pair families; never item notices.</summary>
     internal IReadOnlyList<StorageNotice> OpenStoragePairCauses(string pairId, string rootId, string remoteBinding) => InStore(() =>
     {

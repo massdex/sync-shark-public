@@ -86,7 +86,7 @@ public sealed partial class SqliteStateStore
         var pair = Pair(pairId);
         if (pair is null || pair.A.RootId != rootId) return;
         StorageNotices.Report(this, pair, path,
-            new(rootId, objectId, pair.B.RootId, "pointer-verify", StorageNotices.ReceiptScope(receipt)),
+            new(rootId, objectId, pair.B.RootId, "pointer-verify", StorageNotices.ReceiptScope(receipt.Id, receipt.Revision, receipt.ContentHash)),
             new IOException("This online-only file changed locally; Sync Shark will verify it. Retry downloads missing ranges without discarding edits, then normal sync verifies the content."));
     }
 

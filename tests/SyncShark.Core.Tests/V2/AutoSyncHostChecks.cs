@@ -152,7 +152,7 @@ internal static class AutoSyncHostChecks
                 ["--cli", "conflicts", "resolve", "--pair", "pair-1", "--path", test.Path,
                     "--key", test.Notice.NoticeId!, "--generation", "0", "--choice", test.Choice, "--yes"] };
             var pending = queue.ExecuteAsync(request, client.Token);
-            Console.WriteLine($"NOTICE-MEASURE invalid-choice path={test.Path} reason={test.Notice.ReasonKey} choice={test.Choice} completed={pending.IsCompleted} tokenMatches={observed == client.Token} options={string.Join(",", NoticeChoices.Options(test.Notice).Select(o => o.Choice))}");
+            Console.WriteLine($"NOTICE-MEASURE invalid-choice path={test.Path} reason={test.Notice.ReasonKey} choice={test.Choice} completed={pending.IsCompleted} tokenMatches={observed == client.Token} options={string.Join(",", NoticeOptions.Options(test.Notice).Select(o => o.Choice))}");
             Require(!pending.IsCompleted && observed == client.Token, "invalid choice executes directly, never returns queued");
             release.SetException(new SyncCliReviewException("Choice not accepted"));
             try { await pending; throw new InvalidOperationException("Expected direct refusal"); }

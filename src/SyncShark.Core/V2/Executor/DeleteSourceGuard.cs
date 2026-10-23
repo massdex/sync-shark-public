@@ -3,7 +3,7 @@ namespace Massdex.SyncShark.V2;
 /// <summary>Checks the missing side before any absence-propagating delete or Recovery move.</summary>
 internal static class DeleteSourceGuard
 {
-    internal const string ReasonKey = "delete-source-unconfirmed";
+    internal const string ReasonKey = NoticeVocabulary.DeleteSourceReasonKey;
     internal static string NoticeId(string pairId, string path) => ShortId.Make("n", pairId, "0", PathKey.Of(path), ReasonKey);
 
     // Explicit decisions authorize conditional removal of their frozen victim, not propagation of absence.
@@ -70,11 +70,12 @@ internal static class DeleteSourceGuard
     // The frozen signature is authority; current sync inventory and cursors are NOT fresh proof.
     // Listing is targeted even when ordinary sync excludes this path or consumed its change while sleeping.
     internal static async Task<bool> ReviewedRemovalUnchangedAsync(SyncAction action, PairDef pair,
-        IStateStore store, IInventorySource inventory, CancellationToken ct)
+        IStateStore store, IInventorySource inventory, CancellationToken ct, Func<Exception, bool> isStateDamage)
     {
+        ArgumentNullException.ThrowIfNull(isStateDamage);
         // Whole-root inventory is useful proof input, but never destructive authority over a pair root.
         if (action.Path.Length == 0) return false;
-        var observed = await ObserveReviewedRemovalAsync(action, pair, store, inventory, ct).ConfigureAwait(false);
+        var observed = await ObserveReviewedRemovalAsync(action, pair, store, inventory, ct, isStateDamage: isStateDamage).ConfigureAwait(false);
         if (observed.Signature is null) return false;
         if (action.ExpectedTarget?.Kind != ItemKind.Folder) return true;
         return action.FrozenRemovalSignature is { } all
@@ -83,33 +84,36 @@ internal static class DeleteSourceGuard
     }
 
     internal static async Task<string?> CaptureReviewedRemovalAsync(SyncAction action, PairDef pair,
-        IStateStore store, IInventorySource inventory, CancellationToken ct) =>
-        (await ObserveReviewedRemovalAsync(action, pair, store, inventory, ct).ConfigureAwait(false)).Signature;
+        IStateStore store, IInventorySource inventory, CancellationToken ct, Func<Exception, bool> isStateDamage) =>
+        (await ObserveReviewedRemovalAsync(action, pair, store, inventory, ct, isStateDamage: isStateDamage).ConfigureAwait(false)).Signature;
 
     // Publish consent and its complete proof as one action value. Callers persist that value
     // in one intent/retry write; a missing observation never gains authority from a later retry.
     internal static async Task<SyncAction> RecordRemovalConsentAsync(SyncAction action, PairDef pair,
-        IStateStore store, IInventorySource inventory, CancellationToken ct)
+        IStateStore store, IInventorySource inventory, CancellationToken ct, Func<Exception, bool> isStateDamage)
     {
+        ArgumentNullException.ThrowIfNull(isStateDamage);
         if (action.Kind != ActionKind.Delete) return action;
         if (!RequiresReviewedSubtreeProof(action) || action.FrozenRemovalSignature is not null)
             return action with { RemovalReviewChoice = true };
         var budget = action.CarriedIgnoredBudget;
         var signature = await CaptureDisclosedRemovalAsync(action, pair, store, inventory,
-            budget?.Files ?? 0, budget?.Folders ?? 0, budget?.Bytes ?? 0, ct).ConfigureAwait(false);
+            budget?.Files ?? 0, budget?.Folders ?? 0, budget?.Bytes ?? 0, ct, isStateDamage: isStateDamage).ConfigureAwait(false);
         return action with { RemovalReviewChoice = true, FrozenRemovalSignature = signature ?? "unproven" };
     }
 
     internal static async Task<string?> CaptureDisclosedRemovalAsync(SyncAction action, PairDef pair,
-        IStateStore store, IInventorySource inventory, long files, long folders, long bytes, CancellationToken ct)
+        IStateStore store, IInventorySource inventory, long files, long folders, long bytes, CancellationToken ct, Func<Exception, bool> isStateDamage)
     {
-        var observed = await ObserveReviewedRemovalAsync(action, pair, store, inventory, ct).ConfigureAwait(false);
+        ArgumentNullException.ThrowIfNull(isStateDamage);
+        var observed = await ObserveReviewedRemovalAsync(action, pair, store, inventory, ct, isStateDamage: isStateDamage).ConfigureAwait(false);
         return observed.Files == files && observed.Folders == folders && observed.Bytes == bytes ? observed.Signature : null;
     }
 
     private static async Task<(string? Signature, bool HasCarried, long Files, long Folders, long Bytes)> ObserveReviewedRemovalAsync(SyncAction action,
-        PairDef pair, IStateStore store, IInventorySource inventory, CancellationToken ct)
+        PairDef pair, IStateStore store, IInventorySource inventory, CancellationToken ct, Func<Exception, bool> isStateDamage)
     {
+        ArgumentNullException.ThrowIfNull(isStateDamage);
         if (action.ExpectedTarget is not { } expected) return (null, false, 0, 0, 0);
         long files = 0, folders = 0, bytes = 0;
         var folder = expected.Kind == ItemKind.Folder;
@@ -166,11 +170,11 @@ internal static class DeleteSourceGuard
                 ? db.RemovalObservation(session, action.Target)
                 : memory!.OrderBy(item => item.Path, StringComparer.Ordinal)) : null, hasCarried, files, folders, bytes);
         }
-        catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct) == FailureRetryOwner.FailureScope.Item)
+        catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct, isStateDamage: isStateDamage) == FailureRetryOwner.FailureScope.Item)
         { return (null, hasCarried, files, folders, bytes); }
         catch (Exception error)
         {
-            damaged = FailureRetryOwner.ScopeOf(error, ct) == FailureRetryOwner.FailureScope.State;
+            damaged = FailureRetryOwner.ScopeOf(error, ct, isStateDamage: isStateDamage) == FailureRetryOwner.FailureScope.State;
             throw;
         }
         finally { if (!damaged && db is not null) FairStoreGate.Cleanup(() => db.ClearRemovalObservation(session)); }
@@ -185,8 +189,9 @@ internal static class DeleteSourceGuard
     }
 
     internal static async Task<ActionResult?> CheckReconcileAsync(SyncAction action, IEndpointWriter source,
-        ItemState? historical, bool restorePending, CancellationToken ct)
+        ItemState? historical, bool restorePending, CancellationToken ct, Func<Exception, bool> isStateDamage)
     {
+        ArgumentNullException.ThrowIfNull(isStateDamage);
         // Already-submitted explicit victims and replacements retain their durable non-absence authority.
         if (ExplicitRemoval(action) || action.Rule is 26 or 32) return null;
         if (!restorePending && historical is not null && !string.IsNullOrWhiteSpace(historical.ObjectId) &&
@@ -203,7 +208,7 @@ internal static class DeleteSourceGuard
                 };
         }
         // A paired move's already-submitted effect is resolved by identity absence, not plan-local admission.
-        var result = await CheckEvidenceAsync(action with { Rule = 6 }, source, historical, restorePending, ct)
+        var result = await CheckEvidenceAsync(action with { Rule = 6 }, source, historical, restorePending, ct, isStateDamage: isStateDamage)
             .ConfigureAwait(false);
         return result is null ? null : result with { Outcome = Outcome.Uncertain,
             DeleteSourceUnconfirmed = false, DeleteSourceIdentityMissing = false,
@@ -243,20 +248,24 @@ internal static class DeleteSourceGuard
     }
 
     internal static Task<ActionResult?> CheckAsync(SyncAction action, IEndpointWriter source,
-        StoreCommitter committer, string pairId, CancellationToken ct, ItemState? replacement = null,
+        StoreCommitter committer, string pairId, CancellationToken ct, Func<Exception, bool> isStateDamage, ItemState? replacement = null,
         bool pairedAdmitted = false, bool preprobed = false, bool? absence = null,
-        AdmissionAbsenceBatch? admissionBatch = null, string? absenceReason = null) =>
-        CheckEvidenceAsync(action, source, RequiresAbsence(action) ? committer.DeleteSource(action) : null,
-            Applies(action) && committer.DeleteRestorePending(action), ct, replacement, pairedAdmitted,
+        AdmissionAbsenceBatch? admissionBatch = null, string? absenceReason = null)
+    {
+        ArgumentNullException.ThrowIfNull(isStateDamage);
+        return CheckEvidenceAsync(action, source, RequiresAbsence(action) ? committer.DeleteSource(action) : null,
+            Applies(action) && committer.DeleteRestorePending(action), ct, isStateDamage: isStateDamage, replacement, pairedAdmitted,
             preprobed, absence, admissionBatch, absenceReason);
+    }
 
     // Captured store evidence keeps SQLite reads outside provider namespace gates. Both initial
     // admission and dispatch use this decision; callers never infer authority from a missing callback.
     internal static async Task<ActionResult?> CheckEvidenceAsync(SyncAction action, IEndpointWriter source,
-        ItemState? historical, bool restorePending, CancellationToken ct, ItemState? replacement = null,
+        ItemState? historical, bool restorePending, CancellationToken ct, Func<Exception, bool> isStateDamage, ItemState? replacement = null,
         bool pairedAdmitted = false, bool preprobed = false, bool? absence = null,
         AdmissionAbsenceBatch? admissionBatch = null, string? absenceReason = null)
     {
+        ArgumentNullException.ThrowIfNull(isStateDamage);
         if (!Applies(action)) return null;
         string? detail;
         var retryLater = preprobed && absence is null;
@@ -312,7 +321,7 @@ internal static class DeleteSourceGuard
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-        catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct) == FailureRetryOwner.FailureScope.Item)
+        catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct, isStateDamage: isStateDamage) == FailureRetryOwner.FailureScope.Item)
         {
             retryLater = true;
             detail = "Deletion was expected, but checking the source failed. Nothing was deleted; Retry checks it again next run. " + error.Message;

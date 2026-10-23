@@ -82,7 +82,7 @@ public sealed partial class V2CliRuntime
     private static SyncCliConflictData Project(Notice notice) => new(notice.NoticeId ?? string.Empty, notice.PairId,
         notice.Path, 0, null, null, null, null, null, null, notice.Kind.ToString(), notice.Detail, NoticeOpen)
         {
-            FreeSpace = notice.FreeSpace, Options = NoticeChoices.Options(notice),
+            FreeSpace = notice.FreeSpace, Options = NoticeOptions.Options(notice),
             RetainedRevision = notice.RetainedVersion?.Loser.VersionId
         };
 }

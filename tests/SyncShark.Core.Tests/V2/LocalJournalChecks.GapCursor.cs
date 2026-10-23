@@ -30,7 +30,7 @@ internal static partial class LocalJournalChecks
             LocalChecks.Require(store.Cursor(root.RootId) == before.Cursor && gaps.GapEpoch(root.RootId) is null,
                 "cursor write failure rolls back epoch publication atomically");
             StoreSchema.Execute(db, null, "DROP TRIGGER fail_cursor;");
-            var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), StorageChecks.Fast, TimeProvider.System);
+            var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), StorageChecks.Fast, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage);
             var delta = inventory.JournalReadFailed(gen, root.RootId, before.Cursor, covered, 100, "limit", NtfsUsnReadFailure.OverLimit);
             var epoch = gaps.GapEpoch(root.RootId)!;
             epochId = epoch.Epoch;

@@ -17,8 +17,8 @@ internal static partial class ExecutorChecks
             "executor fallback remains fail closed without any fresh-proof bypass");
         var notice = store.UnresolvedNotices("p1").Single(item => item.Path == folder.Path);
         Require(store.SyncRetryAt("p1", folder.Path)?.ReviewedActions?.Single().ActionId == action.ActionId &&
-            NoticeChoices.Options(notice).Any(option => option.Choice == NoticeChoices.RetryNow) &&
-            NoticeChoices.Options(notice).Any(option => option.Choice == NoticeChoices.ReviewRemoval),
+            NoticeOptions.Options(notice).Any(option => option.Choice == NoticeChoices.RetryNow) &&
+            NoticeOptions.Options(notice).Any(option => option.Choice == NoticeChoices.ReviewRemoval),
             "conservative stale-store hold retains choice and offers Retry and Review again");
         var otherAction = action with { ActionId = "other-reviewed-remove", Target = Side.A };
         DeleteSourceGuard.HoldReviewedRemoval(store, "p1", otherAction);

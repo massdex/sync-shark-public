@@ -10,8 +10,53 @@ internal static partial class RunChecks
             throw new InvalidOperationException("Real gap hash reached");
     }
 
+    private static void CheckOverlayPort()
+    {
+        var path = Path.Combine(LocalChecks.FreshRoot("overlay-port"), "overlay.db");
+        using var overlay = new SqliteRehearsalOverlay(path);
+        var sample = new ItemState("Tree/0000", ItemKind.File, "victim", null, new string('a', 64), 1,
+            DateTimeOffset.UnixEpoch, ItemFlags.None);
+        Require(!overlay.Try("root", "absent", out _), "absent overlay row is distinct from tombstone");
+        for (var i = 0; i < 600; i++)
+        {
+            var item = sample with { Path = "Tree/" + i.ToString("D4"), ObjectId = "item-" + i };
+            overlay.Save("root", item.Path, item);
+        }
+        var through = overlay.Version;
+        overlay.Save("root", "victim", null, sample);
+        Require(overlay.Try("root", "VICTIM", out var tombstone) && tombstone is null,
+            "case-insensitive existing null row denotes tombstone");
+        var changes = overlay.Since("root", through, overlay.Version).ToArray();
+        Require(changes.Length == 1 && changes[0].Kind == ChangeKind.Delete && changes[0].ObjectId == sample.ObjectId,
+            "tombstone preserves victim identity");
+        Require(overlay.Since("root", 0, through).Count() == 600, "Since pages honor fixed through bound");
+        var items = overlay.Items("root", "tree").Select(item => item.Path).ToArray();
+        Require(items.Length == 600 && items.SequenceEqual(items.OrderBy(item => item, StringComparer.Ordinal)),
+            "overlay preserves ordered pages across 256-row boundaries");
+        bool refused = false;
+        try { using var duplicate = new SqliteRehearsalOverlay(path); }
+        catch (IOException) { refused = true; }
+        Require(refused && overlay.Items("root").Count() == 600, "fresh-file constructor never overwrites existing overlay");
+        foreach (var since in new[] { false, true })
+        {
+            var raw = new Microsoft.Data.Sqlite.SqliteException("injected second-page damage", 26);
+            var pages = 0;
+            overlay.ReadPageForTest = () => { if (++pages == 2) throw raw; };
+            using var iterator = (since ? overlay.Since("root", 0, through).Select(change => change.Path)
+                : overlay.Items("root").Select(item => item.Path)).GetEnumerator();
+            for (var i = 0; i < 256; i++) Require(iterator.MoveNext(), "first page remains streaming");
+            Exception? failure = null;
+            try { iterator.MoveNext(); }
+            catch (Exception error) { failure = error; }
+            Require(pages == 2 && failure is StateDamagedException && ReferenceEquals(failure.InnerException, raw),
+                "actual second-page read translates damage with raw inner exception");
+        }
+        overlay.ReadPageForTest = null;
+    }
+
     internal static async Task RehearsalAsync()
     {
+        CheckOverlayPort();
         await LiveLedgerAndAdmissionAsync();
         PlanOnlyPathChecks(); // Includes live-root, alias, state-hardlink and export refusal.
         using var store = SqliteStateStore.Open(LocalChecks.FreshRoot("rehearsal-store"), StorageChecks.Fast, TimeProvider.System);
@@ -24,7 +69,7 @@ internal static partial class RunChecks
         var writes = fx.WriterA.Calls + fx.WriterB.Calls;
         fx.WriterA.OnContentRead = fx.WriterB.OnContentRead = _ => throw new InvalidOperationException("Rehearsal opened real content.");
         var effects = new List<RehearsalEffect>();
-        using var overlay = new RehearsalOverlay(Path.Combine(LocalChecks.FreshRoot("rehearsal"), "overlay.db"));
+        using var overlay = new SqliteRehearsalOverlay(Path.Combine(LocalChecks.FreshRoot("rehearsal"), "overlay.db"));
         var endpoints = new RehearsalEndpoints(fx.Provider, overlay, effect => { lock (effects) effects.Add(effect); });
         var capture = new PlanCaptureExecutor(fx.Executor);
         var run = new SyncRun(fx.Store, capture, endpoints, Settings, TimeProvider.System);

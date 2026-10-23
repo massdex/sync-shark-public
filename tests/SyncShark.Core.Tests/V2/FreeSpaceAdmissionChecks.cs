@@ -372,7 +372,7 @@ internal static class FreeSpaceAdmissionChecks
         probe.Free[root] = 256 * MiB;
         probe.Free[recovery] = 256 * MiB;
         var writer = await LocalWriter.OpenAsync(LocalChecks.RootOf(root, "root-free"), Side.A, LocalChecks.PairId,
-                LocalChecks.InstallationId, recovery, CancellationToken.None, V2Settings.Default, probe)
+                LocalChecks.InstallationId, recovery, CancellationToken.None, isStateDamage: StorageFailureClassifier.IsStateDamage, V2Settings.Default, probe)
             .ConfigureAwait(false);
 
         var copy = await writer.AdmitFreeSpaceAsync(Copy(100 * MiB), CancellationToken.None).ConfigureAwait(false);
@@ -395,7 +395,7 @@ internal static class FreeSpaceAdmissionChecks
         probe.Free[root] = 1_600 * MiB;
         probe.Free[recovery] = 10 * GiB;
         var writer = await LocalWriter.OpenAsync(LocalChecks.RootOf(root, "root-free-download"), Side.A,
-                LocalChecks.PairId, LocalChecks.InstallationId, recovery, CancellationToken.None, V2Settings.Default,
+                LocalChecks.PairId, LocalChecks.InstallationId, recovery, CancellationToken.None, isStateDamage: StorageFailureClassifier.IsStateDamage, V2Settings.Default,
                 probe).ConfigureAwait(false);
 
         var copy = await writer.AdmitFreeSpaceAsync(Copy(1 * GiB), CancellationToken.None).ConfigureAwait(false);

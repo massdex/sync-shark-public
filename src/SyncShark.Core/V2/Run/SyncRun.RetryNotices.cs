@@ -21,7 +21,7 @@ public sealed partial class SyncRun
             // A root-indexing notice is one physical row shown through several pairs; resolve the projection.
             var notice = NoticeForChoice(pairId, noticeId);
             if (notice is null || !NoticeChoices.IsRetryNotice(notice) ||
-                !NoticeChoices.Options(notice).Any(option => option.Choice == choice)) return false;
+                !NoticeChoices.IsAdmissible(notice, choice)) return false;
             // Admission notices own their explicit cap; never schedule an unbounded generic Retry.
             if (notice.ReasonKey == PlanNotices.PlanBoundExceededKey) return false;
             if (notice.ReasonKey == "folder-delete-unrestored")
@@ -67,7 +67,7 @@ public sealed partial class SyncRun
         ct.ThrowIfCancellationRequested();
         var saved = _store.NoticeById(pairId, noticeId);
         if (saved is null || saved.Value.Closed || !NoticeChoices.IsPairRetryNotice(saved.Value.Notice) ||
-            !NoticeChoices.Options(saved.Value.Notice).Any(option => option.Choice == choice))
+            !NoticeChoices.IsAdmissible(saved.Value.Notice, choice))
             throw new SyncRunRefusedException("That pair notice or option is no longer available. Refresh notices.");
         if (choice == NoticeChoices.Ignore) _store.CloseNotice(noticeId, choice);
         return true;
@@ -112,7 +112,7 @@ public sealed partial class SyncRun
                 // Observation is read-only and must start even while another pair owns the run gate.
                 // Revalidate the notice and root bindings under the gate before publication or effects.
                 var saved = _store.NoticeById(pairId, noticeId);
-                if (saved is null || saved.Value.Closed || !NoticeChoices.Options(saved.Value.Notice).Any(o => o.Choice == choice))
+                if (saved is null || saved.Value.Closed || !NoticeChoices.IsAdmissible(saved.Value.Notice, choice))
                     throw new SyncRunRefusedException("That review is no longer available. Refresh notices.");
                 var pair = _store.Pair(pairId) ?? throw new SyncRunRefusedException("The pair is no longer available.");
                 RefuseLayout(pair);
@@ -192,7 +192,7 @@ public sealed partial class SyncRun
             // resolves its notice. Read the pair only AFTER admission, never save a run-start snapshot.
             var notice = acceptedExclusion ?? NoticeForChoice(pairId, noticeId);
             if (notice is null || !NoticeChoices.IsRetryNotice(notice) ||
-                !NoticeChoices.Options(notice).Any(option => option.Choice == choice) ||
+                !NoticeChoices.IsAdmissible(notice, choice) ||
                 (acceptedExclusion is not null && (NoticeChoices.IsPairRetryNotice(notice) ||
                     choice is not (NoticeChoices.Ignore or NoticeChoices.Exclude) || notice.NoticeId != noticeId)))
                 throw new SyncRunRefusedException("That retry notice or option is no longer available. Refresh notices.");

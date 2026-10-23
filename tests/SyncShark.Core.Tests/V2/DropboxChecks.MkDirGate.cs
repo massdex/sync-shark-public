@@ -30,14 +30,14 @@ internal static partial class DropboxChecks
         {
             MkDirBatchSize = 1, MkDirBatchMaxAge = MkDirFlushGrace, UploadCommitConcurrency = 1,
         };
-        var held = new DropboxWriter(Root(), Side.B, holding.Client, Path.Combine(_root, "gate-readback"),
+        var held = new DropboxWriter(Root(), Side.B, holding.Client, Path.Combine(_root, "gate-readback"), isStateDamage: StorageFailureClassifier.IsStateDamage,
             settings).MkDirAsync("held-readback", CancellationToken.None);
         Task<ItemState>? independent = null;
         try
         {
             await WaitForAsync(() => holding.Wire.MetadataPaths.Count(path => path == DropboxWire.RootId) >= 2,
                 "the held create reaches its post-commit root readback");
-            independent = new DropboxWriter(Root(), Side.B, competing.Client, Path.Combine(_root, "gate-readback-other"),
+            independent = new DropboxWriter(Root(), Side.B, competing.Client, Path.Combine(_root, "gate-readback-other"), isStateDamage: StorageFailureClassifier.IsStateDamage,
                 settings).MkDirAsync("independent-readback", CancellationToken.None);
             var winner = await Task.WhenAny(independent, Task.Delay(TimeSpan.FromSeconds(3)));
             Require(winner == independent,
@@ -67,14 +67,14 @@ internal static partial class DropboxChecks
             MkDirBatchSize = 1, MkDirBatchMaxAge = MkDirFlushGrace, UploadCommitConcurrency = 1,
             BatchPollInterval = TimeSpan.FromMilliseconds(100), BatchPollTimeout = TimeSpan.FromSeconds(30),
         };
-        var held = new DropboxWriter(Root(), Side.B, holding.Client, Path.Combine(_root, "gate-poll"),
+        var held = new DropboxWriter(Root(), Side.B, holding.Client, Path.Combine(_root, "gate-poll"), isStateDamage: StorageFailureClassifier.IsStateDamage,
             settings).MkDirAsync("held-poll", CancellationToken.None);
         Task<ItemState>? independent = null;
         try
         {
             await WaitForAsync(() => holding.Wire.Calls.Contains("/2/files/create_folder_batch/check"),
                 "the accepted create job is being polled");
-            independent = new DropboxWriter(Root(), Side.B, competing.Client, Path.Combine(_root, "gate-poll-other"),
+            independent = new DropboxWriter(Root(), Side.B, competing.Client, Path.Combine(_root, "gate-poll-other"), isStateDamage: StorageFailureClassifier.IsStateDamage,
                 settings).MkDirAsync("independent-poll", CancellationToken.None);
             var winner = await Task.WhenAny(independent, Task.Delay(TimeSpan.FromSeconds(3)));
             Require(winner == independent,

@@ -56,7 +56,7 @@ internal static class ConflictTransitionChecks
 
             rig.WriterA.PutFailure = FailConflictCopy;
             rig.WriterB.PutFailure = FailConflictCopy;
-            var results = await ApplyAsync(new Executor(store, Settings, Admission()), plan, rig.WriterA, rig.WriterB);
+            var results = await ApplyAsync(new Executor(store, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), plan, rig.WriterA, rig.WriterB);
             Require(results.Count(result => result.Outcome == Outcome.Done) == 1 &&
                 results.Count(result => result.Outcome == Outcome.Failed) == 2,
                 "forget commits Done while both create-only successors fail before any copy exists");
@@ -110,7 +110,7 @@ internal static class ConflictTransitionChecks
             var failedTarget = successors[0].Target;
             if (failedTarget == Side.A) rig.WriterA.PutFailure = FailConflictCopy;
             else rig.WriterB.PutFailure = FailConflictCopy;
-            var results = await ApplyAsync(new Executor(store, Settings, Admission()), plan, rig.WriterA, rig.WriterB);
+            var results = await ApplyAsync(new Executor(store, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), plan, rig.WriterA, rig.WriterB);
             Require(results.Count(result => result.Outcome == Outcome.Done) == 2 &&
                 results.Count(result => result.Outcome == Outcome.Failed) == 1,
                 "forget and one conflict copy commit while the other successor fails");
@@ -158,7 +158,7 @@ internal static class ConflictTransitionChecks
 
             rig.WriterA.PutFailure = FailConflictCopy;
             rig.WriterB.PutFailure = FailConflictCopy;
-            await ApplyAsync(new Executor(store, Settings, Admission()), plan, rig.WriterA, rig.WriterB);
+            await ApplyAsync(new Executor(store, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), plan, rig.WriterA, rig.WriterB);
             Require(store.UnresolvedIntents(PairId).Count == 2, "both successors remain unresolved before the restart");
         }
         finally
@@ -193,7 +193,7 @@ internal static class ConflictTransitionChecks
         Require(notice.Path == blocked.Path,
             "the occupied destination raises the dedicated keep-both-copy-blocked reason at the copy path");
         Require(NoticeChoices.IsRetryNotice(notice) &&
-            NoticeChoices.Options(notice).Select(option => option.Choice).SequenceEqual(new[] { NoticeChoices.RetryNow }),
+            NoticeOptions.Options(notice).Select(option => option.Choice).SequenceEqual(new[] { NoticeChoices.RetryNow }),
             "the blocked copy offers Retry only, never Ignore or a decision choice");
 
         // The user moves the occupant away, then asks the notice to Retry. The next run must create the retained
@@ -232,7 +232,7 @@ internal static class ConflictTransitionChecks
             (plan, _, successors) = await ConflictPlanAsync(store, rig, gen, CancellationToken.None);
             rig.WriterA.PutFailure = FailConflictCopy;
             rig.WriterB.PutFailure = FailConflictCopy;
-            try { await ApplyAsync(new Executor(store, Settings, Admission()), plan, rig.WriterA, rig.WriterB); }
+            try { await ApplyAsync(new Executor(store, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), plan, rig.WriterA, rig.WriterB); }
             finally
             {
                 rig.WriterA.PutFailure = null;
@@ -265,7 +265,7 @@ internal static class ConflictTransitionChecks
         Require(notices.Length == 2 && notices.All(notice => notice.ReasonKey == ExecutionReasons.ConflictCopyBlocked),
             "each tagged successor's first resumed failure raises its dedicated keep-both-copy-blocked notice");
         Require(notices.All(notice => NoticeChoices.IsRetryNotice(notice) &&
-                NoticeChoices.Options(notice).Select(option => option.Choice).SequenceEqual(new[] { NoticeChoices.RetryNow })),
+                NoticeOptions.Options(notice).Select(option => option.Choice).SequenceEqual(new[] { NoticeChoices.RetryNow })),
             "the failed-copy notice offers Retry only, never Ignore");
         Require(notices.All(notice => notice.Detail.Contains("original versions remain protected", StringComparison.Ordinal)),
             "the Retry-only notice keeps the protection explanation");
@@ -289,7 +289,7 @@ internal static class ConflictTransitionChecks
         }
         using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
         var gen = reopened.BeginGeneration(rig.Pair.A.RootId, "test");
-        var executor = new Executor(reopened, Settings, Admission());
+        var executor = new Executor(reopened, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
         var results = await executor.ReconcileAsync(reopened.UnresolvedIntents(PairId), gen, rig.WriterA, rig.WriterB,
             CancellationToken.None);
         var result = results.Single();
@@ -334,7 +334,7 @@ internal static class ConflictTransitionChecks
             rig.B.Seed(successor.Path, "edit-a", versionId: "landed-copy");
         }
         using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
-        var result = (await new Executor(reopened, Settings, Admission()).ReconcileAsync([successor],
+        var result = (await new Executor(reopened, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage).ReconcileAsync([successor],
             reopened.BeginGeneration(rig.Pair.A.RootId, "test"), rig.WriterA, new HashlessWriter(rig.WriterB), CancellationToken.None)).Single();
         Require(result.Outcome == Outcome.Uncertain && rig.WriterB.Puts == 0,
             "hash-unknown possible completed copy stays verify-only, never Done or replayed");
@@ -366,7 +366,7 @@ internal static class ConflictTransitionChecks
                 store.RecordIntent(PairId, successor with { ProviderEffect = new("upload-commit", "session", DateTimeOffset.UtcNow) });
         }
         using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
-        var results = await new Executor(reopened, Settings, Admission()).ReconcileAsync(reopened.UnresolvedIntents(PairId),
+        var results = await new Executor(reopened, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage).ReconcileAsync(reopened.UnresolvedIntents(PairId),
             reopened.BeginGeneration(rig.Pair.A.RootId, "test"), rig.WriterA, rig.WriterB, CancellationToken.None);
         Require(results.All(result => result.Outcome == Outcome.Uncertain) && rig.WriterA.Puts + rig.WriterB.Puts == 0,
             "a checkpoint within the unknown-commit grace remains verify-only with no replay");
@@ -400,7 +400,7 @@ internal static class ConflictTransitionChecks
         rig.WriterB.PutFailure = CheckAdmission;
         rig.A.Seed(OriginalPath, "edit-after-crash", versionId: "changed-after-crash", mtime: T0.AddHours(1));
         using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
-        var results = await new Executor(reopened, Settings, Admission()).ReconcileAsync(reopened.UnresolvedIntents(PairId),
+        var results = await new Executor(reopened, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage).ReconcileAsync(reopened.UnresolvedIntents(PairId),
             reopened.BeginGeneration(rig.Pair.A.RootId, "test"), rig.WriterA, rig.WriterB, CancellationToken.None);
         Require(results.All(result => result.Outcome == Outcome.Done) && admitted == 2,
             "changed-source successors resume through admission after " + (checkpointKind ?? "no checkpoint"));
@@ -454,7 +454,7 @@ internal static class ConflictTransitionChecks
             "failed observation retains only its successor while the independent copy completes");
         var notice = reopened.OpenNotices(PairId).Single(item => item.ReasonKey == ExecutionReasons.ConflictCopyBlocked);
         Require(notice.Detail.Contains("transient", StringComparison.Ordinal) &&
-            NoticeChoices.Options(notice).All(option => option.Choice == NoticeChoices.RetryNow),
+            NoticeOptions.Options(notice).All(option => option.Choice == NoticeChoices.RetryNow),
             "transient failure remains explained and retryable, without an occupied-name diagnosis");
         rig.WriterA.OnRead = null;
         rig.WriterB.OnRead = null;
@@ -524,7 +524,7 @@ internal static class ConflictTransitionChecks
         }
         using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
         var settings = Settings with { ReplaceOnlineOnlyStubs = false };
-        var run = new SyncRun(reopened, new Executor(reopened, settings, Admission()), rig.Provider, settings, TimeProvider.System);
+        var run = new SyncRun(reopened, new Executor(reopened, settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), rig.Provider, settings, TimeProvider.System);
         await run.IncrementalAsync(PairId, new RecordingProgress(), CancellationToken.None);
         Require(reopened.UnresolvedIntents(PairId).Count == 2 && rig.WriterA.Puts + rig.WriterB.Puts == 0,
             flags + ": temporary source protection or copy-only exclusion retains both successor authorities");
@@ -611,7 +611,7 @@ internal static class ConflictTransitionChecks
     }
 
     private static SyncRun NewRun(IStateStore store, Rig rig) =>
-        new(store, new Executor(store, Settings, Admission()), rig.Provider, Settings, TimeProvider.System);
+        new(store, new Executor(store, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), rig.Provider, Settings, TimeProvider.System);
 
     private static async Task<List<ActionResult>> ApplyAsync(Executor executor, Plan plan, IEndpointWriter a,
         IEndpointWriter b)

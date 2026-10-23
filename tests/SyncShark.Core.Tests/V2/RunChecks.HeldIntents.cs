@@ -62,7 +62,7 @@ internal static partial class RunChecks
             Require(notices[0].Detail.Contains("boundary stays protected"),
                 boundary + ": the notice states that dismissal does not remove protection");
             Require(NoticeChoices.IsRetryNotice(notices[0]) &&
-                NoticeChoices.Options(notices[0]).Select(option => option.Choice).SequenceEqual([NoticeChoices.Ignore]),
+                NoticeOptions.Options(notices[0]).Select(option => option.Choice).SequenceEqual([NoticeChoices.Ignore]),
                 boundary + ": the permanent notice offers Ignore only");
             Require(fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0,
                 boundary + ": retirement performs no endpoint effect");
@@ -149,7 +149,7 @@ internal static partial class RunChecks
         Require(store.OpenNotices(fx.Pair.PairId).All(notice => notice.ReasonKey != "held-intents"),
             "the legacy held-intents summary is closed, not duplicated");
         Require(NoticeChoices.IsRetryNotice(summary[0]) &&
-            NoticeChoices.Options(summary[0]).Select(option => option.Choice).SequenceEqual([NoticeChoices.ShowRemaining]),
+            NoticeOptions.Options(summary[0]).Select(option => option.Choice).SequenceEqual([NoticeChoices.ShowRemaining]),
             "the combined summary offers Show remaining only");
         Require(first.PendingVerification == 2 && first.Held == first.PendingVerification && first.Uncertain == 0 &&
             first.Failures.Count == 0,

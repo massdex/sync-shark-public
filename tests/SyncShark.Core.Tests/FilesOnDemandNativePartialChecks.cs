@@ -164,7 +164,7 @@ internal static class FilesOnDemandNativePartialChecks
         // The production metadata scan with the real owned-pointer classifier and store index. The caller
         // already guarantees the native partial state; this only observes it.
         var inventory = new LocalInventory(pair.A, Side.A, store,
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase), V2Settings.Default, TimeProvider.System,
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase), V2Settings.Default, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage,
             pairId: pair.PairId);
         var generation = store.BeginGeneration(pair.A.RootId, "native-partial-scan");
         return await inventory.FullAsync(generation, _ => true, new Progress<string>(), ct).ConfigureAwait(false);

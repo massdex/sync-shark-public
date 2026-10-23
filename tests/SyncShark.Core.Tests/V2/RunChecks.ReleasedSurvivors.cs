@@ -34,8 +34,8 @@ internal static partial class RunChecks
             "the hashless decision holds both directions before the user chooses");
         var notice = fx.Store.OpenNotices(fx.Pair.PairId)
             .Single(item => item.Path == local.Path && item.ReasonKey == "deletion-review");
-        Console.WriteLine("NOTICE-MEASURE released-survivor choices=" + string.Join(",", NoticeChoices.Options(notice).Select(option => option.Choice)));
-        Require(NoticeChoices.Options(notice).Select(option => option.Choice).SequenceEqual(
+        Console.WriteLine("NOTICE-MEASURE released-survivor choices=" + string.Join(",", NoticeOptions.Options(notice).Select(option => option.Choice)));
+        Require(NoticeOptions.Options(notice).Select(option => option.Choice).SequenceEqual(
             // E9 / cloud-files.md: measured round7 catalogue separates explicit exclusion from Ignore.
             new[] { NoticeChoices.DeleteReviewed, NoticeChoices.KeepRestore, NoticeChoices.Ignore, NoticeChoices.Exclude }),
             "a hashless ordinary file offers delete, keep-restore, cause-only Ignore and explicit Stop syncing");
@@ -74,8 +74,8 @@ internal static partial class RunChecks
             "the released folder decision holds both directions before the user chooses");
         var notice = fx.Store.OpenNotices(fx.Pair.PairId)
             .Single(item => item.Path == folder.Path && item.ReasonKey == "deletion-review");
-        Console.WriteLine("NOTICE-MEASURE released-survivor choices=" + string.Join(",", NoticeChoices.Options(notice).Select(option => option.Choice)));
-        Require(NoticeChoices.Options(notice).Select(option => option.Choice).SequenceEqual(
+        Console.WriteLine("NOTICE-MEASURE released-survivor choices=" + string.Join(",", NoticeOptions.Options(notice).Select(option => option.Choice)));
+        Require(NoticeOptions.Options(notice).Select(option => option.Choice).SequenceEqual(
             // E9: round8 measured keep-restore,ignore,exclude; explicit exclusion grants no deletion.
             new[] { NoticeChoices.KeepRestore, NoticeChoices.Ignore, NoticeChoices.Exclude }),
             "a released folder survivor offers keep-restore, cause-only Ignore and explicit exclusion, never delete authority");
@@ -111,8 +111,8 @@ internal static partial class RunChecks
             "the flagged released decision holds both directions before the user chooses");
         var notice = fx.Store.OpenNotices(fx.Pair.PairId)
             .Single(item => item.Path == local.Path && item.ReasonKey == "deletion-review");
-        Console.WriteLine("NOTICE-MEASURE released-survivor choices=" + string.Join(",", NoticeChoices.Options(notice).Select(option => option.Choice)));
-        Require(NoticeChoices.Options(notice).Select(option => option.Choice).SequenceEqual(
+        Console.WriteLine("NOTICE-MEASURE released-survivor choices=" + string.Join(",", NoticeOptions.Options(notice).Select(option => option.Choice)));
+        Require(NoticeOptions.Options(notice).Select(option => option.Choice).SequenceEqual(
             // E9: round10 measured keep-restore,ignore,exclude; none grants automatic deletion.
             new[] { NoticeChoices.KeepRestore, NoticeChoices.Ignore, NoticeChoices.Exclude }),
             "a released flagged survivor offers keep-restore, cause-only Ignore and explicit exclusion, never delete authority");
@@ -132,15 +132,15 @@ internal static partial class RunChecks
     {
         var result = NoticeChoices.Result(NoticeChoices.Ignore);
         Console.WriteLine("NOTICE-MEASURE ignore-result=" + result);
-        Console.WriteLine("NOTICE-MEASURE ignore-label=" + NoticeChoices.Options(new("p1", 40, NoticeKind.Info, "ignored.txt", "retry", "sync-retry")).Single(o => o.Choice == NoticeChoices.Ignore).Label);
+        Console.WriteLine("NOTICE-MEASURE ignore-label=" + NoticeOptions.Options(new("p1", 40, NoticeKind.Info, "ignored.txt", "retry", "sync-retry")).Single(o => o.Choice == NoticeChoices.Ignore).Label);
         // E9: round12 measured the shared suppression result, not legacy permanent exclusion.
         Require(result == "Notice ignored for this cause. The item stays protected and unsynced; retries continue. No exclusions changed.",
             "Ignore reports cause suppression, preserved protection and continuing retries without exclusion");
         var notice = new Notice("p1", 40, NoticeKind.Info, "ignored.txt", "retry", "sync-retry");
-        Require(NoticeChoices.Options(notice).Single(option => option.Choice == NoticeChoices.Ignore)
+        Require(NoticeOptions.Options(notice).Single(option => option.Choice == NoticeChoices.Ignore)
             .Label == "Ignore this cause (keep retrying safely)",
             "Ignore label names cause suppression and continuing retry");
-        Require(NoticeChoices.Options(notice).Single(option => option.Choice == NoticeChoices.Exclude)
+        Require(NoticeOptions.Options(notice).Single(option => option.Choice == NoticeChoices.Exclude)
             .Label == "Stop syncing this file" && NoticeChoices.Result(NoticeChoices.Exclude).Contains("Excluded", StringComparison.Ordinal),
             "explicit Stop syncing choice alone reports permanent exclusion");
         Console.WriteLine("PASS Ignore_ReportsExclusion");

@@ -48,7 +48,7 @@ internal static partial class LocalJournalChecks
             new RootDef("unused", SyncProviders.Dropbox, null, "/", "unused"), [], [], true);
         store.SavePair(pair);
         var provider = new FakeEndpointProvider().AddInventory(def, inventory);
-        var run = new SyncRun(store, new Executor(store, StorageChecks.Fast, ExecutorChecks.Admission()),
+        var run = new SyncRun(store, new Executor(store, StorageChecks.Fast, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
             provider, StorageChecks.Fast, TimeProvider.System);
         var method = typeof(SyncRun).GetMethod("ScanSideAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
         var task = (Task)method.Invoke(run, [pair, Side.A,

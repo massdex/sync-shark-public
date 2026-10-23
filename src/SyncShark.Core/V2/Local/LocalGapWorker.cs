@@ -3,8 +3,9 @@ using System.Collections.Concurrent;
 namespace Massdex.SyncShark.V2;
 
 /// <summary>Composition-owned, root-deduplicated background work. Never joined by planning.</summary>
-internal sealed class LocalGapWorker(ILocalGapStore store, ILocalGapIo io) : IAsyncDisposable
+internal sealed class LocalGapWorker(ILocalGapStore store, ILocalGapIo io, Func<Exception, bool> isStateDamage) : IAsyncDisposable
 {
+    private readonly Func<Exception, bool> _isStateDamage = isStateDamage ?? throw new ArgumentNullException(nameof(isStateDamage));
     private readonly object _gate = new();
     private readonly CancellationTokenSource _stop = new();
     private readonly ConcurrentDictionary<string, Task> _roots = new(StringComparer.Ordinal);
@@ -47,7 +48,7 @@ internal sealed class LocalGapWorker(ILocalGapStore store, ILocalGapIo io) : IAs
     private async Task Loop(RootDef root, bool discovery, CancellationTokenSource stop)
     {
         var ct = stop.Token;
-        using var admission = FairStoreGate.WithCancellation(ct);
+        using var admission = StoreAdmission.WithCancellation(ct);
         long pausedDiscoveryRun = -1;
         try
         {
@@ -80,12 +81,12 @@ internal sealed class LocalGapWorker(ILocalGapStore store, ILocalGapIo io) : IAs
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
-        catch (Exception error)
+        catch (Exception error) when (!_isStateDamage(error))
         {
             if (store is IStateStore sql) sql.RecordIndexFailure(root.RootId, error.Message);
-            RunLog.Trace($"local gap worker failed ({root.RootId}): {error}");
+            RunTrace.Emit($"local gap worker failed ({root.RootId}): {error}");
             try { store.SetGapStatus(root.RootId, discovery, $"worker failed: {error.Message}; retry on next sync"); }
-            catch (Exception noticeError) { RunLog.Trace($"local gap failure status unavailable: {noticeError.Message}"); }
+            catch (Exception noticeError) { RunTrace.Emit($"local gap failure status unavailable: {noticeError.Message}"); }
             // Stop the sibling lane too, so Start can restart this root on the next run.
             stop.Cancel();
         }
@@ -146,11 +147,11 @@ internal sealed class LocalGapWorker(ILocalGapStore store, ILocalGapIo io) : IAs
                 discovered.Add((item, true));
                 failures.Add((item, error.Message));
                 Record(item, "probe-exception");
-                RunLog.Trace($"local gap item discovery retained: {item.Path}: {error}");
+                RunTrace.Emit($"local gap item discovery retained: {item.Path}: {error}");
             }
         }
         // Once observed, a bounded completed prefix is durable even when stop races admission.
-        using (FairStoreGate.WithCancellation(CancellationToken.None))
+        using (StoreAdmission.WithCancellation(CancellationToken.None))
         {
             // Even a poison item advances discovery. Its protected, entity-owned work is retried separately.
             store.GapDiscoveredBatch(root.RootId, epoch, discovered);
@@ -162,13 +163,13 @@ internal sealed class LocalGapWorker(ILocalGapStore store, ILocalGapIo io) : IAs
             {
                 if (reasons.Count != 0) store.SetGapDiscoveryReasons(root.RootId, epoch, reasons);
             }
-            catch (Exception error) when (error is not (StateDamagedException or OperationCanceledException or OutOfMemoryException))
+            catch (Exception error) when (!_isStateDamage(error) && error is not (StateDamagedException or OperationCanceledException or OutOfMemoryException))
             {
-                RunLog.Trace($"local gap discovery reasons unavailable: {error}");
+                RunTrace.Emit($"local gap discovery reasons unavailable: {error}");
             }
         }
         if (page.Count > 0)
-            RunLog.Trace($"local gap metadata page: root={root.RootId}; epoch={epoch.Epoch}; count={page.Count}; " +
+            RunTrace.Emit($"local gap metadata page: root={root.RootId}; epoch={epoch.Epoch}; count={page.Count}; " +
                 string.Join(", ", counts.OrderBy(entry => entry.Key, StringComparer.Ordinal).Select(entry => $"{entry.Key}={entry.Value}")) +
                 "; first-win32=" + (firstWin32 ?? "none"));
         if (page.Count < 128 && discovered.Count == page.Count && !ct.IsCancellationRequested)
@@ -201,7 +202,7 @@ internal sealed class LocalGapWorker(ILocalGapStore store, ILocalGapIo io) : IAs
                     continue;
                 }
                 store.SetGapStatus(root.RootId, false, $"hashing {item.Path}; interrupted files restart from byte zero");
-                RunLog.Trace($"local gap verification starting/restarting from byte zero: {item.Path}");
+                RunTrace.Emit($"local gap verification starting/restarting from byte zero: {item.Path}");
                 var result = await io.HashAsync(root, item, ct).ConfigureAwait(false);
                 if (result is { Outcome: LocalGapHashOutcome.Verified, Hash: { } hash, Proof: { } proof })
                 {
@@ -222,19 +223,19 @@ internal sealed class LocalGapWorker(ILocalGapStore store, ILocalGapIo io) : IAs
                         LocalGapHashOutcome.Disabled => "content verification disabled by byte-rate setting",
                         _ => $"file/journal proof unavailable or changed for {item.Path}; retry pending"
                     });
-                    RunLog.Trace($"local gap verification interrupted or changed; retained for restart: {item.Path}");
+                    RunTrace.Emit($"local gap verification interrupted or changed; retained for restart: {item.Path}");
                 }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                RunLog.Trace($"local gap file interrupted; next attempt restarts from byte zero: {item.Path}");
+                RunTrace.Emit($"local gap file interrupted; next attempt restarts from byte zero: {item.Path}");
                 throw;
             }
             catch (Exception error)
             {
                 store.FailGapItem(root.RootId, epoch, item, error.Message);
                 store.SetGapStatus(root.RootId, false, $"cannot verify {item.Path}: {error.Message}; retry pending");
-                RunLog.Trace($"local gap file retained for restart: {item.Path}: {error.Message}");
+                RunTrace.Emit($"local gap file retained for restart: {item.Path}: {error.Message}");
             }
         }
         return completed;
@@ -263,7 +264,7 @@ internal sealed class LocalGapWorker(ILocalGapStore store, ILocalGapIo io) : IAs
         catch (Exception error)
         {
             store.SetGapStatus(root.RootId, true, $"metadata promotion deferred: {error.Message}; retry next sync");
-            RunLog.Trace($"local gap metadata promotion deferred: {root.RootId}: {error}");
+            RunTrace.Emit($"local gap metadata promotion deferred: {root.RootId}: {error}");
             return;
         }
     }
@@ -318,7 +319,7 @@ internal sealed class LocalGapWorker(ILocalGapStore store, ILocalGapIo io) : IAs
                 catch (Exception error)
                 {
                     store.DeferGapResult(root.RootId, result, error.Message);
-                    RunLog.Trace($"local gap result validation deferred: {result.Expected.Path}: {error}");
+                    RunTrace.Emit($"local gap result validation deferred: {result.Expected.Path}: {error}");
                 }
             }
         }
@@ -333,7 +334,7 @@ internal sealed class LocalGapWorker(ILocalGapStore store, ILocalGapIo io) : IAs
             _disposed = true; _stop.Cancel(); tasks = _roots.Values.ToArray();
         }
         try { await Task.WhenAll(tasks).ConfigureAwait(false); }
-        catch (Exception error) { RunLog.Trace($"local gap shutdown: {error}"); }
+        catch (Exception error) { RunTrace.Emit($"local gap shutdown: {error}"); }
         finally
         {
             foreach (var stop in _rootStops.Values) stop.Dispose();

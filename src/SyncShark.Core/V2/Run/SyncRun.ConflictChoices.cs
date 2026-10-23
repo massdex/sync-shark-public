@@ -154,7 +154,7 @@ public sealed partial class SyncRun
         var id = ShortId.Make("nch", pairId, noticeId);
         ActionResult Result(Outcome outcome, string reason) => new(id, outcome, null, null, null, reason);
         var (pair, notice) = ConflictNotice(pairId, noticeId);
-        if (!NoticeChoices.Options(notice).Any(option => option.Choice == choice))
+        if (!NoticeChoices.IsAdmissible(notice, choice))
             return Result(Outcome.Skipped, "Choose an action offered by this notice. No files changed.");
         if (notice.ConflictOperation is { } checkpoint)
         {
@@ -335,7 +335,7 @@ public sealed partial class SyncRun
         {
             var intent = _store.IntentById(pair.PairId, action.ActionId) ?? action;
             var result = await EffectResolver.ResolveAsync(intent, intent.Target == Side.A ? a : b,
-                intent.Target == Side.A ? b : a, ct,
+                intent.Target == Side.A ? b : a, ct, isStateDamage: StorageFailureClassifier.IsStateDamage,
                 preserved: RecoverySafety.PreservedReceipt(_store, pair.PairId, intent)).ConfigureAwait(false);
             return (Action: intent, Result: result);
         })).ConfigureAwait(false);

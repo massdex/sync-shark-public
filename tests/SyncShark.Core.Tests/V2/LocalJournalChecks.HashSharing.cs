@@ -20,7 +20,7 @@ internal static partial class LocalJournalChecks
             seed.SetLength(size);
         using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
         var root = LocalChecks.RootOf(rootPath, "hash-sharing");
-        var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), StorageChecks.Fast, TimeProvider.System);
+        var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), StorageChecks.Fast, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage);
         var snapshot = await inventory.FullAsync(store.BeginGeneration(root.RootId, "full"), _ => true, null!, default);
         LocalChecks.Require(snapshot.IncompleteSubtrees.Count == 0, "native metadata inventory is complete for sharing fixture");
         store.WriteSnapshot(snapshot);

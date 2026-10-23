@@ -324,7 +324,7 @@ internal sealed class PairLoop
         if (_last?.Outcome == RunOutcomes.StateDamaged) { RunOutput.Observe(error); return; }
         try
         {
-            FailureRetryOwner.RecordRunFailure(_in.Store, _pairId, error, _in.Time.GetUtcNow());
+            FailureRetryOwner.RecordRunFailure(_in.Store, _pairId, error, _in.Time.GetUtcNow(), isStateDamage: StorageFailureClassifier.IsStateDamage);
         }
         catch (Exception) { /* A damaged/unavailable notice store cannot terminate another pair or the host. */ }
     }

@@ -75,7 +75,7 @@ internal static partial class ExecutorChecks
                             RemoveSourceAsync(endpoint, "new").GetAwaiter().GetResult();
                     }
                 };
-                var results = await Apply(new Executor(recording, Settings(2), Admission()), Plan(adopt, delete),
+                var results = await Apply(new Executor(recording, Settings(2), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), Plan(adopt, delete),
                     side == Side.A ? target : a, side == Side.B ? target : b);
                 Require(results.Single(r => r.ActionId == adopt.ActionId).Outcome == Outcome.Done,
                     "ordinary Adopt remains metadata-only: " + results.Single(r => r.ActionId == adopt.ActionId).Reason);

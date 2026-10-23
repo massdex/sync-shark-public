@@ -17,6 +17,7 @@ public sealed partial class LocalInventory : IInventorySource
     private readonly IStateStore _known;
     private readonly IReadOnlySet<string> _productOwnedPaths;
     private readonly IReadOnlySet<string> _productOwnedRelative;
+    private readonly Func<Exception, bool> _isStateDamage;
     private readonly V2Settings _settings;
     private readonly TimeProvider _clock;
     private readonly uint _volume;
@@ -39,8 +40,10 @@ public sealed partial class LocalInventory : IInventorySource
 
     /// <summary>Binds one local root; the saved root object id must parse into its NTFS identity.</summary>
     public LocalInventory(RootDef root, Side side, IStateStore known,
-        IReadOnlySet<string> productOwnedPaths, V2Settings settings, TimeProvider clock, IDefenderHistory? history = null, string? pairId = null)
+        IReadOnlySet<string> productOwnedPaths, V2Settings settings, TimeProvider clock, Func<Exception, bool> isStateDamage, IDefenderHistory? history = null, string? pairId = null)
     {
+        ArgumentNullException.ThrowIfNull(isStateDamage);
+        _isStateDamage = isStateDamage;
         _root = root ?? throw new ArgumentNullException(nameof(root));
         _side = side;
         _history = history;
@@ -92,7 +95,7 @@ public sealed partial class LocalInventory : IInventorySource
         async Task WalkAsync(string directory, PilotDirectoryIdentity identity)
         {
             try { await WalkCoreAsync(directory, identity).ConfigureAwait(false); }
-            catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct) == FailureRetryOwner.FailureScope.Item)
+            catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct, isStateDamage: _isStateDamage) == FailureRetryOwner.FailureScope.Item)
             {
                 await accept([new ItemState(directory, ItemKind.Folder, "", null, null, 0,
                     DateTimeOffset.UnixEpoch, ItemFlags.Unreadable) { IncompleteReason = error.Message }]).ConfigureAwait(false);
@@ -199,7 +202,7 @@ public sealed partial class LocalInventory : IInventorySource
             ((ILocalGapStore)sql).BeginGap(rootId, checkpoint.Cursor, replayNext, true,
                 "catch-up replay byte budget exceeded; fresh inventory with per-file protection");
             sql.ForgetLocalWalk(rootId);
-            RunLog.Trace($"local catch-up bounded ({rootId}): fresh protected walk, no oversized journal replay");
+            RunTrace.Emit($"local catch-up bounded ({rootId}): fresh protected walk, no oversized journal replay");
         }
         if (checkpoint is null) { sql?.ForgetLocalWalk(rootId); sql = null; }
         var options = JsonSerializer.Serialize(new { _settings.ReplaceOnlineOnlyStubs,
@@ -369,7 +372,7 @@ public sealed partial class LocalInventory : IInventorySource
             if (change.State is not { Kind: ItemKind.File } state) continue;
             ct.ThrowIfCancellationRequested();
             if (!names.Ambiguous(LocalItems.ParseObjectId(state.ObjectId).FileId, state, requirePresent: true)) continue;
-            RunLog.Trace("local journal post-refresh retry: " + names.LastFailure);
+            RunTrace.Emit("local journal post-refresh retry: " + names.LastFailure);
             Defer(new(LocalItems.ParseObjectId(state.ObjectId).FileId, 0, 0, 0, FileAttributes.Normal, ""),
                 _known.ByObject(rootId, state.ObjectId), state.Path,
                 names.LastFailure ?? "refreshed file has ambiguous hard-link identity");
@@ -396,7 +399,7 @@ public sealed partial class LocalInventory : IInventorySource
                 IncompleteReasons = delta.IncompleteReasons.Concat(scoped).GroupBy(entry => entry.Key, StringComparer.OrdinalIgnoreCase)
                     .ToDictionary(group => group.Key, group => group.Last().Value, StringComparer.OrdinalIgnoreCase)
             };
-            RunLog.Trace($"local journal scoped retry ({rootId}): {scoped.Count} ambiguous path(s); remaining replay retained");
+            RunTrace.Emit($"local journal scoped retry ({rootId}): {scoped.Count} ambiguous path(s); remaining replay retained");
         }
         var written = changes.Where(change => (change.Reason & 0x7) != 0)
             .Select(change => SyncLocalEndpointStore.ObjectId(_volume, change.FileId)).ToHashSet(StringComparer.Ordinal);
@@ -606,18 +609,18 @@ public sealed partial class LocalInventory : IInventorySource
             if (proof is { Outcome: LocalGapHashOutcome.Verified, Hash: { } hash, Proof: { } evidence })
             {
                 if (!LocalGapWorker.Matches(item, evidence.File))
-                    RunLog.Trace($"content proof rejected ({_root.RootId}): {item.Path}: native identity or metadata changed");
+                    RunTrace.Emit($"content proof rejected ({_root.RootId}): {item.Path}: native identity or metadata changed");
                 else if (_known.CompleteIndexingRehash(_root.RootId, item, hash, revision))
                 {
                     hashes[item.Path] = hash;
                     CompletePointerVerification(item);
                 }
                 else
-                    RunLog.Trace($"content proof publication rejected ({_root.RootId}): {item.Path}: captured-revision={revision}; current-revision={_known.RehashRevision(_root.RootId, item.ObjectId)}; newer obligation or observation");
+                    RunTrace.Emit($"content proof publication rejected ({_root.RootId}): {item.Path}: captured-revision={revision}; current-revision={_known.RehashRevision(_root.RootId, item.ObjectId)}; newer obligation or observation");
             }
             else
             {
-                RunLog.Trace($"content proof unavailable ({_root.RootId}): {item.Path}: outcome={proof.Outcome}; reason={proof.Reason ?? "not supplied"}");
+                RunTrace.Emit($"content proof unavailable ({_root.RootId}): {item.Path}: outcome={proof.Outcome}; reason={proof.Reason ?? "not supplied"}");
                 if (proof.Outcome == LocalGapHashOutcome.Unverifiable)
                     _known.FailIndexingRehash(_root.RootId, item, revision, proof.Reason ?? "content proof unavailable or changed");
             }
@@ -823,7 +826,7 @@ public sealed partial class LocalInventory : IInventorySource
     internal Delta RetryJournal(long gen, string rootId, string cursor, string reason)
     {
         LastFallbackReason = reason;
-        RunLog.Trace($"local journal retry next sync ({rootId}): {reason}");
+        RunTrace.Emit($"local journal retry next sync ({rootId}): {reason}");
         // Preserve the exact cursor, and mark this run unknown rather than inventing deletion evidence.
         return new(rootId, _side, gen, cursor, cursor, Array.Empty<Change>(), false, [string.Empty]);
     }
@@ -831,7 +834,7 @@ public sealed partial class LocalInventory : IInventorySource
     private Delta Invalid(long gen, string rootId, string cursor, string reason)
     {
         LastFallbackReason = reason;
-        RunLog.Trace($"local full reconciliation ({rootId}): {reason}");
+        RunTrace.Emit($"local full reconciliation ({rootId}): {reason}");
         // A caller that keeps the scopes as read debt (RetryScanScopesAsync) reads this to explain the
         // failure; callers that rescan ignore it.
         return new(rootId, _side, gen, cursor, cursor, Array.Empty<Change>(), true, Array.Empty<string>())

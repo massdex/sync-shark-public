@@ -189,19 +189,19 @@ public sealed partial class SyncRun
     private void RecordUnavailable(string pairId, Exception error, bool completion = false)
     {
         RunLog.Trace("Run incomplete; automatic retry required: " + error.ToString());
-        if (FailureRetryOwner.ScopeOf(error, CancellationToken.None) == FailureRetryOwner.FailureScope.State)
+        if (StorageFailureClassifier.ScopeOf(error, CancellationToken.None) == FailureRetryOwner.FailureScope.State)
             return; // Fatal persistence is reported in memory, never written back through the damaged store.
         try
         {
             if (_store.Pair(pairId) is null) return;
-            FailureRetryOwner.RecordRunFailure(_store, pairId, error, _time.GetUtcNow());
+            FailureRetryOwner.RecordRunFailure(_store, pairId, error, _time.GetUtcNow(), isStateDamage: StorageFailureClassifier.IsStateDamage);
         }
         catch (Exception writeError) when (RunFailure(writeError, CancellationToken.None))
         { RunLog.Trace("Unable to persist run notice; retry on next run: " + writeError.ToString()); }
     }
 
     private static bool RunFailure(Exception error, CancellationToken ct) =>
-        FailureRetryOwner.ScopeOf(error, ct) == FailureRetryOwner.FailureScope.Item &&
+        StorageFailureClassifier.ScopeOf(error, ct) == FailureRetryOwner.FailureScope.Item &&
         error is not SyncRunRefusedException;
 
     // Never reinterpret cancellation, lost endpoint authority or damaged persistence as a

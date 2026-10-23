@@ -433,7 +433,7 @@ internal static partial class DropboxChecks
             using var http = new HttpClient(h.Wire);
             var client = new DropboxPilotClient(http, new FixedTokenSource(), "/", Binding(), "ns:root-namespace");
             var writer = new DropboxWriter(new RootDef(RootId, "Dropbox", "acc", "/", "ns:root-namespace"), Side.B,
-                client, Path.Combine(_root, "spool-ns"),
+                client, Path.Combine(_root, "spool-ns"), isStateDamage: StorageFailureClassifier.IsStateDamage,
                 V2Settings.Default with { UploadBatchSize = 1, MkDirBatchSize = 1 });
             var bytes = Encoding.UTF8.GetBytes("0123456789");
             await writer.PutAsync(PutAction("plain.txt", Source("plain.txt", bytes)), new MemoryStream(bytes),

@@ -15,7 +15,7 @@ internal static partial class DropboxChecks
         h.Wire.SeedFile("Doc.txt", "content");
         var original = (await writer.ObserveAsync("Doc.txt", CancellationToken.None))!;
         var localWriter = await LocalWriter.OpenAsync(pair.A, Side.A, pair.PairId, LocalChecks.InstallationId,
-            Path.Combine(directory, "recovery"), CancellationToken.None, settings);
+            Path.Combine(directory, "recovery"), CancellationToken.None, isStateDamage: StorageFailureClassifier.IsStateDamage, settings);
         var source = (await localWriter.ObserveAsync("doc.txt", CancellationToken.None))!;
         var action = new SyncAction("outage-case-intent", 20, ActionKind.Move, Side.B, "doc.txt", "Doc.txt", source, original, false, "case-key");
         var state = Path.Combine(directory, "state");
@@ -41,7 +41,7 @@ internal static partial class DropboxChecks
         }
         using var reopened = SqliteStateStore.Open(state, settings, TimeProvider.System);
         var endpoints = new FakeEndpointProvider().AddWriter(pair.A, localWriter).AddWriter(pair.B, writer)
-            .AddInventory(pair.A, new LocalInventory(pair.A, Side.A, reopened, new HashSet<string>(), settings, TimeProvider.System))
+            .AddInventory(pair.A, new LocalInventory(pair.A, Side.A, reopened, new HashSet<string>(), settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage))
             .AddInventory(pair.B, new DropboxInventory(pair.B, Side.B, h.Client, reopened, pair.PairId));
         var preview = new PlanOnlyEndpoints(endpoints);
         var calls = h.Wire.Calls.Count;
@@ -52,7 +52,7 @@ internal static partial class DropboxChecks
         h.Client.ReadRetryTime = clock;
         h.Client.ReadRetryDelay = (delay, ct) => { ct.ThrowIfCancellationRequested(); clock.Advance(delay); return Task.CompletedTask; };
         h.Wire.UnavailableMetadataIdentity = original.ObjectId;
-        var run = new SyncRun(reopened, new Executor(reopened, settings, ExecutorChecks.Admission()), endpoints, settings, TimeProvider.System);
+        var run = new SyncRun(reopened, new Executor(reopened, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), endpoints, settings, TimeProvider.System);
         await run.IncrementalAsync(pair.PairId, new RecordingProgress(), CancellationToken.None);
         Require(reopened.UnresolvedIntents(pair.PairId).Single().ActionId == action.ActionId,
             "cold-reopen lookup outage retains the interrupted intent");

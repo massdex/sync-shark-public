@@ -390,7 +390,7 @@ internal static partial class DropboxChecks
         var provider = new FakeEndpointProvider().Add(pair.A, local)
             .AddInventory(pair.B, new DropboxInventory(pair.B, Side.B, h.Client, store, pair.PairId))
             .AddWriter(pair.B, h.Writer(Path.Combine(productRoot, "spool")));
-        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission()),
+        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
             provider, settings, time);
         return (new V2CliRuntime(null, store, run, new EndpointRootProbe(provider), productRoot), run);
     }

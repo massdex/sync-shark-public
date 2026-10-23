@@ -23,7 +23,7 @@ internal static partial class ExecutorChecks
                 : FreeSpaceAdmission.Granted,
         };
         var admission = Admission();
-        var executor = new Executor(store, Settings(4), admission);
+        var executor = new Executor(store, Settings(4), admission, isStateDamage: StorageFailureClassifier.IsStateDamage);
         var blocked = Act(ActionKind.CopyNew, Side.B, "blocked", source: refused, key: "k1");
         var allowedAction = Act(ActionKind.CopyNew, Side.B, "ok", source: allowed, key: "k2");
 
@@ -78,7 +78,7 @@ internal static partial class ExecutorChecks
     {
         await FreeSpace_CancelledAdmissionRecordsNothing();
         var (store, a, b, _) = Rig();
-        var executor = new Executor(store, Settings(4), Admission());
+        var executor = new Executor(store, Settings(4), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
 
         var success = new TrackingReservation();
         var successSource = a.Seed("success", "success-bytes", versionId: "v1");
@@ -133,7 +133,7 @@ internal static partial class ExecutorChecks
     {
         var (store, a, b, _) = Rig();
         var admission = Admission();
-        var executor = new Executor(store, Settings(4), admission);
+        var executor = new Executor(store, Settings(4), admission, isStateDamage: StorageFailureClassifier.IsStateDamage);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var record = new RecordingWriter(b)
         {
@@ -177,7 +177,7 @@ internal static partial class ExecutorChecks
             "Options: free space and retry; exclude this folder",
             FreeSpaceRefusal.InsufficientReasonKey, @"C:\", 2L << 20, 1L << 20, 512L << 20);
         var record = new RecordingWriter(b) { RefusePut = refusal };
-        var executor = new Executor(store, Settings(4), Admission());
+        var executor = new Executor(store, Settings(4), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
         var one = Act(ActionKind.CopyNew, Side.B, "one.txt", source: first, key: "k1");
         var two = Act(ActionKind.CopyNew, Side.B, "two.txt", source: second, key: "k2");
 
@@ -195,7 +195,7 @@ internal static partial class ExecutorChecks
                 notice.ReasonKey == FreeSpaceRefusal.InsufficientReasonKey &&
                 notice.FreeSpace is { VolumeRoot: @"C:\" } facts && facts.RequiredBytes == 2L << 20),
             "each refused item stores the free-space reason key and volume facts");
-        var options = NoticeChoices.Options(notices[0]);
+        var options = NoticeOptions.Options(notices[0]);
         Require(options.Any(option => option.Choice == NoticeChoices.RetryNow) &&
             options.Any(option => option.Choice == NoticeChoices.Ignore),
             "a free-space notice offers Retry and Ignore");

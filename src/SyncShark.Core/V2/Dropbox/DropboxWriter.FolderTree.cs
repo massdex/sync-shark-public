@@ -85,8 +85,9 @@ public sealed partial class DropboxWriter
                     return submit.Select(tree => DropboxItems.ToEntry(tree.Folder)).ToArray();
                 });
         }
-        catch (Exception e) when (FailureRetryOwner.ScopeOf(e, ct) == FailureRetryOwner.FailureScope.Item ||
-            e is OperationCanceledException && ct.IsCancellationRequested && prepared)
+        catch (Exception e) when (FailureRetryOwner.ScopeOf(e, ct, isStateDamage: _isStateDamage) == FailureRetryOwner.FailureScope.Item ||
+            e is OperationCanceledException && ct.IsCancellationRequested && prepared &&
+            FailureRetryOwner.ScopeOf(e, ct, _isStateDamage) != FailureRetryOwner.FailureScope.State)
         {
             outcomes.AddRange((prepared ? submit : trees.Where(tree =>
                     !outcomes.Any(outcome => ReferenceEquals(outcome.Tree, tree))))
@@ -146,7 +147,7 @@ public sealed partial class DropboxWriter
             return await FinishFolderGroupAsync(trees, recovery,
                 updated => checkpoint(JsonSerializer.Serialize(updated)));
         }
-        catch (Exception e) when (e is not PairPausedException && !(e is OperationCanceledException && ct.IsCancellationRequested))
+        catch (Exception e) when (!_isStateDamage(e) && e is not PairPausedException && !(e is OperationCanceledException && ct.IsCancellationRequested))
         {
             return trees.Select(tree => FolderTreeOutcome.Of(tree, FolderTreeStatus.Uncertain,
                 "The whole-folder recovery could not be checked: " + Describe(e))).ToArray();
@@ -240,7 +241,7 @@ public sealed partial class DropboxWriter
             }
             return results;
         }
-        catch (Exception e) when (e is not PairPausedException)
+        catch (Exception e) when (!_isStateDamage(e) && e is not PairPausedException)
         {
             return trees.Select(tree => FolderTreeOutcome.Of(tree, FolderTreeStatus.Uncertain,
                 "The change feed after the whole-folder delete could not be read: " + Describe(e))).ToArray();
@@ -391,7 +392,7 @@ public sealed partial class DropboxWriter
                     await recordSettled(path, null);
                     restored.Add(path);
                 }
-                catch (Exception e) when (e is not (RecoveryCheckpointException or PairPausedException))
+                catch (Exception e) when (!_isStateDamage(e) && e is not (RecoveryCheckpointException or PairPausedException))
                 {
                     var rejection = (e as FolderRestoreNotAppliedException)?.InnerException ?? e;
                     if ((e is FolderRestoreNotAppliedException || !started.ContainsKey(path)) && PermanentRestoreRejection(rejection))
@@ -445,7 +446,7 @@ public sealed partial class DropboxWriter
                         restored.Add(path);
                     }
                 }
-                catch (Exception e) when (e is not (RecoveryCheckpointException or PairPausedException))
+                catch (Exception e) when (!_isStateDamage(e) && e is not (RecoveryCheckpointException or PairPausedException))
                 {
                     var rejection = (e as FolderRestoreNotAppliedException)?.InnerException ?? e;
                     if ((e is FolderRestoreNotAppliedException || !started.ContainsKey(path)) && PermanentRestoreRejection(rejection))
@@ -477,7 +478,7 @@ public sealed partial class DropboxWriter
                     $"Could not restore {unrestored.Count} item(s) added or changed after the scan: {failure}",
                     kept, unconfirmed, restored, unrestored);
         }
-        catch (Exception e) when (e is not PairPausedException)
+        catch (Exception e) when (!_isStateDamage(e) && e is not PairPausedException)
         {
             return FolderTreeOutcome.Of(tree, FolderTreeStatus.Uncertain,
                 "The whole-folder delete could not be checked: " + Describe(e));

@@ -434,7 +434,7 @@ public sealed partial class SyncRun
                 catch (Exception error) when (ScopeFailure(error, ct)) { Trace("held file worker: " + error.GetType().Name); }
                 catch (PairPausedException) { throw; }
                 catch (Exception error) when (ct.IsCancellationRequested &&
-                    FailureRetryOwner.ScopeOf(error, ct) != FailureRetryOwner.FailureScope.State)
+                    StorageFailureClassifier.ScopeOf(error, ct) != FailureRetryOwner.FailureScope.State)
                 { /* Ordinary worker faults cannot replace cancellation; fatal state must escape. */ }
                 finally { gate.Dispose(); }
             }
@@ -714,7 +714,7 @@ public sealed partial class SyncRun
             catch (Exception error)
             {
                 failure = error;
-                if (FailureRetryOwner.ScopeOf(error, token) == FailureRetryOwner.FailureScope.State)
+                if (StorageFailureClassifier.ScopeOf(error, token) == FailureRetryOwner.FailureScope.State)
                     Interlocked.Exchange(ref executionFailure, error);
                 else Interlocked.CompareExchange(ref executionFailure, error, null);
             }
@@ -736,7 +736,7 @@ public sealed partial class SyncRun
         }
         catch (Exception error)
         {
-            if (FailureRetryOwner.ScopeOf(error, token) == FailureRetryOwner.FailureScope.State)
+            if (StorageFailureClassifier.ScopeOf(error, token) == FailureRetryOwner.FailureScope.State)
                 Interlocked.Exchange(ref executionFailure, error);
             throw;
         }
@@ -748,7 +748,7 @@ public sealed partial class SyncRun
             {
                 // Cancellation of the consumer cannot erase durable results already queued.
                 while (results.Reader.TryRead(out var item)) tally.Add(pair, item.Action, item.Result);
-                if (executionFailure is null || FailureRetryOwner.ScopeOf(executionFailure, token) != FailureRetryOwner.FailureScope.State)
+                if (executionFailure is null || StorageFailureClassifier.ScopeOf(executionFailure, token) != FailureRetryOwner.FailureScope.State)
                     FairStoreGate.Cleanup(() => AddProviderNameRefusalNotice(pair));
             }
         }

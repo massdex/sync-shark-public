@@ -22,7 +22,7 @@ internal static partial class DropboxChecks
             var folder = (await fixture.Writer().ObserveAsync("reviewed", default))!;
             var action = new SyncAction("reviewed", 40, ActionKind.Delete, side, folder.Path,
                 null, null, folder, false, null) { RemovalReviewChoice = true };
-            var signature = await DeleteSourceGuard.CaptureReviewedRemovalAsync(action, pair, fixture.Known, inventory, default);
+            var signature = await DeleteSourceGuard.CaptureReviewedRemovalAsync(action, pair, fixture.Known, inventory, default, isStateDamage: StorageFailureClassifier.IsStateDamage);
             LocalChecks.Require(signature is not null, "real Dropbox adapter captures baseline proof");
             action = action with { FrozenRemovalSignature = signature };
             fixture.Wire.ListedRootCopies = copies;
@@ -32,7 +32,7 @@ internal static partial class DropboxChecks
             await inventory.ReadSubtreeAsync(folder.Path, page => { rows.AddRange(page); return Task.CompletedTask; }, default);
             LocalChecks.Require(different || rows.Count(item => item.Path == folder.Path) == 1,
                 "metadata root emitted once despite zero, one or repeated list roots");
-            LocalChecks.Require(await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(action, pair, fixture.Known, inventory, default) == !different,
+            LocalChecks.Require(await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(action, pair, fixture.Known, inventory, default, isStateDamage: StorageFailureClassifier.IsStateDamage) == !different,
                 "matching listed roots never count as children; different identity at root path vetoes");
         }
     }

@@ -23,7 +23,7 @@ internal static partial class DropboxChecks
             var writer = h.Writer(Path.Combine(home, "spool"));
             var provider = new FakeEndpointProvider().Add(pair.A, local).AddInventory(pair.B, inventory).AddWriter(pair.B, writer);
             var settings = V2Settings.Default with { ProgressInterval = TimeSpan.Zero, MaxWorkers = 1 };
-            var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission()), provider, settings, TimeProvider.System);
+            var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider, settings, TimeProvider.System);
             var runtime = new V2CliRuntime(null, store, run, new EndpointRootProbe(provider), Path.Combine(home, "prepare"));
             await runtime.PrepareFirstSyncAsync(pair.PairId, _ => { }, default);
             var initial = await runtime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { }, default);
@@ -76,7 +76,7 @@ internal static partial class DropboxChecks
         var writer = h.Writer(Path.Combine(folder, "spool"));
         var provider = new FakeEndpointProvider().Add(pair.A, local).AddInventory(pair.B, inventory).AddWriter(pair.B, writer);
         var settings = V2Settings.Default with { ProgressInterval = TimeSpan.Zero, MaxWorkers = 1 };
-        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission()), provider, settings, TimeProvider.System);
+        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider, settings, TimeProvider.System);
         var runtime = new V2CliRuntime(null, store, run, new EndpointRootProbe(provider), Path.Combine(folder, "prepare"));
         await runtime.PrepareFirstSyncAsync(pair.PairId, _ => { }, default);
         var initial = await runtime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { }, default);

@@ -19,13 +19,13 @@ internal static partial class ExecutorChecks
         var action = Act(ActionKind.CopyNew, Side.B, "grace", source: source.Seed("grace", "content")) with
             { ProviderEffect = new ProviderEffectCheckpoint("upload-commit", "s1", start) };
         var legacy = await EffectResolver.ResolveAsync(action with
-            { ProviderEffect = new ProviderEffectCheckpoint("upload-commit", "legacy") }, target, source, default,
+            { ProviderEffect = new ProviderEffectCheckpoint("upload-commit", "legacy") }, target, source, default, isStateDamage: StorageFailureClassifier.IsStateDamage,
             TimeSpan.FromMinutes(15), new RecoveryClock(start));
         Require(legacy.Outcome == Outcome.Uncertain && legacy.RetryAfterSeconds is null,
             "legacy checkpoint without timestamp needs review, not endless retry");
         foreach (var seconds in new[] { 30, 300, 1800 })
         {
-            var result = await EffectResolver.ResolveAsync(action, target, source, default,
+            var result = await EffectResolver.ResolveAsync(action, target, source, default, isStateDamage: StorageFailureClassifier.IsStateDamage,
                 TimeSpan.FromMinutes(15), new RecoveryClock(start.AddSeconds(seconds)));
             Require(seconds < 900 ? result.Outcome == Outcome.Uncertain && result.RetryAfterSeconds == 900 - seconds
                 : result.Outcome == Outcome.Skipped && result.RetryAfterSeconds is null,
@@ -43,7 +43,7 @@ internal static partial class ExecutorChecks
         using var wire = new DropboxWire { DeleteBatchAsyncJob = true };
         using var http = new HttpClient(wire);
         var settings = Settings(1) with { DeleteBatchSize = 1, StoreDurableCommits = false };
-        var writer = new DropboxWriter(Pair().B, Side.B, UploadSafetyClient(http, new FixedTokenSource()), "unused", settings);
+        var writer = new DropboxWriter(Pair().B, Side.B, UploadSafetyClient(http, new FixedTokenSource()), "unused", isStateDamage: StorageFailureClassifier.IsStateDamage, settings);
         wire.SeedFile("delete-restart", "old");
         var victim = (await writer.ObserveAsync("delete-restart", default))!;
         var source = new FakeEndpoint(Side.A, "ra");
@@ -76,7 +76,7 @@ internal static partial class ExecutorChecks
         using var reopened = SqliteStateStore.Open(folder, settings, TimeProvider.System);
         var pending = reopened.UnresolvedIntents("p1");
         Require(pending.Count == 1 && pending[0].ProviderEffect?.Kind == "delete-job", "restart retains the exact job checkpoint");
-        var results = await new Executor(reopened, settings, Admission()).ReconcileAsync(pending, 1,
+        var results = await new Executor(reopened, settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage).ReconcileAsync(pending, 1,
             source, writer, default);
         Require(results.Single().Outcome == Outcome.Done && reopened.UnresolvedIntents("p1").Count == 0,
             "saved job resolves its original deletion after store reopen");
@@ -98,12 +98,12 @@ internal static partial class ExecutorChecks
         using var http = new HttpClient(wire);
         var settings = Settings(8) with { UploadBatchSize = count, PendingUploadCommitLimit = count,
             UploadBatchMaxAge = TimeSpan.FromMinutes(1), StoreDurableCommits = false };
-        var writer = new DropboxWriter(Pair().B, Side.B, UploadSafetyClient(http, new FixedTokenSource()), "unused", settings);
+        var writer = new DropboxWriter(Pair().B, Side.B, UploadSafetyClient(http, new FixedTokenSource()), "unused", isStateDamage: StorageFailureClassifier.IsStateDamage, settings);
         var folder = Path.Combine(root, "lost-ack-" + Guid.NewGuid().ToString("N"));
         using (var store = SqliteStateStore.Open(folder, settings, TimeProvider.System))
         {
             store.SavePair(Pair());
-            var results = await Apply(new Executor(store, settings, Admission()), Plan(actions), source, writer)
+            var results = await Apply(new Executor(store, settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), Plan(actions), source, writer)
                 .WaitAsync(TimeSpan.FromSeconds(20));
             Require(results.Count == count && wire.BatchSizes.SequenceEqual(new[] { count }), "one full 1000-entry uncertain finish");
             Require(results.Count(r => r.Outcome == Outcome.Done) == landed, "positive observations retain applied effects");
@@ -113,7 +113,7 @@ internal static partial class ExecutorChecks
         {
             var pending = reopened.UnresolvedIntents("p1");
             Require(pending.All(a => a.ProviderEffect?.Kind == "upload-commit"), "commit checkpoints survive reopening");
-            var executor = new Executor(reopened, settings, Admission());
+            var executor = new Executor(reopened, settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
             var results = await executor.ReconcileAsync(pending, 1, source, writer, default);
             Require(results.All(r => r.Outcome == Outcome.Uncertain), "absence alone never immediately replays an unknown finish");
             Require(wire.Finishes == 1 && wire.Starts == count, "restart sends no duplicate mutation");

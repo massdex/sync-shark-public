@@ -4,6 +4,7 @@ internal static partial class RunChecks
 {
     private static async Task Output_ReviewChecksAsync()
     {
+        await Output_DiagnosticPortsAsync();
         var byteSink = new RecordingProgress();
         using (var activity = RunActivity.Begin(byteSink, V2Settings.Default, TimeProvider.System))
         {
@@ -134,5 +135,103 @@ internal static partial class RunChecks
         }
         finally { Directory.Delete(directory, true); }
         Console.WriteLine("PASS Output_ReviewChecks");
+    }
+
+    private static async Task Output_DiagnosticPortsAsync()
+    {
+        var previousTrace = RunTrace.Slot.Value;
+        var previousPreparation = RunPreparation.Slot.Value;
+        var root = Path.Combine(PhysicalFixtureRoot, "diagnostic-ports-" + Guid.NewGuid().ToString("N"));
+        var error = Console.Error;
+        try
+        {
+            RunTrace.Slot.Value = null;
+            RunPreparation.Slot.Value = null;
+            using var fallback = new StringWriter();
+            Console.SetError(fallback);
+            RunTrace.Emit("lower fallback");
+            RunLog.Trace("shim fallback");
+            Require(fallback.ToString() == "Sync Shark trace: lower fallback" + Environment.NewLine +
+                "Sync Shark trace: shim fallback" + Environment.NewLine, "exact lower and shim no-scope fallback text");
+            Console.SetError(new ThrowingOutput());
+            RunTrace.Emit("failed sink");
+            RunPreparation.Report("no scope");
+            Console.SetError(error);
+
+            using (var outer = RunLog.Open(root, "outer", "run", false))
+            {
+                Require(ReferenceEquals(RunTrace.Slot.Value, outer) && ReferenceEquals(RunLog.Current, outer),
+                    "logger port and shim share actual instance identity");
+                using (var inner = RunLog.Open(root, "inner", "run", false))
+                {
+                    RunTrace.Emit("inner-only");
+                    Require(ReferenceEquals(RunTrace.Slot.Value, inner), "nested logger installs its single port slot");
+                }
+                Require(ReferenceEquals(RunLog.Current, outer), "nested logger restores outer");
+                var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var child = Task.Run(async () =>
+                {
+                    using var log = RunLog.Open(root, "child", "run", false);
+                    ready.SetResult();
+                    await release.Task;
+                    Require(ReferenceEquals(RunTrace.Slot.Value, log), "child logger survives parent flow activity");
+                    RunTrace.Emit("child-only");
+                });
+                await ready.Task;
+                try { Require(ReferenceEquals(RunLog.Current, outer), "concurrent logger cannot replace parent slot"); }
+                finally { release.SetResult(); }
+                await child;
+                RunTrace.Emit("outer-only");
+            }
+            Require(RunTrace.Slot.Value is null, "logger scope restores empty slot after writer completion");
+
+            var clock = new OutputClock();
+            var sink = new RecordingProgress();
+            using (var outer = RunActivity.Begin(sink, V2Settings.Default, clock))
+            {
+                RunPreparation.Report("outer preparation");
+                using (var inner = RunActivity.Begin(null, V2Settings.Default, clock))
+                {
+                    RunActivity.Preparation("inner preparation");
+                    Require(ReferenceEquals(RunPreparation.Slot.Value, inner), "preparation shim and port share nested instance");
+                }
+                Require(ReferenceEquals(RunPreparation.Slot.Value, outer), "nested activity restores outer port");
+                await Task.Run(async () =>
+                {
+                    using var child = RunActivity.Begin(null, V2Settings.Default, clock);
+                    await Task.Yield();
+                    RunPreparation.Report("child preparation");
+                    Require(ReferenceEquals(RunPreparation.Slot.Value, child), "activity slot flows across child awaits");
+                });
+                Require(ReferenceEquals(RunPreparation.Slot.Value, outer), "child activity leaves parent scope intact");
+                clock.Advance(30);
+                Require(sink.Reports.Any(x => x.Message?.Contains("outer preparation") == true) &&
+                    sink.Reports.All(x => x.Message?.Contains("child preparation") != true &&
+                        x.Message?.Contains("inner preparation") != true), "preparation text remains isolated per activity");
+            }
+            Require(RunPreparation.Slot.Value is null, "activity restores empty port slot");
+
+            using (var prior = RunLog.Open(root, "prior", "run", false))
+            using (var log = RunLog.Open(root, "conditional", "run", false))
+            {
+                RunTrace.Slot.Value = null;
+                log.Dispose();
+                Require(RunTrace.Slot.Value is null, "logger disposal does not replace a changed slot");
+            }
+            using (var prior = RunActivity.Begin(null, V2Settings.Default, clock))
+            using (var activity = RunActivity.Begin(null, V2Settings.Default, clock))
+            {
+                RunPreparation.Slot.Value = null;
+                activity.Dispose();
+                Require(RunPreparation.Slot.Value is null, "activity disposal does not replace a changed slot");
+            }
+        }
+        finally
+        {
+            Console.SetError(error);
+            RunTrace.Slot.Value = previousTrace;
+            RunPreparation.Slot.Value = previousPreparation;
+        }
     }
 }

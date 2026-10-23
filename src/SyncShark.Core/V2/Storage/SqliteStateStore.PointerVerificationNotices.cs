@@ -4,6 +4,12 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SqliteStateStore
 {
+    void IStateStore.RecordPointerVerificationNotice(string pairId, Notice itemNotice, string itemFamily,
+        Notice summaryNotice, string summaryFamily) =>
+        RecordPointerVerificationNotice(pairId, itemNotice, itemFamily, summaryNotice, summaryFamily);
+    void IStateStore.RetirePointerVerificationSummary(string pairId, StorageNotice summary) =>
+        RetirePointerVerificationSummary(pairId, summary);
+
     /// <summary>
     /// Writes the per-item verification notice while the pair has at most <see cref="StorageNotices.NoticeAggregateLimit"/>
     /// open item notices, and replaces the whole item family with one pair summary above it. The entity debts

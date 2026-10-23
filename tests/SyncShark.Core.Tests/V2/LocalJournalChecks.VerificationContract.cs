@@ -53,7 +53,7 @@ internal static partial class LocalJournalChecks
             var gaps = (ILocalGapStore)cloudStore;
             gaps.BeginGap(cloudRoot.RootId, "0000000000000001:200", 100, true);
             var io = new GapCheckIo(stamp, "0000000000000001:200") { RequiresHash = true, UsnOverride = 99 };
-            await using var worker = new LocalGapWorker(gaps, io);
+            await using var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage);
             worker.Discover(cloudRoot, gaps.GapEpoch(cloudRoot.RootId)!, default);
             gaps.PromoteGapDiscovery(cloudRoot.RootId);
             LocalChecks.Require(gaps.GapHashPage(cloudRoot.RootId, gaps.GapEpoch(cloudRoot.RootId)!, 10).Count == 1 &&
@@ -121,7 +121,7 @@ internal static partial class LocalJournalChecks
             if (!ReferenceEquals(contractStore, store))
                 contractStore.WriteSnapshot(new(def.RootId, Side.A, contractStore.BeginGeneration(def.RootId, "full"), "", [item], []));
             contractStore.RequireRehash(def.RootId, item, "race start");
-            var raceInventory = new LocalInventory(def, Side.A, contractStore, new HashSet<string>(), V2Settings.Default, TimeProvider.System);
+            var raceInventory = new LocalInventory(def, Side.A, contractStore, new HashSet<string>(), V2Settings.Default, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage);
             raceInventory.GapIo = new VerificationTestIo((_, selected, _) =>
             {
                 contractStore.RequireRehash(def.RootId, selected, "newer write DURING reader");

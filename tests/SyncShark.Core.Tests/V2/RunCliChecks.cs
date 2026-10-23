@@ -274,7 +274,7 @@ internal static partial class RunCliChecks
         public required PairDef Pair { get; init; }
 
         public SyncRun Run() =>
-            new(Store, new Executor(Store, Settings, ExecutorChecks.Admission()), Provider, Settings, TimeProvider.System);
+            new(Store, new Executor(Store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), Provider, Settings, TimeProvider.System);
     }
 
     private static Fixture Build(string pairId = "p1", IStateStore? store = null)

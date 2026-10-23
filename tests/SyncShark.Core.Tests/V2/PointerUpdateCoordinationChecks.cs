@@ -49,7 +49,7 @@ internal static class PointerUpdateCoordinationChecks
         {
             writer.Cause = cause;
             var runner = new ActionRunner(committer, V2Settings.Default, Admission(), pair.PairId,
-                writer, writer, [], new());
+                writer, writer, [], new(), isStateDamage: StorageFailureClassifier.IsStateDamage);
             var result = await runner.RunAsync(action, CancellationToken.None);
             Require(result?.Outcome == Outcome.Skipped, "pair failure is deferred, not an item failure");
             Require(store.UnresolvedIntents(pair.PairId).Count == 0, "no unperformed effect remains for replay");
@@ -107,7 +107,7 @@ internal static class PointerUpdateCoordinationChecks
                 new StoragePairException("binding", "Foreign or overlapping registration."));
             var directCommitter = new StoreCommitter(store, gate, directPair.PairId, 1);
             var directRunner = new ActionRunner(directCommitter, V2Settings.Default, Admission(), directPair.PairId,
-                direct, writer, [], new());
+                direct, writer, [], new(), isStateDamage: StorageFailureClassifier.IsStateDamage);
             var deferredRun = await directRunner.RunAsync(action, CancellationToken.None);
             Require(deferredRun?.Outcome == Outcome.Skipped &&
                 store.OpenNotices(directPair.PairId).Count == 1 &&

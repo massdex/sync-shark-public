@@ -12,8 +12,9 @@ internal sealed class ActionRunner
     private const string UncertainReason = "Could not verify: effect outcome unknown";
     private const string UnexpectedKind = "Unexpected effect kind ";
 
+    private readonly Func<Exception, bool> _isStateDamage;
     private readonly StoreCommitter _committer;
-    private readonly AdmissionAbsenceBatch _absenceBatch = new();
+    private readonly AdmissionAbsenceBatch _absenceBatch;
     private readonly DropboxQuota _quota;
     private readonly SyncTransferResourceController _admission;
     private readonly string _pairId;
@@ -36,9 +37,12 @@ internal sealed class ActionRunner
 
     internal ActionRunner(StoreCommitter committer, V2Settings settings, SyncTransferResourceController admission,
         string pairId, IEndpointWriter a, IEndpointWriter b, IReadOnlyList<SyncAction> dependencies,
-        ConcurrentDictionary<string, Outcome> outcomes, DropboxQuota? quota = null,
+        ConcurrentDictionary<string, Outcome> outcomes, Func<Exception, bool> isStateDamage, DropboxQuota? quota = null,
         IReadOnlyList<SyncAction>? replacementActions = null)
     {
+        ArgumentNullException.ThrowIfNull(isStateDamage);
+        _isStateDamage = isStateDamage;
+        _absenceBatch = new(isStateDamage);
         _committer = committer;
         _quota = quota ?? new DropboxQuota(null, false);
         _admission = admission;
@@ -156,7 +160,7 @@ internal sealed class ActionRunner
             if (await GrantHoldAsync(action).ConfigureAwait(false) is { } held) return held;
             // Rule 12 checks its surviving bytes once, after the intent/admission waits below.
             if ((action.Kind != ActionKind.Delete || action.Rule != 12) &&
-                await DeleteSourceGuard.CheckAsync(action, source, _committer, _pairId, ct,
+                await DeleteSourceGuard.CheckAsync(action, source, _committer, _pairId, ct, isStateDamage: _isStateDamage,
                 DeleteSourceGuard.Replacement(action, _replacementActions),
                 pairedAdmitted: await PairedDeleteAdmittedAsync(action, ct).ConfigureAwait(false),
                 admissionBatch: _absenceBatch).ConfigureAwait(false) is { } blocked)
@@ -183,7 +187,7 @@ internal sealed class ActionRunner
                 providerContext.RevalidateDelete = async () =>
                 {
                     dispatchRefusal = await DeleteSourceGuard.CheckEvidenceAsync(action, source, historical,
-                        restorePending, ct, DeleteSourceGuard.Replacement(action, _replacementActions),
+                        restorePending, ct, isStateDamage: _isStateDamage, DeleteSourceGuard.Replacement(action, _replacementActions),
                         pairedAdmitted: await PairedDeleteAdmittedAsync(action, ct, dispatch: true).ConfigureAwait(false),
                         admissionBatch: _absenceBatch).ConfigureAwait(false);
                     return new(dispatchRefusal is null ? true : null, dispatchRefusal?.Reason);
@@ -197,7 +201,7 @@ internal sealed class ActionRunner
             // Rule 12's survivor proof must follow admission and intent-write waits: local
             // preservation can itself remove the old copy. Planned Adopt success is not proof.
             if (action.Kind == ActionKind.Delete && action.Rule == 12 &&
-                await DeleteSourceGuard.CheckAsync(action, source, _committer, _pairId, ct,
+                await DeleteSourceGuard.CheckAsync(action, source, _committer, _pairId, ct, isStateDamage: _isStateDamage,
                     pairedAdmitted: await PairedDeleteAdmittedAsync(action, ct).ConfigureAwait(false))
                     .ConfigureAwait(false) is { } staleSurvivor)
                 return await CommitAsync(action, staleSurvivor).ConfigureAwait(false);
@@ -297,7 +301,7 @@ internal sealed class ActionRunner
                         return true;
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-                catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct) == FailureRetryOwner.FailureScope.Item) { /* Unknown is not admission. */ }
+                catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct, isStateDamage: _isStateDamage) == FailureRetryOwner.FailureScope.Item) { /* Unknown is not admission. */ }
                 continue;
             }
             // Adopt runs in the earlier commit-only phase and Update before removal. A still-pending
@@ -320,7 +324,7 @@ internal sealed class ActionRunner
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             // A pause is not inconclusive evidence: propagate it instead of treating the pair as not admitted.
-            catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct) == FailureRetryOwner.FailureScope.Item) { /* Unknown is not admission. */ }
+            catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct, isStateDamage: _isStateDamage) == FailureRetryOwner.FailureScope.Item) { /* Unknown is not admission. */ }
         }
         return false;
     }
@@ -460,7 +464,7 @@ internal sealed class ActionRunner
         }
         // A user pause is not an effect failure: propagate it so the run reports Paused and the durable intent is
         // reconciled (never replayed blind) on the next run, instead of committing a false Failed/Uncertain result.
-        catch (Exception e) when (FailureRetryOwner.ScopeOf(e, ct) == FailureRetryOwner.FailureScope.Item)
+        catch (Exception e) when (FailureRetryOwner.ScopeOf(e, ct, isStateDamage: _isStateDamage) == FailureRetryOwner.FailureScope.Item)
         {
             NativeIoDiagnostic.LogOnce($"pair={_pairId}; relative={action.Path}", e);
             // An access failure is not committed: the intent stays unresolved and the next run observes it. After a
@@ -566,7 +570,7 @@ internal sealed class ActionRunner
             return (null, new ActionResult(action.ActionId, Outcome.Skipped, null, null, null,
                 QuarantineFailure.Describe(action.Path, e)) { Quarantined = true });
         }
-        catch (Exception e) when (e is not OperationCanceledException && FailureRetryOwner.ScopeOf(e, ct) == FailureRetryOwner.FailureScope.Item)
+        catch (Exception e) when (e is not OperationCanceledException && FailureRetryOwner.ScopeOf(e, ct, isStateDamage: _isStateDamage) == FailureRetryOwner.FailureScope.Item)
         {
             NativeIoDiagnostic.LogOnce($"pair={_pairId}; relative={action.Path}", e);
             return (null, Failed(action, RecoveryFailed + Describe(e)) with { FailureHResult = e.HResult });
@@ -578,7 +582,7 @@ internal sealed class ActionRunner
     {
         var uncertain = new ActionResult(action.ActionId, Outcome.Uncertain, null, null, preserved, UncertainReason);
         await CommitAsync(action, uncertain).ConfigureAwait(false);
-        var resolved = await EffectResolver.ResolveAsync(_committer.LatestAction(action), target, source, ct,
+        var resolved = await EffectResolver.ResolveAsync(_committer.LatestAction(action), target, source, ct, isStateDamage: _isStateDamage,
             _unknownCommitGracePeriod, historicalDeleteSource: action.Kind == ActionKind.Delete
                 ? _committer.DeleteSource(action) : null, preserved: preserved,
             deleteRestorePending: action.Kind == ActionKind.Delete && _committer.DeleteRestorePending(action)).ConfigureAwait(false);

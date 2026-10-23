@@ -32,14 +32,14 @@ internal static partial class RunChecks
             var pair = new PairDef(LocalChecks.PairId, "held ignored child", localRoot, remoteRoot, [], rules, true);
             store.SavePair(pair);
             var writer = await LocalWriter.OpenAsync(localRoot, Side.A, pair.PairId, LocalChecks.InstallationId,
-                recovery, default, ignoreRules: PairInclude.IgnoreRules(pair));
+                recovery, default, isStateDamage: StorageFailureClassifier.IsStateDamage, ignoreRules: PairInclude.IgnoreRules(pair));
             var remote = new FakeEndpoint(Side.B, remoteRoot.RootId) { DropboxHashes = true, RequireHashes = true };
             var provider = new FakeEndpointProvider().Add(remoteRoot, remote)
                 .AddInventory(remoteRoot, new RecoveryEvidenceInventory(remote) { Tombstone = test.Tombstone })
                 .AddWriter(localRoot, writer)
                 .AddInventory(localRoot, LocalChecks.Inventory(root, store, TimeProvider.System));
             var settings = V2Settings.Default with { MaxWorkers = 1, ProgressInterval = TimeSpan.Zero };
-            var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission()),
+            var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
                 provider, settings, TimeProvider.System);
             var progress = new RecordingProgress();
             var plan = await run.PreviewFirstSyncAsync(pair.PairId, progress, default);

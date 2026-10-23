@@ -26,7 +26,7 @@ internal static partial class DropboxChecks
         var settings = V2Settings.Default with { ProgressInterval = TimeSpan.Zero, MaxWorkers = 1 };
         var provider = new FakeEndpointProvider().Add(pair.A, local)
             .AddInventory(pair.B, h.Inventory).AddWriter(pair.B, h.Writer());
-        var run = new SyncRun(h.Known, new Executor(h.Known, settings, ExecutorChecks.Admission()),
+        var run = new SyncRun(h.Known, new Executor(h.Known, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
             provider, settings, TimeProvider.System);
         var runtime = new V2CliRuntime(null, h.Known, run, new EndpointRootProbe(provider),
             Path.Combine(_root, "delta-folder-prepare"));
@@ -66,7 +66,7 @@ internal static partial class DropboxChecks
         var settings = V2Settings.Default with { ProgressInterval = TimeSpan.Zero, MaxWorkers = 1 };
         var provider = new FakeEndpointProvider().Add(pair.A, local)
             .AddInventory(pair.B, h.Inventory).AddWriter(pair.B, h.Writer());
-        var run = new SyncRun(h.Known, new Executor(h.Known, settings, ExecutorChecks.Admission()),
+        var run = new SyncRun(h.Known, new Executor(h.Known, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
             provider, settings, TimeProvider.System);
         var runtime = new V2CliRuntime(null, h.Known, run, new EndpointRootProbe(provider),
             Path.Combine(_root, "delta-pending-prepare"));
@@ -138,9 +138,13 @@ internal static partial class DropboxChecks
             local.WriteCalls == localWrites && CloudWrites() == cloudWrites,
             "cursor-released evidence asks for a decision after exactly one reachable history probe; no delete or resurrection without explicit choice");
         var decisions = h.Known.OpenNotices("p1").Where(n => n.Path == "gone.txt" && n.ReasonKey == "deletion-review").ToArray();
+        Console.WriteLine("released evidence decision options: " + System.Text.Json.JsonSerializer.Serialize(
+            decisions.Select(notice => new { notice.NoticeId, Options = NoticeChoices.Options(notice) })));
+        // NoticeChoices.Options adds explicit exclusion separately from Ignore for item retry notices.
         Require(decisions.Length == 1 && NoticeChoices.Options(decisions[0]).Select(option => option.Choice)
-            .ToHashSet(StringComparer.Ordinal).SetEquals([NoticeChoices.DeleteReviewed, NoticeChoices.KeepRestore, NoticeChoices.Ignore]),
-            "one deletion-review notice offers Delete with Recovery, Keep/restore, and Ignore");
+            .ToHashSet(StringComparer.Ordinal).SetEquals(
+                [NoticeChoices.DeleteReviewed, NoticeChoices.KeepRestore, NoticeChoices.Ignore, NoticeChoices.Exclude]),
+            "one deletion-review notice offers exactly Delete with Recovery, Keep/restore, Ignore, and Stop syncing");
         Require(h.Known.SyncRetryAt("p1", "gone.txt") is { Kind: "decision" } &&
             await h.Writer().ObserveAsync("gone.txt", default) is null,
             "successful re-probe leaves a decision hold without resurrecting the cloud tombstone");

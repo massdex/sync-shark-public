@@ -19,15 +19,15 @@ internal static partial class DropboxChecks
         var pair = new PairDef("provider-names-local", "real local name", localRoot, Root(), [], [], true);
         store.SavePair(pair);
         var writer = await LocalWriter.OpenAsync(localRoot, Side.A, "provider-names-local", LocalChecks.InstallationId,
-            recovery, CancellationToken.None, settings, providerNameRefused: item =>
+            recovery, CancellationToken.None, isStateDamage: StorageFailureClassifier.IsStateDamage, settings, providerNameRefused: item =>
                 store.LiveSpellings(localRoot.RootId, item.Path).Any(known => known.Path == item.Path &&
                     known.ObjectId == item.ObjectId && known.Flags.HasFlag(ItemFlags.ProviderNameRefused)));
         var provider = new FakeEndpointProvider().AddWriter(localRoot, writer)
-            .AddInventory(localRoot, new LocalInventory(localRoot, Side.A, store, new HashSet<string>(), settings, TimeProvider.System))
+            .AddInventory(localRoot, new LocalInventory(localRoot, Side.A, store, new HashSet<string>(), settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage))
             .AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, store, "provider-names-local"))
             .AddWriter(pair.B, h.Writer());
         h.Wire.NameWriteErrors["folder/refused.txt"] = "disallowed_name";
-        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission()), provider, settings,
+        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider, settings,
             TimeProvider.System);
         var plan = await run.PreviewFirstSyncAsync("provider-names-local", new RecordingProgress(), CancellationToken.None);
         var report = await run.ApplyAsync("provider-names-local", plan, new RecordingProgress(), CancellationToken.None);

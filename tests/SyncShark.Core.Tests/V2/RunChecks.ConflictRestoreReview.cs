@@ -24,7 +24,7 @@ internal static partial class RunChecks
             Require(store.IntentById(fx.Pair.PairId, intent.ActionId) is null &&
                 await HashAt(fx.A, "outside.txt") == HashOf("still syncing"), "normal sync abandons receipt-less " + kind + " without stalling");
             var open = store.NoticeById(fx.Pair.PairId, notice.NoticeId!)!.Value;
-            Require(!open.Closed && NoticeChoices.Options(open.Notice).Any(option => option.Choice == NoticeChoices.RestoreAsCopy) &&
+            Require(!open.Closed && NoticeOptions.Options(open.Notice).Any(option => option.Choice == NoticeChoices.RestoreAsCopy) &&
                 store.Recoveries(fx.Pair.PairId).Count == 1, "abandon keeps Recovery and notice options");
             Require((await fx.A.ObserveAsync(item.Path, CancellationToken.None))?.ObjectId == item.ObjectId,
                 "abandon never removes or adopts the unverified created item");

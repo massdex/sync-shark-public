@@ -16,8 +16,8 @@ internal static class BlockedDeleteNoticeChecks
         var summary = store.OpenNotices(pair.PairId).Single(x => x.ReasonKey == SqliteStateStore.BlockedDeleteSummary);
         LocalChecks.Require(summary.Detail.Contains("57 deletions", StringComparison.Ordinal) &&
             !store.OpenNotices(pair.PairId).Any(x => x.ReasonKey == DeleteSourceGuard.ReasonKey), "one exact pair summary above threshold");
-        LocalChecks.Require(NoticeChoices.Options(summary).Any(x => x.Choice == NoticeChoices.ShowRemaining), "summary routes to remaining items");
-        var run = new SyncRun(store, new Executor(store, V2Settings.Default, ExecutorChecks.Admission()),
+        LocalChecks.Require(NoticeOptions.Options(summary).Any(x => x.Choice == NoticeChoices.ShowRemaining), "summary routes to remaining items");
+        var run = new SyncRun(store, new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
             new FakeEndpointProvider(), V2Settings.Default, TimeProvider.System);
         var shown = run.ApplyRetryNoticeChoiceAsync(pair.PairId, summary.NoticeId!, NoticeChoices.ShowRemaining,
             default).GetAwaiter().GetResult();

@@ -4,6 +4,7 @@ internal static partial class ExecutorChecks
 {
     private static async Task DeleteSourceChecksAsync()
     {
+        await FailureBoundaryChecks.RunAsync();
         foreach (var side in new[] { Side.A, Side.B })
         {
             var (store, a, b, executor) = Rig();
@@ -270,7 +271,7 @@ internal static partial class ExecutorChecks
                 store.SavePair(Pair());
                 var adopt = Act(ActionKind.Adopt, Side.B, "x", source: source, expected: victim, key: "kx");
                 store.CommitResult("p1", 1, adopt, new ActionResult(adopt.ActionId, Outcome.Done, source, victim, null, null));
-                var executor = new Executor(store, Settings(2), Admission());
+                var executor = new Executor(store, Settings(2), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
                 var results = await Apply(executor, Plan(Act(ActionKind.Delete, Side.B, "x", expected: victim, key: "kx")), a, b);
                 Require(results.Single().DeleteSourceUnconfirmed, "source guard marks durable replan debt");
             }

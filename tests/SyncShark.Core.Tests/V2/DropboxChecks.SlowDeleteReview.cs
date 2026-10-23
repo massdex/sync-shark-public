@@ -129,7 +129,7 @@ internal static partial class DropboxChecks
     {
         var binding = Binding() with { ConnectionId = Guid.NewGuid().ToString() };
         using var h = new Harness(binding);
-        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"),
+        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"), isStateDamage: StorageFailureClassifier.IsStateDamage,
             V2Settings.Default with { DeleteBatchSize = 1, DropboxWriteOperationRetryCount = 1 });
         h.Wire.SeedFile("throttled.txt", "kept");
         h.Wire.DeleteWriteRefusals["throttled.txt"] = 2;

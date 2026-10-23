@@ -109,7 +109,7 @@ internal static partial class LocalJournalChecks
             "a recorded root failure holds the root behind its future durable deadline");
 
         var settings = StorageChecks.Fast with { ProgressInterval = TimeSpan.Zero, MaxWorkers = 1 };
-        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission()),
+        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
             new FakeEndpointProvider(), settings, TimeProvider.System);
         var beforeIgnore = (RootState(), GapState(), RehashState());
         var ignoreResult = await run.ApplyRetryNoticeChoiceAsync(pairB.PairId, projected[0].NoticeId!,

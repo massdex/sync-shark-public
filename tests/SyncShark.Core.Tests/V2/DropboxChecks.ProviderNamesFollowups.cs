@@ -301,7 +301,7 @@ internal static partial class DropboxChecks
             CreateRun();
         }
         private void CreateRun() => Run = new SyncRun(Store,
-            new Executor(Store, _settings, ExecutorChecks.Admission()),
+            new Executor(Store, _settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
             new FakeEndpointProvider().Add(_pair.A, A).Add(_pair.B, B)
                 .AddWriter(_pair.A, WriterA).AddWriter(_pair.B, WriterB), _settings, TimeProvider.System);
         public void Reopen()

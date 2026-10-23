@@ -25,8 +25,30 @@ internal static class HydrationNoticeWriterChecks
         // Regression: "receipt" and "cause" are vocabulary labels, not ShortId.Make's 1-4 letter prefixes.
         // The old Report path threw ArgumentException for "cause" before persistence, then swallowed it.
         var remote = new PilotRemoteEntry("Folder/file.txt", PilotEntryKind.File, "id:file", "rev-1", 4, new string('a', 64));
-        Require(StorageNotices.ReceiptScope(remote) == "receipt" + ShortId.Hex16(remote.Id!, remote.Revision!, remote.ContentHash!),
+        Require(StorageNotices.ReceiptScope(remote.Id, remote.Revision, remote.ContentHash) == "receipt" + ShortId.Hex16(remote.Id!, remote.Revision!, remote.ContentHash!),
             "receipt scope accepts its long vocabulary label without calling the short-prefix API");
+
+        Require(StorageNotices.ReceiptScope(null, null, null) == "receipt" + ShortId.Hex16("", "", ""),
+            "primitive receipt scope preserves null normalization");
+        using (IStateStore unsupported = new InMemoryStateStore())
+        {
+            var notice = new Notice(pair.PairId, 42, NoticeKind.Info, "file.txt", "failure", "storage-test", Storage: metadata);
+            Action[] calls = [
+                () => unsupported.ReportStorageNotice(pair.PairId, notice, "storage-test:"),
+                () => unsupported.RecordPointerVerificationNotice(pair.PairId, notice, "item:", notice, "summary:"),
+                () => unsupported.RetirePointerVerificationSummary(pair.PairId, metadata),
+                () => unsupported.CloseStorageNoticeBatch(pair.PairId, [metadata]),
+                () => unsupported.OpenStoragePairCauses(pair.PairId, pair.A.RootId, pair.B.RootId),
+                () => unsupported.ClearStorageRootBackoff(pair.A.RootId)
+            ];
+            foreach (var call in calls)
+            {
+                var threw = false;
+                try { call(); }
+                catch (NotSupportedException) { threw = true; }
+                Require(threw, "unsupported storage notice capabilities throw, including reads");
+            }
+        }
 
         // The callback path only queues: no placeholder open and no SQLite write before the worker runs. Draining on
         // the calling thread is deterministic; the product worker is the same Process loop, so no timed polling.

@@ -43,7 +43,7 @@ internal static class LocalItems
         }
         catch (Exception error) when (error is not OutOfMemoryException and not StackOverflowException and not AccessViolationException)
         {
-            RunLog.Trace($"Optional notice hash unavailable ({error.GetType().Name}); retaining unknown evidence.");
+            RunTrace.Emit($"Optional notice hash unavailable ({error.GetType().Name}); retaining unknown evidence.");
         }
         return item;
     }

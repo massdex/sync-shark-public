@@ -47,14 +47,14 @@ internal static class DateProvenanceChecks
         }
         store.WriteSnapshot(new Snapshot("a", Side.A, gen, "cursor", locals, []));
         Task<ItemState?> Remote(string path, CancellationToken _) => Task.FromResult<ItemState?>(clouds[path]);
-        var report = await DateRepair.RunAsync(store, pair, Remote, root, true, [], CancellationToken.None, reportMismatch: true);
+        var report = await DateRepair.RunAsync(store, pair, Remote, root, true, [], CancellationToken.None, StorageFailureClassifier.IsStateDamage, reportMismatch: true);
         var csv = File.ReadAllText(report.CsvFile!);
         LocalChecks.Require(report.Mismatches == 3 && report.MissingWriteHistory == 1 && report.LocalDateNotWritten == 1 &&
             csv.Contains("user-date") && csv.Contains("no-history") && csv.Contains("\"written\"") && csv.Contains("no evidence"),
             "read-only mismatch CSV distinguishes nonmatching write from missing history");
         LocalChecks.Require(locals.All(item => File.GetLastWriteTimeUtc(Path.Combine(files, item.Path)) == now.UtcDateTime),
             "mismatch reporting changes no dates");
-        var repaired = await DateRepair.RunAsync(store, pair, Remote, root, false, [], CancellationToken.None);
+        var repaired = await DateRepair.RunAsync(store, pair, Remote, root, false, [], CancellationToken.None, StorageFailureClassifier.IsStateDamage);
         LocalChecks.Require(repaired.Changed == 1 && repaired.Examples.Single().Evidence == "restore-notice" && repaired.MissingWriteHistory == 1 && repaired.LocalDateNotWritten == 1 &&
             File.GetLastWriteTimeUtc(Path.Combine(files, "user-date")) == now.UtcDateTime &&
             File.GetLastWriteTimeUtc(Path.Combine(files, "no-history")) == now.UtcDateTime &&

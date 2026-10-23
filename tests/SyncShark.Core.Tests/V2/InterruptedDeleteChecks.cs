@@ -40,7 +40,7 @@ internal static class InterruptedDeleteChecks
             // result persistence must not infer permission to retire that history.
             var result = await EffectResolver.ResolveAsync(action,
                 new TerminalWriter(writer, new DropboxEffectUncertainException("expired") { JobIdUnavailable = true }),
-                source, default);
+                source, default, isStateDamage: StorageFailureClassifier.IsStateDamage);
             Require(result is { Outcome: Outcome.Skipped, DeleteSourceIdentityMissing: true,
                 DeleteSourceUnconfirmed: true, ForgetUnsafeDeleteBaseline: false },
                 "expired no-identity reconciliation becomes review, not Done or endless Uncertain");
@@ -81,7 +81,7 @@ internal static class InterruptedDeleteChecks
             store.RecordIntent(pair.PairId, delete);
             await victim.DeleteAsync(delete, default); // effect landed, process lost its acknowledgement
             Snapshot(store, target == Side.A ? "a" : "b", target, []);
-            var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission());
+            var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
             var result = (await executor.ReconcileAsync([delete], 2, a, b, default)).Single();
             Require(result.Outcome == Outcome.Skipped && result.ForgetUnsafeDeleteBaseline,
                 "landed unsafe delete is not applied to sync history");
@@ -127,7 +127,7 @@ internal static class InterruptedDeleteChecks
         Require(firstSyncPlan.Actions.All(action => action.Kind != ActionKind.Delete) &&
             firstSyncPlan.Actions.Any(action => action.Kind == ActionKind.CopyNew && action.Target == target),
             "first-sync tombstone and retained match also restore rather than delete");
-        var executor2 = new Executor(reopened, V2Settings.Default, ExecutorChecks.Admission());
+        var executor2 = new Executor(reopened, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
         await foreach (var result in executor2.ApplyAsync(plan, a, b, default))
             Require(result.Outcome == Outcome.Done, "restoration executes successfully: " + result.Reason);
         Require(await a.ObserveAsync("File", default) is not null && await b.ObserveAsync("File", default) is not null,
@@ -210,77 +210,77 @@ internal static class InterruptedDeleteChecks
         var writer = target == Side.A ? a : b;
         var source = target == Side.A ? b : a;
         var historical = target == Side.A ? sb : sa;
-        var present = await EffectResolver.ResolveAsync(action, writer, source, default, deleteRestorePending: false, historicalDeleteSource: historical);
+        var present = await EffectResolver.ResolveAsync(action, writer, source, default, isStateDamage: StorageFailureClassifier.IsStateDamage, deleteRestorePending: false, historicalDeleteSource: historical);
         Require(present.Outcome == Outcome.Skipped && !present.ForgetUnsafeDeleteBaseline,
             "target still present keeps baseline intact");
         var submitted = action with { ProviderEffect = new("delete-submit", "unknown", DateTimeOffset.UtcNow) };
-        var withinGrace = await EffectResolver.ResolveAsync(submitted, writer, source, default, historicalDeleteSource: historical);
+        var withinGrace = await EffectResolver.ResolveAsync(submitted, writer, source, default, isStateDamage: StorageFailureClassifier.IsStateDamage, historicalDeleteSource: historical);
         Require(withinGrace.Outcome == Outcome.Uncertain, "E8 same target within submission grace remains protected and unknown");
         var elapsed = submitted with { ProviderEffect = new("delete-submit", "unknown", DateTimeOffset.UnixEpoch) };
-        var notApplied = await EffectResolver.ResolveAsync(elapsed, writer, source, default, historicalDeleteSource: historical);
+        var notApplied = await EffectResolver.ResolveAsync(elapsed, writer, source, default, isStateDamage: StorageFailureClassifier.IsStateDamage, historicalDeleteSource: historical);
         Require(notApplied.Outcome == Outcome.Skipped && !notApplied.ForgetUnsafeDeleteBaseline,
             "E8 same identity after grace retires as not-applied without replaying deletion");
         var changedSubmission = elapsed with { ExpectedTarget = elapsed.ExpectedTarget! with { VersionId = "older-version" } };
-        var superseded = await EffectResolver.ResolveAsync(changedSubmission, writer, source, default, historicalDeleteSource: historical);
+        var superseded = await EffectResolver.ResolveAsync(changedSubmission, writer, source, default, isStateDamage: StorageFailureClassifier.IsStateDamage, historicalDeleteSource: historical);
         Require(superseded.Outcome == Outcome.Skipped && !superseded.ForgetUnsafeDeleteBaseline,
             "E8 changed target retires old submission authority without deleting current bytes");
         await writer.DeleteAsync(action, default);
-        var approved = await EffectResolver.ResolveAsync(action with { RemovalReviewChoice = true }, writer, source, default);
+        var approved = await EffectResolver.ResolveAsync(action with { RemovalReviewChoice = true }, writer, source, default, isStateDamage: StorageFailureClassifier.IsStateDamage);
         Require(approved.Outcome == Outcome.Done && !approved.ForgetUnsafeDeleteBaseline,
             "durable explicit victim approval is not reclassified as absence propagation");
-        var noIdentity = await EffectResolver.ResolveAsync(action, writer, source, default);
+        var noIdentity = await EffectResolver.ResolveAsync(action, writer, source, default, isStateDamage: StorageFailureClassifier.IsStateDamage);
         Require(noIdentity.Outcome == Outcome.Uncertain && !noIdentity.ForgetUnsafeDeleteBaseline,
             "absent target without trusted source identity never settles a deletion");
         var pending = action with { ProviderEffect = new("delete-job", "job", DateTimeOffset.UnixEpoch) };
         foreach (var kind in new[] { "delete-job" })
         {
             var pendingResult = await EffectResolver.ResolveAsync(pending with
-                { ProviderEffect = new(kind, "unknown", DateTimeOffset.UnixEpoch) }, writer, source, default,
+                { ProviderEffect = new(kind, "unknown", DateTimeOffset.UnixEpoch) }, writer, source, default, isStateDamage: StorageFailureClassifier.IsStateDamage,
                 deleteRestorePending: false, historicalDeleteSource: historical);
             Require(pendingResult.Outcome == Outcome.Uncertain && !pendingResult.ForgetUnsafeDeleteBaseline,
                 "unknown provider job/submit never restores under a possibly running delete");
         }
-        var pendingRestoreSubmission = await EffectResolver.ResolveAsync(elapsed, writer, source, default, historicalDeleteSource: historical);
+        var pendingRestoreSubmission = await EffectResolver.ResolveAsync(elapsed, writer, source, default, isStateDamage: StorageFailureClassifier.IsStateDamage, historicalDeleteSource: historical);
         Require(pendingRestoreSubmission.Outcome == Outcome.Uncertain && !pendingRestoreSubmission.ForgetUnsafeDeleteBaseline,
             "E8 conservative default keeps a pending restoration from acquiring a second restore transition");
-        var absentSubmission = await EffectResolver.ResolveAsync(elapsed, writer, source, default,
+        var absentSubmission = await EffectResolver.ResolveAsync(elapsed, writer, source, default, isStateDamage: StorageFailureClassifier.IsStateDamage,
             deleteRestorePending: false, historicalDeleteSource: historical);
         Require(absentSubmission.Outcome == Outcome.Skipped && absentSubmission.ForgetUnsafeDeleteBaseline,
             "E8 absent submission uses source-aware absence resolution and protects surviving source content");
-        var terminal = await EffectResolver.ResolveAsync(pending, new TerminalWriter(writer), source, default,
+        var terminal = await EffectResolver.ResolveAsync(pending, new TerminalWriter(writer), source, default, isStateDamage: StorageFailureClassifier.IsStateDamage,
             deleteRestorePending: false, historicalDeleteSource: historical);
         Require(terminal.ForgetUnsafeDeleteBaseline && terminal.Outcome == Outcome.Skipped,
             "terminal provider success still rechecks source and queues restoration");
         var expiredWriter = new TerminalWriter(writer,
             new DropboxEffectUncertainException("expired job") { JobIdUnavailable = true });
-        var expired = await EffectResolver.ResolveAsync(pending, expiredWriter, source, default,
+        var expired = await EffectResolver.ResolveAsync(pending, expiredWriter, source, default, isStateDamage: StorageFailureClassifier.IsStateDamage,
             deleteRestorePending: false, historicalDeleteSource: historical);
         Require(expired.Outcome == Outcome.Skipped && expired.ForgetUnsafeDeleteBaseline,
             "expired job after grace rechecks same-ID survivor and queues repair");
         var recent = await EffectResolver.ResolveAsync(pending with
-            { ProviderEffect = new("delete-job", "expired", DateTimeOffset.UtcNow) }, expiredWriter, source, default,
+            { ProviderEffect = new("delete-job", "expired", DateTimeOffset.UtcNow) }, expiredWriter, source, default, isStateDamage: StorageFailureClassifier.IsStateDamage,
             deleteRestorePending: false, historicalDeleteSource: historical);
         Require(recent.Outcome == Outcome.Uncertain, "expired id within grace remains protected");
         foreach (var error in new Exception[] { new IOException("lookup failed"),
             new DropboxEffectUncertainException("internal error"), new HttpRequestException("offline") })
         {
             var unknown = await EffectResolver.ResolveAsync(pending, new TerminalWriter(writer, error), source,
-                default, deleteRestorePending: false, historicalDeleteSource: historical);
+                default, isStateDamage: StorageFailureClassifier.IsStateDamage, deleteRestorePending: false, historicalDeleteSource: historical);
             Require(unknown.Outcome == Outcome.Uncertain && !unknown.ForgetUnsafeDeleteBaseline,
                 "generic lookup failures never impersonate expired job evidence");
         }
         var active = await EffectResolver.ResolveAsync(pending, new TerminalWriter(writer, applied: null), source,
-            default, deleteRestorePending: false, historicalDeleteSource: historical);
+            default, isStateDamage: StorageFailureClassifier.IsStateDamage, deleteRestorePending: false, historicalDeleteSource: historical);
         Require(active.Outcome == Outcome.Uncertain, "active jobs remain protected after grace with absent target");
         var oldSource = await source.ObserveAsync("File", default);
         await source.DeleteAsync(action with { ExpectedTarget = oldSource, Target = target == Side.A ? Side.B : Side.A }, default);
-        var absent = await EffectResolver.ResolveAsync(pending, expiredWriter, source, default,
+        var absent = await EffectResolver.ResolveAsync(pending, expiredWriter, source, default, isStateDamage: StorageFailureClassifier.IsStateDamage,
             deleteRestorePending: false, historicalDeleteSource: historical);
         Require(absent.Outcome == Outcome.Done && !absent.ForgetUnsafeDeleteBaseline,
             "expired job with trusted original source now absent settles normally");
         source.Seed("File", "replacement");
         store.RecordIntent(pair.PairId, action);
-        var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission());
+        var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
         var changed = (await executor.ReconcileAsync([action], 2, a, b, default)).Single();
         Require(changed.Outcome == Outcome.Uncertain && store.Baselines(pair.PairId).Count == 1,
             "same-path different identity cannot invalidate history or authorize reverse deletion");
@@ -288,8 +288,8 @@ internal static class InterruptedDeleteChecks
         Require(store.OpenNotices(pair.PairId).Count(notice => notice.ReasonKey == "interrupted-delete-unverified") == 1,
             "repeated unknown identity produces one notice, not whole-run failure");
         var uncertainNotice = store.OpenNotices(pair.PairId).Single(notice => notice.ReasonKey == "interrupted-delete-unverified");
-        Require(NoticeChoices.Options(uncertainNotice).Any(option => option.Choice == NoticeChoices.RetryNow) &&
-            NoticeChoices.Options(uncertainNotice).Any(option => option.Choice == NoticeChoices.Ignore),
+        Require(NoticeOptions.Options(uncertainNotice).Any(option => option.Choice == NoticeChoices.RetryNow) &&
+            NoticeOptions.Options(uncertainNotice).Any(option => option.Choice == NoticeChoices.Ignore),
             "uncertain deletion uses the shared Retry and Ignore choices");
         store.AddNotices([new(pair.PairId, 40, NoticeKind.Info, action.Path, "Generic retry", "sync-retry")]);
         Require(!store.OpenNotices(pair.PairId).Any(notice => notice.ReasonKey == "sync-retry" && notice.Path == action.Path),

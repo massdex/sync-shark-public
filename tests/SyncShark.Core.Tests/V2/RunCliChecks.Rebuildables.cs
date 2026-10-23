@@ -528,7 +528,7 @@ internal static partial class RunCliChecks
                 string.Join(" | ", fx.Store.ReadSyncRetries(fx.Pair.PairId).Select(row => $"path={row.Path}; kind={row.Kind}; due={row.RetryAfter:O}; attempts={row.Attempts}; reviewed={row.ReviewedActions?.Count}")));
             var savedDebts = fx.Store.ReadSyncRetries(fx.Pair.PairId).ToArray();
             var retryClock = new ReviewedRemovalRetryClock { Now = savedDebts.Min(row => row.RetryAfter).AddTicks(-1) };
-            var retryRun = new SyncRun(fx.Store, new Executor(fx.Store, Settings, ExecutorChecks.Admission()),
+            var retryRun = new SyncRun(fx.Store, new Executor(fx.Store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
                 fx.Provider, Settings, retryClock);
             if (grows) fx.B.Seed("node_modules/new.txt", "unreviewed cloud child");
             await retryRun.IncrementalAsync(fx.Pair.PairId, new Progress<RunProgress>(), default);

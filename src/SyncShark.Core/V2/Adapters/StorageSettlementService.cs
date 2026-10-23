@@ -308,7 +308,7 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
         // Schedule this item's next attempt before reporting, so a notice failure cannot turn a bounded retry
         // into a rehash on every pass.
         // Pair-scoped causes belong only to the root adapter; the item keeps pending work, not a second count.
-        if (StorageNotices.ClassifyFailure(error) is StoragePairException) store.DeferStorageSettlement(job, TimeSpan.Zero);
+        if (StorageNoticeFailureClassifier.ClassifyFailure(error) is StoragePairException) store.DeferStorageSettlement(job, TimeSpan.Zero);
         else store.FailStorageSettlement(job);
         ReportFailure(pair, store.ByObject(job.RootId, job.ObjectId)?.Path ?? "", Metadata(job, "settlement"), error);
     }
@@ -317,7 +317,7 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
     // root backoff, while item-specific causes keep their per-item notice. Never starts native work by itself.
     internal void ReportFailure(PairDef pair, string path, StorageNotice item, Exception error)
     {
-        var failure = (Exception?)StorageNotices.ClassifyFailure(error) ?? error;
+        var failure = (Exception?)StorageNoticeFailureClassifier.ClassifyFailure(error) ?? error;
         if (failure is not StoragePairException || _reportedPairs.TryAdd(pair.PairId, 0))
         {
             if (failure is StoragePairException) Backoff(pair);
@@ -325,7 +325,7 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
         }
     }
     private static StorageNotice Metadata(StorageSettlement job, string operation) =>
-        new(job.RootId, job.ObjectId, job.RemoteBinding, operation, StorageNotices.ReceiptScope(job.Remote));
+        new(job.RootId, job.ObjectId, job.RemoteBinding, operation, StorageNotices.ReceiptScope(job.Remote.Id, job.Remote.Revision, job.Remote.ContentHash));
     private void Complete(StorageSettlement job)
     {
         if (Pair(job) is not { } pair) return;
@@ -423,7 +423,7 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
                 return;
             }
             remote = remote with { RelativePath = local.Path, ModifiedUtc = remote.ModifiedUtc ?? local.Mtime };
-            item = item with { Scope = StorageNotices.ReceiptScope(remote) };
+            item = item with { Scope = StorageNotices.ReceiptScope(remote.Id, remote.Revision, remote.ContentHash) };
             var baseline = store.BaselinesAt(pair.PairId, Side.A, [local.Path]).FirstOrDefault(point =>
                 point.A.ObjectId == local.ObjectId && point.B.ObjectId == remote.Id)
                 ?? throw new IOException("The common baseline is unavailable. Resync before refreshing the pointer.");
@@ -468,7 +468,7 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch (Exception error)
         {
-            if (StorageNotices.ClassifyFailure(error) is StoragePairException) store.DeferStoragePointer(job, TimeSpan.Zero);
+            if (StorageNoticeFailureClassifier.ClassifyFailure(error) is StoragePairException) store.DeferStoragePointer(job, TimeSpan.Zero);
             else store.FailStoragePointer(job);
             ReportFailure(pair, store.ByObject(job.RootId, job.ObjectId)?.Path ?? "", item, error);
         }
@@ -543,7 +543,7 @@ internal sealed class StorageSettlementService(SqliteStateStore store, CloudFile
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception error)
         {
-            var failure = (Exception?)StorageNotices.ClassifyFailure(error) ?? OfflineSource(error);
+            var failure = (Exception?)StorageNoticeFailureClassifier.ClassifyFailure(error) ?? OfflineSource(error);
             if (failure is StoragePairException) store.DeferStorageHydration(job, TimeSpan.Zero);
             else store.FailStorageHydration(job);
             // A classified pair cause takes the same deduped pair path as every other lane: one notice plus a

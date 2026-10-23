@@ -210,8 +210,9 @@ internal static class StorageExplicitRetryChecks
             // Refresh failure reports the newly observed revision before the old receipt is replaced.
             // Retry targets the entity, not an equality check against that old receipt's scope.
             var metadata = fixture.Notice(0)?.Storage ?? throw new InvalidOperationException("Missing refresh notice.");
+            var revisedRemote = fixture.Pointer(0).Remote with { Revision = "revision-2" };
             StorageNotices.Report(fixture.Store, fixture.Pair, fixture.Files[0].Path,
-                metadata with { Scope = StorageNotices.ReceiptScope(fixture.Pointer(0).Remote with { Revision = "revision-2" }) },
+                metadata with { Scope = StorageNotices.ReceiptScope(revisedRemote.Id, revisedRemote.Revision, revisedRemote.ContentHash) },
                 new IOException("Synthetic refresh failure after remote observation"));
         }
         var notice = fixture.Notice(0) ?? throw new InvalidOperationException(queue + ": missing dispatch fixture notice.");
@@ -469,9 +470,17 @@ internal static class StorageExplicitRetryChecks
             Queue.Offline => Store.StorageHydrationFor(Pair.A.RootId, Files[i].ObjectId) is not null,
             _ => Store.StoragePointerFor(Pair.A.RootId, Files[i].ObjectId, Pair.B.RootId) is { JobId: > 0 }
         };
-        private StorageNotice Target(int i) => new(Pair.A.RootId, Files[i].ObjectId, Pair.B.RootId,
-            _queue switch { Queue.Settlement => "settlement", Queue.Offline => "offline", _ => "remote-update" },
-            _queue == Queue.Offline ? "offline" : StorageNotices.ReceiptScope(_queue == Queue.Settlement ? Settlement(i).Remote : Pointer(i).Remote));
+        private StorageNotice Target(int i)
+        {
+            var scope = "offline";
+            if (_queue != Queue.Offline)
+            {
+                var remote = _queue == Queue.Settlement ? Settlement(i).Remote : Pointer(i).Remote;
+                scope = StorageNotices.ReceiptScope(remote.Id, remote.Revision, remote.ContentHash);
+            }
+            return new(Pair.A.RootId, Files[i].ObjectId, Pair.B.RootId,
+                _queue switch { Queue.Settlement => "settlement", Queue.Offline => "offline", _ => "remote-update" }, scope);
+        }
         internal Notice? Notice(int i) => Store.OpenNotices(Pair.PairId).SingleOrDefault(n => n.Storage?.ObjectId == Files[i].ObjectId);
         internal void Suspend(bool disabled, bool suspended)
         {

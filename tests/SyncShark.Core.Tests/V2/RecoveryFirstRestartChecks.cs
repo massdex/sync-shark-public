@@ -37,7 +37,7 @@ internal static class RecoveryFirstRestartChecks
             var generation = store.BeginGeneration(pair.A.RootId, "fixture");
             var a = await OpenWriterAsync(fixture).ConfigureAwait(false);
             var b = await LocalWriter.OpenAsync(other, Side.B, PairId, LocalChecks.InstallationId,
-                fixture.Recovery, CancellationToken.None).ConfigureAwait(false);
+                fixture.Recovery, CancellationToken.None, isStateDamage: StorageFailureClassifier.IsStateDamage).ConfigureAwait(false);
             LocalChecks.Seed(fixture.Root, "file.txt", "old bytes");
             LocalChecks.Seed(otherPath, "file.txt", "old bytes");
             var oldA = (await a.ObserveAsync("file.txt", default))!;
@@ -63,7 +63,7 @@ internal static class RecoveryFirstRestartChecks
             var indexedBeforeRemoval = false;
             SyncLocalRecovery.SourceRemovedBeforeRecoveryCloseForTest = _ => indexedBeforeRemoval =
                 store.Recoveries(PairId).Any(record => record.ActionId == action.ActionId);
-            var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission());
+            var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
             try
             {
                 await foreach (var result in executor.ApplyAsync(plan, a, b, default))
@@ -75,9 +75,9 @@ internal static class RecoveryFirstRestartChecks
             var receipt = store.Recoveries(PairId).Single();
             var provider = new FakeEndpointProvider().AddWriter(pair.A, a).AddWriter(pair.B, b);
             // Keep native proof real, but do not let machine activity/power pause this deterministic fixture.
-            provider.AddInventory(pair.A, new LocalInventory(pair.A, Side.A, store, new HashSet<string>(), V2Settings.Default, TimeProvider.System)
+            provider.AddInventory(pair.A, new LocalInventory(pair.A, Side.A, store, new HashSet<string>(), V2Settings.Default, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage)
                 { GapIo = new LocalGapIo(store, V2Settings.Default, new HashSet<string>(), () => false) });
-            provider.AddInventory(pair.B, new LocalInventory(pair.B, Side.B, store, new HashSet<string>(), V2Settings.Default, TimeProvider.System)
+            provider.AddInventory(pair.B, new LocalInventory(pair.B, Side.B, store, new HashSet<string>(), V2Settings.Default, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage)
                 { GapIo = new LocalGapIo(store, V2Settings.Default, new HashSet<string>(), () => false) });
             var clock = new RetryClock { Now = DateTimeOffset.UtcNow };
             var run = new SyncRun(store, executor, provider, V2Settings.Default, clock);
@@ -157,7 +157,7 @@ internal static class RecoveryFirstRestartChecks
     private static async Task<LocalWriter> OpenWriterAsync(Fixture fixture,
         IReadOnlyList<SyncIgnoreRule>? rules = null) =>
         await LocalWriter.OpenAsync(fixture.Local, Side.A, PairId, LocalChecks.InstallationId, fixture.Recovery,
-            CancellationToken.None, ignoreRules: rules).ConfigureAwait(false);
+            CancellationToken.None, isStateDamage: StorageFailureClassifier.IsStateDamage, ignoreRules: rules).ConfigureAwait(false);
 
     private static async Task GenericFailureColdReopenAsync() =>
         await GenericColdReopenAsync("recovery-first-generic-failure", cancelSourceRead: false).ConfigureAwait(false);
@@ -198,7 +198,7 @@ internal static class RecoveryFirstRestartChecks
                 using var cancel = new CancellationTokenSource();
                 var runner = new ActionRunner(committer, V2Settings.Default, ExecutorChecks.Admission(), PairId,
                     writer, new FailingSource(cancelSourceRead ? cancel : null), [],
-                    new ConcurrentDictionary<string, Outcome>());
+                    new ConcurrentDictionary<string, Outcome>(), isStateDamage: StorageFailureClassifier.IsStateDamage);
                 result = await runner.RunAsync(action, cancel.Token).ConfigureAwait(false);
             }
             finally
@@ -242,7 +242,7 @@ internal static class RecoveryFirstRestartChecks
                 name + ": the cold store's receipt opens the exact original bytes");
         }
         var counted = new PreserveCounter(reopenedWriter);
-        var reconciled = (await new Executor(reopened, V2Settings.Default, ExecutorChecks.Admission())
+        var reconciled = (await new Executor(reopened, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage)
             .ReconcileAsync(intents, generation, counted, new FailingSource(), CancellationToken.None)
             .ConfigureAwait(false)).Single();
         LocalChecks.Require(reconciled.Outcome == Outcome.Uncertain && reconciled.Recovery is not null,
@@ -330,7 +330,7 @@ internal static class RecoveryFirstRestartChecks
             name + ": the cold store still holds the carried child's Recovery row");
         var opposite = new FakeEndpoint(Side.B, fixture.Pair.B.RootId);
         var provider = new FakeEndpointProvider().Add(fixture.Pair.B, opposite).AddWriter(fixture.Pair.A, reopenedWriter);
-        var run = new SyncRun(reopened, new Executor(reopened, V2Settings.Default, ExecutorChecks.Admission()), provider,
+        var run = new SyncRun(reopened, new Executor(reopened, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider,
             V2Settings.Default, TimeProvider.System);
         var restored = (await run.RestoreRecoveryPageAsync(PairId,
                 new RecoveryQuery(Id: child!.RecoveryId), asCopy: false, dryRun: false, CancellationToken.None)
@@ -372,7 +372,7 @@ internal static class RecoveryFirstRestartChecks
             var committer = new StoreCommitter(store, new SemaphoreSlim(1, 1), PairId, generation);
             ProviderEffectContext.Current.Value = committer.CreateProviderContext(action);
             var runner = new ActionRunner(committer, V2Settings.Default, ExecutorChecks.Admission(), PairId,
-                writer, new ThrottledSource(), [], new ConcurrentDictionary<string, Outcome>());
+                writer, new ThrottledSource(), [], new ConcurrentDictionary<string, Outcome>(), isStateDamage: StorageFailureClassifier.IsStateDamage);
             result = await runner.RunAsync(action, CancellationToken.None).ConfigureAwait(false);
         }
         finally
@@ -402,14 +402,14 @@ internal static class RecoveryFirstRestartChecks
         var target = new FakeEndpoint(Side.B, "rb");
         var folder = target.Seed("d", "", ItemKind.Folder, versionId: "v1");
         var mkdir = new SyncAction("act-folder-mkdir", 1, ActionKind.MkDir, Side.B, "d", null, null, folder, true, null);
-        var made = await EffectResolver.ResolveAsync(mkdir, target, source, CancellationToken.None).ConfigureAwait(false);
+        var made = await EffectResolver.ResolveAsync(mkdir, target, source, CancellationToken.None, isStateDamage: StorageFailureClassifier.IsStateDamage).ConfigureAwait(false);
         LocalChecks.Require(made.Outcome == Outcome.Done,
             name + ": a RecoveryFirst folder MkDir resolves Done without a file receipt: " + made.Reason);
         var empty = new FakeEndpoint(Side.B, "rb2");
         var delete = new SyncAction("act-folder-delete", 32, ActionKind.Delete, Side.B, "old", null, null,
             new ItemState("old", ItemKind.Folder, "id:old", "v1", null, 0, DateTimeOffset.UnixEpoch, ItemFlags.None),
             true, null);
-        var deleted = await EffectResolver.ResolveAsync(delete, empty, source, CancellationToken.None).ConfigureAwait(false);
+        var deleted = await EffectResolver.ResolveAsync(delete, empty, source, CancellationToken.None, isStateDamage: StorageFailureClassifier.IsStateDamage).ConfigureAwait(false);
         LocalChecks.Require(deleted.Outcome == Outcome.Done,
             name + ": a RecoveryFirst rule-32 folder delete resolves Done without a file receipt: " + deleted.Reason);
     }

@@ -232,7 +232,7 @@ internal static class LocalRecoveryInterruptionChecks
             DropboxProviderConfiguration.RequiredScopes);
         var client = new DropboxPilotClient(http, new FixedTokenSource(), "/Pilot", binding, "id:pilot-folder");
         var cloud = new DropboxWriter(new RootDef("cloud", "Dropbox", "account", "/Pilot", "id:pilot-folder"),
-            Side.B, client, spool);
+            Side.B, client, spool, isStateDamage: StorageFailureClassifier.IsStateDamage);
         // DropboxContractHandler binds its immutable download and metadata to /Pilot/wire.txt.
         var source = new ItemState("wire.txt", ItemKind.File, "id:wire", "revision", hash, bytes.Length,
             DateTimeOffset.UnixEpoch, ItemFlags.None);

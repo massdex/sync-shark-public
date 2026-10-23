@@ -47,7 +47,7 @@ public sealed partial class SqliteStateStore
                 // once on the existing connection; this slower fallback retains every hold.
                 var code = exception is SqliteException failure
                     ? $" sqlite={failure.SqliteErrorCode}/{failure.SqliteExtendedErrorCode}" : "";
-                RunLog.Trace($"protection reader unavailable ({exception.GetType().Name}{code}): {exception.Message}; using gated store connection once");
+                RunTrace.Emit($"protection reader unavailable ({exception.GetType().Name}{code}): {exception.Message}; using gated store connection once");
                 using (_gate.Enter())
                 {
                     ObjectDisposedException.ThrowIf(_disposed, this);
@@ -84,10 +84,9 @@ public sealed partial class SqliteStateStore
                 var root = ProtectionRootNumber(connection, transaction, rootId);
                 return (connection, transaction, root);
             }
-            catch
+            catch (Exception error)
             {
-                transaction?.Dispose();
-                connection.Dispose();
+                DisposePreserving(error, transaction, connection);
                 throw;
             }
         }

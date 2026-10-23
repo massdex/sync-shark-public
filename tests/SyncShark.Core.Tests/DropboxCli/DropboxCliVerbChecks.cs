@@ -383,7 +383,7 @@ internal static class DropboxCliVerbChecks
         var store = new Massdex.SyncShark.V2.InMemoryStateStore();
         var v2 = new Massdex.SyncShark.V2.V2CliRuntime(null, store,
             new Massdex.SyncShark.V2.SyncRun(store, new Massdex.SyncShark.V2.Executor(store, Massdex.SyncShark.V2.V2Settings.Default,
-                    Massdex.SyncShark.V2.ExecutorChecks.Admission()),
+                    Massdex.SyncShark.V2.ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
                 new Massdex.SyncShark.V2.FakeEndpointProvider(), Massdex.SyncShark.V2.V2Settings.Default,
                 TimeProvider.System),
             new Massdex.SyncShark.V2.EndpointRootProbe(new Massdex.SyncShark.V2.FakeEndpointProvider()), "C:\\root");
@@ -477,7 +477,7 @@ internal static class DropboxCliVerbChecks
         var store = new Massdex.SyncShark.V2.InMemoryStateStore();
         var v2 = new Massdex.SyncShark.V2.V2CliRuntime(instance, store,
             new Massdex.SyncShark.V2.SyncRun(store, new Massdex.SyncShark.V2.Executor(store, Massdex.SyncShark.V2.V2Settings.Default,
-                    Massdex.SyncShark.V2.ExecutorChecks.Admission()),
+                    Massdex.SyncShark.V2.ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
                 new Massdex.SyncShark.V2.FakeEndpointProvider(), Massdex.SyncShark.V2.V2Settings.Default,
                 TimeProvider.System),
             new Massdex.SyncShark.V2.EndpointRootProbe(new Massdex.SyncShark.V2.FakeEndpointProvider()), root)

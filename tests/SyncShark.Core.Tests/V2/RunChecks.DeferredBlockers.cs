@@ -92,7 +92,7 @@ internal static partial class RunChecks
         await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, history.NoticeId!, NoticeChoices.CheckHistoryAgain, default);
         Require(fx.Store.SyncRetryAt(fx.Pair.PairId, history.Path) == waiting with { RetryAfter = DateTimeOffset.MinValue },
             "history check only resets schedule, preserving all evidence and review guards");
-        Require(!NoticeChoices.Options(history).Any(o => o.Choice == NoticeChoices.DeleteReviewed), "unknown evidence cannot grant Delete");
+        Require(!NoticeOptions.Options(history).Any(o => o.Choice == NoticeChoices.DeleteReviewed), "unknown evidence cannot grant Delete");
         fx.Store.AddNotices([new(fx.Pair.PairId, 40, NoticeKind.Info, "large.txt", "storage full", "insufficient-free-space",
             FreeSpace: new("X:\\", 100, 50, 25))]);
         var disk = fx.Store.OpenNotices(fx.Pair.PairId).Single(n => n.FreeSpace is not null);

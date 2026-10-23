@@ -4,6 +4,15 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SqliteStateStore
 {
+    bool IStateStore.SupportsListingCheckpoint => true;
+    bool IStateStore.CachedPairPaused(string pairId) => CachedPairPaused(pairId);
+    void IStateStore.BeginListing(RootDef root, string mode) => BeginListing(root, mode);
+    string? IStateStore.ListingPage(string root, string request) => ListingPage(root, request);
+    void IStateStore.SaveListingPage(string root, string request, string cursor, string payload) =>
+        SaveListingPage(root, request, cursor, payload);
+    void IStateStore.ForgetListing(string root) => ForgetListing(root);
+    bool IStateStore.HasFullListing(RootDef root) => HasFullListing(root);
+
     // Partial provider pages are deliberately separate from observation_checkpoint and live inventory.
     // One page contains both its rows and continuation cursor: they can never commit independently.
     internal void BeginListing(RootDef root, string mode) => InStore(() =>

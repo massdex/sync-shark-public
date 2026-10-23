@@ -75,14 +75,14 @@ internal static partial class DropboxChecks
                 [rig.H.Wire.ChangeOf("big/late"), rig.H.Wire.ChangeOf("big/late/child.txt")], false, "late-middle");
             rig.H.Wire.FolderDeleteFeedCursor = "late-middle";
             rig.H.Wire.LoseCreatedFolderResponse = "big/late";
-            var executor = new Executor(store, settings, ExecutorChecks.Admission());
+            var executor = new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
             await foreach (var result in executor.ApplyAsync(rig.Plan() with { Gen = gen }, rig.A, rig.B, default))
                 Require(result.Outcome == Outcome.Uncertain, "unknown folder recreation retains group");
             Require(rig.H.Wire.Restores.Count == 0, "child restore cannot indirectly replay its unknown parent");
             store.Dispose();
             store = SqliteStateStore.Open(folder, settings, TimeProvider.System);
             rig.H.Wire.LoseCreatedFolderResponse = null;
-            executor = new Executor(store, settings, ExecutorChecks.Admission());
+            executor = new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
             var ended = await executor.ReconcileAsync(store.UnresolvedIntents("p1"), gen, rig.A, rig.B, default);
             Require(ended.All(r => r.Outcome == Outcome.Uncertain) && rig.H.Wire.Restores.Count == 0 &&
                 await rig.B.ObserveAsync("big/late", default) is null,
@@ -104,8 +104,8 @@ internal static partial class DropboxChecks
             store.WriteSnapshot(new Snapshot(RootId, Side.B, gen, rig.Cursor,
                 FolderDelete.LiveDescendants(rig.Store, RootId, "big").Append(rig.Delete.ExpectedTarget!).ToArray(), []));
             store.CompleteGeneration(gen, rig.Cursor, true);
-            var writer = new DropboxWriter(Root(), Side.B, rig.H.Client, Path.Combine(_root, "spool"), settings);
-            var executor = new Executor(store, settings, ExecutorChecks.Admission());
+            var writer = new DropboxWriter(Root(), Side.B, rig.H.Client, Path.Combine(_root, "spool"), isStateDamage: StorageFailureClassifier.IsStateDamage, settings);
+            var executor = new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
             rig.H.Wire.SeedFile("big/late-a.txt", "recoverable content");
             if (mode == "confirmed-then-deleted") rig.H.Wire.SeedFile("big/late-b.txt", "second content");
             rig.H.Wire.BeforeBuryFolder = () => Require(store.OpenNotices("p1").Count(n =>
@@ -166,7 +166,7 @@ internal static partial class DropboxChecks
             rig.H.Wire.AfterBuriedRevisionRead = null;
             rig.H.Wire.MetadataFailurePath = null;
             rig.H.Wire.BeforeMetadataResponse = null;
-            executor = new Executor(store, settings, ExecutorChecks.Admission());
+            executor = new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
             var calls = rig.H.Wire.Calls.Count(call => call == "/2/files/restore");
             var waiting = await executor.ReconcileAsync(store.UnresolvedIntents("p1"), gen, rig.A, writer, default);
             if (mode == "lost-response-live")
@@ -182,7 +182,7 @@ internal static partial class DropboxChecks
             Require(store.OpenNotices("p1").Count(n => n.ReasonKey == "folder-delete-unrestored") == 1,
                 "repeated verification updates one deduplicated recovery notice");
             var notice = store.OpenNotices("p1").Single(n => n.ReasonKey == "folder-delete-unrestored");
-            Require(NoticeChoices.IsRetryNotice(notice) && NoticeChoices.Options(notice).Select(o => o.Choice)
+            Require(NoticeChoices.IsRetryNotice(notice) && NoticeOptions.Options(notice).Select(o => o.Choice)
                 .Order().SequenceEqual(new[] { NoticeChoices.RetryNow, NoticeChoices.RestoreAgain, NoticeChoices.Ignore, NoticeChoices.OpenDropbox }.Order()),
                 "shared GUI/CLI choices provide verification, history and protected ignore");
             if (mode == "lost-response-again")
@@ -194,7 +194,7 @@ internal static partial class DropboxChecks
                     "explicit authorization does not prematurely close the notice");
                 store.Dispose();
                 store = SqliteStateStore.Open(folder, settings, TimeProvider.System);
-                executor = new Executor(store, settings, ExecutorChecks.Admission());
+                executor = new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
                 var explicitResult = await executor.ReconcileAsync(store.UnresolvedIntents("p1"), gen, rig.A, writer, default);
                 Require(explicitResult.All(r => r.Outcome != Outcome.Uncertain) && rig.H.Wire.Restores.Count == 2 &&
                     rig.H.Wire.WholeFolderDeletes == 1 && rig.H.Wire.Calls.Count(call => call == "/2/files/list_revisions") == revisionReads &&
@@ -212,7 +212,7 @@ internal static partial class DropboxChecks
                     "Ignore uses the shared notice authority");
                 store.Dispose();
                 store = SqliteStateStore.Open(folder, settings, TimeProvider.System);
-                executor = new Executor(store, settings, ExecutorChecks.Admission());
+                executor = new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
                 await executor.ReconcileAsync(store.UnresolvedIntents("p1"), gen, rig.A, writer, default);
                 Require(store.Pair("p1")!.Excluded.Count == 0 && store.UnresolvedIntents("p1").Count > 0 &&
                     !store.OpenNotices("p1").Any(n => n.ReasonKey == "folder-delete-unrestored") &&
@@ -233,7 +233,7 @@ internal static partial class DropboxChecks
             store.RecordIntent("p1", anchor with { ProviderEffect = anchor.ProviderEffect with { Id = group.ToJsonString() } });
             store.Dispose();
             store = SqliteStateStore.Open(folder, settings, TimeProvider.System);
-            executor = new Executor(store, settings, ExecutorChecks.Admission());
+            executor = new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
             var ended = await executor.ReconcileAsync(store.UnresolvedIntents("p1"), gen, rig.A, writer, default);
             Require(ended.All(result => result.Outcome != Outcome.Uncertain) && store.UnresolvedIntents("p1").Count == 0 &&
                 rig.H.Wire.WholeFolderDeletes == 1 && await writer.ObserveAsync(retryPath, default) is not null,

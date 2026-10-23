@@ -32,7 +32,7 @@ internal static partial class RunChecks
                 // Decision 7 / run.md Terminal boundary decisions: fatal state returns
                 // a counted in-memory report, not an exception or a new persisted notice.
                 Require(report.Outcome == RunOutcomes.StateDamaged && report.HaltedBy is { } cause &&
-                    FailureRetryOwner.ScopeOf(cause, default) == FailureRetryOwner.FailureScope.State,
+                    StorageFailureClassifier.ScopeOf(cause, default) == FailureRetryOwner.FailureScope.State,
                     "fatal refusal refresh returns typed StateDamaged with retained cause and completed effects");
             }
             else
@@ -165,14 +165,14 @@ internal static partial class RunChecks
 
         foreach (var measuredKey in new[] { "unreadable", NoticeChoices.ItemBlocked })
             Console.WriteLine("NOTICE-MEASURE generic-blocker key=" + measuredKey + " choices=" + string.Join(",",
-                NoticeChoices.Options(new(pair, 40, NoticeKind.Info, measuredKey + ".txt", "cannot read this item", measuredKey)).Select(o => o.Choice)));
+                NoticeOptions.Options(new(pair, 40, NoticeKind.Info, measuredKey + ".txt", "cannot read this item", measuredKey)).Select(o => o.Choice)));
         foreach (var key in new[] { "unreadable", NoticeChoices.ItemBlocked })
         {
             var path = key + ".txt";
             var before = fx.A.Seed(path, "untouched");
             store.AddNotices([new(pair, 40, NoticeKind.Info, path, "cannot read this item", key)]);
             var generic = store.OpenNotices(pair).Single(n => n.Path == path);
-            Require(NoticeChoices.Options(generic).Select(option => option.Choice).SequenceEqual(
+            Require(NoticeOptions.Options(generic).Select(option => option.Choice).SequenceEqual(
                 // CI39907099426 measured both reasons: repair-help,retry-now,ignore,exclude (E9).
                 new[] { NoticeChoices.RepairHelp, NoticeChoices.RetryNow, NoticeChoices.Ignore, NoticeChoices.Exclude }),
                 "unreadable and undiscovered blockers offer why, Retry, cause-only Ignore and explicit exclusion");
@@ -189,7 +189,7 @@ internal static partial class RunChecks
             Require(store.Pair(pair)!.Excluded.Contains(path) && await fx.A.ObserveAsync(path, default) == before,
                 "explicit Stop syncing excludes the path without deleting its file");
         }
-        Require(NoticeChoices.Options(new(pair, 40, NoticeKind.Info, "pending.txt", "pending evidence", "deletion-evidence-pending"))
+        Require(NoticeOptions.Options(new(pair, 40, NoticeKind.Info, "pending.txt", "pending evidence", "deletion-evidence-pending"))
             .All(option => option.Choice != NoticeChoices.DeleteReviewed), "pending evidence never offers deletion authority");
         var refusedRows = Enumerable.Range(0, 205).Select(i => new ItemState("refused-" + i,
             ItemKind.File, "refused-id-" + i, "v1", null, 0, DateTimeOffset.MinValue, ItemFlags.ProviderNameRefused)).ToArray();

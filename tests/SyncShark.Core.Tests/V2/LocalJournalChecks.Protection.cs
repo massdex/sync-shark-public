@@ -167,7 +167,7 @@ internal static partial class LocalJournalChecks
         var endpointA = new FakeEndpoint(Side.A, pair.A.RootId);
         var endpointB = new FakeEndpoint(Side.B, pair.B.RootId);
         var provider = new FakeEndpointProvider().Add(pair.A, endpointA).Add(pair.B, endpointB);
-        var run = new SyncRun(store, new Executor(store, StorageChecks.Fast, ExecutorChecks.Admission()),
+        var run = new SyncRun(store, new Executor(store, StorageChecks.Fast, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
             provider, StorageChecks.Fast, TimeProvider.System);
         var guard = typeof(SyncRun).GetMethod("ActionPredicates", hidden)!.Invoke(run, [pair, links, null]);
         var actions = rows.Select((row, n) => new SyncAction("protection-" + n, 1, ActionKind.CopyNew,

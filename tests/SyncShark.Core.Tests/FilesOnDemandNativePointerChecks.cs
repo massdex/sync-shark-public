@@ -27,7 +27,7 @@ internal static class FilesOnDemandNativePointerChecks
             throw new IOException("The transient-registration fixture does not start from a clean owned pointer row: " + before);
         var readsBefore = reads();
         var inventory = new LocalInventory(pair.A, Side.A, store,
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase), V2Settings.Default, TimeProvider.System,
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase), V2Settings.Default, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage,
             pairId: pairId)
         {
             // Simulates a sharing/IO failure while Windows registration data is read.
@@ -95,7 +95,7 @@ internal static class FilesOnDemandNativePointerChecks
         var receipt = store.StoragePointerFor(pair.A.RootId, objectId, pair.B.RootId)?.Remote
             ?? throw new IOException("The dirty pointer has no durable cloud receipt.");
         var inventory = new LocalInventory(pair.A, Side.A, store,
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase), V2Settings.Default, TimeProvider.System,
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase), V2Settings.Default, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage,
             pairId: pairId);
         var generation = store.BeginGeneration(pair.A.RootId, "snapshot");
         var snapshot = await inventory.FullAsync(generation, _ => true, new Progress<string>(), cancellationToken)
@@ -121,7 +121,7 @@ internal static class FilesOnDemandNativePointerChecks
         // snapshot publication stays pending, proving the acknowledgment lane coexists with it.
         var refreshBefore = store.StoragePointerFor(pair.A.RootId, objectId, pair.B.RootId);
         var target = new StorageNotice(pair.A.RootId, objectId, pair.B.RootId, "settlement",
-            StorageNotices.ReceiptScope(queued!.Remote));
+            StorageNotices.ReceiptScope(queued!.Remote.Id, queued!.Remote.Revision, queued!.Remote.ContentHash));
         using (var lifetime = new CloudFilesLifetime((_, _, _) => createProvider(), _ => true, store,
                    (_, _, _) => Task.FromResult<PilotRemoteEntry?>(current)))
         {
@@ -174,7 +174,7 @@ internal static class FilesOnDemandNativePointerChecks
             replaceRemote(movedReceipt);
             // Production ownership classification must preserve the moved entity and its exact hash.
             var inventory = new LocalInventory(pair.A, Side.A, store,
-                new HashSet<string>(StringComparer.OrdinalIgnoreCase), V2Settings.Default, TimeProvider.System,
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase), V2Settings.Default, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage,
                 pairId: pairId);
             var generation = store.BeginGeneration(pair.A.RootId, "snapshot");
             var scan = await inventory.FullAsync(generation, _ => true, new Progress<string>(), cancellationToken)
@@ -209,7 +209,7 @@ internal static class FilesOnDemandNativePointerChecks
                 "The Move did not publish the post-Move receipt durably.");
             var refreshBefore = store.StoragePointerFor(pair.A.RootId, pointer.ObjectId, pair.B.RootId);
             var target = new StorageNotice(pair.A.RootId, pointer.ObjectId, pair.B.RootId, "settlement",
-                StorageNotices.ReceiptScope(acknowledgment!.Remote));
+                StorageNotices.ReceiptScope(acknowledgment!.Remote.Id, acknowledgment!.Remote.Revision, acknowledgment!.Remote.ContentHash));
             using (var lifetime = new CloudFilesLifetime((_, _, _) => createProvider(), _ => true, store,
                        (_, _, _) => Task.FromResult<PilotRemoteEntry?>(movedReceipt)))
             {

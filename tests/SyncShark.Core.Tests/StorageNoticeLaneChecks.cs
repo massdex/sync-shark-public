@@ -129,41 +129,41 @@ internal static class StorageNoticeLaneChecks
     private static void PairCauseIsOneNotice(SqliteStateStore store, PairDef pair)
     {
         // Positive transport/auth/provider evidence classifies as a pair cause; item-specific faults never do.
-        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyFailure(
+        HydrationNoticeWriterChecks.Require(Cause(StorageNoticeFailureClassifier.ClassifyFailure(
                 new HttpRequestException("denied", null, HttpStatusCode.Unauthorized))) == "auth",
             "an HTTP 401 is account auth");
-        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyFailure(
+        HydrationNoticeWriterChecks.Require(Cause(StorageNoticeFailureClassifier.ClassifyFailure(
                 new DropboxApiException(HttpStatusCode.Unauthorized, "token")
                 { OAuthError = DropboxOAuthError.InvalidGrant })) == "auth",
             "an OAuth invalid_grant is account auth");
-        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyFailure(
+        HydrationNoticeWriterChecks.Require(Cause(StorageNoticeFailureClassifier.ClassifyFailure(
                 new EndpointAccessException("access refused"))) == "auth",
             "the mapped account-access refusal is auth");
-        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyFailure(
+        HydrationNoticeWriterChecks.Require(Cause(StorageNoticeFailureClassifier.ClassifyFailure(
                 new DropboxCredentialUnavailableException("connection"))) == "auth",
             "a missing protected credential is auth");
-        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyFailure(
+        HydrationNoticeWriterChecks.Require(Cause(StorageNoticeFailureClassifier.ClassifyFailure(
                 new HttpRequestException("offline", null, HttpStatusCode.ServiceUnavailable))) == "network",
             "an HTTP 503 is transport");
-        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyFailure(
+        HydrationNoticeWriterChecks.Require(Cause(StorageNoticeFailureClassifier.ClassifyFailure(
                 new HttpRequestException("offline"))) == "network",
             "a connection failure without a status is transport");
-        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyFailure(
+        HydrationNoticeWriterChecks.Require(Cause(StorageNoticeFailureClassifier.ClassifyFailure(
                 new ProviderTransportTimeoutException("stalled"))) == "network",
             "a bounded read timeout is transport");
-        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyFailure(
+        HydrationNoticeWriterChecks.Require(Cause(StorageNoticeFailureClassifier.ClassifyFailure(
                 new SocketException((int)SocketError.HostUnreachable))) == "network",
             "a socket failure is transport");
-        HydrationNoticeWriterChecks.Require(Cause(StorageNotices.ClassifyFailure(
+        HydrationNoticeWriterChecks.Require(Cause(StorageNoticeFailureClassifier.ClassifyFailure(
                 new SyncRunRefusedException("The Dropbox connection is not connected."))) == "provider",
             "a disconnected provider is pair-level");
-        HydrationNoticeWriterChecks.Require(StorageNotices.ClassifyFailure(
+        HydrationNoticeWriterChecks.Require(StorageNoticeFailureClassifier.ClassifyFailure(
                 new InvalidDataException("The expected Dropbox range identity is incomplete.")) is null,
             "a missing item revision/hash stays item-specific");
-        HydrationNoticeWriterChecks.Require(StorageNotices.ClassifyFailure(
+        HydrationNoticeWriterChecks.Require(StorageNoticeFailureClassifier.ClassifyFailure(
                 new DropboxApiException(HttpStatusCode.Conflict, "changed")) is null,
             "a remote change conflict stays item-specific");
-        HydrationNoticeWriterChecks.Require(StorageNotices.ClassifyFailure(
+        HydrationNoticeWriterChecks.Require(StorageNoticeFailureClassifier.ClassifyFailure(
                 new IOException("The hydrated range differs from the exact provider placeholder identity.")) is null,
             "a range mismatch stays item-specific");
 

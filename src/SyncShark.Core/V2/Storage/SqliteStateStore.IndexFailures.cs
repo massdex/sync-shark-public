@@ -4,7 +4,7 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SqliteStateStore
 {
-    internal const string IndexFailurePrefix = "indexing-root-failure:";
+    internal const string IndexFailurePrefix = NoticeVocabulary.IndexFailurePrefix;
 
     // The one notice cause for a root: a root-level pass failure, one item's metadata/hash failure,
     // a rejected proof, or a background rehash failure. These stable classes define root-summary

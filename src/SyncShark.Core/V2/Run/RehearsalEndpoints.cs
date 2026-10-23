@@ -38,7 +38,7 @@ internal sealed class RehearsalEndpoints(IEndpointProvider real, RehearsalOverla
             var io = new RehearsalGapIo(realGap, storage, store);
             local.GapIo = io;
             if (!_workers.TryGetValue("indexing", out var worker))
-                _workers["indexing"] = worker = new LocalGapWorker(gaps, io);
+                _workers["indexing"] = worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage);
             local.GapWorker = worker;
             _indexing ??= new LocalIndexingRuns(store, (target, token) =>
                 _roots[target.RootId].Inventory is LocalInventory inventory

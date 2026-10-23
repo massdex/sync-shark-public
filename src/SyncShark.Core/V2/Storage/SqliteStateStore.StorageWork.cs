@@ -5,6 +5,9 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SqliteStateStore
 {
+    void IStateStore.CloseStorageNoticeBatch(string pairId, IReadOnlyList<StorageNotice> items) =>
+        CloseStorageNoticeBatch(pairId, items);
+
     internal const string HasStorageWorkSql = """
         SELECT EXISTS(SELECT 1 FROM storage_policy WHERE mode='online-only')
           OR EXISTS(SELECT 1 FROM storage_settlement WHERE state='pending' AND due<=$now)

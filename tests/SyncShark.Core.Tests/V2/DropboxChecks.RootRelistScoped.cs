@@ -10,6 +10,35 @@ internal static partial class DropboxChecks
         var folder = Path.Combine(root, "root-relist-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
         using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        IStateStore listingStore = store;
+        IStateStore unsupported = new InMemoryStateStore();
+        Require(!unsupported.SupportsListingCheckpoint && !unsupported.CachedPairPaused("p1") &&
+            !unsupported.HasFullListing(Root()) && unsupported.ListingPage(RootId, "page") is null,
+            "non-SQLite defaults do not certify listing or pause state");
+        unsupported.BeginListing(Root(), "full");
+        unsupported.SaveListingPage(RootId, "page", "cursor", "{}");
+        unsupported.ForgetListing(RootId);
+        Require(!unsupported.HasFullListing(Root()) && unsupported.ListingPage(RootId, "page") is null,
+            "unsupported listing writes stay inert");
+        Require(listingStore.SupportsListingCheckpoint, "SQLite advertises checkpoint support through its interface");
+        listingStore.BeginListing(Root(), "full");
+        listingStore.SaveListingPage(RootId, "page", "cursor", "{\"cursor\":\"cursor\"}");
+        listingStore.BeginListing(Root(), "full");
+        Require(listingStore.HasFullListing(Root()) && listingStore.ListingPage(RootId, "page") is not null,
+            "same binding and mode replay the durable page");
+        listingStore.BeginListing(Root(), "delta:cursor");
+        Require(!listingStore.HasFullListing(Root()) && listingStore.ListingPage(RootId, "page") is null,
+            "mode change clears replay pages without certifying a full listing");
+        listingStore.SaveListingPage(RootId, "page", "cursor", "{}");
+        listingStore.BeginListing(Root() with { RootPath = "/Other" }, "full");
+        Require(!listingStore.HasFullListing(Root()) && listingStore.ListingPage(RootId, "page") is null,
+            "binding change clears replay and cannot certify the old root");
+        listingStore.ForgetListing(RootId);
+        Require(!listingStore.HasFullListing(Root()), "interface forget clears listing checkpoint");
+        store.SetPairPaused("pause-check", true);
+        Require(listingStore.CachedPairPaused("pause-check"), "cached pause forwards to SQLite");
+        store.SetPairPaused("pause-check", false);
+        Require(!listingStore.CachedPairPaused("pause-check"), "cached pause observes local resume immediately");
         using var h = new Harness();
         var local = new FakeEndpoint(Side.A, "ra");
         var pair = new PairDef("p1", "Pair A", new("ra", SyncProviders.Local, null, "/local", "id:ra"), Root(), [], [], true);
@@ -30,7 +59,7 @@ internal static partial class DropboxChecks
         var provider = new FakeEndpointProvider().Add(pair.A, local).AddInventory(pair.B, inventory)
             .AddWriter(pair.B, h.Writer(Path.Combine(folder, "spool")));
         var settings = V2Settings.Default with { ProgressInterval = TimeSpan.Zero, MaxWorkers = 1 };
-        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission()), provider, settings, TimeProvider.System);
+        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider, settings, TimeProvider.System);
         var retry = typeof(SyncRun).GetMethod("RetryScanScopesAsync", BindingFlags.Instance | BindingFlags.NonPublic)
             ?? throw new InvalidOperationException("Missing targeted scan owner.");
         var gen = store.BeginGeneration(RootId, "delta");

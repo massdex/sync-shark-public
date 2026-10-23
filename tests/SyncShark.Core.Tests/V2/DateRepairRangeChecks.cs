@@ -86,7 +86,7 @@ internal static class DateRepairRangeChecks
             if (path == "remote-failed") throw new HttpRequestException("single lookup failure");
             return Task.FromResult<ItemState?>(cloud[path]);
         }
-        var dry = await DateRepair.RunAsync(store, pair, Observe, root, true, [], CancellationToken.None,
+        var dry = await DateRepair.RunAsync(store, pair, Observe, root, true, [], CancellationToken.None, StorageFailureClassifier.IsStateDamage,
             from: DateRepairBound.Parse("2026-10-18T11:00"), to: DateRepairBound.Parse("2026-10-18T13:00"), excludeList: list);
         var log = File.ReadAllText(dry.ReportFile);
         LocalChecks.Require(dry.Eligible == 2 && dry.Skipped == 6 &&
@@ -94,11 +94,32 @@ internal static class DateRepairRangeChecks
             log.Contains("Excluded by --exclude-list.") && log.Contains("Locked file content differs") &&
             log.Contains("single lookup failure"),
             "hour window, exclusion list, null hashes, and independent failures have exact reasons");
+        foreach (var code in new[] { 11, 26, 5 })
+        {
+            var fault = new IOException("wrapped date failure", new Microsoft.Data.Sqlite.SqliteException("synthetic", code));
+            var before = store.Baselines(pair.PairId, ["fix"]).Single();
+            store.BeforeDateRepairCommitForTest = _ => throw fault;
+            Exception? observed = null;
+            DateRepairReport? report = null;
+            try
+            {
+                report = await DateRepair.RunAsync(store, pair, Observe, root, false, [], CancellationToken.None,
+                    StorageFailureClassifier.IsStateDamage, from: day, to: day, excludeList: list);
+            }
+            catch (Exception error) { observed = error; }
+            finally { store.BeforeDateRepairCommitForTest = null; }
+            LocalChecks.Require(store.Baselines(pair.PairId, ["fix"]).Single() == before,
+                "wrapped commit failure never publishes a repaired baseline");
+            LocalChecks.Require(code == 5
+                ? observed is null && report is { Changed: 0 }
+                : observed is not null && StorageFailureClassifier.ScopeOf(observed, default) == FailureRetryOwner.FailureScope.State,
+                "date repair propagates wrapped corruption but retains non-damage item handling");
+        }
         store.BeforeDateRepairCommitForTest = baseline =>
         {
             if (baseline.ObjectKey == "db-busy") throw new Microsoft.Data.Sqlite.SqliteException("single item busy", 5);
         };
-        var done = await DateRepair.RunAsync(store, pair, Observe, root, false, [], CancellationToken.None, from: day, to: day, excludeList: list);
+        var done = await DateRepair.RunAsync(store, pair, Observe, root, false, [], CancellationToken.None, StorageFailureClassifier.IsStateDamage, from: day, to: day, excludeList: list);
         store.BeforeDateRepairCommitForTest = null;
         LocalChecks.Require(done.Skipped == 7 && File.ReadAllText(done.ReportFile).Contains("single item busy"),
             "a transient database failure skips its item and independent repairs finish");
@@ -109,8 +130,8 @@ internal static class DateRepairRangeChecks
             "repair reconciles null hash, re-downloaded identity and date without changing content");
         LocalChecks.Require(!store.OpenNotices(pair.PairId).Any(n => n.ReasonKey == "local-download-date"),
             "successful repair closes its date-only retry notice");
-        LocalChecks.Require(!DateRepair.ItemFailure(new Microsoft.Data.Sqlite.SqliteException("corrupt", 11)) &&
-            DateRepair.ItemFailure(new Microsoft.Data.Sqlite.SqliteException("busy", 5)),
+        LocalChecks.Require(!DateRepair.ItemFailure(new Microsoft.Data.Sqlite.SqliteException("corrupt", 11), StorageFailureClassifier.IsStateDamage) &&
+            DateRepair.ItemFailure(new Microsoft.Data.Sqlite.SqliteException("busy", 5), StorageFailureClassifier.IsStateDamage),
             "corruption stops, transient item busy skips");
     }
 }

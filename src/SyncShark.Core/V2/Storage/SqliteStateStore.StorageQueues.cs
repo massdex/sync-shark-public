@@ -5,6 +5,8 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SqliteStateStore
 {
+    void IStateStore.ClearStorageRootBackoff(string rootId) => ClearStorageRootBackoff(rootId);
+
     // The caller supplies roots after global/account pause projection. With no projection,
     // derive active roots from the small pair catalog, never from the item inventory.
     private const string StorageRootsSql = "json_each($roots) roots";

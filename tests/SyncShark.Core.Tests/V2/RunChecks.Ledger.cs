@@ -95,8 +95,8 @@ internal static partial class RunChecks
             await fx.B.ObserveAsync("committed.txt", default) is not null,
             "ledger IO failure preserves committed effects, completed counts and diagnostic-failure flag");
         var notice = store.OpenNotices(fx.Pair.PairId).Single(n => n.ReasonKey == EffectsLedger.IncompleteReason);
-        Require(NoticeChoices.Options(notice).Any(o => o.Choice == NoticeChoices.RetryNow) &&
-            NoticeChoices.Options(notice).Any(o => o.Choice == NoticeChoices.Ignore),
+        Require(NoticeOptions.Options(notice).Any(o => o.Choice == NoticeChoices.RetryNow) &&
+            NoticeOptions.Options(notice).Any(o => o.Choice == NoticeChoices.Ignore),
             "ledger diagnostic offers Retry and Ignore without losing the report");
         await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default,
             new RunOptions { EffectsExportPath = Path.Combine(LocalChecks.FreshRoot("ledger-repaired"), "effects.csv") });

@@ -52,7 +52,7 @@ internal static partial class RunChecks
         store.AddNotices([new Notice(fx.Pair.PairId, 40, NoticeKind.Info, "skip.txt", "retry", "sync-retry")]);
         var notice = store.OpenNotices(fx.Pair.PairId).Single(item => item.ReasonKey == "sync-retry");
         // cloud-files.md/E9: only the separate explicit Stop syncing choice authorizes exclusion.
-        Require(NoticeChoices.Options(notice).Any(option => option.Choice == NoticeChoices.Exclude),
+        Require(NoticeOptions.Options(notice).Any(option => option.Choice == NoticeChoices.Exclude),
             "retry notice offers explicit Stop syncing independently of Ignore");
         await runtime.ResolveConflictAsync(fx.Pair.PairId, notice.Path, NoticeChoices.Exclude, notice.NoticeId, 0, null, default);
         var result = await runtime.ApplyFirstSyncAsync(fx.Pair.PairId, null, true, null, _ => { }, default);
@@ -115,7 +115,7 @@ internal static partial class RunChecks
         Require(fx.Store.OpenNotices(fx.Pair.PairId).Count(notice => notice.ReasonKey == "recovery-unavailable") == 1,
             "Recovery outage has one pair-level notice");
         var recoveryNotice = fx.Store.OpenNotices(fx.Pair.PairId).Single(notice => notice.ReasonKey == "recovery-unavailable");
-        Require(NoticeChoices.Options(recoveryNotice).Any(option => option.Choice == NoticeChoices.Ignore),
+        Require(NoticeOptions.Options(recoveryNotice).Any(option => option.Choice == NoticeChoices.Ignore),
             "Recovery summary offers Ignore without dropping protection");
         await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, recoveryNotice.NoticeId!, NoticeChoices.Ignore, default);
         Require(fx.Store.SyncRetryAt(fx.Pair.PairId, "replace.txt") is not null && fx.Store.Pair(fx.Pair.PairId)!.Excluded.Count == 0 &&
@@ -183,7 +183,7 @@ internal static partial class RunChecks
             Require(fx.Store.OpenNotices(fx.Pair.PairId).Count(notice => notice.ReasonKey == "planning-degraded") == 1,
                 "post-pass failure emits exactly one retryable planning notice");
             var notice = fx.Store.OpenNotices(fx.Pair.PairId).Single(item => item.ReasonKey == "planning-degraded");
-            Require(NoticeChoices.Options(notice).Any(option => option.Choice == NoticeChoices.Ignore),
+            Require(NoticeOptions.Options(notice).Any(option => option.Choice == NoticeChoices.Ignore),
                 "planning summary offers Ignore without excluding the root");
             await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, notice.NoticeId!, NoticeChoices.Ignore, default);
             Require(fx.Store.SyncRetryAt(fx.Pair.PairId, "replace.txt")?.Kind == "planning" &&
@@ -463,7 +463,7 @@ internal static partial class RunChecks
         }
         var stuck = store.OpenNotices(fx.Pair.PairId).Single(notice => notice.ReasonKey == "sync-retry");
         Require(new[] { NoticeChoices.RepairHelp, NoticeChoices.RetryNow, NoticeChoices.Ignore, NoticeChoices.Exclude }
-            .All(choice => NoticeChoices.Options(stuck).Any(option => option.Choice == choice)),
+            .All(choice => NoticeOptions.Options(stuck).Any(option => option.Choice == choice)),
             "retry options distinguish Ignore suppression from explicit Stop syncing");
         await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, stuck.NoticeId!, NoticeChoices.RetryNow, CancellationToken.None);
         Require(store.SyncRetryAt(fx.Pair.PairId, "stuck.txt") is { Attempts: 3 } state &&

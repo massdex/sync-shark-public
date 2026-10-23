@@ -18,7 +18,7 @@ internal static class NoticeMapping
         Group: GroupLabel(notice.Kind),
         Recommendation: notice.Detail,
         Status: "open",
-        Options: NoticeChoices.Options(notice));
+        Options: NoticeOptions.Options(notice));
 
     /// <summary>One open notice as the page's selection snapshot.</summary>
     internal static SyncConflictSelection ToSelection(Notice notice) =>

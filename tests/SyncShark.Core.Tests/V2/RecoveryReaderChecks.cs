@@ -37,7 +37,7 @@ internal static class RecoveryReaderChecks
         using var http = new HttpClient(wire);
         var client = new DropboxPilotClient(http, new FixedTokenSource(), "/Pilot", Binding(), DropboxWire.RootId);
         var writer = new DropboxWriter(new RootDef("rb", SyncProviders.Dropbox, "acc", "/Pilot", DropboxWire.RootId),
-            Side.B, client, Path.Combine(directory, "spool"), V2Settings.Default, pairId: LocalChecks.PairId);
+            Side.B, client, Path.Combine(directory, "spool"), isStateDamage: StorageFailureClassifier.IsStateDamage, V2Settings.Default, pairId: LocalChecks.PairId);
         var modified = new DateTimeOffset(2026, 10, 12, 7, 0, 0, TimeSpan.Zero);
         wire.SeedFile("file.txt", "retained cloud bytes", modified);
         var victim = (await writer.ObserveAsync("file.txt", CancellationToken.None))!;

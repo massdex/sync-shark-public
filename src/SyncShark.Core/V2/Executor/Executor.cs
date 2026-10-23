@@ -8,14 +8,17 @@ namespace Massdex.SyncShark.V2;
 /// <summary>Applies a plan's effects in a safe order; never decides, holds, or replays an uncertain effect blind.</summary>
 public sealed partial class Executor : IExecutor
 {
+    private readonly Func<Exception, bool> _isStateDamage;
     private readonly IStateStore _store;
     private readonly V2Settings _settings;
     private readonly SyncTransferResourceController _admission;
     private readonly SemaphoreSlim _storeGate = new(1, 1);
 
     /// <summary>Creates the executor over one store, its settings and the shared admission controller.</summary>
-    public Executor(IStateStore store, V2Settings settings, SyncTransferResourceController admission)
+    public Executor(IStateStore store, V2Settings settings, SyncTransferResourceController admission, Func<Exception, bool> isStateDamage)
     {
+        ArgumentNullException.ThrowIfNull(isStateDamage);
+        _isStateDamage = isStateDamage;
         if (settings.UnknownCommitGracePeriod <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(settings), "Unknown commit observation grace must be positive.");
         _store = store;
@@ -67,7 +70,7 @@ public sealed partial class Executor : IExecutor
         var dependencies = actions.Concat(trees.Where(tree => tree.Handled).SelectMany(tree => tree.Actions))
             .Where(action => action.Kind is ActionKind.MkDir or ActionKind.Move or ActionKind.Delete).ToArray();
         var runner = new ActionRunner(committer, _settings, _admission, p.PairId, a, b,
-            dependencies, outcomes, new DropboxQuota(_store.Pair(p.PairId),
+            dependencies, outcomes, isStateDamage: _isStateDamage, new DropboxQuota(_store.Pair(p.PairId),
                 _store.NoticeById(p.PairId, DropboxQuota.Id(p.PairId))?.Notice.UploadSuspended == true), actions);
 
         using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -182,7 +185,7 @@ public sealed partial class Executor : IExecutor
             {
                 if (providerCommitter is not null)
                     ProviderEffectContext.Current.Value = providerCommitter.CreateProviderContext(intent);
-                result = await EffectResolver.ResolveAsync(intent, target, source, token,
+                result = await EffectResolver.ResolveAsync(intent, target, source, token, isStateDamage: _isStateDamage,
                     _settings.UnknownCommitGracePeriod, jobChecks: jobChecks, materializationBlock: materializationBlock,
                     historicalDeleteSource: historicalDeleteSource, preserved: preserved, deleteRestorePending: deleteRestorePending).ConfigureAwait(false);
             }
@@ -245,7 +248,7 @@ public sealed partial class Executor : IExecutor
                 sourceAbsent = current is null &&
                     await DeleteSourceGuard.ObserveAbsenceAsync(source, intent.Source, intent.Source.Path, ct).ConfigureAwait(false) == true;
             }
-            catch (Exception error) when (EffectResolver.Unverifiable(error, ct))
+            catch (Exception error) when (EffectResolver.Unverifiable(error, ct, isStateDamage: _isStateDamage))
             {
                 return (observed with { Outcome = Outcome.Uncertain,
                     Reason = BlockerDiagnostic.Describe(error) }, false);
@@ -264,7 +267,7 @@ public sealed partial class Executor : IExecutor
                     Reason = $"The conflict source '{intent.Source.Path}' cannot yet be verified. Retry checks its identity and content again." }, false);
             intent = intent with { Source = current, ProviderEffect = null };
             var committer = new StoreCommitter(_store, _storeGate, pairId, gen);
-            var runner = new ActionRunner(committer, _settings, _admission, pairId, a, b, [], new(),
+            var runner = new ActionRunner(committer, _settings, _admission, pairId, a, b, [], new(), isStateDamage: _isStateDamage,
                 new DropboxQuota(_store.Pair(pairId),
                     _store.NoticeById(pairId, DropboxQuota.Id(pairId))?.Notice.UploadSuspended == true));
             var resumed = await runner.RunAsync(intent, ct).ConfigureAwait(false);
@@ -277,7 +280,7 @@ public sealed partial class Executor : IExecutor
             var target = intent.Target == Side.A ? a : b;
             ItemState? occupant;
             try { occupant = await target.ObserveAsync(intent.Path, ct).ConfigureAwait(false); }
-            catch (Exception error) when (EffectResolver.Unverifiable(error, ct))
+            catch (Exception error) when (EffectResolver.Unverifiable(error, ct, isStateDamage: _isStateDamage))
             {
                 return (observed with { Outcome = Outcome.Uncertain,
                     Reason = BlockerDiagnostic.Describe(error) }, false);
@@ -381,7 +384,7 @@ public sealed partial class Executor : IExecutor
                 var group = new List<SyncAction>();
                 while (index < ordered.Count && ordered[index].Step == level)
                     group.Add(ordered[index++].Action);
-                await RunGroupAsync(group, gate, pending, runner, writer, ct, consumerGone).ConfigureAwait(false);
+                await RunGroupAsync(group, gate, pending, runner, writer, ct, consumerGone, _isStateDamage).ConfigureAwait(false);
             }
             writer.TryComplete();
         }
@@ -393,7 +396,7 @@ public sealed partial class Executor : IExecutor
 
     private static async Task RunGroupAsync(IReadOnlyList<SyncAction> group, SemaphoreSlim gate,
         SemaphoreSlim pending, ActionRunner runner, ChannelWriter<ActionResult> writer, CancellationToken ct,
-        CancellationToken consumerGone)
+        CancellationToken consumerGone, Func<Exception, bool> isStateDamage)
     {
         var running = new List<Task>();
         try
@@ -406,7 +409,7 @@ public sealed partial class Executor : IExecutor
                 catch { pending.Release(); throw; }
                 try { PairPause.Check(); }
                 catch { gate.Release(); pending.Release(); throw; }
-                running.Add(LaunchAsync(action, gate, pending, runner, writer, ct, consumerGone));
+                running.Add(LaunchAsync(action, gate, pending, runner, writer, ct, consumerGone, isStateDamage));
                 // Observe every completed task (including faults) without retaining one task per plan row.
                 for (var i = running.Count - 1; i >= 0; i--)
                 {
@@ -439,7 +442,7 @@ public sealed partial class Executor : IExecutor
     }
 
     private static async Task LaunchAsync(SyncAction action, SemaphoreSlim gate, SemaphoreSlim pending,
-        ActionRunner runner, ChannelWriter<ActionResult> writer, CancellationToken ct, CancellationToken consumerGone)
+        ActionRunner runner, ChannelWriter<ActionResult> writer, CancellationToken ct, CancellationToken consumerGone, Func<Exception, bool> isStateDamage)
     {
         var previous = SyncEffectStaging.Current.Value;
         var staging = new SyncEffectStaging(() => gate.Release());
@@ -449,7 +452,7 @@ public sealed partial class Executor : IExecutor
             if (await runner.RunAsync(action, ct).ConfigureAwait(false) is { } result)
                 await writer.WriteAsync(result, consumerGone).ConfigureAwait(false);
         }
-        catch (Exception error) when (error is not (PairPausedException or OperationCanceledException or EndpointAccessException or StateDamagedException) &&
+        catch (Exception error) when (!isStateDamage(error) && error is not (PairPausedException or OperationCanceledException or EndpointAccessException or StateDamagedException) &&
             error is not Microsoft.Data.Sqlite.SqliteException)
         {
             // The intent, if any, remains unresolved for next-run reconciliation. Do not
@@ -621,7 +624,7 @@ public sealed partial class Executor : IExecutor
         await RunOperations.WaitAsync(_storeGate, "executor store gate", ct).ConfigureAwait(false);
         try
         {
-            using var admission = FairStoreGate.WithCancellation(ct);
+            using var admission = StoreAdmission.WithCancellation(ct);
             work();
         }
         finally
@@ -635,7 +638,7 @@ public sealed partial class Executor : IExecutor
         await RunOperations.WaitAsync(_storeGate, "executor store gate", ct).ConfigureAwait(false);
         try
         {
-            using var admission = FairStoreGate.WithCancellation(ct);
+            using var admission = StoreAdmission.WithCancellation(ct);
             return work();
         }
         finally

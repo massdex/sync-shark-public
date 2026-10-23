@@ -12,8 +12,8 @@ internal static partial class StorageChecks
                 CommitDoneBaselineAndIntent(store);
                 var notice = store.OpenNotices("p1").Single(n => n.ReasonKey == "store-maintenance");
                 Require(notice.Detail.Contains("injected post-commit cleanup failure") &&
-                    NoticeChoices.Options(notice).Any(o => o.Choice == NoticeChoices.RetryNow) &&
-                    NoticeChoices.Options(notice).Any(o => o.Choice == NoticeChoices.Ignore),
+                    NoticeOptions.Options(notice).Any(o => o.Choice == NoticeChoices.RetryNow) &&
+                    NoticeOptions.Options(notice).Any(o => o.Choice == NoticeChoices.Ignore),
                     "post-commit failure is actionable maintenance, not failed file result");
                 store.Prune();
                 Require(store.OpenNotices("p1").Count(n => n.ReasonKey == "store-maintenance") == 1,

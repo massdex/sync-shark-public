@@ -312,7 +312,7 @@ public sealed partial class SyncRun : ISyncRun
             using (FairStoreGate.WithCancellation(linked.Token))
                 result = await body(activity.Progress, linked.Token).ConfigureAwait(false);
             if (result is not RunReport report) return result;
-            if (report.HaltedBy is { } fatal && FailureRetryOwner.ScopeOf(fatal, linked.Token) == FailureRetryOwner.FailureScope.State)
+            if (report.HaltedBy is { } fatal && StorageFailureClassifier.ScopeOf(fatal, linked.Token) == FailureRetryOwner.FailureScope.State)
                 return (T)(object)FinalizeOutcome(report with { CompletedUtc = _time.GetUtcNow(), Diagnostics = instrumentation?.Snapshot() }, linked.Token);
             var completion = new CompletionSteps(this, report.PairId, linked.Token);
             var completed = report;
@@ -343,7 +343,7 @@ public sealed partial class SyncRun : ISyncRun
             return (T)(object)report;
         }
         catch (Exception error) when (typeof(T) == typeof(RunReport) && historyPairId is not null &&
-            FailureRetryOwner.ScopeOf(error, linked.Token) == FailureRetryOwner.FailureScope.State)
+            StorageFailureClassifier.ScopeOf(error, linked.Token) == FailureRetryOwner.FailureScope.State)
         {
             // Preserve effects already counted before the store lost authority; never run completion or history writes.
             var counted = error.Data["SyncRun.ExecutionReport"] as RunReport ??
@@ -367,7 +367,7 @@ public sealed partial class SyncRun : ISyncRun
         var summary = $"Run outcome={report.Outcome}; pending={report.Pending}; deferred={report.Deferred}; done={report.Done}; failed={report.Failed}; uncertain={report.Uncertain}";
         if (RunLog.Current is { } log) log.Summary(summary);
         else RunLog.Trace(summary);
-        if (report.HaltedBy is { } fatal && FailureRetryOwner.ScopeOf(fatal, CancellationToken.None) == FailureRetryOwner.FailureScope.State)
+        if (report.HaltedBy is { } fatal && StorageFailureClassifier.ScopeOf(fatal, CancellationToken.None) == FailureRetryOwner.FailureScope.State)
             return;
         try
         {
@@ -1555,7 +1555,7 @@ public sealed partial class SyncRun : ISyncRun
 
     private static RunReport FinalizeOutcome(RunReport report, CancellationToken ct)
     {
-        var outcome = report.HaltedBy is { } fatal && FailureRetryOwner.ScopeOf(fatal, ct) == FailureRetryOwner.FailureScope.State
+        var outcome = report.HaltedBy is { } fatal && StorageFailureClassifier.ScopeOf(fatal, ct) == FailureRetryOwner.FailureScope.State
             ? RunOutcomes.StateDamaged
             : report.Paused || report.Outcome == RunOutcomes.Paused || report.HaltedBy is PairPausedException ? RunOutcomes.Paused
             : report.Cancelled || ct.IsCancellationRequested || report.Outcome == RunOutcomes.Stopped ? RunOutcomes.Stopped

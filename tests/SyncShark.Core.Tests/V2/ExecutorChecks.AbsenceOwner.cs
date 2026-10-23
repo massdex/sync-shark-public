@@ -27,7 +27,7 @@ internal static partial class ExecutorChecks
                 var halted = false;
                 try
                 {
-                    var results = await Apply(new Executor(store, Settings(2), Admission()), Plan(action), source, target);
+                    var results = await Apply(new Executor(store, Settings(2), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), Plan(action), source, target);
                     Require(results.Single().DeleteSourceUnconfirmed, "unknown or pending restoration blocks delete");
                 }
                 catch (EndpointAccessException) when (scenario == "access") { halted = true; }
@@ -38,7 +38,7 @@ internal static partial class ExecutorChecks
                 {
                     store.RecordIntent("p1", action);
                     await RemoveSourceAsync(b, "item");
-                    var result = await new Executor(store, Settings(2), Admission()).ReconcileAsync([action], 2, a, b, default);
+                    var result = await new Executor(store, Settings(2), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage).ReconcileAsync([action], 2, a, b, default);
                     Require(result.Single().Outcome == Outcome.Uncertain, "crash reconcile shares pending-restore guard");
                 }
             }
@@ -101,7 +101,7 @@ internal static partial class ExecutorChecks
                 try
                 {
                     if (window == "archive") SyncLocalRecovery.RecoveryCreatedBeforeBindingForTest = () => source.AbsenceUnknown = true;
-                    var results = await Apply(new Executor(recording, Settings(2), Admission()), Plan(action), setup.Writer, source);
+                    var results = await Apply(new Executor(recording, Settings(2), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), Plan(action), setup.Writer, source);
                     Require(results.Single().DeleteSourceUnconfirmed && File.Exists(Path.Combine(setup.Root, "item")),
                         "source becoming unknown during intent/archive wait cannot remove local survivor");
                 }

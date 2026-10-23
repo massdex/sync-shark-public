@@ -21,7 +21,7 @@ internal static partial class RunChecks
             new HashSet<string>(), () => false) { CheckpointForCheck = _ => checkpoint() };
         var io = new GapRecoveryIndexIo(native, checkpoint);
         inventory.GapIo = io;
-        await using var worker = new LocalGapWorker((ILocalGapStore)store, io);
+        await using var worker = new LocalGapWorker((ILocalGapStore)store, io, StorageFailureClassifier.IsStateDamage);
         await using var index = new LocalIndexingRuns(store, (_, ct) => inventory.VerifyIndexingPassAsync(ct),
             worker, io, _ => checkpoint());
         // One bounded manual pass may discover after its hash lane captured its page. Another

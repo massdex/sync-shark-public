@@ -68,7 +68,7 @@ internal static partial class RunChecks
             { ProviderEffect = new("delete-submit", "unknown", DateTimeOffset.UnixEpoch) };
         store.RecordIntent(fx.Pair.PairId, action);
         store.SaveSyncRetry(fx.Pair.PairId, new(action.Path, "sync", 1, "unknown submission", DateTimeOffset.MinValue));
-        var observed = await EffectResolver.ResolveAsync(action, fx.WriterB, fx.WriterA, default,
+        var observed = await EffectResolver.ResolveAsync(action, fx.WriterB, fx.WriterA, default, isStateDamage: StorageFailureClassifier.IsStateDamage,
             historicalDeleteSource: await fx.A.ObserveAsync(action.Path, default));
         Require(observed.Outcome == Outcome.Skipped && observed.Reason?.Contains("not", StringComparison.OrdinalIgnoreCase) == true,
             "E8 expired unknown submission with same target produces NotApplied observation");
@@ -161,8 +161,8 @@ internal static partial class RunChecks
                 "failed notice delivery advances only its nested attempt, preserving file deadline and count");
             var decision = new SyncRetry("", "decision", 7, "review required", DateTimeOffset.MaxValue);
             store.SaveSyncRetry(pairId, decision);
-            FailureRetryOwner.RecordRunFailure(store, pairId, new IOException("run bookkeeping unavailable"), now);
-            FailureRetryOwner.RecordRunFailure(store, pairId, new IOException("run bookkeeping unavailable"), now.AddMinutes(1));
+            FailureRetryOwner.RecordRunFailure(store, pairId, new IOException("run bookkeeping unavailable"), now, isStateDamage: StorageFailureClassifier.IsStateDamage);
+            FailureRetryOwner.RecordRunFailure(store, pairId, new IOException("run bookkeeping unavailable"), now.AddMinutes(1), isStateDamage: StorageFailureClassifier.IsStateDamage);
             Require(store.SyncRetryAt(pairId, "") == decision &&
                 store.OpenNotices(pairId).Count(notice => notice.ReasonKey == "run-unavailable") == 1 &&
                 FailureRetryOwner.RunFailureState(store, pairId) is { Attempts: 2 },

@@ -21,7 +21,7 @@ internal static partial class RunChecks
                 n.Quarantine.ExpectedTarget?.ObjectId == current.ObjectId);
         }
         var notice = await Observe();
-        Require(NoticeChoices.Options(notice).Any(o => o.Choice == NoticeChoices.DefenderKeep),
+        Require(NoticeOptions.Options(notice).Any(o => o.Choice == NoticeChoices.DefenderKeep),
             "grant notice offers cheap explicit keep-exclusion confirmation for current file");
         fx.A.Seed("kept.txt", "replacement after review");
         Require((await fx.Run().ResolveQuarantineAsync("p1", notice.NoticeId!, NoticeChoices.DefenderKeep, default)).Outcome == Outcome.Skipped &&
@@ -43,7 +43,7 @@ internal static partial class RunChecks
         Require(!store.AcceptDefenderGrant(grant, local, cloud), "keep-exclusion compare rejects stale grant metadata");
         fx.A.Seed("kept.txt", "", ItemKind.Folder);
         notice = await Observe();
-        Require(!NoticeChoices.Options(notice).Any(o => o.Choice == NoticeChoices.DefenderKeep) &&
+        Require(!NoticeOptions.Options(notice).Any(o => o.Choice == NoticeChoices.DefenderKeep) &&
             (await fx.Run().ResolveQuarantineAsync("p1", notice.NoticeId!, NoticeChoices.DefenderKeep, default)).Outcome == Outcome.Skipped &&
             store.DefenderGrantById(grant.GrantId) == bound, "keep-exclusion never authorizes a folder or subtree");
     }
@@ -62,12 +62,12 @@ internal static partial class RunChecks
         var fx = Build(suppliedStore: store);
         var nativeRoot = LocalChecks.RootOf(localPath, "ra");
         store.SavePair(fx.Pair with { A = nativeRoot });
-        var writer = await LocalWriter.OpenAsync(nativeRoot, Side.A, "p1", LocalChecks.InstallationId, Path.Combine(owned, "recovery"), default);
+        var writer = await LocalWriter.OpenAsync(nativeRoot, Side.A, "p1", LocalChecks.InstallationId, Path.Combine(owned, "recovery"), default, isStateDamage: StorageFailureClassifier.IsStateDamage);
         fx.Provider.AddWriter(nativeRoot, writer);
         var path = AttendedElevatedAction.ValidatePath(localPath, "kept.txt");
         var grant = new DefenderGrant("keep-native-grant", "old-owner", "cloud-object", null, path, AttendedElevatedAction.DownloadStagePath(path));
         store.StoreDefenderGrant(grant);
-        var inventory = new LocalInventory(nativeRoot, Side.A, store, new HashSet<string>(StringComparer.OrdinalIgnoreCase), Settings, TimeProvider.System);
+        var inventory = new LocalInventory(nativeRoot, Side.A, store, new HashSet<string>(StringComparer.OrdinalIgnoreCase), Settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage);
         async Task<Notice> Observe()
         {
             var gen = store.BeginGeneration("ra", "keep-native-observation");
@@ -360,7 +360,7 @@ internal static partial class RunChecks
             Require(store.FirstSyncDone("p1") && await fx.A.ObserveAsync("blocked/child", default) is null,
                 "settled grant hold and descendants do not keep first sync pending");
             var note = store.OpenNotices("p1").Single(n => n.Quarantine?.ConflictingGrantId == grant.GrantId);
-            Require(note.Kind == NoticeKind.UserDecision && NoticeChoices.Options(note).Any(o => o.Choice == NoticeChoices.DefenderVerify),
+            Require(note.Kind == NoticeKind.UserDecision && NoticeOptions.Options(note).Any(o => o.Choice == NoticeChoices.DefenderVerify),
                 "grant guard exposes stable decision and explicit read-only admin option");
             foreach (var view in new[] { new DefenderExclusionView(false, []), new DefenderExclusionView(true, [grant.Path]), new DefenderExclusionView(true, [grant.StagePath]) })
             {
@@ -611,7 +611,7 @@ internal static partial class RunChecks
         Require(store.OpenNotices("p1").Single(n => n.Quarantine is not null).Quarantine!.ExpectedTarget!.ObjectId == newer.ObjectId,
             "new entity at ignored path reopens notice with matching held identity");
         var folderNote = note with { Quarantine = new(Side.A, null, newer with { Kind = ItemKind.Folder }, true) };
-        Require(!NoticeChoices.Options(folderNote).Any(o => o.Choice is NoticeChoices.DefenderExclude or NoticeChoices.QuarantineDeleteDropbox),
+        Require(!NoticeOptions.Options(folderNote).Any(o => o.Choice is NoticeChoices.DefenderExclude or NoticeChoices.QuarantineDeleteDropbox),
             "folder holds never offer broad Defender exclusion or unsupported cloud deletion");
     }
 

@@ -22,7 +22,7 @@ internal static class SettlementInventoryChecks
             new("remote", SyncProviders.Dropbox, "account", "/Remote", "remote-root"), [], [], true);
         store.SavePair(pair);
         LocalInventory Inventory() => new(pair.A, Side.A, store,
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase), settings, TimeProvider.System, pairId: pair.PairId)
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase), settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId)
             { WalkCheckpointForTest = () => (new NtfsUsnCheckpoint(1, 0, 100, 0), false) };
         var initial = await Inventory().FullAsync(1, _ => true, null!, CancellationToken.None);
         var local = initial.Items.Single() with { Hash = DropboxContentHash.Compute(System.Text.Encoding.UTF8.GetBytes("data")) };
@@ -84,12 +84,12 @@ internal static class SettlementInventoryChecks
                 DateTimeOffset.UnixEpoch, ItemFlags.None);
             var removal = new SyncAction("pointer-review", 40, ActionKind.Delete, Side.A, "", null,
                 null, reviewRoot, false, null) { RemovalReviewChoice = true };
-            var proof = await DeleteSourceGuard.CaptureReviewedRemovalAsync(removal, pair, store, inventory, default);
+            var proof = await DeleteSourceGuard.CaptureReviewedRemovalAsync(removal, pair, store, inventory, default, isStateDamage: StorageFailureClassifier.IsStateDamage);
             Require(proof is not null && proof == await DeleteSourceGuard.CaptureReviewedRemovalAsync(
-                removal, pair, store, inventory, default),
+                removal, pair, store, inventory, default, isStateDamage: StorageFailureClassifier.IsStateDamage),
                 "real local subtree reader proves owned pointers from native identity and version metadata without hydration");
             Require(!await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(
-                removal with { FrozenRemovalSignature = proof }, pair, store, inventory, default),
+                removal with { FrozenRemovalSignature = proof }, pair, store, inventory, default, isStateDamage: StorageFailureClassifier.IsStateDamage),
                 "whole-root observation never authorises removal of the pair root");
             store.WriteSnapshot(scanned with { Gen = store.BeginGeneration(pair.A.RootId, "snapshot") });
             // An unavailable NTFS journal can independently protect this disposable root.
@@ -116,7 +116,7 @@ internal static class SettlementInventoryChecks
             using var gate = new SemaphoreSlim(1, 1);
             var runner = new ActionRunner(new StoreCommitter(store, gate, pair.PairId, 2), settings,
                 new SyncTransferResourceController(new SyncTransferSettings(ResourceMode: "Performance"),
-                    TimeProvider.System, () => new SyncResourcePressure(0, 0.1, 8L << 30)), pair.PairId, target, source, [], new());
+                    TimeProvider.System, () => new SyncResourcePressure(0, 0.1, 8L << 30)), pair.PairId, target, source, [], new(), isStateDamage: StorageFailureClassifier.IsStateDamage);
             var result = await runner.RunAsync(action, CancellationToken.None);
             Require(result?.Outcome == Outcome.Done && target.Updates == 1 && target.ByteCalls == 0 && source.ByteCalls == 0,
                 "remote update executes through metadata only with either ReplaceOnlineOnlyStubs setting");

@@ -3,10 +3,32 @@ namespace Massdex.SyncShark.V2;
 /// <summary>The only place that reads and writes the sync database.</summary>
 public interface IStateStore : IDisposable
 {
+    string? ReportStorageNotice(string pairId, Notice notice, string familyPrefix) =>
+        throw new NotSupportedException("Storage notices are not supported by this store.");
+    void RecordPointerVerificationNotice(string pairId, Notice itemNotice,
+        string itemFamily, Notice summaryNotice, string summaryFamily) =>
+        throw new NotSupportedException("Pointer verification notices are not supported by this store.");
+    void RetirePointerVerificationSummary(string pairId, StorageNotice summary) =>
+        throw new NotSupportedException("Pointer verification notices are not supported by this store.");
+    void CloseStorageNoticeBatch(string pairId, IReadOnlyList<StorageNotice> items) =>
+        throw new NotSupportedException("Storage notices are not supported by this store.");
+    IReadOnlyList<StorageNotice> OpenStoragePairCauses(string pairId, string rootId, string remoteBinding) =>
+        throw new NotSupportedException("Storage notices are not supported by this store.");
+    void ClearStorageRootBackoff(string rootId) =>
+        throw new NotSupportedException("Storage root backoff is not supported by this store.");
+
     /// <summary>Capture before checking indexing eligibility/debt, then wait after this version.</summary>
     long IndexingWorkVersion => IndexingWorkSignal.For(this).Version;
     /// <summary>Completes on a writer notification since the captured version; cancellation affects only this waiter.</summary>
     Task WaitForIndexingWorkAsync(long afterVersion, CancellationToken ct) => IndexingWorkSignal.For(this).WaitAsync(afterVersion, ct);
+
+    bool CachedPairPaused(string pairId) => false;
+    bool SupportsListingCheckpoint => false;
+    void BeginListing(RootDef root, string mode) { }
+    string? ListingPage(string root, string request) => null;
+    void SaveListingPage(string root, string request, string cursor, string payload) { }
+    void ForgetListing(string root) { }
+    bool HasFullListing(RootDef root) => false;
 
     long BeginGeneration(string rootId, string kind);
     void WriteSnapshot(Snapshot s);

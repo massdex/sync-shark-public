@@ -15,7 +15,7 @@ public sealed class ProviderEffectContext
 
     /// <summary>A context owned by the Executor's committer, carrying its action so a batch lane can group many
     /// entries' checkpoints into one durable write.</summary>
-    internal ProviderEffectContext(SyncAction action, StoreCommitter owner, Func<ProviderEffectCheckpoint, Task> record)
+    internal ProviderEffectContext(SyncAction action, ProviderEffectOwner owner, Func<ProviderEffectCheckpoint, Task> record)
     {
         Action = action;
         Owner = owner;
@@ -26,7 +26,7 @@ public sealed class ProviderEffectContext
     internal SyncAction? Action { get; init; }
 
     /// <summary>The committer that owns this context's writes, or null for a free-standing context.</summary>
-    internal StoreCommitter? Owner { get; }
+    internal ProviderEffectOwner? Owner { get; }
 
     /// <summary>Completes only after the session/job evidence is durable; an effect must not outrun this task.</summary>
     public Task RecordAsync(string kind, string id)
@@ -43,6 +43,6 @@ public sealed class ProviderEffectContext
     internal Task RecordRecoveryAsync(string actionId, string path, RecoveryRef recovery, string pairId,
         CancellationToken ct) =>
         Owner is { } owner && string.Equals(owner.PairId, pairId, StringComparison.Ordinal)
-            ? owner.RecordRecoveryAsync(actionId, path, recovery, ct)
+            ? owner.RecordRecovery(actionId, path, recovery, pairId, ct)
             : Task.CompletedTask;
 }

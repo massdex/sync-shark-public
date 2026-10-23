@@ -30,7 +30,7 @@ public sealed partial class SqliteStateStore
         }
         catch (Exception error)
         {
-            RunLog.Trace("Committed results retained; storage maintenance pending: " + error.ToString());
+            RunTrace.Emit("Committed results retained; storage maintenance pending: " + error.ToString());
             if (error is StateDamagedException or EndpointAccessException ||
                 error is Microsoft.Data.Sqlite.SqliteException sql && StoreSchema.IsDamaged(sql))
                 Interlocked.CompareExchange(ref _resultMaintenanceHalt, error is Microsoft.Data.Sqlite.SqliteException
@@ -43,7 +43,7 @@ public sealed partial class SqliteStateStore
                     ". Retry runs the remaining maintenance; the next sync retries automatically. Ignore dismisses this notice without undoing file results.",
                     "store-maintenance")]);
             }
-            catch (Exception noticeError) { RunLog.Trace("Maintenance notice could not be saved: " + noticeError.ToString()); }
+            catch (Exception noticeError) { RunTrace.Emit("Maintenance notice could not be saved: " + noticeError.ToString()); }
         }
     }
 }

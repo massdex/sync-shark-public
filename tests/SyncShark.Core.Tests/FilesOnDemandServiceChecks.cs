@@ -91,7 +91,7 @@ internal static class FilesOnDemandServiceChecks
             (_, _, _) => throw new InvalidOperationException("native provider must not open"), _ => false, store);
         var receipt = new PilotRemoteEntry("Folder/file.bin", PilotEntryKind.File, "id:remote-file", "rev-1", 4, new string('a', 64));
         var item = new StorageNotice(a.RootId, "id:local:00000001:00000000000000ae", b.RootId,
-            "remote-update", StorageNotices.ReceiptScope(receipt));
+            "remote-update", StorageNotices.ReceiptScope(receipt.Id, receipt.Revision, receipt.ContentHash));
         async Task ReportAsync(Exception error)
         {
             await using var service = new StorageSettlementService(store, connections);
@@ -245,9 +245,9 @@ internal static class FilesOnDemandServiceChecks
         await Fail(2, itemAttempt.Correlate(new IOException("Windows read failed")));
         Require(store.OpenNotices(pair.PairId).Any(n => n.Storage?.ObjectId == files[2].ObjectId),
             "correlated item-specific failure remains visible during the pair outage");
-        Require(StorageNotices.ClassifyFailure(new IOException("Sharing", unchecked((int)0x80070020))) is null &&
-            StorageNotices.ClassifyFailure(new IOException("Disk full", unchecked((int)0x80070070))) is null &&
-            StorageNotices.ClassifyFailure(new InvalidDataException("Policy changed")) is null,
+        Require(StorageNoticeFailureClassifier.ClassifyFailure(new IOException("Sharing", unchecked((int)0x80070020))) is null &&
+            StorageNoticeFailureClassifier.ClassifyFailure(new IOException("Disk full", unchecked((int)0x80070070))) is null &&
+            StorageNoticeFailureClassifier.ClassifyFailure(new InvalidDataException("Policy changed")) is null,
             "specific item HRESULTs and policy faults never become pair causes");
         var recovered = 0;
         Task<StorageObserved> Success(PairDef _, ItemState item, Action validate, CancellationToken ct)

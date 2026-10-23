@@ -57,7 +57,7 @@ internal static partial class RunChecks
             Require(store.Live(heldRoot, ["blocked.txt"]).Single().Flags.HasFlag(ItemFlags.Quarantined), "hold lives on entity row");
             Require(store.UnresolvedIntents("p1").Count == 0, "settled quarantine has no automatic retry intent");
             var notice = store.OpenNotices("p1").Single(n => n.Quarantine is not null);
-            Require(notice.Detail.Contains($"Win32={code}") && NoticeChoices.Options(notice).Count == 5,
+            Require(notice.Detail.Contains($"Win32={code}") && NoticeOptions.Options(notice).Count == 5,
                 "native diagnostics and explicit actions survive notice serialization");
             var calls = fault.Attempts;
             await run.IncrementalAsync("p1", new RecordingProgress(), default);

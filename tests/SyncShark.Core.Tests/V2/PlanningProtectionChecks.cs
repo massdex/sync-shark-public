@@ -12,6 +12,7 @@ internal static class PlanningProtectionChecks
             CheckUnbaselined(Path.Combine(folder, "unbaselined-" + side), side);
         CheckRetryGate(Path.Combine(folder, "retry-gate"));
         CheckProtectionComposition(Path.Combine(folder, "composition"));
+        CheckDamageBoundaries(Path.Combine(folder, "damage-boundaries"));
         CheckIncompleteCoverage();
         CheckUnknownTargetCoverage();
         CheckLinkedClosure(Path.Combine(folder, "linked-closure"), 4);
@@ -21,6 +22,72 @@ internal static class PlanningProtectionChecks
         BlockedDeleteNoticeChecks.Run(Path.Combine(folder, "blocked-delete-notices"));
         DeleteReviewNoticeChecks.Run(Path.Combine(folder, "delete-review-notices"));
         Console.WriteLine("PASS immutable scope protection and real scan completeness: no false Delete/Forget");
+    }
+
+    private static void CheckDamageBoundaries(string folder)
+    {
+        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        var pair = new PairDef("pair", "Pair A", new("left", SyncProviders.Local, null, "/left", "left"),
+            new("right", SyncProviders.Local, null, "/right", "right"), [], [], true);
+        store.SavePair(pair);
+        using var protection = store.OpenPlanningProtection(pair);
+        using var indexed = protection.Stream();
+        // The second stream encounters the existing TEMP index table; exact reads still work.
+        using var fallback = protection.Stream();
+        var matches = fallback.Read(["untouched"]);
+        LocalChecks.Require(indexed.SourcePasses == 3 && fallback.SourcePasses == 0 && fallback.MaximumInputBatch == 1 &&
+            matches.Count == 1 && !matches[0].Covered, "failed index preserves exact-read fallback and counters");
+        foreach (var code in new[] { 11, 26, 5, 6, 13, 19 })
+        {
+            var raw = new SqliteException("injected exact-read failure", code);
+            fallback.ExactReadForTest = () => throw raw;
+            Exception? caught = null;
+            try { fallback.Read(["untouched"]); }
+            catch (Exception error) { caught = error; }
+            LocalChecks.Require(code is 11 or 26
+                ? caught is StateDamagedException && ReferenceEquals(caught.InnerException, raw)
+                : ReferenceEquals(caught, raw), "only typed 11/26 escaping final fallback are translated");
+        }
+        fallback.ExactReadForTest = null;
+        foreach (var primary in new Exception[] { new IOException("primary"), new SqliteException("primary damage", 11) })
+        {
+            var secondary = new SqliteException("cleanup damage", 26);
+            var cleanup = new FailingProtectionCleanup(secondary);
+            var next = new FailingProtectionCleanup(null);
+            SqliteStateStore.DisposePreserving(primary, cleanup, next);
+            LocalChecks.Require(cleanup.Called && next.Called &&
+                primary.Data["StoreCleanupFailure"] is StateDamagedException retained &&
+                ReferenceEquals(retained.InnerException, secondary), "cleanup retains primary and attempts remaining resources");
+        }
+        var disposalRaw = new SqliteException("standalone disposal", 11);
+        Exception? disposalFailure = null;
+        try { SqliteStateStore.DisposePreserving(null, new FailingProtectionCleanup(disposalRaw)); }
+        catch (Exception error) { disposalFailure = error; }
+        LocalChecks.Require(disposalFailure is StateDamagedException &&
+            ReferenceEquals(disposalFailure.InnerException, disposalRaw), "standalone disposal translates typed damage");
+        var iteratorRaw = new SqliteException("deferred read", 26);
+        IEnumerable<int> Deferred()
+        {
+            yield return 1;
+            throw iteratorRaw;
+        }
+        using var iterator = SqliteStateStore.DamageEnumeration(Deferred).GetEnumerator();
+        LocalChecks.Require(iterator.MoveNext() && iterator.Current == 1, "damage adapter stays lazy");
+        Exception? iteratorFailure = null;
+        try { iterator.MoveNext(); }
+        catch (Exception error) { iteratorFailure = error; }
+        LocalChecks.Require(iteratorFailure is StateDamagedException &&
+            ReferenceEquals(iteratorFailure.InnerException, iteratorRaw), "damage is translated at MoveNext");
+    }
+
+    private sealed class FailingProtectionCleanup(Exception? error) : IDisposable
+    {
+        internal bool Called { get; private set; }
+        public void Dispose()
+        {
+            Called = true;
+            if (error is not null) throw error;
+        }
     }
 
     private static void CheckProtectionComposition(string folder)
@@ -36,7 +103,7 @@ internal static class PlanningProtectionChecks
         var item = new ItemState("Effect", ItemKind.File, "item", null, new string('a', 64), 1,
             DateTimeOffset.UnixEpoch, ItemFlags.None);
         store.RecordIntent(pair.PairId, new("effect", 18, ActionKind.CopyNew, Side.B, item.Path, null, item, null, false, null));
-        var run = new SyncRun(store, new Executor(store, V2Settings.Default, ExecutorChecks.Admission()),
+        var run = new SyncRun(store, new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
             new FakeEndpointProvider(), V2Settings.Default, TimeProvider.System);
         var builder = typeof(SyncRun).GetMethod("Protection", System.Reflection.BindingFlags.Instance |
             System.Reflection.BindingFlags.NonPublic)!;

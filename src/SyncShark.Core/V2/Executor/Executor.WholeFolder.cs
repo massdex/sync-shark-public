@@ -87,7 +87,7 @@ public sealed partial class Executor
                     {
                         ItemState? historical;
                         try { historical = committer.DeleteSource(action); }
-                        catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct) == FailureRetryOwner.FailureScope.Item) { continue; }
+                        catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct, isStateDamage: _isStateDamage) == FailureRetryOwner.FailureScope.Item) { continue; }
                         if (historical is null || string.IsNullOrWhiteSpace(historical.ObjectId)) continue;
                         indices[action.ActionId] = requests.Count;
                         requests.Add((historical, action.Path));
@@ -95,14 +95,14 @@ public sealed partial class Executor
                     IReadOnlyList<AbsenceObservation> observations = new AbsenceObservation[requests.Count];
                     if (requests.Count > 0 && source is ISourceAbsenceProbe probe)
                     {
-                        try { observations = await probe.IsAbsentBatchAsync(requests, ct).ConfigureAwait(false); }
+                        try { observations = await SourceAbsenceBatch.ObserveAsync(probe, requests, ct, _isStateDamage).ConfigureAwait(false); }
                         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-                        catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct) == FailureRetryOwner.FailureScope.Item) { /* Retry debt, never absence. */ }
+                        catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct, isStateDamage: _isStateDamage) == FailureRetryOwner.FailureScope.Item) { /* Retry debt, never absence. */ }
                     }
                     foreach (var action in page)
                     {
                         var indexed = indices.TryGetValue(action.ActionId, out var index);
-                        var result = await DeleteSourceGuard.CheckAsync(action, source, committer, plan.PairId, ct,
+                        var result = await DeleteSourceGuard.CheckAsync(action, source, committer, plan.PairId, ct, isStateDamage: _isStateDamage,
                             DeleteSourceGuard.Replacement(action, replacements), preprobed: true,
                             absence: indexed && observations.Count == requests.Count ? observations[index].Absent : null,
                             absenceReason: indexed && observations.Count == requests.Count ? observations[index].Reason : null)
@@ -128,12 +128,12 @@ public sealed partial class Executor
                 {
                     RevalidateDelete = async () =>
                     {
-                        var batching = new AdmissionAbsenceBatch();
+                        var batching = new AdmissionAbsenceBatch(_isStateDamage);
                         foreach (var page in evidence.Chunk(128))
                         {
                             var checks = await Task.WhenAll(page.Select(item =>
                                 DeleteSourceGuard.CheckEvidenceAsync(item.Action, source, item.Historical,
-                                    item.RestorePending, ct, DeleteSourceGuard.Replacement(item.Action, replacements),
+                                    item.RestorePending, ct, isStateDamage: _isStateDamage, DeleteSourceGuard.Replacement(item.Action, replacements),
                                     admissionBatch: batching))).ConfigureAwait(false);
                             if (checks.Any(result => result is not null)) return false;
                         }
@@ -184,7 +184,7 @@ public sealed partial class Executor
                 remaining.AddRange(group.SelectMany(whole => whole.Actions));
                 continue;
             }
-            catch (Exception e) when (recovery is not null && FailureRetryOwner.ScopeOf(e, ct) == FailureRetryOwner.FailureScope.Item)
+            catch (Exception e) when (recovery is not null && FailureRetryOwner.ScopeOf(e, ct, isStateDamage: _isStateDamage) == FailureRetryOwner.FailureScope.Item)
             {
                 // A timeout/cancellation after the checkpoint must never fall back to replaying per-item effects.
                 ended = byTree.Keys.Select(tree => FolderTreeOutcome.Of(tree, FolderTreeStatus.Uncertain,
@@ -209,7 +209,7 @@ public sealed partial class Executor
                         outcome.Reason, "folder-delete-refused"));
                 var folderResults = new List<(SyncAction Action, ActionResult Result)>(whole.Actions.Count);
                 foreach (var action in whole.Actions)
-                    folderResults.Add((action, await WholeFolderResultAsync(action, outcome, target, folderResults)
+                    folderResults.Add((action, await WholeFolderResultAsync(action, outcome, target, folderResults, isStateDamage: _isStateDamage)
                         .ConfigureAwait(false)));
                 groupResults.AddRange(folderResults);
                 if (outcome.Restored.Count > 0)
@@ -316,7 +316,7 @@ public sealed partial class Executor
                     }, ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-            catch (Exception e) when (FailureRetryOwner.ScopeOf(e, CancellationToken.None) == FailureRetryOwner.FailureScope.Item)
+            catch (Exception e) when (FailureRetryOwner.ScopeOf(e, CancellationToken.None, isStateDamage: _isStateDamage) == FailureRetryOwner.FailureScope.Item)
             {
                 ended = trees.Select(tree => FolderTreeOutcome.Of(tree, FolderTreeStatus.Uncertain, e.Message)).ToArray();
             }
@@ -341,7 +341,7 @@ public sealed partial class Executor
                 {
                     var result = outcome.Status == FolderTreeStatus.NotSubmitted
                         ? new ActionResult(action.ActionId, Outcome.Skipped, null, null, null, EffectResolver.Superseded)
-                        : await WholeFolderResultAsync(action, outcome, target, folderResults).ConfigureAwait(false);
+                        : await WholeFolderResultAsync(action, outcome, target, folderResults, isStateDamage: _isStateDamage).ConfigureAwait(false);
                     folderResults.Add((action, result));
                 }
                 allResults.AddRange(folderResults);
@@ -387,8 +387,9 @@ public sealed partial class Executor
     // One child's result from its folder's outcome. The folder's own action comes last and is Done only when every
     // victim under it is confirmed.
     private static async Task<ActionResult> WholeFolderResultAsync(SyncAction action, FolderTreeOutcome outcome,
-        IEndpointWriter target, IReadOnlyList<(SyncAction Action, ActionResult Result)> earlier)
+        IEndpointWriter target, IReadOnlyList<(SyncAction Action, ActionResult Result)> earlier, Func<Exception, bool> isStateDamage)
     {
+        ArgumentNullException.ThrowIfNull(isStateDamage);
         if (outcome.Status == FolderTreeStatus.Uncertain)
             return Uncertain(action, outcome.Reason ?? "the whole-folder delete was not checked");
         if (outcome.Kept.Contains(action.Path))
@@ -404,7 +405,7 @@ public sealed partial class Executor
         {
             // Dropbox keeps the deleted revision in its own history; the reference names it, with no provider call.
             try { recovery = await target.PreserveAsync(action.ExpectedTarget, action.ActionId, CancellationToken.None); }
-            catch (Exception e) when (FailureRetryOwner.ScopeOf(e, CancellationToken.None) == FailureRetryOwner.FailureScope.Item)
+            catch (Exception e) when (FailureRetryOwner.ScopeOf(e, CancellationToken.None, isStateDamage: isStateDamage) == FailureRetryOwner.FailureScope.Item)
             {
                 return Uncertain(action, string.Format(ExecutionReasons.RecoveryUnverified.Detail, e.Message));
             }

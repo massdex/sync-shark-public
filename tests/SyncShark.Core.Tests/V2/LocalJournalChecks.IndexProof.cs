@@ -56,7 +56,7 @@ internal static partial class LocalJournalChecks
         gaps.BeginGap(root.RootId, cursor, 100, true);
         var epoch = gaps.GapEpoch(root.RootId)!;
         var io = new GapCheckIo(stamp, cursor) { UsnOverride = 99 };
-        await using (var worker = new LocalGapWorker(gaps, io))
+        await using (var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage))
             worker.Discover(root, epoch, default);
 
         // Raw rows are the durable oracle: the stored classification is not inferred from a projection.

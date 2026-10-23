@@ -182,7 +182,7 @@ internal static class FilesOnDemandNativeEdgeChecks
         var writer = await LocalWriter.OpenAsync(
             new RootDef(LocalRootIdFor(fullRoot), SyncProviders.Local, null, fullRoot,
                 SyncLocalEndpointStore.ObjectId(rootIdentity.VolumeSerialNumber, rootIdentity.FileId)),
-            Side.A, pairId, InstallationId, recoveryRoot, cancellationToken).ConfigureAwait(false);
+            Side.A, pairId, InstallationId, recoveryRoot, cancellationToken, isStateDamage: StorageFailureClassifier.IsStateDamage).ConfigureAwait(false);
         VerifyUnelevatedControlSecurity(fullRoot);
         var downloadsBefore = downloads();
 
@@ -246,7 +246,7 @@ internal static class FilesOnDemandNativeEdgeChecks
         var writer = await LocalWriter.OpenAsync(
             new RootDef(LocalRootIdFor(fullRoot), SyncProviders.Local, null, fullRoot,
                 SyncLocalEndpointStore.ObjectId(rootIdentity.VolumeSerialNumber, rootIdentity.FileId)),
-            Side.A, pairId, InstallationId, recoveryRoot, cancellationToken).ConfigureAwait(false);
+            Side.A, pairId, InstallationId, recoveryRoot, cancellationToken, isStateDamage: StorageFailureClassifier.IsStateDamage).ConfigureAwait(false);
         var replacement = BuildReplacementContent();
         var source = new ItemState(remote.RelativePath, ItemKind.File,
             "id:local:00000001:0000000000000001", null, DropboxContentHash.Compute(replacement),

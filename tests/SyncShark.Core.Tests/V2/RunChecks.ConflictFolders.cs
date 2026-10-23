@@ -301,7 +301,7 @@ internal static partial class RunChecks
                     !store.UnresolvedIntents(fx.Pair.PairId).Any(action => action.ConflictRestore),
                     "interrupted restore does not block ordinary pair sync");
                 var open = store.NoticeById(fx.Pair.PairId, notice.NoticeId!)!.Value;
-                Require(!open.Closed && NoticeChoices.Options(open.Notice).Any(option => option.Choice == NoticeChoices.RestoreAsCopy) &&
+                Require(!open.Closed && NoticeOptions.Options(open.Notice).Any(option => option.Choice == NoticeChoices.RestoreAsCopy) &&
                     store.Recoveries(fx.Pair.PairId).Count == 1, "Recovery and restore-as-copy options survive abandonment");
                 var dismissed = await Choose(fx, notice, NoticeChoices.Dismiss);
                 Require(dismissed.Outcome == Outcome.Done && store.NoticeById(fx.Pair.PairId, notice.NoticeId!)!.Value.Closed,

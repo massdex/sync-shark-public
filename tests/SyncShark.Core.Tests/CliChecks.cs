@@ -1407,9 +1407,9 @@ internal static partial class CliChecks
         var folderRecovery = new Massdex.SyncShark.V2.Notice("pair", 32,
             Massdex.SyncShark.V2.NoticeKind.Info, "folder", "Recovery pending", "folder-delete-unrestored",
             FolderRecoveryAnchor: "anchor");
-        Require(Massdex.SyncShark.V2.NoticeChoices.Options(folderRecovery).Any(option => option.Choice == "restore-again") &&
+        Require(Massdex.SyncShark.V2.NoticeOptions.Options(folderRecovery).Any(option => option.Choice == "restore-again") &&
             help.StandardOutput.Contains("restore-again", StringComparison.Ordinal), "Restore again is advertised by shared CLI help");
-        Require(Massdex.SyncShark.V2.NoticeChoices.Options(folderRecovery).All(option =>
+        Require(Massdex.SyncShark.V2.NoticeOptions.Options(folderRecovery).All(option =>
                 Massdex.SyncShark.V2.NoticeChoices.IsExplicitNoticeChoice(option.Choice)) &&
             Massdex.SyncShark.V2.NoticeChoices.IsRetryNotice(folderRecovery),
             "whole-folder recovery choices use the shared explicit CLI notice dispatcher");

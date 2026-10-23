@@ -166,7 +166,7 @@ internal static class DirectDownloadChecks
             Planned(LocalChecks.Bytes("planned")), victim, true, null);
         var runner = new ActionRunner(new StoreCommitter(store, new SemaphoreSlim(1, 1), PairId, 1),
             V2Settings.Default, ExecutorChecks.Admission(), PairId, setup.Writer, source, [],
-            new ConcurrentDictionary<string, Outcome>());
+            new ConcurrentDictionary<string, Outcome>(), isStateDamage: StorageFailureClassifier.IsStateDamage);
         var result = await runner.RunAsync(action, cancel.Token).ConfigureAwait(false);
         LocalChecks.Require(result is null, "a cancelled download records no outcome");
         LocalChecks.Require(File.ReadAllText(Path.Combine(setup.Root, "keep.txt")) == "original-target",
@@ -189,7 +189,7 @@ internal static class DirectDownloadChecks
             Planned(LocalChecks.Bytes("downloaded")), victim, true, null);
         var result = await RunAsync(setup.Writer, source, action, store).ConfigureAwait(false);
         LocalChecks.Require(result is { Outcome: Outcome.Uncertain }, "the checkpoint awaits safe reconciliation");
-        var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission());
+        var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
         var settled = (await executor.ReconcileAsync(store.UnresolvedIntents(PairId), 1, setup.Writer, source,
             CancellationToken.None)).Single();
         LocalChecks.Require(settled.Outcome == Outcome.Skipped && settled.Reason!.Contains(EffectResolver.Superseded) &&
@@ -362,7 +362,7 @@ internal static class DirectDownloadChecks
         using var store = new InMemoryStateStore();
         RegisterPair(store, setup.Root);
         store.RecordIntent(PairId, action);
-        var result = (await new Executor(store, V2Settings.Default, ExecutorChecks.Admission())
+        var result = (await new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage)
             .ReconcileAsync([action], 1, relocated, new Source(bytes), CancellationToken.None)).Single();
         LocalChecks.Require(result.Outcome == Outcome.Skipped && store.UnresolvedIntents(PairId).Count == 0 &&
             store.OpenNotices(PairId).Any(n => n.Detail.Contains(setup.Recovery)),
@@ -381,7 +381,7 @@ internal static class DirectDownloadChecks
             ProviderEffect = new ProviderEffectCheckpoint(SyncDirectDownloadCheckpoint.Kind, "{}",
                 DateTimeOffset.UtcNow)
         };
-        var result = await EffectResolver.ResolveAsync(action, endpoint, endpoint, CancellationToken.None)
+        var result = await EffectResolver.ResolveAsync(action, endpoint, endpoint, CancellationToken.None, isStateDamage: StorageFailureClassifier.IsStateDamage)
             .ConfigureAwait(false);
         LocalChecks.Require(result.Outcome == Outcome.Uncertain,
             "a local download checkpoint without resume stays Uncertain instead of being classified absent");
@@ -398,7 +398,7 @@ internal static class DirectDownloadChecks
         using var store = new InMemoryStateStore();
         RegisterPair(store, root);
         store.RecordIntent(PairId, action);
-        var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission());
+        var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
         var results = await executor.ReconcileAsync([action], 1, writer, new Source(Array.Empty<byte>()),
             CancellationToken.None).ConfigureAwait(false);
         return results.Single();
@@ -409,7 +409,7 @@ internal static class DirectDownloadChecks
     {
         var runner = new ActionRunner(new StoreCommitter(store, new SemaphoreSlim(1, 1), PairId, 1),
             V2Settings.Default, ExecutorChecks.Admission(), PairId, writer, source, [],
-            new ConcurrentDictionary<string, Outcome>());
+            new ConcurrentDictionary<string, Outcome>(), isStateDamage: StorageFailureClassifier.IsStateDamage);
         return await runner.RunAsync(action, CancellationToken.None).ConfigureAwait(false);
     }
 

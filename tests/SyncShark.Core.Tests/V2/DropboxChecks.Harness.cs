@@ -27,7 +27,7 @@ internal static partial class DropboxChecks
 
         public DropboxWriter Writer() => Writer(Path.Combine(_root, "spool"));
 
-        public DropboxWriter Writer(string spool) => new(Root(), Side.B, Client, spool,
+        public DropboxWriter Writer(string spool) => new(Root(), Side.B, Client, spool, isStateDamage: StorageFailureClassifier.IsStateDamage,
             V2Settings.Default with { UploadBatchSize = 1, DeleteBatchSize = 1, MkDirBatchSize = 1 });
 
         public void Dispose()

@@ -4,15 +4,15 @@ public static class JournalSizing
 {
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, byte> Silent = new();
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, byte> Active = new();
-    public const string NoticeKey = "journal-capacity";
+    public const string NoticeKey = NoticeVocabulary.JournalNoticeKey;
     public static string Key(long serial) => NoticeKey + ":" + serial.ToString(System.Globalization.CultureInfo.InvariantCulture);
-    public static bool IsNotice(Notice notice) => notice.ReasonKey.StartsWith(NoticeKey + ":", StringComparison.Ordinal);
-    public const string Enlarge = "enlarge-journal";
-    public const string NotNow = "journal-not-now";
-    public const string Never = "journal-never";
+    public static bool IsNotice(Notice notice) => NoticeVocabulary.IsJournalNotice(notice);
+    public const string Enlarge = NoticeVocabulary.JournalEnlarge;
+    public const string NotNow = NoticeVocabulary.JournalNotNow;
+    public const string Never = NoticeVocabulary.JournalNever;
     public const long Minimum = 1024L * 1024 * 1024;
     public const long Maximum = 8 * Minimum;
-    public static bool IsChoice(string choice) => choice is Enlarge or NotNow or Never;
+    public static bool IsChoice(string choice) => NoticeVocabulary.IsJournalChoice(choice);
 
     public static JournalSizingState Observe(JournalSizingState? previous, ulong journal, long next, DateTimeOffset now)
     {
@@ -56,7 +56,7 @@ public static class JournalSizing
             sqlite.ObserveJournal(pairId, volume, data[7], unchecked((ulong)data[0]), data[2], data[4], data[6], gap, now, deferNotice: !observeOnly && SyncDiscoveryClient.IsInstalled, allocation: data[5]);
             var pending = sqlite.PendingJournal(data[7]);
             if (pending is not null && !observeOnly) (queue ?? QueueSilent)(sqlite, pending, new SyncDiscoveryRoot(root, expectedSerial, rootFileId));
-            else RunLog.Trace($"local journal capacity: volume={volume}; maximum={data[4]}; allocation={data[5]}; " +
+            else RunTrace.Emit($"local journal capacity: volume={volume}; maximum={data[4]}; allocation={data[5]}; " +
                 (pending is null ? "no pending growth" : "preview recommendation only; journal growth disabled"));
         }
         catch (Exception error)
@@ -74,7 +74,7 @@ public static class JournalSizing
     internal static async Task MaintainAsync(SqliteStateStore store, SqliteStateStore.JournalPending pending,
         SyncDiscoveryRoot root, Func<SyncDiscoveryRoot, long, Task<uint?>> grow, Func<string, long[]?> query)
     {
-        using var admission = FairStoreGate.WithCancellation(CancellationToken.None);
+        using var admission = StoreAdmission.WithCancellation(CancellationToken.None);
         if (!Silent.TryAdd(root.VolumeSerial, 0)) return;
         var active = false;
         try

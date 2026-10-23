@@ -27,9 +27,56 @@ internal static partial class RunChecks
         }
     }
 
+    private static void NoticeFoldSpecificityChecks()
+    {
+        using var memory = new InMemoryStateStore();
+        using var sqlite = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "notice-specificity-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System);
+        foreach (var store in new IStateStore[] { memory, sqlite })
+        {
+            var fx = Build(suppliedStore: store);
+            // Content-unconfirmed is also the planner observation's existing vocabulary.
+            // Exercise both roles without introducing a second reason or display-text classifier.
+            foreach (var first in Enumerable.Range(0, 4))
+            foreach (var second in Enumerable.Range(0, 4))
+            foreach (var ignoreFirst in new[] { false, true })
+            {
+                var path = $"specificity-{first}-{second}-{ignoreFirst}.txt";
+                Notice Candidate(int category) => category switch
+                {
+                    0 => FailureRetryOwner.RetryNotice(fx.Pair.PairId, path,
+                        "Content proof is unavailable, paused, changed, or deferred to indexing; the item remains unsynced."),
+                    2 => FailureRetryOwner.RetryNotice(fx.Pair.PairId, path, "Hash: provider rejected this exact version"),
+                    _ => new Notice(fx.Pair.PairId, 30, NoticeKind.Info, path,
+                        "comparison unconfirmed", "content-unconfirmed")
+                };
+                int Rank(int category) => category == 0 ? 0 : category == 2 ? 2 : 1;
+                var initial = Candidate(first);
+                var incoming = Candidate(second);
+                store.AddNotices([initial]);
+                var saved = store.UnresolvedNotices(fx.Pair.PairId).Single(n => n.Path == path);
+                if (ignoreFirst) store.CloseNotice(saved.NoticeId!, NoticeChoices.Ignore);
+                store.AddNotices([incoming]);
+                var winner = store.UnresolvedNotices(fx.Pair.PairId).Single(n => n.Path == path);
+                var expected = Rank(first) >= Rank(second) ? initial : incoming;
+                Require(winner.ReasonKey == expected.ReasonKey && winner.Detail == expected.Detail &&
+                    winner.CauseKey == expected.CauseKey,
+                    $"specificity truth table retains one most-specific cause: {first}/{second}/{ignoreFirst}");
+                var remainsSuppressed = ignoreFirst && Rank(first) >= Rank(second);
+                Require(store.OpenNotices(fx.Pair.PairId).Count(n => n.Path == path) == (remainsSuppressed ? 0 : 1),
+                    "losing observations never resurface an ignored winner; a new stronger cause does resurface");
+                store.CloseNotice(winner.NoticeId!, NoticeChoices.Ignore);
+                store.AddNotices([initial, incoming]);
+                Require(store.OpenNotices(fx.Pair.PairId).All(n => n.Path != path) &&
+                    store.UnresolvedNotices(fx.Pair.PairId).Count(n => n.Path == path) == 1,
+                    "republication preserves ignored winning authority without duplicate notices");
+            }
+        }
+    }
+
     internal static async Task BlockerActionChecksAsync()
     {
         NoticeFoldParityChecks();
+        NoticeFoldSpecificityChecks();
         foreach (var name in new[] { "CON", "COM1.txt", "bad:name?.txt", "trailing. ", "<>|", "..." })
             Require(PilotPath.IsWindowsTransferPath(BlockerNames.Suggest(name)), "safe suggestion for " + name);
         foreach (var name in new[] { "../escape", "Other/Child", "CON.txt", "same.txt", "", "bad?name" })
@@ -48,8 +95,8 @@ internal static partial class RunChecks
             Repair: new NoticeRepair(Side.A, item));
         store.AddNotices([Refusal(original)]);
         var notice = store.OpenNotices(pairId).Single(n => n.ReasonKey == "provider-name-refused");
-        Require(NoticeChoices.Options(notice).Any(o => o.Choice == NoticeChoices.Rename) &&
-            NoticeChoices.Options(notice).Any(o => o.Choice == NoticeChoices.Ignore), "refused name offers real Rename / Keep excluded options");
+        Require(NoticeOptions.Options(notice).Any(o => o.Choice == NoticeChoices.Rename) &&
+            NoticeOptions.Options(notice).Any(o => o.Choice == NoticeChoices.Ignore), "refused name offers real Rename / Keep excluded options");
         Require(store.NoticeById(pairId, notice.NoticeId!)?.Notice.Repair?.Item == original, "repair provenance round trips through SQLite");
         foreach (var name in new[] { "desktop.ini", ".dropbox", "~$document.docx" })
         {
@@ -105,8 +152,8 @@ internal static partial class RunChecks
         var refusalNotice = store.OpenNotices(pairId).Single(n => n.NoticeId == notice.NoticeId);
         Require(refusalNotice.Repair?.Destination == "safe.txt" &&
             refusalNotice.Detail.Contains("earlier rename", StringComparison.Ordinal) &&
-            NoticeChoices.Options(refusalNotice).Any(o => o.Choice == NoticeChoices.RetryNow) &&
-            NoticeChoices.Options(refusalNotice).Any(o => o.Choice == NoticeChoices.Ignore) &&
+            NoticeOptions.Options(refusalNotice).Any(o => o.Choice == NoticeChoices.RetryNow) &&
+            NoticeOptions.Options(refusalNotice).Any(o => o.Choice == NoticeChoices.Ignore) &&
             store.OpenNotices(pairId).Count(n => n.ReasonKey == "provider-name-refused") == 1,
             "refused choices update one actionable notice with why, Retry and Ignore");
         await FirstSyncAsync(run, fx);

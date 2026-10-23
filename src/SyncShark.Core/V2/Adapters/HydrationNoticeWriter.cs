@@ -80,7 +80,7 @@ internal sealed class HydrationNoticeWriter : IDisposable
     {
         // Positive type evidence only, and only after Windows I/O completion. A pair-level cause is coalesced by
         // (pair, cause) so an offline burst of thousands of reads queues one event, not one per file.
-        var pairError = StorageNotices.ClassifyFailure(error);
+        var pairError = StorageNoticeFailureClassifier.ClassifyFailure(error);
         lock (_gate)
         {
             if (_disposed) return;
@@ -142,7 +142,7 @@ internal sealed class HydrationNoticeWriter : IDisposable
         try { notices = _store.HydrationNoticesPage(pairId, MaximumOpenCache + 1).ToList(); }
         catch (Exception error)
         {
-            if (FailureRetryOwner.ScopeOf(error, _stop.Token) is FailureRetryOwner.FailureScope.State or FailureRetryOwner.FailureScope.Stop)
+            if (StorageFailureClassifier.ScopeOf(error, _stop.Token) is FailureRetryOwner.FailureScope.State or FailureRetryOwner.FailureScope.Stop)
                 throw;
             RecordPersistenceError(error);
             lock (_gate)
@@ -408,7 +408,7 @@ internal sealed class HydrationNoticeWriter : IDisposable
             catch (Exception error)
             {
                 RecordPersistenceError(error);
-                if (FailureRetryOwner.ScopeOf(error, _stop.Token) is
+                if (StorageFailureClassifier.ScopeOf(error, _stop.Token) is
                     FailureRetryOwner.FailureScope.State or FailureRetryOwner.FailureScope.Stop)
                 {
                     lock (_gate) _workerFailure = error;
@@ -420,7 +420,7 @@ internal sealed class HydrationNoticeWriter : IDisposable
                 try { removed = batch.Count > 0 && _store.Pair(batch[0].PairId) is null; }
                 catch (Exception lookupError)
                 {
-                    if (FailureRetryOwner.ScopeOf(lookupError, _stop.Token) is
+                    if (StorageFailureClassifier.ScopeOf(lookupError, _stop.Token) is
                         FailureRetryOwner.FailureScope.State or FailureRetryOwner.FailureScope.Stop)
                     {
                         lock (_gate) _workerFailure = lookupError;

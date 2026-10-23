@@ -6,7 +6,7 @@ public sealed partial class SyncRun
         IProgress<RunProgress>? progress, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        if (!NoticeChoices.Options(notice).Any(option => option.Choice == choice))
+        if (!NoticeChoices.IsAdmissible(notice, choice))
             throw new SyncRunRefusedException("That admission option is no longer available. Refresh notices.");
         if (choice == NoticeChoices.RepairHelp) return notice.Detail;
         if (choice == NoticeChoices.Ignore)

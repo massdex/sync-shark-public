@@ -27,12 +27,12 @@ internal static partial class DropboxChecks
         store.SavePair(pair);
         store.MarkFirstSyncDone(pair.PairId);
         var localWriter = await LocalWriter.OpenAsync(pair.A, Side.A, pair.PairId, LocalChecks.InstallationId,
-            Path.Combine(product, "recovery"), CancellationToken.None, settings);
+            Path.Combine(product, "recovery"), CancellationToken.None, isStateDamage: StorageFailureClassifier.IsStateDamage, settings);
         var endpoints = new FakeEndpointProvider().AddWriter(pair.A, localWriter)
-            .AddInventory(pair.A, new LocalInventory(pair.A, Side.A, store, new HashSet<string>(), settings, TimeProvider.System))
+            .AddInventory(pair.A, new LocalInventory(pair.A, Side.A, store, new HashSet<string>(), settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage))
             .AddInventory(pair.B, new DropboxInventory(pair.B, Side.B, h.Client, store, pair.PairId))
             .AddWriter(pair.B, h.Writer(Path.Combine(product, "spool")));
-        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission()), endpoints, settings,
+        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), endpoints, settings,
             TimeProvider.System);
         h.Wire.LatestCursor = "pf-c0";
         h.Wire.SeedChangePage("pf-c0", [], false, "pf-c0");

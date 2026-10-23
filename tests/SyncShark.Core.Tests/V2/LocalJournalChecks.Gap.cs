@@ -36,7 +36,7 @@ internal static partial class LocalJournalChecks
             LocalChecks.Require(held[0].Contains && held[1].Covered && held[2].Contains && !held[3].Covered,
                 "unvisited gap rows protect ancestors root and self only");
             var io = new GapCheckIo(stamp, cursor);
-            await using (var worker = new LocalGapWorker(gaps, io))
+            await using (var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage))
             {
                 io.IsPaused = true;
                 worker.Discover(root, epoch, default);
@@ -93,7 +93,7 @@ internal static partial class LocalJournalChecks
             gaps.BeginGap(root.RootId, "0000000000000002:400", 0, false);
             epoch = gaps.GapEpoch(root.RootId)!;
             var before = io.Probes;
-            await using (var worker = new LocalGapWorker(gaps, io)) worker.Discover(root, epoch, default);
+            await using (var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage)) worker.Discover(root, epoch, default);
             LocalChecks.Require(io.Probes == before && gaps.GapHashPage(root.RootId, epoch, 128).Count == 3,
                 "untrusted history queues every entity without treating metadata as proof");
             gaps.BeginGap(root.RootId, "0000000000000002:500", 400, true);
@@ -106,7 +106,7 @@ internal static partial class LocalJournalChecks
             LocalChecks.Require(gaps.HasGapProtection(root.RootId) && gaps.GapResultWatermark(root.RootId) >= watermark &&
                 !gaps.AcceptGapResult(root.RootId, stale), "restart preserves gap obligations monotonic cutoff and stale-proof rejection");
             var blocking = new GapCheckIo(stamp, cursor) { Block = true };
-            await using (var worker = new LocalGapWorker(gaps, blocking))
+            await using (var worker = new LocalGapWorker(gaps, blocking, StorageFailureClassifier.IsStateDamage))
             {
                 worker.Start(root); worker.Start(root);
                 await blocking.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -126,7 +126,7 @@ internal static partial class LocalJournalChecks
                 entered.TrySetResult();
                 if (!release.Wait(TimeSpan.FromSeconds(5))) throw new IOException("test discovery gate timed out");
             } };
-            await using (var worker = new LocalGapWorker(gaps, concurrent))
+            await using (var worker = new LocalGapWorker(gaps, concurrent, StorageFailureClassifier.IsStateDamage))
             {
                 try
                 {
@@ -208,7 +208,7 @@ internal static partial class LocalJournalChecks
         LocalChecks.Require(through.RequiresFullReconciliation(saved) &&
             !new NtfsUsnCheckpoint(1, 0, 200, 0).RequiresFullReconciliation(saved),
             "same journal requires reconciliation only when retention passes the saved cursor, not on resize");
-        var inventory = new LocalInventory(root, Side.A, reopened, new HashSet<string>(), StorageChecks.Fast, TimeProvider.System);
+        var inventory = new LocalInventory(root, Side.A, reopened, new HashSet<string>(), StorageChecks.Fast, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage);
         inventory.BeginJournalGap(root.RootId, journalId, next, through);
         inventory.BeginFullGap(root.RootId, through.Cursor, journalDeleted: false);
         var gaps = (ILocalGapStore)reopened;
@@ -216,7 +216,7 @@ internal static partial class LocalJournalChecks
         LocalChecks.Require(epoch is { TrustFileUsn: true, Boundary: 100 },
             "same-ID wrap and full fallback preserve the trusted saved boundary");
         var io = new GapCheckIo(stamp, through.Cursor);
-        await using (var worker = new LocalGapWorker(gaps, io))
+        await using (var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage))
             worker.Discover(root, epoch, default);
         LocalChecks.Require(reopened.ProtectionBatch(root.RootId, ItemFlags.NeedsRehash, [rows[0].Path])[0].Covered,
             "same-run unchanged USN proof remains held");
@@ -341,7 +341,7 @@ internal static partial class LocalJournalChecks
         store.WriteSnapshot(new Snapshot(root.RootId, Side.A, store.BeginGeneration(root.RootId, "full"), cursor, metadata, []));
         gaps.BeginGap(root.RootId, cursor, 0, false);
         var io = new GapCheckIo(stamp, cursor) { IsPaused = true };
-        await using (var worker = new LocalGapWorker(gaps, io))
+        await using (var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage))
             worker.Discover(root, gaps.GapEpoch(root.RootId)!, default);
         LocalChecks.Require(gaps.HasGapProtection(root.RootId), "metadata-only worker stages rather than discharges protection");
         gaps.PromoteGapDiscovery(root.RootId);
@@ -467,7 +467,7 @@ internal static partial class LocalJournalChecks
             gaps.GapHashPage(root.RootId, epoch, 128).Count == 0, "foreground content verification retires same-entity gap obligation");
         root = original with { RootId = "read-failure-classification" };
         store.WriteSnapshot(new Snapshot(root.RootId, Side.A, store.BeginGeneration(root.RootId, "full"), cursor, rows, []));
-        var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), StorageChecks.Fast, TimeProvider.System);
+        var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), StorageChecks.Fast, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage);
         var through = new NtfsUsnCheckpoint(1, 0, 300, 0);
         var retry = inventory.JournalReadFailed(1, root.RootId, cursor, through, 200, "volume open failed");
         LocalChecks.Require(!retry.CursorInvalid && retry.CursorAfter == cursor && retry.Changes.Count == 0 &&
@@ -481,14 +481,14 @@ internal static partial class LocalJournalChecks
 
         root = original with { RootId = "missing-saved-cursor" };
         store.WriteSnapshot(new Snapshot(root.RootId, Side.A, store.BeginGeneration(root.RootId, "full"), "", rows, []));
-        inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), StorageChecks.Fast, TimeProvider.System);
+        inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), StorageChecks.Fast, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage);
         await inventory.FullAsync(1, _ => true, null!, default);
         LocalChecks.Require(gaps.GapEpoch(root.RootId) is { TrustFileUsn: false } && gaps.HasGapProtection(root.RootId),
             "full scan with retained rows but no readable saved cursor starts untrusted gap verification");
 
         root = original with { RootId = "initial-resume" };
         store.WriteSnapshot(new Snapshot(root.RootId, Side.A, store.BeginGeneration(root.RootId, "full"), "", rows.Select(r => r with { Hash = null }).ToArray(), []));
-        inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), StorageChecks.Fast, TimeProvider.System);
+        inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), StorageChecks.Fast, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage);
         inventory.BeginFullGap(root.RootId, "", journalDeleted: true);
         LocalChecks.Require(store.Cursor(root.RootId) is null && store.Live(root.RootId).Count == rows.Length &&
             gaps.GapEpoch(root.RootId) is null, "interrupted initial metadata snapshot retains rows without cursor but does not blanket background-verify on resume");
@@ -497,7 +497,7 @@ internal static partial class LocalJournalChecks
         store.WriteSnapshot(new Snapshot(root.RootId, Side.A, store.BeginGeneration(root.RootId, "full"), cursor, rows, []));
         gaps.BeginGap(root.RootId, "", 0, false, "NTFS journal deleted or disabled");
         var deletedEpoch = gaps.GapEpoch(root.RootId)!;
-        inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), StorageChecks.Fast, TimeProvider.System);
+        inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), StorageChecks.Fast, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage);
         inventory.BeginFullGap(root.RootId, cursor, journalDeleted: true);
         inventory.BeginFullGap(root.RootId, cursor, journalDeleted: true);
         LocalChecks.Require(gaps.GapEpoch(root.RootId)!.Epoch == deletedEpoch.Epoch, "deleted journal delta and full fallback share one persistent gap epoch");
@@ -506,7 +506,7 @@ internal static partial class LocalJournalChecks
         store.WriteSnapshot(new Snapshot(root.RootId, Side.A, store.BeginGeneration(root.RootId, "full"), cursor, rows, []));
         gaps.BeginGap(root.RootId, cursor, 100, true); epoch = gaps.GapEpoch(root.RootId)!;
         io = new GapCheckIo(stamp, cursor) { PageUnavailable = "temporary journal outage" };
-        await using (var worker = new LocalGapWorker(gaps, io))
+        await using (var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage))
         {
             LocalChecks.Require(!worker.Discover(root, epoch, default) && gaps.GapEpoch(root.RootId)!.AfterObject == "" &&
                 gaps.GapHashPage(root.RootId, epoch, 128).Count == 0, "temporary discovery outage preserves cursor and queues no content page");
@@ -536,7 +536,7 @@ internal static partial class LocalJournalChecks
             using var reader = cmd.ExecuteReader();
             return reader.Read() ? (reader.GetInt64(0), reader.GetInt64(1)) : (0, 0);
         }
-        await using (var worker = new LocalGapWorker(gaps, io))
+        await using (var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage))
         {
             worker.Discover(root, epoch, default);
             var failed = GapFailureState();
@@ -582,7 +582,7 @@ internal static partial class LocalJournalChecks
         store.WriteSnapshot(new Snapshot(root.RootId, Side.A, store.BeginGeneration(root.RootId, "full"), cursor, rows, []));
         gaps.BeginGap(root.RootId, cursor, 100, true);
         io = new GapCheckIo(stamp, cursor) { OnOpen = () => throw new ArgumentException("injected root failure") };
-        await using (var worker = new LocalGapWorker(gaps, io))
+        await using (var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage))
         {
             worker.Start(root);
             for (var n = 0; n < 100 && !gaps.GapProgress(root.RootId).Contains("worker failed"); n++) await Task.Delay(10);

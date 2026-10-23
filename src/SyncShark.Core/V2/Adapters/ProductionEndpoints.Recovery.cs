@@ -15,7 +15,7 @@ public sealed partial class ProductionEndpoints
         {
             IInventorySource inventory = checkedSide.Client is { } client
                 ? new DropboxInventory(root, side, client, _store, pair.PairId)
-                : new LocalInventory(root, side, _store, OwnedInside(root, checkedSide.Recovery!), _settings, _time);
+                : new LocalInventory(root, side, _store, OwnedInside(root, checkedSide.Recovery!), _settings, _time, isStateDamage: StorageFailureClassifier.IsStateDamage);
             _open[root.RootId] = (inventory, new RecoveryReadOnlyWriter(pair.PairId, root, side, checkedSide), null);
         }
     }

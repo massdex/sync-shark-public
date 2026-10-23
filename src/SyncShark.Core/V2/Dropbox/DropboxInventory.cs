@@ -79,14 +79,14 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
         }
         catch (InvalidDataException error)
         {
-            if (_known is SqliteStateStore sql) sql.ForgetListing(_root.RootId);
+            _known?.ForgetListing(_root.RootId);
             return WholeIncomplete(gen,
                 "Dropbox returned inventory data that could not be verified safely: " + error.Message +
                 " No item was inferred absent. Retry; if it persists, report the folder that cannot be listed.");
         }
         catch (DropboxApiException exception) when (exception.StatusCode == HttpStatusCode.Conflict)
         {
-            if (_known is SqliteStateStore sql) sql.ForgetListing(_root.RootId);
+            _known?.ForgetListing(_root.RootId);
             return WholeIncomplete(gen,
                 "Dropbox rejected the saved listing checkpoint after the folder changed. A fresh complete listing is required; nothing was inferred absent.");
         }
@@ -122,11 +122,11 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
         _deletedAncestorsFromFull = null;
         _evidenceBasis = null;
         _evidenceValidatedThisRun = false;
-        if (string.IsNullOrEmpty(cursor) || _known is SqliteStateStore sql && sql.HasFullListing(_root)) return invalid;
+        if (string.IsNullOrEmpty(cursor) || _known?.HasFullListing(_root) == true) return invalid;
         var classification = _known.ReadDeletionClassification(_root);
         if (firstSync && classification?.Cursor != cursor)
         {
-            RunLog.Trace("first-sync cursor bootstrap: durable tombstone classification missing or basis mismatch; one complete listing required");
+            RunTrace.Emit("first-sync cursor bootstrap: durable tombstone classification missing or basis mismatch; one complete listing required");
             return invalid;
         }
         var (valid, current, feed) = await ReadFeedAsync(cursor, ct);
@@ -189,7 +189,7 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
                         var held = row with { Flags = row.Flags | ItemFlags.Unreadable };
                         repaired.Enqueue(new(ChangeKind.Upsert, held.ObjectId, held.Path, held, null));
                     }
-                    RunLog.Trace($"released deletion row remains held: {error.GetType().Name}");
+                    RunTrace.Emit($"released deletion row remains held: {error.GetType().Name}");
                 }
             });
             changes = changes.Concat(repaired.OrderBy(change => change.Path, StringComparer.Ordinal)).ToArray();
@@ -224,7 +224,7 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
             catch (DropboxApiException error) when (error.StatusCode == HttpStatusCode.Conflict && checkpoint is not null)
             {
                 checkpoint.Complete();
-                RunLog.Trace("Dropbox unfinished listing rejected (cursor or path changed); discarded partial pages and starting a fresh listing.");
+                RunTrace.Emit("Dropbox unfinished listing rejected (cursor or path changed); discarded partial pages and starting a fresh listing.");
                 checkpoint = OpenListing("full");
                 listing = await ListAsync();
             }
@@ -241,8 +241,8 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
         }
     }
 
-    private ListingCheckpoint? OpenListing(string mode) => _known is SqliteStateStore sql
-        ? new ListingCheckpoint(sql, _root, _pairId, mode) : null;
+    private ListingCheckpoint? OpenListing(string mode) => _known?.SupportsListingCheckpoint == true
+        ? new ListingCheckpoint(_known, _root, _pairId, mode) : null;
 
     // Reads every change page until the feed is exhausted; a reset (409) or a moved root is not a delta.
     private async Task<(bool Valid, string Cursor, List<DropboxChange> Feed)> ReadFeedAsync(string cursor,
@@ -274,7 +274,7 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
         catch (DropboxApiException exception) when (exception.StatusCode == HttpStatusCode.Conflict)
         {
             checkpoint?.Complete();
-            RunLog.Trace("Dropbox unfinished delta rejected/reset or malformed; discarded partial pages; a full listing is required.");
+            RunTrace.Emit("Dropbox unfinished delta rejected/reset or malformed; discarded partial pages; a full listing is required.");
             return (false, cursor, feed);
         }
         catch (Exception exception) when (exception is InvalidDataException or System.Text.Json.JsonException or
@@ -282,7 +282,7 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
         {
             // Missing/wrong-shaped JSON fields are bad feed data too, not a transient transport failure.
             checkpoint?.Complete();
-            RunLog.Trace("Dropbox unfinished delta rejected/reset or malformed; discarded partial pages; a full listing is required.");
+            RunTrace.Emit("Dropbox unfinished delta rejected/reset or malformed; discarded partial pages; a full listing is required.");
             return (false, cursor, feed);
         }
         catch (Exception exception) when (DropboxItems.MapAccessError(exception) is var mapped && mapped != exception)
@@ -754,7 +754,7 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
                     else pending.Add(path);
                 }
             }
-            RunLog.Trace($"held classification: requested {names.Length:N0}, tombstone-matched {matched:N0}, held {pending.Count:N0}, classification ok (complete cursor-bound tombstones)");
+            RunTrace.Emit($"held classification: requested {names.Length:N0}, tombstone-matched {matched:N0}, held {pending.Count:N0}, classification ok (complete cursor-bound tombstones)");
             return new(resolved, pending);
         }
         catch (Exception exception) when (exception is not (EndpointAccessException or PairPausedException) &&
@@ -765,7 +765,7 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
             var matched = _deletedExactFromFull is not null && _deletedAncestorsFromFull is not null
                 ? names.Count(path => DropboxPilotClient.IsDeletionProbe(path, _deletedExactFromFull, _deletedAncestorsFromFull)).ToString("N0")
                 : "unknown";
-            RunLog.Trace($"held classification: requested {names.Length:N0}, tombstone-matched {matched}, held {names.Length:N0}, classification failed ({exception.GetType().Name}: {exception.Message})");
+            RunTrace.Emit($"held classification: requested {names.Length:N0}, tombstone-matched {matched}, held {names.Length:N0}, classification failed ({exception.GetType().Name}: {exception.Message})");
             return new(new Dictionary<string, SyncRemoteDeletionEvidence>(StringComparer.OrdinalIgnoreCase), names);
         }
     }
@@ -774,7 +774,7 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
         Action<string, SyncRemoteDeletionEvidence> resolved, CancellationToken ct)
     {
         if (paths.Count == 0) return;
-        RunLog.Trace($"deletion evidence lane: {paths.Count:N0} path(s) to resolve");
+        RunTrace.Emit($"deletion evidence lane: {paths.Count:N0} path(s) to resolve");
         var cached = await PrepareEvidenceCacheAsync(paths, ct);
         await _client.LookupDeletionEvidenceForV2Async(paths,
             _deletedExactFromFull,

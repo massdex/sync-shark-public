@@ -22,7 +22,7 @@ internal static partial class RunChecks
             var inventory = DurableInventory(root, store, checkpoint, () => { });
             fx.Provider.AddInventory(root, inventory);
             fx.Provider.AddWriter(root, await LocalWriter.OpenAsync(root, Side.A, fx.Pair.PairId,
-                LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default));
+                LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default, isStateDamage: StorageFailureClassifier.IsStateDamage));
             await FirstSyncAsync(fx.Run(), fx);
             ((ILocalGapStore)store).BeginGap(root.RootId, checkpoint.Cursor, 100, true);
             Require(store.GapInventoryPending(root.RootId), "fixture BeginGap creates a durable inventory obligation");
@@ -42,7 +42,7 @@ internal static partial class RunChecks
             var walks = 0;
             fx.Provider.AddInventory(root, DurableInventory(root, reopened, checkpoint, () => walks++));
             fx.Provider.AddWriter(root, await LocalWriter.OpenAsync(root, Side.A, fx.Pair.PairId,
-                LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default));
+                LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default, isStateDamage: StorageFailureClassifier.IsStateDamage));
             var run = new SyncRun(reopened, NewExecutor(reopened), fx.Provider, Settings, TimeProvider.System);
             var report = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
             Require(report.Downloaded == 0 && report.Uploaded == 0 && !report.CompletionFailed && walks <= (interrupt ? 1 : 0) &&
@@ -71,7 +71,7 @@ internal static partial class RunChecks
     private static LocalInventory DurableInventory(RootDef root, SqliteStateStore store,
         NtfsUsnCheckpoint checkpoint, Action walked)
     {
-        var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings, TimeProvider.System, pairId: "p1")
+        var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: "p1")
         {
             WalkCheckpointForTest = () => (checkpoint, false),
             DirectoryCompletedForTest = _ => walked()

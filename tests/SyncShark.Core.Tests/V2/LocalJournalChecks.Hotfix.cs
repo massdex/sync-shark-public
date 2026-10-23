@@ -123,7 +123,7 @@ internal static partial class LocalJournalChecks
         gaps.BeginGap(root.RootId, "0000000000000001:200", 100, true);
         var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var io = new GapCheckIo(stamp, "0000000000000001:200") { OnProbe = (_, _) => started.TrySetResult() };
-        await using var worker = new LocalGapWorker(gaps, io);
+        await using var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage);
         worker.Start(root);
         await started.Task.WaitAsync(TimeSpan.FromSeconds(15));
         var foreground = Task.Run(() =>

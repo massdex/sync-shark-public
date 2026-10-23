@@ -58,7 +58,7 @@ internal static class StorageNoticeChoices
             var queued = false;
             if (item.Operation == "settlement" &&
                 store.StorageSettlementFor(item.RootId, item.ObjectId, item.RemoteBinding) is { } settlement &&
-                (item.Scope is null || ReceiptScope(settlement.Remote) == item.Scope))
+                (item.Scope is null || ReceiptScope(settlement.Remote.Id, settlement.Remote.Revision, settlement.Remote.ContentHash) == item.Scope))
             {
                 queued = store.RequestStorageSettlement(settlement);
             }
@@ -163,7 +163,7 @@ internal static class StorageNoticeChoices
         if (item.Operation == "settlement")
         {
             var pending = store.StorageSettlementFor(item.RootId, item.ObjectId, item.RemoteBinding);
-            if (pending is null || item.Scope is not null && ReceiptScope(pending.Remote) != item.Scope)
+            if (pending is null || item.Scope is not null && ReceiptScope(pending.Remote.Id, pending.Remote.Revision, pending.Remote.ContentHash) != item.Scope)
             {
                 Complete(store, pair.PairId, item);
                 return;

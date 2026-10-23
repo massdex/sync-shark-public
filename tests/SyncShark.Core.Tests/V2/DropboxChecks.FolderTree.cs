@@ -67,9 +67,9 @@ internal static partial class DropboxChecks
             ChoiceRemove = true,
             FrozenVictimSignature = FolderDelete.Signature(FolderDelete.LiveDescendants(store, RootId, "big")),
         };
-        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"),
+        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"), isStateDamage: StorageFailureClassifier.IsStateDamage,
             V2Settings.Default with { DeleteBatchSize = 1, UploadBatchSize = 1, MkDirBatchSize = 1 });
-        return new TreeRig(h, store, new Executor(store, V2Settings.Default, ExecutorChecks.Admission()),
+        return new TreeRig(h, store, new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
             new FakeEndpoint(Side.A, "ra"), writer, delete, snapshot.CursorAfter);
     }
 
@@ -107,7 +107,7 @@ internal static partial class DropboxChecks
             var delete = rig.Delete with { Rule = 6, ChoiceRemove = false,
                 ObjectKey = "baseline-" + rig.Delete.ExpectedTarget!.ObjectId };
             var results = new List<ActionResult>();
-            var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission());
+            var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
             await foreach (var result in executor.ApplyAsync(rig.Plan() with { Actions = [delete] }, source, rig.B, default))
                 results.Add(result);
             Require(recreated && rig.H.Wire.WholeFolderDeletes == 0,

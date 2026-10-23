@@ -14,18 +14,18 @@ namespace Massdex.SyncShark.V2;
 /// kept apart from the phase state, so a notice never resets the phase or its counts.
 /// </para>
 /// </summary>
-internal sealed class RunActivity : IProgress<RunProgress>, IDisposable
+internal sealed class RunActivity : RunPreparation, IProgress<RunProgress>, IDisposable
 {
-    private static readonly AsyncLocal<RunActivity?> Ambient = new();
-    private readonly RunActivity? _previous;
+    private readonly RunPreparation? _previous;
     private string? _preparation;
 
     // Update heartbeat context without suppressing its quiet timer or flooding the sink.
     // Other concurrent messages cannot overwrite this preparation sub-step.
-    internal static void Preparation(string? message)
+    internal static void Preparation(string? message) => RunPreparation.Report(message);
+
+    internal override void SetPreparation(string? message)
     {
-        if (Ambient.Value is not { } activity) return;
-        lock (activity._gate) activity._preparation = message;
+        lock (_gate) _preparation = message;
     }
 
     // The path the shared seam reports for the run itself when no narrower path is in scope.
@@ -58,8 +58,8 @@ internal sealed class RunActivity : IProgress<RunProgress>, IDisposable
 
     private RunActivity(IProgress<RunProgress>? sink, V2Settings settings, TimeProvider time)
     {
-        _previous = Ambient.Value;
-        Ambient.Value = this;
+        _previous = RunPreparation.Slot.Value;
+        RunPreparation.Slot.Value = this;
         _sink = sink;
         _time = time;
         _messageInterval = settings.ProgressInterval;
@@ -302,7 +302,7 @@ internal sealed class RunActivity : IProgress<RunProgress>, IDisposable
     {
         if (_disposed) return;
         lock (_gate) _disposed = true;
-        if (Ambient.Value == this) Ambient.Value = _previous;
+        if (RunPreparation.Slot.Value == this) RunPreparation.Slot.Value = _previous;
         try { _timer?.Dispose(); }
         catch (Exception error) { Observe(error); }
         try { _operations?.Dispose(); }

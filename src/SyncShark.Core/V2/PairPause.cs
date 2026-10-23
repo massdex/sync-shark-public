@@ -4,13 +4,13 @@ internal sealed class PairPause : IDisposable
 {
     private static readonly AsyncLocal<PairPause?> Current = new();
     private readonly PairPause? _previous;
-    private readonly SqliteStateStore? _store;
+    private readonly IStateStore _store;
     private readonly string _pair;
     private readonly Func<bool>? _requested;
     private PairPause(IStateStore store, string pair, Func<bool>? requested)
     {
         _previous = Current.Value;
-        _store = store as SqliteStateStore;
+        _store = store;
         _pair = pair;
         _requested = requested ?? _previous?._requested;
         Current.Value = this;
@@ -20,7 +20,7 @@ internal sealed class PairPause : IDisposable
     // this; work that must stop calls Check. Both observe the same two sources.
     internal static bool IsPaused =>
         Current.Value is { } pause &&
-        (pause._requested?.Invoke() == true || pause._store?.CachedPairPaused(pause._pair) == true);
+        (pause._requested?.Invoke() == true || pause._store.CachedPairPaused(pause._pair) == true);
     internal static void Check()
     {
         if (Current.Value is { } pause && IsPaused) throw new PairPausedException(pause._pair);

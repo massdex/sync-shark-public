@@ -80,7 +80,7 @@ internal static partial class StorageChecks
                             "migrated saved cursor is outside the retained journal range");
                         var local = new RootDef("root-a", SyncProviders.Local, null, folder,
                             SyncLocalEndpointStore.ObjectId(1, 1));
-                        var inventory = new LocalInventory(local, Side.A, store, new HashSet<string>(), Fast, new TestClock());
+                        var inventory = new LocalInventory(local, Side.A, store, new HashSet<string>(), Fast, new TestClock(), isStateDamage: StorageFailureClassifier.IsStateDamage);
                         inventory.BeginJournalGap(local.RootId, 1, 100, through);
                         expectedCursor = through.Cursor;
                         Require(store.Cursor(local.RootId) == expectedCursor && store.GapInventoryPending(local.RootId),

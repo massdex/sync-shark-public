@@ -13,7 +13,7 @@ internal static partial class RunChecks
         var fx = Build(suppliedStore: store);
         var local = LocalChecks.RootOf(files, "ra");
         store.SavePair(fx.Pair with { A = local });
-        var inventory = new LocalInventory(local, Side.A, store, new HashSet<string>(), Settings, TimeProvider.System);
+        var inventory = new LocalInventory(local, Side.A, store, new HashSet<string>(), Settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage);
         var gen = store.BeginGeneration("ra", "seed");
         store.WriteSnapshot(await inventory.FullAsync(gen, _ => true, new Progress<string>(), default));
         var item = store.Live("ra").Single();
@@ -54,7 +54,7 @@ internal static partial class RunChecks
         var fx = Build(suppliedStore: store);
         var local = LocalChecks.RootOf(localPath, "ra");
         store.SavePair(fx.Pair with { A = local });
-        var inventory = new LocalInventory(local, Side.A, store, new HashSet<string>(), Settings, TimeProvider.System);
+        var inventory = new LocalInventory(local, Side.A, store, new HashSet<string>(), Settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage);
         var gen = store.BeginGeneration("ra", "rehash-fixture");
         store.WriteSnapshot(await inventory.FullAsync(gen, _ => true, new Progress<string>(), default));
         var item = store.Live("ra", ["held.txt"]).Single();

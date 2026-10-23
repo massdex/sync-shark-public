@@ -100,11 +100,11 @@ internal static partial class RunChecks
                 var notice = fx.Store.OpenNotices(pair.PairId).Single(item => item.ReasonKey == "reviewed-removal-skipped");
                 Console.WriteLine("NOTICE-MEASURE skipped-removal sides=" +
                     (notice.RemovalSides is null ? "null" : "[" + string.Join(",", notice.RemovalSides) + "]") +
-                    " choices=" + string.Join(",", NoticeChoices.Options(notice).Select(option => option.Choice)));
+                    " choices=" + string.Join(",", NoticeOptions.Options(notice).Select(option => option.Choice)));
                 Require(notice.RemovalSides is not null && notice.RemovalSides.SequenceEqual(new[] { Side.B }),
                     "skipped removal retains the reviewed target side B");
                 // RQ-032 requires Retry; E9 Dismiss suppresses this cause without granting removal authority.
-                Require(NoticeChoices.Options(notice).Select(option => option.Choice).SequenceEqual(
+                Require(NoticeOptions.Options(notice).Select(option => option.Choice).SequenceEqual(
                     new[] { NoticeChoices.RetryNow, NoticeChoices.ReviewRemoval, NoticeChoices.OpenFolderSettings, NoticeChoices.Dismiss }),
                     "skipped removal offers Retry, a fresh review, settings and dismiss, never unsigned deletion");
                 foreach (var unsignedChoice in new[] { NoticeChoices.DeleteReviewed, NoticeChoices.ConfirmRemoval })

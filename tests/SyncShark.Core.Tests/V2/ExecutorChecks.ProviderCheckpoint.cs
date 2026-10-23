@@ -268,26 +268,26 @@ internal static partial class ExecutorChecks
         var action = Act(ActionKind.Delete, Side.B, "victim", expected: victim) with { ProviderEffect = expired };
         // Dropbox definitively reports the job still in progress (delete_batch/check): it may still run, so grace
         // must never expire it into a replan while the target survives, else a restored copy could then be deleted.
-        var result = await EffectResolver.ResolveAsync(action, new PendingJobWriter(b, fail: false), a, default);
+        var result = await EffectResolver.ResolveAsync(action, new PendingJobWriter(b, fail: false), a, default, isStateDamage: StorageFailureClassifier.IsStateDamage);
         Require(result.Outcome == Outcome.Uncertain && result.Reason!.Contains("pending"),
             "a job Dropbox reports in progress stays Unverified past grace, never replanned while it may run: " +
             result.Reason);
         // Explicit expired/invalid job ids are finished-unknown after grace; endpoint checks still decide.
-        result = await EffectResolver.ResolveAsync(action, new PendingJobWriter(b, fail: true), a, default);
+        result = await EffectResolver.ResolveAsync(action, new PendingJobWriter(b, fail: true), a, default, isStateDamage: StorageFailureClassifier.IsStateDamage);
         Require(result.Outcome == Outcome.Skipped && result.DeleteSourceIdentityMissing &&
             result.DeleteSourceUnconfirmed && !result.ForgetUnsafeDeleteBaseline,
             "an expired delete job without trusted identity parks review and retains baseline");
         result = await EffectResolver.ResolveAsync(action with { Path = "absent" },
-            new PendingJobWriter(b, fail: true), a, default);
+            new PendingJobWriter(b, fail: true), a, default, isStateDamage: StorageFailureClassifier.IsStateDamage);
         Require(result.Outcome == Outcome.Skipped && result.DeleteSourceIdentityMissing &&
             !result.ForgetUnsafeDeleteBaseline,
             "expired job with absent target and no trusted identity also parks review, never Done");
-        result = await EffectResolver.ResolveAsync(action, new PendingJobWriter(b, fail: false, outage: true), a, default);
+        result = await EffectResolver.ResolveAsync(action, new PendingJobWriter(b, fail: false, outage: true), a, default, isStateDamage: StorageFailureClassifier.IsStateDamage);
         Require(result.Outcome == Outcome.Uncertain && result.RetryAfterSeconds == 30,
             "transient job lookup failure never expires the job into replay after grace");
         // An absent target is not terminal proof: a pending delete could still remove a restored copy.
         result = await EffectResolver.ResolveAsync(action with { Path = "absent" },
-            new PendingJobWriter(b, fail: false), a, default);
+            new PendingJobWriter(b, fail: false), a, default, isStateDamage: StorageFailureClassifier.IsStateDamage);
         Require(result.Outcome == Outcome.Uncertain, "absent target remains protected while the delete job is pending");
     }
 

@@ -449,7 +449,7 @@ internal static partial class RunChecks
                 store.CountUnresolvedIntents(fx.Pair.PairId) == 0 && fx.WriterA.Puts == attempts &&
                 notice.Kind == NoticeKind.Info && notice.ConflictOperation?.Actions.Count == 0 &&
                 notice.ConflictOperation?.Destination == source.Path &&
-                NoticeChoices.Options(notice).Any(option => option.Choice == NoticeChoices.RestoreAsCopy),
+                NoticeOptions.Options(notice).Any(option => option.Choice == NoticeChoices.RestoreAsCopy),
                 "an absent effect releases the hold, keeps the selected destination and offers Restore as a copy");
             await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, notice.NoticeId!, NoticeChoices.RestoreAsCopy, default);
             var restored = (await fx.A.FullAsync(0, _ => true, new Progress<string>(), default)).Items

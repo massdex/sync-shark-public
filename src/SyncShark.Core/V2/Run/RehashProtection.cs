@@ -3,8 +3,8 @@ namespace Massdex.SyncShark.V2;
 /// <summary>Database-backed protection: a million pending files do not become a million managed rows/paths.</summary>
 internal sealed class RehashProtection
 {
-    internal const int Rule = 38;
-    internal const string Reason = "local-rehash-pending";
+    internal const int Rule = NoticeVocabulary.RehashRule;
+    internal const string Reason = NoticeVocabulary.RehashReason;
     private readonly IStateStore _store;
     private readonly PairDef _pair;
     private readonly ItemFlags _flag;

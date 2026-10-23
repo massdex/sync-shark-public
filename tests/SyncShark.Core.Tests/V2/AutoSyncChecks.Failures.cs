@@ -43,8 +43,8 @@ internal static partial class AutoSyncChecks
         Require(firstFailureNotices.Count == 1 && firstFailureNotices[0].NoticeId == FailureRetryOwner.RunNoticeId("p1") &&
             firstFailureNotices[0].FailureRetry is { Attempts: 1 } &&
             firstFailureNotices[0].Detail.Contains("test provider unavailable", StringComparison.Ordinal) &&
-            NoticeChoices.Options(firstFailureNotices[0]).Any(option => option.Choice == NoticeChoices.RetryNow) &&
-            NoticeChoices.Options(firstFailureNotices[0]).Any(option => option.Choice == NoticeChoices.Ignore),
+            NoticeOptions.Options(firstFailureNotices[0]).Any(option => option.Choice == NoticeChoices.RetryNow) &&
+            NoticeOptions.Options(firstFailureNotices[0]).Any(option => option.Choice == NoticeChoices.Ignore),
             "first transient failure immediately gives one durable actionable notice");
         for (var i = 1; i < 4; i++)
         {
@@ -53,7 +53,7 @@ internal static partial class AutoSyncChecks
             await Until(() => rig.Run.Runs("p1") == expected && rig.State("p1").RetryAt > rig.Clock.GetUtcNow() && rig.Clock.ActiveTimers == 1, "failed run retries");
         }
         var notices = rig._store.OpenNotices("p1");
-        Require(notices.Count == 1 && NoticeChoices.Options(notices[0]).Select(o => o.Choice).SequenceEqual(new[] { NoticeChoices.RetryNow, NoticeChoices.Ignore }),
+        Require(notices.Count == 1 && NoticeOptions.Options(notices[0]).Select(o => o.Choice).SequenceEqual(new[] { NoticeChoices.RetryNow, NoticeChoices.Ignore }),
             "repeated failures dedupe with Retry and Ignore, never root exclusion");
         rig.Clock.Advance(SafetyPoll);
         await rig.ParkedAsync(AutoStatus.Idle);
@@ -106,7 +106,7 @@ internal static partial class AutoSyncChecks
                     projection.NotificationDetail.Contains("backup", StringComparison.OrdinalIgnoreCase),
                     "fatal state preserves counted in-memory outcome and recovery guidance without a damaged-store notice");
                 var forbidden = System.Reflection.DispatchProxy.Create<IStateStore, ForbiddenFailureStore>();
-                var state = FailureRetryOwner.RecordRunFailure(forbidden, "p1", error, completion.Clock.GetUtcNow());
+                var state = FailureRetryOwner.RecordRunFailure(forbidden, "p1", error, completion.Clock.GetUtcNow(), isStateDamage: StorageFailureClassifier.IsStateDamage);
                 Require(((ForbiddenFailureStore)(object)forbidden).Calls == 0 && state.RetryAfter == DateTimeOffset.MaxValue,
                     "fatal failure owner performs zero store calls including notice writes");
             }
@@ -158,8 +158,8 @@ internal static partial class AutoSyncChecks
         // One canonical run owner retains the actual cause rather than a second host classification label.
         Require(diskNotice.NoticeId == FailureRetryOwner.RunNoticeId("p1") && diskNotice.CauseKey == "disk full" &&
             diskNotice.FailureRetry is { Attempts: 1 } && diskNotice.Detail.Contains("available storage", StringComparison.Ordinal) &&
-            NoticeChoices.Options(diskNotice).Any(option => option.Choice == NoticeChoices.RetryNow) &&
-            NoticeChoices.Options(diskNotice).Any(option => option.Choice == NoticeChoices.Ignore),
+            NoticeOptions.Options(diskNotice).Any(option => option.Choice == NoticeChoices.RetryNow) &&
+            NoticeOptions.Options(diskNotice).Any(option => option.Choice == NoticeChoices.Ignore),
             "disk failure immediately retains its exact cause with storage guidance and actionable durable retry");
         Pass("ImmediateDiskFullReport");
     }
@@ -367,7 +367,7 @@ internal static partial class AutoSyncChecks
             gates[id] = new GatedInventory(a) { Block = block };
             provider.Add(pair.A, a).Add(pair.B, new FakeEndpoint(Side.B, pair.B.RootId)).AddInventory(pair.A, gates[id]);
         }
-        var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission()), provider, Settings,
+        var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider, Settings,
             TimeProvider.System);
         var clock = new ManualClock();
         string? pausedPair = null;

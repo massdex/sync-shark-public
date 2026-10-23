@@ -514,7 +514,7 @@ internal static partial class DropboxChecks
         var provider = new FakeEndpointProvider().Add(pair.A, local)
             .AddWriter(pair.A, writerA).AddWriter(pair.B, writerB)
             .AddInventory(pair.B, inventoryB);
-        return new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission()), provider,
+        return new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider,
             settings, TimeProvider.System);
     }
 

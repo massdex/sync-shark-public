@@ -16,8 +16,9 @@ internal static partial class DateRepair
     }
 
     internal static async Task<DateRepairReport> RestoreAsync(SqliteStateStore store, PairDef pair, string audit,
-        string productRoot, bool dryRun, IReadOnlyList<string> productOwned, CancellationToken ct, Func<Func<Task>, Task>? withPageLock = null)
+        string productRoot, bool dryRun, IReadOnlyList<string> productOwned, CancellationToken ct, Func<Exception, bool> isStateDamage, Func<Func<Task>, Task>? withPageLock = null)
     {
+        ArgumentNullException.ThrowIfNull(isStateDamage);
         if (AuditPair(audit) != pair.PairId) throw new SyncCliUsageException("Audit belongs to another pair.");
         var side = pair.A.Provider == SyncProviders.Local ? Side.A : Side.B;
         var localRoot = side == Side.A ? pair.A : pair.B;
@@ -108,7 +109,7 @@ internal static partial class DateRepair
                 }
                 lock (logGate) if (examples.Count < 10) examples.Add(example);
             }
-            catch (Exception error) when (ItemFailure(error) && error is not SyncCliUsageException)
+            catch (Exception error) when (ItemFailure(error, isStateDamage) && error is not SyncCliUsageException)
             {
                 Interlocked.Increment(ref skipped); Record(new { Path = path, Outcome = "skipped", Reason = error.Message });
             }

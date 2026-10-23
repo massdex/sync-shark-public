@@ -28,15 +28,20 @@ public static class FailureRetryOwner
     /// Scope is independent of retry timing. Endpoint identity remains with the caller.
     /// State damage stops effects and forbids further writes to the damaged store.
     /// </summary>
-    public static FailureScope ScopeOf(Exception error, CancellationToken cancellationToken) => error switch
+    public static FailureScope ScopeOf(Exception error, CancellationToken cancellationToken,
+        Func<Exception, bool> isStateDamage)
     {
-        StateDamagedException or StateNeedsFreshDatabaseException => FailureScope.State,
-        Microsoft.Data.Sqlite.SqliteException sqlite when StoreSchema.IsDamaged(sqlite) => FailureScope.State,
-        PairPausedException or OutOfMemoryException => FailureScope.Stop,
-        OperationCanceledException when cancellationToken.IsCancellationRequested => FailureScope.Stop,
-        EndpointAccessException => FailureScope.Endpoint,
-        _ => FailureScope.Item
-    };
+        ArgumentNullException.ThrowIfNull(isStateDamage);
+        if (error is StateDamagedException or StateNeedsFreshDatabaseException || isStateDamage(error))
+            return FailureScope.State;
+        return error switch
+        {
+            PairPausedException or OutOfMemoryException => FailureScope.Stop,
+            OperationCanceledException when cancellationToken.IsCancellationRequested => FailureScope.Stop,
+            EndpointAccessException => FailureScope.Endpoint,
+            _ => FailureScope.Item
+        };
+    }
 
     /// <summary>Ten-second exponential backoff, capped at five minutes, with a saturating counter.</summary>
     public static State Failed(int attempts, DateTimeOffset now, bool countAttempt = true)
@@ -64,9 +69,10 @@ public static class FailureRetryOwner
     public static string RunNoticeId(string pairId) => ShortId.Make("n", pairId, "40", "", "run-unavailable");
 
     /// <summary>Run debt belongs to a pair/run notice, never the root path's item or decision row.</summary>
-    public static State RecordRunFailure(IStateStore store, string pairId, Exception error, DateTimeOffset now)
+    public static State RecordRunFailure(IStateStore store, string pairId, Exception error, DateTimeOffset now,
+        Func<Exception, bool> isStateDamage)
     {
-        if (ScopeOf(error, CancellationToken.None) == FailureScope.State)
+        if (ScopeOf(error, CancellationToken.None, isStateDamage) == FailureScope.State)
         {
             // Do not try to persist a notice through a store whose authority is lost.
             RunOutput.Observe(error);

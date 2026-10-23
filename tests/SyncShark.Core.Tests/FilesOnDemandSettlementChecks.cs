@@ -69,7 +69,7 @@ internal static class FilesOnDemandSettlementChecks
             "targeted resync merges roots without losing prior review state");
 
         var metadata = new StorageNotice(localRoot.RootId, local.ObjectId, remoteRoot.RootId,
-            "settlement", StorageNotices.ReceiptScope(remote));
+            "settlement", StorageNotices.ReceiptScope(remote.Id, remote.Revision, remote.ContentHash));
         StorageNotices.Report(store, pair, local.Path, metadata, new IOException("cause one"));
         var notice = store.OpenNotices(pair.PairId).Single(n => n.Storage is not null);
         Require(!PlanNotices.HasPathScope(notice), "storage failures never hold ordinary sync");
@@ -79,7 +79,8 @@ internal static class FilesOnDemandSettlementChecks
         StorageNotices.Report(store, pair, local.Path, metadata, new IOException("cause two"));
         Require(store.OpenNotices(pair.PairId).Count(n => n.Storage is not null) == 1, "different cause remains visible");
         StorageNotices.Complete(store, pair.PairId, metadata);
-        StorageNotices.Report(store, pair, local.Path, metadata with { Scope = StorageNotices.ReceiptScope(remote with { Revision = "rev-2" }) }, new IOException("cause one"));
+        var revisedRemote = remote with { Revision = "rev-2" };
+        StorageNotices.Report(store, pair, local.Path, metadata with { Scope = StorageNotices.ReceiptScope(revisedRemote.Id, revisedRemote.Revision, revisedRemote.ContentHash) }, new IOException("cause one"));
         Require(store.OpenNotices(pair.PairId).Count(n => n.Storage is not null) == 1, "new receipt not suppressed by older Ignore");
         StorageNotices.Complete(store, pair.PairId, metadata);
         StorageNotices.Report(store, pair, local.Path, metadata, new StoragePairException("volume", "Requires fixed NTFS"));
@@ -116,7 +117,7 @@ internal static class FilesOnDemandSettlementChecks
         Require(store.StorageSettlementFor(localRoot.RootId, local.ObjectId, remoteRoot.RootId)?.JobId == acknowledgment!.JobId,
             "ordinary conversion enqueue preserves typed acknowledgment identity");
         var acknowledgments = 0;
-        var ackTarget = metadata with { Scope = StorageNotices.ReceiptScope(movedReceipt) };
+        var ackTarget = metadata with { Scope = StorageNotices.ReceiptScope(movedReceipt.Id, movedReceipt.Revision, movedReceipt.ContentHash) };
         using (var connections = new CloudFilesLifetime((_, _, _) => throw new InvalidOperationException("managed ack opened native provider"), _ => false, store))
         {
             StorageObserved Acknowledge(StorageSettlement pending, Action revalidate)

@@ -28,7 +28,7 @@ internal static partial class DropboxChecks
             var local = new FakeEndpoint(Side.A, "local") { DropboxHashes = true };
             var source = new RecordingWriter(local);
             var settings = V2Settings.Default with { DeleteBatchSize = 3, DeleteBatchMaxAge = TimeSpan.FromSeconds(1) };
-            var remote = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(folder, "spool"), settings);
+            var remote = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(folder, "spool"), isStateDamage: StorageFailureClassifier.IsStateDamage, settings);
             var target = new QueuedDeleteWriter(remote, 3);
             var actions = new List<SyncAction>();
             var pair = new PairDef("dispatch", "Pair A", new("local", SyncProviders.Local, null, "/local", "local"),
@@ -52,7 +52,7 @@ internal static partial class DropboxChecks
                 var gate = DropboxDeleteJobGate.For(binding.ConnectionId, binding.RootNamespaceId);
                 gate.Throttled(); gate.Throttled();
                 await gate.EnterAsync();
-                var executor = new Executor(store, settings, ExecutorChecks.Admission());
+                var executor = new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
                 var running = CollectAsync();
                 try
                 {
@@ -123,7 +123,7 @@ internal static partial class DropboxChecks
             using var h = new Harness();
             var setup = await LocalWriterChecks.SetupAsync("move-out-" + sourceSide);
             var local = await LocalWriter.OpenAsync(LocalChecks.RootOf(setup.Root, "local"), Side.A,
-                "move-out", LocalChecks.InstallationId, setup.Recovery, default);
+                "move-out", LocalChecks.InstallationId, setup.Recovery, default, isStateDamage: StorageFailureClassifier.IsStateDamage);
             var remote = h.Writer();
             LocalChecks.Seed(setup.Root, "item", "same");
             h.Wire.SeedFile("item", "same");
@@ -141,7 +141,7 @@ internal static partial class DropboxChecks
                 var action = new SyncAction("delete", 6, ActionKind.Delete, target, "item", null, null,
                     target == Side.A ? a : b, true, "key");
                 var results = new List<ActionResult>();
-                await foreach (var result in new Executor(store, V2Settings.Default, ExecutorChecks.Admission())
+                await foreach (var result in new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage)
                     .ApplyAsync(new("move-out", 2, [action], []), local, remote, default)) results.Add(result);
                 Require(results.Single().Outcome == Outcome.Done && results.Single().Recovery is not null,
                     "confirmed move-out propagates recoverable removal on either side: " + results.Single().Reason);

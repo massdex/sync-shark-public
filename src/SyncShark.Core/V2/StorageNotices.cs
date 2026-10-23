@@ -1,7 +1,3 @@
-using System.Net;
-using System.Net.Sockets;
-using System.Security.Authentication;
-
 namespace Massdex.SyncShark.V2;
 
 /// <summary>Shared storage notice vocabulary and actions; no delete or upload authority.</summary>
@@ -22,8 +18,8 @@ internal static class StorageNotices
     /// per-entity debts (rehash flags, sync-retry rows and hydration jobs) are unchanged.</summary>
     internal const int NoticeAggregateLimit = 20;
 
-    internal static string ReceiptScope(PilotRemoteEntry remote) =>
-        "receipt" + ShortId.Hex16(remote.Id ?? "", remote.Revision ?? "", remote.ContentHash ?? "");
+    internal static string ReceiptScope(string? id, string? revision, string? hash) =>
+        "receipt" + ShortId.Hex16(id ?? "", revision ?? "", hash ?? "");
     private static string Family(StorageNotice item) => "storage:" + item.Operation + ":" +
         ShortId.Make("item", item.RootId, item.ObjectId, item.RemoteBinding) + ":";
     internal static string Prefix(StorageNotice item) => Family(item) + (item.Scope is null ? "" : item.Scope + ":");
@@ -33,7 +29,7 @@ internal static class StorageNotices
     internal static string OperationPrefix(string operation) => "storage:" + operation + ":";
     internal static string OperationEnd(string operation) => "storage:" + operation + ";";
 
-    internal static void Report(SqliteStateStore store, PairDef pair, string path, StorageNotice item, Exception error)
+    internal static void Report(IStateStore store, PairDef pair, string path, StorageNotice item, Exception error)
     {
         if (error is StoragePairException pairError)
         {
@@ -91,7 +87,7 @@ internal static class StorageNotices
         notice.Storage is not null && PairPath.Same(notice.Path, relativePath);
 
     // A successful current item observation closes obsolete revisions/causes as well.
-    internal static void Complete(SqliteStateStore store, string pairId, StorageNotice item)
+    internal static void Complete(IStateStore store, string pairId, StorageNotice item)
     {
         store.CloseNoticeFamily(pairId, Family(item));
         // Verification debt falls per entity, so the pair summary retires only once every debt is settled; any
@@ -101,7 +97,7 @@ internal static class StorageNotices
     }
     /// <summary>Closes the pair cause family for the requested operation. Hydration and the durable offline lane
     /// keep their own families; settlement/remote-update failures share the status-only "availability" family.</summary>
-    internal static void CompletePair(SqliteStateStore store, PairDef pair, string operation)
+    internal static void CompletePair(IStateStore store, PairDef pair, string operation)
     {
         var family = operation switch
         {
@@ -113,14 +109,14 @@ internal static class StorageNotices
 
     /// <summary>Closes the pair's hydration cause family only: one bounded indexed update, prior-process notices
     /// included. Ignored rows keep their choice, so cause-specific suppression survives.</summary>
-    internal static void CompleteHydrationPair(SqliteStateStore store, PairDef pair) =>
+    internal static void CompleteHydrationPair(IStateStore store, PairDef pair) =>
         store.CloseStorageNoticeBatch(pair.PairId, [new(pair.A.RootId, "", pair.B.RootId, HydrationPairOperation)]);
 
     /// <summary>A positive observation retires a recorded pair cause only when every open pair cause is
     /// connectivity (network/auth/provider) and, for a normal lane completion, no pair cause was reported in
     /// this same turn. A binding/registration/volume/backlog cause always survives an unrelated item success.
     /// An explicit success is positive connectivity evidence even within that turn.</summary>
-    internal static void CompleteSuccess(SqliteStateStore store, PairDef pair, bool requested, bool pairCauseReportedThisTurn)
+    internal static void CompleteSuccess(IStateStore store, PairDef pair, bool requested, bool pairCauseReportedThisTurn)
     {
         var pairNotices = store.OpenStoragePairCauses(pair.PairId, pair.A.RootId, pair.B.RootId);
         if (pairNotices.Count == 0) return;
@@ -131,74 +127,4 @@ internal static class StorageNotices
             CompletePair(store, pair, operation == HydrationPairOperation ? OfflineOperation : "availability");
     }
 
-    /// <summary>
-    /// Positive-evidence classification shared by every storage lane (hydration, its durable offline lane, settlement
-    /// and pointer refresh). A pair-level cause (network, account auth or a disconnected provider) fails every file,
-    /// so it is reported as ONE pair notice; anything item-specific (a missing revision/hash, a changed remote
-    /// revision, a range/disk fault) stays a per-item notice. Never infers from message text, and a local
-    /// cancellation is not a failure to report.
-    /// </summary>
-    internal static StoragePairException? ClassifyFailure(Exception error)
-    {
-        foreach (var current in Chain(error))
-        {
-            switch (current)
-            {
-                case StoragePairException pair:
-                    return pair;
-                case EndpointAccessException access:
-                    // Created only by DropboxItems.MapAccessError from IsAccessRefusal (401, OAuth invalid_grant or a
-                    // missing protected credential): an account-access refusal, not an item permission.
-                    return new StoragePairException("auth", AuthDetail, access);
-                case DropboxCredentialUnavailableException credential:
-                    return new StoragePairException("auth", AuthDetail, credential);
-                case DropboxApiException api when api.OAuthError == DropboxOAuthError.InvalidGrant:
-                    return new StoragePairException("auth", AuthDetail, api);
-                case DropboxApiException api when api.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden:
-                    return new StoragePairException("auth", AuthDetail, api);
-                case HttpRequestException http when http.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden:
-                    return new StoragePairException("auth", AuthDetail, http);
-                case SyncRunRefusedException refusal:
-                    // The connection is missing, signed out or not connected: every file under the pair fails.
-                    return new StoragePairException("provider", ProviderDetail, refusal);
-                case SocketException socket:
-                    return new StoragePairException("network", NetworkDetail, socket);
-                case ProviderTransportTimeoutException timeout:
-                    return new StoragePairException("network", NetworkDetail, timeout);
-                case AuthenticationException tls:
-                    // A TLS handshake/secure-connection failure is transport, not an account sign-in refusal.
-                    return new StoragePairException("network", NetworkDetail, tls);
-                case HttpRequestException httpServer when httpServer.StatusCode is null ||
-                    httpServer.StatusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests ||
-                    (int?)httpServer.StatusCode is >= 500 and <= 599:
-                    return new StoragePairException("network", NetworkDetail, httpServer);
-                case OperationCanceledException { InnerException: TimeoutException } cancelled:
-                    return new StoragePairException("network", NetworkDetail, cancelled);
-            }
-        }
-        return null;
-    }
-
-    private const string AuthDetail =
-        "Dropbox sign-in was refused during storage work. Reconnect this Dropbox account, then Retry, or Ignore this cause.";
-    private const string NetworkDetail =
-        "Dropbox could not be reached during storage work. Check the network connection; the affected work stays deferred and retries, then Retry, or Ignore this cause.";
-    private const string ProviderDetail =
-        "The Dropbox connection is unavailable during storage work. Reconnect the provider, then Retry, or Ignore this cause.";
-
-    private static IEnumerable<Exception> Chain(Exception error)
-    {
-        // Flatten at any depth: a native wrapper may carry an AggregateException as its InnerException.
-        if (error is AggregateException aggregate)
-        {
-            foreach (var inner in aggregate.Flatten().InnerExceptions)
-                foreach (var nested in Chain(inner))
-                    yield return nested;
-            yield break;
-        }
-        yield return error;
-        if (error.InnerException is { } innerException)
-            foreach (var nested in Chain(innerException))
-                yield return nested;
-    }
 }

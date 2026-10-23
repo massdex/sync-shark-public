@@ -168,7 +168,7 @@ internal static partial class RunCliChecks
                 "include reports and retains started-zero and uncertain intents for verification");
             var calls = fx.WriterA.Calls + fx.WriterB.Calls;
             var gen = store.BeginGeneration(fx.Pair.A.RootId, "include-reconcile-test");
-            var executor = new Executor(store, Settings, ExecutorChecks.Admission());
+            var executor = new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
             // Pass stale in-memory actions from before include: durable metadata must win.
             var results = await executor.ReconcileAsync([delete, upload], gen,
                 fx.WriterA, fx.WriterB, CancellationToken.None);

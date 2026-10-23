@@ -7,18 +7,17 @@ using System.Threading.Channels;
 namespace Massdex.SyncShark.V2;
 
 // The background task is the sole owner of files, rotation, flushing and disposal. Producers only TryWrite.
-internal sealed class RunLog : IDisposable
+internal sealed class RunLog : RunTrace, IDisposable
 {
     internal const int MaximumFiles = 50;
     internal const long MaximumBytes = 200L * 1024 * 1024;
     internal const long MaximumRunBytes = 100L * 1024 * 1024;
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> SkippedRotation = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly AsyncLocal<RunLog?> Ambient = new();
     private static readonly Regex RunName = new(@"^\d{8}-\d{6}-\d{3}-[0-9a-f]{8}-[\p{L}\p{N}_-]+-[\p{L}\p{N}_-]+\.log$", RegexOptions.CultureInvariant);
     private readonly Channel<(string Text, string Json)> _traces = Queue(10_000);
     private readonly Channel<(string Text, string Json)> _summaries = Queue(256);
     private readonly TaskCompletionSource _stop = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private readonly RunLog? _previous;
+    private readonly RunTrace? _previous;
     private readonly Task _writer;
     private readonly string _directory;
     private readonly bool _verbose;
@@ -34,8 +33,8 @@ internal sealed class RunLog : IDisposable
         Func<string, Stream>? open)
     {
         _verbose = verbose;
-        _previous = Ambient.Value;
-        Ambient.Value = this;
+        _previous = RunTrace.Slot.Value;
+        RunTrace.Slot.Value = this;
         try
         {
             _directory = System.IO.Path.GetFullPath(System.IO.Path.Combine(root, "v2", "logs"));
@@ -53,7 +52,7 @@ internal sealed class RunLog : IDisposable
         }
     }
 
-    internal static RunLog? Current => Ambient.Value;
+    internal static RunLog? Current => RunTrace.Slot.Value as RunLog;
     internal string? Path { get; }
     internal string? JsonPath { get; }
     internal bool Verbose => _verbose;
@@ -71,11 +70,9 @@ internal sealed class RunLog : IDisposable
         return line => { RunOutput.Write(progress, line); log.Summary(line); };
     }
 
-    internal static void Trace(string line)
-    {
-        if (Current is { } log) log.Detailed(line);
-        else RunOutput.Write(Console.Error.WriteLine, "Sync Shark trace: " + line);
-    }
+    internal static void Trace(string line) => RunTrace.Emit(line);
+
+    internal override void WriteTrace(string line) => Detailed(line);
 
     internal static string Line(RunProgress value) => value.Message ??
         (string.IsNullOrEmpty(value.Path) ? $"{value.Phase} ({value.Done}/{value.Total}){Extra(value.Extra)}"
@@ -179,7 +176,7 @@ internal sealed class RunLog : IDisposable
         _stop.TrySetResult();
         try { _writer.Wait(TimeSpan.FromSeconds(5)); }
         catch (Exception error) { RunOutput.Observe(error); }
-        if (ReferenceEquals(Ambient.Value, this)) Ambient.Value = _previous;
+        if (ReferenceEquals(RunTrace.Slot.Value, this)) RunTrace.Slot.Value = _previous;
     }
 
     internal static void Rotate(string directory, int maximumFiles, long maximumBytes)

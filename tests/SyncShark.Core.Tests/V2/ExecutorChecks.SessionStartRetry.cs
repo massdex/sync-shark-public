@@ -66,8 +66,8 @@ internal static partial class ExecutorChecks
         using var metrics = RunInstrumentation.Begin(settings, TimeProvider.System)!;
         using var store = new InMemoryStateStore(); store.SavePair(Pair());
         var writer = new DropboxWriter(new RootDef("rb", "Dropbox", "acc", "/Pilot", DropboxWire.RootId),
-            Side.B, client, "unused", settings);
-        var results = await Apply(new Executor(store, settings, Admission()), Plan(action), source, writer)
+            Side.B, client, "unused", isStateDamage: StorageFailureClassifier.IsStateDamage, settings);
+        var results = await Apply(new Executor(store, settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), Plan(action), source, writer)
             .WaitAsync(HeldEffectTimeout);
         var diagnostics = metrics.Snapshot();
         var expectedAttempts = fault switch
@@ -194,7 +194,7 @@ internal static partial class ExecutorChecks
         var settings = Settings(1) with { EnableRunInstrumentation = true, DropboxSessionStartRetryBaseDelayMs = 0 };
         using var metrics = RunInstrumentation.Begin(settings, TimeProvider.System)!;
         var writer = new DropboxWriter(new RootDef("rb", "Dropbox", "acc", "/Pilot", DropboxWire.RootId),
-            Side.B, client, "unused", settings);
+            Side.B, client, "unused", isStateDamage: StorageFailureClassifier.IsStateDamage, settings);
         using var stream = new MemoryStream(bytes);
         Exception? failure = null;
         try { await writer.PutAsync(action, stream, default).WaitAsync(HeldEffectTimeout); }

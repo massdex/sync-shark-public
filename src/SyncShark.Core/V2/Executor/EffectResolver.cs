@@ -12,10 +12,11 @@ internal static class EffectResolver
     /// carries the actual failure. A requested cancellation and an endpoint access failure propagate.
     /// </summary>
     internal static async Task<ActionResult> ResolveAsync(SyncAction x, IEndpointWriter target, IEndpointWriter source,
-        CancellationToken ct, TimeSpan? unknownCommitGracePeriod = null, TimeProvider? timeProvider = null,
+        CancellationToken ct, Func<Exception, bool> isStateDamage, TimeSpan? unknownCommitGracePeriod = null, TimeProvider? timeProvider = null,
         ProviderJobCheckCache? jobChecks = null, string? materializationBlock = null,
         ItemState? historicalDeleteSource = null, RecoveryRef? preserved = null, bool deleteRestorePending = true)
     {
+        ArgumentNullException.ThrowIfNull(isStateDamage);
         // Restore creates only: without the atomic receipt we cannot claim ownership. Abandon the
         // intent, not the Recovery copy or notice, even if observation/provider lookup is unavailable.
         if (x.ConflictRestore)
@@ -41,8 +42,8 @@ internal static class EffectResolver
                 // never expire by grace while the target survives, or a replan-restored copy could be deleted late.
                 if (applied is null) providerReportsInProgress = true;
             }
-            catch (Exception e) when (Unverifiable(e, ct) || x.Kind == ActionKind.Delete &&
-                FailureRetryOwner.ScopeOf(e, ct) == FailureRetryOwner.FailureScope.Item &&
+            catch (Exception e) when (Unverifiable(e, ct, isStateDamage: isStateDamage) || x.Kind == ActionKind.Delete &&
+                FailureRetryOwner.ScopeOf(e, ct, isStateDamage: isStateDamage) == FailureRetryOwner.FailureScope.Item &&
                 !(e is OperationCanceledException && ct.IsCancellationRequested))
             {
                 // A transient lookup failure is not proof that the job expired. Positive
@@ -67,7 +68,7 @@ internal static class EffectResolver
                 }
                 return Unverified(x, "Provider recovery remains pending.");
             }
-            catch (Exception error) when (Unverifiable(error, ct))
+            catch (Exception error) when (Unverifiable(error, ct, isStateDamage: isStateDamage))
             { return Unverified(x, Describe(error)) with
                 { RetryAfterSeconds = ProviderTransientFailure.VerificationRetrySeconds }; }
         }
@@ -83,7 +84,7 @@ internal static class EffectResolver
                 SyncDownloadStage? stage;
                 try { stage = System.Text.Json.JsonSerializer.Deserialize<SyncDownloadStage>(downloadCheckpoint.Id); }
                 catch (System.Text.Json.JsonException) { stage = null; }
-                var observed = await ObserveAsync(target, x.Path, ct).ConfigureAwait(false);
+                var observed = await ObserveAsync(target, x.Path, ct, isStateDamage: isStateDamage).ConfigureAwait(false);
                 if (stage is not null && observed.State is { Kind: ItemKind.File, Hash: not null } published &&
                     published.ObjectId == stage.ObjectId && x.Source is { Hash: not null } original &&
                     Content.SameContent(published, original) == true)
@@ -104,13 +105,13 @@ internal static class EffectResolver
             {
                 return await direct.ResumeDownloadAsync(x, downloadCheckpoint, ct).ConfigureAwait(false);
             }
-            catch (Exception e) when (Unverifiable(e, ct))
+            catch (Exception e) when (Unverifiable(e, ct, isStateDamage: isStateDamage))
             {
                 return Unverified(x, "download resume: " + Describe(e));
             }
         }
 
-        var path = await ObserveAsync(target, x.Path, ct).ConfigureAwait(false);
+        var path = await ObserveAsync(target, x.Path, ct, isStateDamage: isStateDamage).ConfigureAwait(false);
         if (path.Failure is { } failure) return Unverified(x, Describe(failure)) with
             { RetryAfterSeconds = x.Kind == ActionKind.Delete || ProviderTransientFailure.IsTransient(failure, ct)
                 ? ProviderTransientFailure.VerificationRetrySeconds : null };
@@ -120,7 +121,7 @@ internal static class EffectResolver
             // CONSOLIDATED E8: Retry observes only; it never resubmits a deletion. An unchanged target
             // proves no effect only after the existing grace window, while changed content retires old authority.
             if (obs is null)
-                return await ResolveAbsentDeleteAsync(x, target, source, historicalDeleteSource, preserved, ct, deleteRestorePending).ConfigureAwait(false);
+                return await ResolveAbsentDeleteAsync(x, target, source, historicalDeleteSource, preserved, ct, deleteRestorePending, isStateDamage: isStateDamage).ConfigureAwait(false);
             if (!SameAsExpected(obs, x.ExpectedTarget)) return Skipped(x, Superseded);
             var grace = unknownCommitGracePeriod ?? V2Settings.Default.UnknownCommitGracePeriod;
             if (submission.RecordedAtUtc is { } submitted && now - submitted >= grace)
@@ -178,7 +179,7 @@ internal static class EffectResolver
                     return await PreservedButAbsentAsync(x, preserved).ConfigureAwait(false);
                 return Skipped(x, SameAsExpected(obs, x.ExpectedTarget) ? NotApplied : Superseded);
             case ActionKind.Move:
-                return await ResolveMoveAsync(x, obs, target, ct, preserved).ConfigureAwait(false);
+                return await ResolveMoveAsync(x, obs, target, ct, preserved, isStateDamage: isStateDamage).ConfigureAwait(false);
             case ActionKind.Delete:
                 // Typed expired/invalid job + elapsed grace ends verify-only waiting, not deletion
                 // authority. Without a trusted original identity retain history and park a user review.
@@ -189,7 +190,7 @@ internal static class EffectResolver
                     return Skipped(x, "The delete job expired without a trusted source identity. Review the item; nothing further was deleted.") with
                     { DeleteSourceUnconfirmed = true, DeleteSourceIdentityMissing = true };
                 if (obs is not null) return Skipped(x, SameAsExpected(obs, x.ExpectedTarget) ? NotApplied : Superseded);
-                return await ResolveAbsentDeleteAsync(x, target, source, historicalDeleteSource, preserved, ct, deleteRestorePending)
+                return await ResolveAbsentDeleteAsync(x, target, source, historicalDeleteSource, preserved, ct, deleteRestorePending, isStateDamage: isStateDamage)
                     .ConfigureAwait(false);
             case ActionKind.MkDir:
                 if (obs?.Kind == ItemKind.Folder)
@@ -204,16 +205,17 @@ internal static class EffectResolver
     }
 
     private static async Task<ActionResult> ResolveAbsentDeleteAsync(SyncAction action, IEndpointWriter target,
-        IEndpointWriter source, ItemState? historical, RecoveryRef? preserved, CancellationToken ct, bool restorePending)
+        IEndpointWriter source, ItemState? historical, RecoveryRef? preserved, CancellationToken ct, bool restorePending, Func<Exception, bool> isStateDamage)
     {
+        ArgumentNullException.ThrowIfNull(isStateDamage);
         try
         {
-            var blocked = await DeleteSourceGuard.CheckReconcileAsync(action, source, historical, restorePending, ct)
+            var blocked = await DeleteSourceGuard.CheckReconcileAsync(action, source, historical, restorePending, ct, isStateDamage: isStateDamage)
                 .ConfigureAwait(false);
             return blocked ?? await DoneAsync(action, null, target, ct, preserved).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-        catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct) == FailureRetryOwner.FailureScope.Item)
+        catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct, isStateDamage: isStateDamage) == FailureRetryOwner.FailureScope.Item)
         {
             return Unverified(action, "Interrupted deletion source check: " + Describe(error)) with
                 { RetryAfterSeconds = ProviderTransientFailure.VerificationRetrySeconds };
@@ -236,12 +238,13 @@ internal static class EffectResolver
     // A move is only Done when the source is gone and the destination holds the moved item, ExpectedTarget (its id,
     // plus its hash when both are known). Source is the opposite side and may differ (a move before an update).
     private static async Task<ActionResult> ResolveMoveAsync(SyncAction x, ItemState? obs, IEndpointWriter target,
-        CancellationToken ct, RecoveryRef? preserved)
+        CancellationToken ct, RecoveryRef? preserved, Func<Exception, bool> isStateDamage)
     {
+        ArgumentNullException.ThrowIfNull(isStateDamage);
         if (PairPath.Same(x.FromPath ?? x.Path, x.Path) && MoveLanded(obs, x) &&
             string.Equals(obs!.Path, x.Path, StringComparison.Ordinal))
             return await DoneAsync(x, obs, target, ct, preserved).ConfigureAwait(false);
-        var from = await ObserveAsync(target, x.FromPath, ct).ConfigureAwait(false);
+        var from = await ObserveAsync(target, x.FromPath, ct, isStateDamage: isStateDamage).ConfigureAwait(false);
         if (from.Failure is { } failure) return Unverified(x, Describe(failure)) with
             { RetryAfterSeconds = ProviderTransientFailure.IsTransient(failure, ct) ? ProviderTransientFailure.VerificationRetrySeconds : null };
         if (from.State is not null) return Skipped(x, NotApplied);
@@ -297,14 +300,15 @@ internal static class EffectResolver
             { RetryAfterSeconds = ProviderTransientFailure.VerificationRetrySeconds });
 
     private static async Task<(ItemState? State, Exception? Failure)> ObserveAsync(IEndpointWriter target,
-        string? path, CancellationToken ct)
+        string? path, CancellationToken ct, Func<Exception, bool> isStateDamage)
     {
+        ArgumentNullException.ThrowIfNull(isStateDamage);
         if (path is null) return (null, null);
         try
         {
             return (await target.ObserveAsync(path, ct).ConfigureAwait(false), null);
         }
-        catch (Exception e) when (Unverifiable(e, ct))
+        catch (Exception e) when (Unverifiable(e, ct, isStateDamage: isStateDamage))
         {
             return (null, e);
         }
@@ -313,8 +317,8 @@ internal static class EffectResolver
     // A failure that only leaves the effect unverified. A requested cancellation (the caller's token), a user pause
     // (the run reports Paused and the intent is reconciled next run) and an access failure (the next run observes it)
     // are not swallowed.
-    internal static bool Unverifiable(Exception e, CancellationToken ct) =>
-        FailureRetryOwner.ScopeOf(e, ct) == FailureRetryOwner.FailureScope.Item;
+    internal static bool Unverifiable(Exception e, CancellationToken ct, Func<Exception, bool> isStateDamage) =>
+        FailureRetryOwner.ScopeOf(e, ct, isStateDamage: isStateDamage) == FailureRetryOwner.FailureScope.Item;
 
     private static ActionResult Unverified(SyncAction x, string detail) =>
         new(x.ActionId, Outcome.Uncertain, null, null, null, string.Format(ExecutionReasons.Unverified.Detail, detail));

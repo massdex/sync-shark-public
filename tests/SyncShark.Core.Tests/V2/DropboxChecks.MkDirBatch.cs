@@ -31,7 +31,7 @@ internal static partial class DropboxChecks
         // Dropbox's displayed casing differs from the saved pair root; every path comparison must stay case-insensitive.
         h.Wire.RootPath = "/pilot";
         h.Wire.MkDirSuccessUntaggedMetadata = true;
-        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"),
+        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"), isStateDamage: StorageFailureClassifier.IsStateDamage,
             V2Settings.Default with { MkDirBatchSize = 9, MkDirBatchMaxAge = MkDirFlushGrace });
         await using var scope = SyncProviderAccountVerificationScope.Begin(CancellationToken.None);
 
@@ -63,7 +63,7 @@ internal static partial class DropboxChecks
     {
         using var h = new Harness();
         for (var parent = 0; parent < 50; parent++) h.Wire.SeedFolder("p" + parent.ToString("D2"));
-        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"),
+        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"), isStateDamage: StorageFailureClassifier.IsStateDamage,
             V2Settings.Default with { MkDirBatchSize = 1000, MkDirBatchMaxAge = MkDirFlushGrace });
         // Hold the first batch in flight so every create is queued before any batch is drained: the entry cap,
         // never the arrival timing, decides every batch's size.
@@ -112,7 +112,7 @@ internal static partial class DropboxChecks
     private static async Task MkDirEntryFailureAsync()
     {
         using var h = new Harness();
-        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"),
+        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"), isStateDamage: StorageFailureClassifier.IsStateDamage,
             V2Settings.Default with { MkDirBatchSize = 2, MkDirBatchMaxAge = MkDirFlushGrace });
         h.Wire.SeedFile("taken.txt", "occupied");
         var good = writer.MkDirAsync("free", CancellationToken.None);
@@ -129,7 +129,7 @@ internal static partial class DropboxChecks
     private static async Task MkDirAsyncJobAsync()
     {
         using var h = new Harness();
-        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"),
+        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"), isStateDamage: StorageFailureClassifier.IsStateDamage,
             V2Settings.Default with { MkDirBatchSize = 2, MkDirBatchMaxAge = MkDirFlushGrace });
         h.Wire.MkDirBatchAsyncJob = true;
         h.Wire.MkDirBatchPendingChecks = 1;
@@ -185,7 +185,7 @@ internal static partial class DropboxChecks
         foreach (var refusals in new[] { 1, 2 })
         {
             using var h = new Harness();
-            var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"),
+            var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"), isStateDamage: StorageFailureClassifier.IsStateDamage,
                 V2Settings.Default with
                 {
                     MkDirBatchSize = 2, MkDirBatchMaxAge = MkDirFlushGrace,
@@ -219,7 +219,7 @@ internal static partial class DropboxChecks
     private static async Task ParentEnsureIsOneCheckAsync()
     {
         using var h = new Harness();
-        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"),
+        var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"), isStateDamage: StorageFailureClassifier.IsStateDamage,
             V2Settings.Default with { UploadBatchSize = 1, DeleteBatchSize = 1, MkDirBatchSize = 1 });
         foreach (var folder in new[] { "m", "m/a", "m/a/b", "m/a/b/c" }) h.Wire.SeedFolder(folder);
         var bytes = new byte[(8 * 1024 * 1024) + 1];

@@ -38,7 +38,7 @@ internal static partial class RunChecks
         store.AddNotices([new(fx.Pair.PairId, LinkExclusions.StubRule, NoticeKind.Info, large.Path, "online only", "online-only-item", Repair: new(Side.A, large))]);
         var largeNotice = store.OpenNotices(fx.Pair.PairId).Single(n => n.Path == large.Path);
         await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, largeNotice.NoticeId!, NoticeChoices.MakeAvailableOffline, default);
-        Require(downloads == 1 && NoticeChoices.Options(store.NoticeById(fx.Pair.PairId, largeNotice.NoticeId!)!.Value.Notice)
+        Require(downloads == 1 && NoticeOptions.Options(store.NoticeById(fx.Pair.PairId, largeNotice.NoticeId!)!.Value.Notice)
             .Any(option => option.Choice == NoticeChoices.ConfirmLargeDownload), "large files offer explicit confirmation without refusing");
         await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, largeNotice.NoticeId!, NoticeChoices.ConfirmLargeDownload, default);
         Require(downloads == 2, "confirmed large file reaches streaming hydration");
@@ -225,7 +225,7 @@ internal static partial class RunChecks
                     store.OpenNotices(fx.Pair.PairId).All(n => n.NoticeId != notice.NoticeId) &&
                     System.Text.Json.JsonSerializer.Serialize(store.SyncRetryAt(fx.Pair.PairId, item.Path)) == beforeIgnore,
                     "Ignore suppresses only the cause and leaves held retry provenance and scheduling unchanged");
-                Require(NoticeChoices.Options(notice).Any(option => option.Choice == NoticeChoices.Exclude),
+                Require(NoticeOptions.Options(notice).Any(option => option.Choice == NoticeChoices.Exclude),
                     "pending evidence offers separate Stop syncing choice for exclusion");
                 await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, notice.NoticeId!, NoticeChoices.Exclude, default);
             }
@@ -291,8 +291,8 @@ internal static partial class RunChecks
                     Require(decision.Detail.Contains("not checked for folders", StringComparison.Ordinal) &&
                         !decision.Detail.Contains("did not return an answer", StringComparison.Ordinal),
                         "restored folder decision says folder history is not checked instead of claiming no answer");
-                    Console.WriteLine("NOTICE-MEASURE restored-folder choices=" + string.Join(",", NoticeChoices.Options(decision).Select(option => option.Choice)));
-                    Require(NoticeChoices.Options(decision).Select(option => option.Choice).SequenceEqual(
+                    Console.WriteLine("NOTICE-MEASURE restored-folder choices=" + string.Join(",", NoticeOptions.Options(decision).Select(option => option.Choice)));
+                    Require(NoticeOptions.Options(decision).Select(option => option.Choice).SequenceEqual(
                         // E9: round15 measured separate explicit exclusion; no DeleteReviewed is allowed.
                         new[] { NoticeChoices.KeepRestore, NoticeChoices.Ignore, NoticeChoices.Exclude }),
                         "restored folder offers restore, cause-only Ignore or explicit exclusion, never delete");

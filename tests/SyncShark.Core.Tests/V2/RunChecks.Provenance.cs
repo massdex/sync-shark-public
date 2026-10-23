@@ -2,10 +2,63 @@ namespace Massdex.SyncShark.V2;
 
 internal static partial class RunChecks
 {
+    private static async Task CheckProvenancePortAsync(string root, IStateStore store)
+    {
+        using var output = new StringWriter();
+        var path = Path.Combine(root, "port-observations.db");
+        var provenance = new SqlitePlanProvenance(path, output);
+        var previous = PlanProvenance.Current.Value;
+        try
+        {
+            PlanProvenance.Current.Value = provenance;
+            await Task.Run(() =>
+            {
+                Require(ReferenceEquals(PlanProvenance.Current.Value, provenance), "lower provenance slot flows to child");
+                PlanProvenance.Current.Value = null;
+            });
+            Require(ReferenceEquals(PlanProvenance.Current.Value, provenance), "child ambient change does not overwrite caller");
+            provenance.BeginRun(7);
+            var sample = new ItemState("first", ItemKind.File, "item", null, new string('a', 64), 1,
+                DateTimeOffset.UnixEpoch, ItemFlags.None);
+            // BeginRun contributes one operation; the next 4999 reach the existing 5000 flush threshold.
+            for (var i = 0; i < 4999; i++)
+                provenance.Visibility(Side.A, sample with { Path = "row/" + i }, false, "visible");
+            using (var reader = new Microsoft.Data.Sqlite.SqliteConnection(
+                new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString()))
+            {
+                reader.Open();
+                using var command = reader.CreateCommand();
+                command.CommandText = "SELECT COUNT(*) FROM visibility";
+                Require(Convert.ToInt64(command.ExecuteScalar()) == 4999, "batch threshold commits without requiring Summary");
+            }
+            var first = new SyncAction("first-action", 1, ActionKind.CopyNew, Side.B, "first", null, sample, null, false, null);
+            var second = first with { ActionId = "second-action", Path = "second", Source = sample with { Path = "second" } };
+            provenance.BeginScope("FirstScope");
+            provenance.Decided(first, false);
+            provenance.BeginScope("SecondScope");
+            provenance.Decided(second, true);
+            provenance.Final(new Plan("port-pair", 1, [second, first], []), store);
+            provenance.Final(new Plan("port-pair", 1, [first, second], []), store);
+            var rows = output.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            Require(rows.Length == 3 && rows[1].Contains(",y,second,second,SecondScope,", StringComparison.Ordinal) &&
+                rows[2].Contains(",n,first,first,FirstScope,", StringComparison.Ordinal),
+                "final row order follows plan, retains decision scope, and deduplicates emissions");
+        }
+        finally
+        {
+            PlanProvenance.Current.Value = previous;
+            provenance.Dispose();
+        }
+        Require(ReferenceEquals(PlanProvenance.Current.Value, previous), "caller-owned ambient restoration is preserved");
+        output.WriteLine("still-owned-by-caller");
+        Require(output.ToString().Contains("still-owned-by-caller", StringComparison.Ordinal), "disposal does not own output writer");
+    }
+
     internal static async Task ProvenanceAsync()
     {
         var root = LocalChecks.FreshRoot("provenance");
         using var store = SqliteStateStore.Open(Path.Combine(root, "store"), StorageChecks.Fast, TimeProvider.System);
+        await CheckProvenancePortAsync(root, store);
         var fx = Build(suppliedStore: store);
         fx.A.Seed("same.txt", "same");
         fx.A.Seed("held.txt", "held");
@@ -22,8 +75,8 @@ internal static partial class RunChecks
         }
         fx.A.Seed("incoming.txt", "incoming");
         using var csv = new StringWriter();
-        using var provenance = new PlanProvenance(Path.Combine(root, "observations.db"), csv);
-        using var overlay = new RehearsalOverlay(Path.Combine(root, "overlay.db"));
+        using var provenance = new SqlitePlanProvenance(Path.Combine(root, "observations.db"), csv);
+        using var overlay = new SqliteRehearsalOverlay(Path.Combine(root, "overlay.db"));
         PlanProvenance.Current.Value = provenance;
         try
         {

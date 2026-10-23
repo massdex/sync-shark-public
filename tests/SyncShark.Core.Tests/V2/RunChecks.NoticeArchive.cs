@@ -11,7 +11,7 @@ internal static partial class RunChecks
         Directory.CreateDirectory(root);
         LocalChecks.Seed(root, "file.txt", "retained local bytes");
         var writer = await LocalWriter.OpenAsync(LocalChecks.RootOf(root, "ra"), Side.A, "pair00001",
-            LocalChecks.InstallationId, Path.Combine(directory, "recovery"), CancellationToken.None);
+            LocalChecks.InstallationId, Path.Combine(directory, "recovery"), CancellationToken.None, isStateDamage: StorageFailureClassifier.IsStateDamage);
         var loser = (await writer.ObserveAsync("file.txt", CancellationToken.None))!;
         await File.WriteAllTextAsync(Path.Combine(directory, "loser.json"), JsonSerializer.Serialize(loser));
         SyncLocalRecovery.SourceRemovedBeforeRecoveryCloseForTest = path =>
@@ -43,7 +43,7 @@ internal static partial class RunChecks
         var root = Path.Combine(directory, "local");
         var localRoot = LocalChecks.RootOf(root, "ra");
         var writer = await LocalWriter.OpenAsync(localRoot, Side.A, "pair00001", LocalChecks.InstallationId,
-            Path.Combine(directory, "recovery"), CancellationToken.None);
+            Path.Combine(directory, "recovery"), CancellationToken.None, isStateDamage: StorageFailureClassifier.IsStateDamage);
         LocalChecks.Seed(root, "file.txt", "winner bytes");
         var winner = (await writer.ObserveAsync("file.txt", CancellationToken.None))!;
         var other = new FakeEndpoint(Side.B, "rb") { DropboxHashes = true };

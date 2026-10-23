@@ -100,6 +100,7 @@ internal static partial class ExecutorChecks
     // write fails the whole group so no caller sees a one-by-one split.
     private static async Task GroupCommit_ProviderCheckpointsAreOneTransactionAsync()
     {
+        await ProviderOwner_GroupingAndRecoveryAsync();
         const int entries = 8;
         var inner = new InMemoryStateStore();
         inner.SavePair(Pair());
@@ -155,7 +156,7 @@ internal static partial class ExecutorChecks
         var a = new FakeEndpoint(Side.A, "ra");
         var b = new FakeEndpoint(Side.B, "rb") { Latency = TimeSpan.FromMilliseconds(5) };
         var record = new RecordingWriter(b, new List<string>());
-        var executor = new Executor(store, Settings(128), Admission());
+        var executor = new Executor(store, Settings(128), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
         var actions = Enumerable.Range(0, 128)
             .Select(i => Act(ActionKind.CopyNew, Side.B, "f" + i, source: a.Seed("f" + i, "v" + i), key: "k" + i))
             .ToArray();
@@ -189,8 +190,8 @@ internal static partial class ExecutorChecks
         inner.SavePair(Pair());
         var store = new JournalStore(inner, new List<string>());
         var writer = new DropboxWriter(new RootDef("rb", "Dropbox", "acc", "/Pilot", DropboxWire.RootId),
-            Side.B, client, "unused", settings);
-        var work = Apply(new Executor(store, settings, Admission()), Plan(actions), source, writer);
+            Side.B, client, "unused", isStateDamage: StorageFailureClassifier.IsStateDamage, settings);
+        var work = Apply(new Executor(store, settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), Plan(actions), source, writer);
         try
         {
             // The finish request reaching the scripted transport proves every checkpoint was already awaited durable.
@@ -227,13 +228,116 @@ internal static partial class ExecutorChecks
         var store = new JournalStore(inner, new List<string>())
             { FailIntentsWhen = batch => batch.Any(a => a.ProviderEffect?.Kind == "upload-commit") };
         var writer = new DropboxWriter(new RootDef("rb", "Dropbox", "acc", "/Pilot", DropboxWire.RootId),
-            Side.B, client, "unused", settings);
+            Side.B, client, "unused", isStateDamage: StorageFailureClassifier.IsStateDamage, settings);
 
-        var results = await Apply(new Executor(store, settings, Admission()), Plan(actions), source, writer)
+        var results = await Apply(new Executor(store, settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), Plan(actions), source, writer)
             .WaitAsync(HeldEffectTimeout);
         Require(wire.Finishes == 0, "no finish is sent when the checkpoint write fails");
         Require(results.Count == files && results.All(r => r.Outcome != Outcome.Done),
             "no entry reports Done without a durable checkpoint");
+    }
+
+    private static async Task ProviderOwner_GroupingAndRecoveryAsync()
+    {
+        var firstStore = new InMemoryStateStore();
+        var secondStore = new InMemoryStateStore();
+        firstStore.SavePair(Pair());
+        secondStore.SavePair(Pair());
+        using var firstGate = new SemaphoreSlim(1, 1);
+        using var secondGate = new SemaphoreSlim(1, 1);
+        var first = new StoreCommitter(firstStore, firstGate, "p1", 1);
+        var second = new StoreCommitter(secondStore, secondGate, "p1", 1);
+        var calls = new int[2];
+        var sizes = new int[2];
+        var fallbackCalls = 0;
+        var batch = new List<DropboxUploadCommit>();
+        var previous = ProviderEffectContext.Current.Value;
+        try
+        {
+            for (var i = 0; i < 5; i++)
+            {
+                var index = i < 3 ? 0 : 1;
+                var committer = index == 0 ? first : second;
+                var action = Act(ActionKind.CopyNew, Side.B, "owner-" + i, key: "owner-key-" + i);
+                var context = committer.CreateProviderContext(action);
+                var owner = context.Owner!;
+                Require(ReferenceEquals(owner.Key, committer) && owner.PairId == "p1",
+                    "provider owner carries the actual committer key and pair identity");
+                // A separate descriptor and delegate per effect must still produce one call per committer.
+                var observed = owner with { RecordCheckpoints = async checkpoints =>
+                {
+                    calls[index]++;
+                    sizes[index] = checkpoints.Count;
+                    await owner.RecordCheckpoints(checkpoints);
+                } };
+                ProviderEffectContext.Current.Value = new ProviderEffectContext(action, observed,
+                    _ => throw new InvalidOperationException("Owned entries must use grouped recording."));
+                batch.Add(new DropboxUploadCommit(action.Path, null, "session-" + i, "hash", 1));
+            }
+            ProviderEffectContext.Current.Value = new ProviderEffectContext(checkpoint =>
+            {
+                Require(checkpoint.Kind == "upload-commit" && checkpoint.Id == "free-session",
+                    "ownerless fallback retains checkpoint kind and session identity");
+                fallbackCalls++;
+                return Task.CompletedTask;
+            });
+            batch.Add(new DropboxUploadCommit("free", null, "free-session", "hash", 1));
+            ProviderEffectContext.Current.Value = null;
+            batch.Add(new DropboxUploadCommit("untracked", null, "untracked-session", "hash", 1));
+        }
+        finally { ProviderEffectContext.Current.Value = previous; }
+
+        var record = typeof(DropboxPilotClient).GetMethod("RecordUploadCommitCheckpointsAsync",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+        using (StoreAdmission.WithCancellation(new CancellationToken(canceled: true)))
+            await ((Task)record.Invoke(null, new object[] { batch })!).WaitAsync(HeldEffectTimeout);
+        Require(calls.SequenceEqual(new[] { 1, 1 }) && sizes.SequenceEqual(new[] { 3, 2 }),
+            "same committer gets exactly one grouped call; equal-pair distinct committers remain separate");
+        Require(fallbackCalls == 1, "only the ownerless context uses per-context recording");
+        Require(firstStore.UnresolvedIntents("p1").Count == 3 && secondStore.UnresolvedIntents("p1").Count == 2,
+            "grouped checkpoints are durable in their own stores despite cancelled ambient admission");
+        Require(batch.Take(5).All(item =>
+            (ReferenceEquals(item.Context!.Owner!.Key, first) ? first : second)
+                .LatestAction(item.Context.Action!).ProviderEffect?.Id == item.SessionId),
+            "every checkpoint retains its action and session identity");
+
+        var recoveryAction = Act(ActionKind.CopyNew, Side.B, "recovered", key: "recovery-key");
+        var recoveryContext = first.CreateProviderContext(recoveryAction);
+        var recovery = new RecoveryRef(Side.B, "archive/recovered", null, "hash", 1);
+        using var stopped = new CancellationTokenSource();
+        stopped.Cancel();
+        await recoveryContext.RecordRecoveryAsync(recoveryAction.ActionId, recoveryAction.Path, recovery,
+            "other-pair", stopped.Token);
+        await new ProviderEffectContext(_ => Task.CompletedTask).RecordRecoveryAsync(
+            recoveryAction.ActionId, recoveryAction.Path, recovery, "p1", stopped.Token);
+        Require(firstStore.RecoveryForAction("p1", recoveryAction.ActionId) is null,
+            "pair mismatch and ownerless recovery are no-ops even with a cancelled token");
+        await ExpectAsync<OperationCanceledException>(() => recoveryContext.RecordRecoveryAsync(
+            recoveryAction.ActionId, recoveryAction.Path, recovery, "p1", stopped.Token));
+        Require(firstStore.RecoveryForAction("p1", recoveryAction.ActionId) is null,
+            "cancelled recovery admission cannot publish a receipt or permit removal");
+
+        await firstGate.WaitAsync();
+        Task durableRecovery;
+        try
+        {
+            durableRecovery = recoveryContext.RecordRecoveryAsync(recoveryAction.ActionId, recoveryAction.Path,
+                recovery, "p1", CancellationToken.None);
+            Require(!durableRecovery.IsCompleted && firstStore.RecoveryForAction("p1", recoveryAction.ActionId) is null,
+                "provider recovery does not complete while durable store admission is blocked");
+        }
+        finally { firstGate.Release(); }
+        await durableRecovery.WaitAsync(HeldEffectTimeout);
+        Require(firstStore.RecoveryForAction("p1", recoveryAction.ActionId)?.Location == recovery.Location,
+            "provider may remove the original only after its recovery receipt is durable");
+
+        await first.RecordIntentAsync(recoveryAction, CancellationToken.None);
+        using (StoreAdmission.WithCancellation(stopped.Token))
+            await first.CommitAsync(recoveryAction,
+                new ActionResult(recoveryAction.ActionId, Outcome.Done, null, null, null, null))
+                .WaitAsync(HeldEffectTimeout);
+        Require(firstStore.UnresolvedIntents("p1").All(action => action.ActionId != recoveryAction.ActionId),
+            "completed-effect commits remain noncancellable after owner descriptor migration");
     }
 
     private static DropboxPilotClient UploadClient(HttpClient http) => new(http, new FixedTokenSource(), "/Pilot",

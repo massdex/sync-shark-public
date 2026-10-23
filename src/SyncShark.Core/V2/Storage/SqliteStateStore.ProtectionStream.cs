@@ -11,6 +11,7 @@ public sealed partial class SqliteStateStore
         private readonly SqliteTransaction _transaction;
         private readonly Func<IReadOnlyList<string>, IReadOnlyList<ProtectionMatch>> _fallback;
         private bool _failed, _hasHeld;
+        internal Action? ExactReadForTest { get; set; }
         internal int SourcePasses { get; private set; }
         internal int ResultQueries { get; private set; }
         internal int MaximumInputBatch { get; private set; }
@@ -48,7 +49,7 @@ public sealed partial class SqliteStateStore
                 held.Parameters.AddWithValue("$a", (object?)a ?? DBNull.Value);
                 held.Parameters.AddWithValue("$b", (object?)b ?? DBNull.Value);
                 held.Parameters.AddWithValue("$flags", (long)flags);
-                RunActivity.Preparation("Preparing protection scope: indexing held entities");
+                RunPreparation.Report("Preparing protection scope: indexing held entities");
                 held.ExecuteNonQuery();
                 SourcePasses = 3;
                 _hasHeld = Convert.ToInt64(StoreSchema.Scalar(connection, transaction,
@@ -62,7 +63,7 @@ public sealed partial class SqliteStateStore
         {
             if (paths.Count > 1024) throw new ArgumentOutOfRangeException(nameof(paths));
             MaximumInputBatch = Math.Max(MaximumInputBatch, paths.Count);
-            if (_failed) return _fallback(paths);
+            if (_failed) return DamageBoundary(() => { ExactReadForTest?.Invoke(); return _fallback(paths); });
             if (!_hasHeld) return new ProtectionMatch[paths.Count];
             try
             {
@@ -88,14 +89,14 @@ public sealed partial class SqliteStateStore
             catch (Exception error)
             {
                 Failed(error);
-                return _fallback(paths);
+                return DamageBoundary(() => { ExactReadForTest?.Invoke(); return _fallback(paths); });
             }
         }
 
         private void Failed(Exception error)
         {
             _failed = true;
-            RunLog.Trace($"Protection index unavailable; using exact legacy batch reads: {error.Message}");
+            RunTrace.Emit($"Protection index unavailable; using exact legacy batch reads: {error.Message}");
         }
 
         public void Dispose() { }

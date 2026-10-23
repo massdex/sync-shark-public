@@ -15,7 +15,7 @@ internal static partial class LocalInventoryChecks
             var pair = new PairDef("removal-pair", "Pair A", side == Side.A ? root : other,
                 side == Side.B ? root : other, [], [], true);
             store.SavePair(pair);
-            var inventory = new LocalInventory(root, side, store, new HashSet<string>(), V2Settings.Default, TimeProvider.System)
+            var inventory = new LocalInventory(root, side, store, new HashSet<string>(), V2Settings.Default, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage)
                 { GapIo = new LocalGapIo(store, V2Settings.Default, new HashSet<string>(), () => false) };
             var rows = new List<ItemState>();
             await inventory.ReadSubtreeAsync("reviewed", page => { rows.AddRange(page); return Task.CompletedTask; }, default);
@@ -24,13 +24,13 @@ internal static partial class LocalInventoryChecks
                 LocalChecks.BlockHash(LocalChecks.Bytes("previously unindexed bytes")), "real local read proves never-indexed child through VERIFY");
             var action = new SyncAction("remove", 40, ActionKind.Delete, side, folder.Path,
                 null, null, folder, false, null) { RemovalReviewChoice = true };
-            var signature = await DeleteSourceGuard.CaptureReviewedRemovalAsync(action, pair, store, inventory, default);
+            var signature = await DeleteSourceGuard.CaptureReviewedRemovalAsync(action, pair, store, inventory, default, isStateDamage: StorageFailureClassifier.IsStateDamage);
             LocalChecks.Require(signature is not null, "real local producer yields complete baseline");
             action = action with { FrozenRemovalSignature = signature };
-            LocalChecks.Require(await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(action, pair, store, inventory, default),
+            LocalChecks.Require(await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(action, pair, store, inventory, default, isStateDamage: StorageFailureClassifier.IsStateDamage),
                 "unchanged real local tree passes on " + side);
             LocalChecks.Seed(directory, "reviewed/new.txt", "unreviewed");
-            LocalChecks.Require(!await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(action, pair, store, inventory, default),
+            LocalChecks.Require(!await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(action, pair, store, inventory, default, isStateDamage: StorageFailureClassifier.IsStateDamage),
                 "real local new child vetoes on " + side);
             var consentPair = pair with { IgnoreRules = ["FileExtension:tmp"] };
             LocalChecks.Seed(directory, "consented/original.tmp", "data");
@@ -39,23 +39,23 @@ internal static partial class LocalInventoryChecks
             var proposed = new SyncAction("consent", 23, ActionKind.Delete, side, "consented", null, null,
                 consentRows.Single(item => item.Path == "consented"), true, null)
                 { CarriedIgnoredBudget = new CarriedIgnoredContent(1, 0, 4), FrozenVictimSignature = FolderDelete.Signature([]) };
-            var consent = await DeleteSourceGuard.RecordRemovalConsentAsync(proposed, consentPair, store, inventory, default);
+            var consent = await DeleteSourceGuard.RecordRemovalConsentAsync(proposed, consentPair, store, inventory, default, isStateDamage: StorageFailureClassifier.IsStateDamage);
             LocalChecks.Require(consent.RemovalReviewChoice && consent.FrozenRemovalSignature is not (null or "unproven") &&
-                await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(consent, consentPair, store, inventory, default),
+                await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(consent, consentPair, store, inventory, default, isStateDamage: StorageFailureClassifier.IsStateDamage),
                 "consent freezes complete carried observation together with authority on " + side);
             var plannedConsent = await DeleteSourceGuard.RecordRemovalConsentAsync(
                 proposed with { ActionId = "planned-consent", DescendantsPlanned = true, PreserveIgnoredChildren = false },
-                consentPair, store, inventory, default);
+                consentPair, store, inventory, default, isStateDamage: StorageFailureClassifier.IsStateDamage);
             LocalChecks.Require(DeleteSourceGuard.RequiresReviewedSubtreeProof(plannedConsent) &&
                 plannedConsent.FrozenRemovalSignature is not (null or "unproven") &&
-                await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(plannedConsent, consentPair, store, inventory, default),
+                await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(plannedConsent, consentPair, store, inventory, default, isStateDamage: StorageFailureClassifier.IsStateDamage),
                 "separately planned folder freezes carried children on " + side);
             LocalChecks.Seed(directory, "consented/late.tmp", "later");
-            LocalChecks.Require(!await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(plannedConsent, consentPair, store, inventory, default),
+            LocalChecks.Require(!await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(plannedConsent, consentPair, store, inventory, default, isStateDamage: StorageFailureClassifier.IsStateDamage),
                 "separately planned folder holds ignored child added after consent on " + side);
-            LocalChecks.Require(!await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(consent, consentPair, store, inventory, default),
+            LocalChecks.Require(!await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(consent, consentPair, store, inventory, default, isStateDamage: StorageFailureClassifier.IsStateDamage),
                 "carried file added after consent holds whole removal on " + side);
-            var incompleteConsent = await DeleteSourceGuard.RecordRemovalConsentAsync(proposed, consentPair, store, inventory, default);
+            var incompleteConsent = await DeleteSourceGuard.RecordRemovalConsentAsync(proposed, consentPair, store, inventory, default, isStateDamage: StorageFailureClassifier.IsStateDamage);
             LocalChecks.Require(incompleteConsent.FrozenRemovalSignature == "unproven",
                 "undisclosed carried contents cannot acquire a consent signature on " + side);
             // Wide tree crosses page boundaries without opening content (empty directories).
