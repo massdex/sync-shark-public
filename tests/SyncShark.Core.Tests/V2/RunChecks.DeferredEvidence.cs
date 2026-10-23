@@ -686,6 +686,7 @@ internal static partial class RunChecks
         }
         public Func<string, string>? ResolvedPath { get; init; }
         public bool Block { get; init; }
+        public Action<IReadOnlyList<string>>? Preparing { get; init; }
         public bool Fail { get; init; }
         public bool ProviderOutage { get; init; }
         public bool Pause { get; set; }
@@ -703,6 +704,7 @@ internal static partial class RunChecks
             CancellationToken ct)
         {
             CheckFilePaths(paths);
+            Preparing?.Invoke(paths);
             var resolved = Cached.ToDictionary(entry => entry.Key,
                 entry => new SyncRemoteDeletionEvidence(entry.Value, "cached evidence", ContentHash: HistoryHashes.GetValueOrDefault(entry.Key)),
                 StringComparer.OrdinalIgnoreCase);
