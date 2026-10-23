@@ -22,7 +22,7 @@ internal sealed class InMemoryStateStore : IStateStore
     public SyncRetry? SyncRetryAt(string pairId, string path)
     { lock (_gate) return _retries.GetValueOrDefault((pairId, path.ToUpperInvariant())); }
     public IReadOnlyList<SyncRetry> DueSyncRetries(string pairId, DateTimeOffset now, int limit) =>
-        ReadSyncRetries(pairId).Where(item => item.RetryAfter <= now).OrderBy(item => item.RetryAfter).Take(Math.Clamp(limit, 1, 256)).ToArray();
+        ReadSyncRetries(pairId).Where(item => FailureRetryOwner.IsDue(item.RetryAfter, now)).OrderBy(item => item.RetryAfter).Take(Math.Clamp(limit, 1, 256)).ToArray();
     // An indefinite pair-wide decision hold (Kind decision at the root path) is not scheduling debt, but one still
     // waiting on a failed notice write (PendingNotice set) is.
     public int CountSyncRetries(string pairId) => ReadSyncRetries(pairId).Count(item =>

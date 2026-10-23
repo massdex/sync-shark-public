@@ -121,18 +121,33 @@ internal static partial class RunChecks
         SyncCliPauseData? control = null;
         var pausing = true;
         var summary = string.Empty;
+        // TEMPORARY diagnostics for the superseded serial premise: record the real callback order and the second
+        // pair's put count at each step, so the fixture migration is built on measured values rather than a guess.
+        var callbacks = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        var callbackOrder = 0;
         var result = await host.RunPairsAsync(
             [PauseView(fx.Pair), PauseView(second.Def)],
             "global-pause-batch", admissionProgress: text =>
             {
                 summary = text;
+                callbacks.Enqueue(Interlocked.Increment(ref callbackOrder) + " admission secondPuts=" +
+                    second.Writer.Puts + " summary=\"" + text + "\"");
                 if (!pausing) return;
                 pausing = false;
+                callbacks.Enqueue(Interlocked.Increment(ref callbackOrder) + " pause-save begin secondPuts=" +
+                    second.Writer.Puts);
                 // The same operation the app's pause menu and the CLI verb use: save the durable scope.
                 control = cli.SetPauseAsync(PauseScopes.Global, null, true, null, true, CancellationToken.None)
                     .GetAwaiter().GetResult();
+                callbacks.Enqueue(Interlocked.Increment(ref callbackOrder) + " pause-save done secondPuts=" +
+                    second.Writer.Puts);
             });
         var now = TimeProvider.System.GetUtcNow();
+        PauseBetweenPairsDiagnostic("global-between-pairs", result, before, second.Writer.Puts, callbacks.ToArray(),
+            "control=" + (control is null ? "null" : control.Scope + "/paused=" + control.Paused) +
+            " globalSaved=" + PauseStateProjection.GlobalPaused(preferences.Load(), now) +
+            " pairPaused[p1=" + sql.PairPaused("p1") + ",p2=" + sql.PairPaused("p2") + "]" +
+            " lastSummary=\"" + summary + "\"");
         Require(control is { Scope: PauseScopes.Global, Paused: true },
             "the CLI global pause saved the durable scope");
         Require(result.Items.Count == 1 && summary.Contains("(" + RunOutcomes.Complete + ")", StringComparison.Ordinal),
@@ -153,6 +168,8 @@ internal static partial class RunChecks
         var resumedBatch = await host.RunPairsAsync(
             [PauseView(fx.Pair), PauseView(second.Def)],
             "global-resume-batch");
+        PauseBetweenPairsDiagnostic("global-resume-batch", resumedBatch, before, second.Writer.Puts, [],
+            "globalSaved=" + PauseStateProjection.GlobalPaused(preferences.Load(), TimeProvider.System.GetUtcNow()));
         Require(resumedBatch.Items.Count == 2 && second.Writer.Puts > before,
             "after the CLI resume the next batch runs the pair the pause held back");
     }
@@ -178,18 +195,35 @@ internal static partial class RunChecks
         second.A.Seed("second-run.txt", "two");
         var before = second.Writer.Puts;
         var pausing = true;
+        var summary = string.Empty;
+        // TEMPORARY diagnostics, same measured values as the global scope: items/outcomes, callback order and the
+        // second pair's put count before, during and after the pause save.
+        var callbacks = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        var callbackOrder = 0;
         var result = await host.RunPairsAsync(
             [PauseView(fx.Pair), PauseView(second.Def)],
-            "account-pause-batch", admissionProgress: _ =>
+            "account-pause-batch", admissionProgress: text =>
             {
+                summary = text;
+                callbacks.Enqueue(Interlocked.Increment(ref callbackOrder) + " admission secondPuts=" +
+                    second.Writer.Puts + " summary=\"" + text + "\"");
                 if (!pausing) return;
                 pausing = false;
+                callbacks.Enqueue(Interlocked.Increment(ref callbackOrder) + " pause-save begin secondPuts=" +
+                    second.Writer.Puts);
                 saved = saved with
                 {
                     AccountPauses = [new SyncAccountPause(PauseAccount, true, null, TimeZoneInfo.Local.Id)]
                 };
+                callbacks.Enqueue(Interlocked.Increment(ref callbackOrder) + " pause-save done secondPuts=" +
+                    second.Writer.Puts);
             });
         var now = TimeProvider.System.GetUtcNow();
+        PauseBetweenPairsDiagnostic("account-between-pairs", result, before, second.Writer.Puts, callbacks.ToArray(),
+            "globalSaved=" + PauseStateProjection.GlobalPaused(saved, now) +
+            " accountSaved=" + PauseStateProjection.AccountPaused(saved, PauseAccount, now) +
+            " pairPaused[p1=" + sql.PairPaused("p1") + ",p2=" + sql.PairPaused("p2") + "]" +
+            " lastSummary=\"" + summary + "\"");
         Require(!PauseStateProjection.GlobalPaused(saved, now) &&
             PauseStateProjection.AccountPaused(saved, PauseAccount, now),
             "the account pause leaves the global scope untouched");
@@ -206,8 +240,29 @@ internal static partial class RunChecks
         var resumedBatch = await host.RunPairsAsync(
             [PauseView(fx.Pair), PauseView(second.Def)],
             "account-resume-batch");
+        PauseBetweenPairsDiagnostic("account-resume-batch", resumedBatch, before, second.Writer.Puts, [],
+            "accountSaved=" + PauseStateProjection.AccountPaused(saved, PauseAccount,
+                TimeProvider.System.GetUtcNow()));
         Require(resumedBatch.Items.Count == 2 && second.Writer.Puts > before,
             "clearing the account scope lets the next batch run pair 2");
+    }
+
+    // TEMPORARY measurement for the between-pairs fixture migration: the real batch items/outcomes (the admission
+    // summary carries the run outcome string), the second pair's put count before and after, and the callback order.
+    // Printed before the existing assertions so the shared CI still reports measured values when the superseded
+    // serial premise fails. Delete with the fixture migration.
+    private static void PauseBetweenPairsDiagnostic(string label, SyncAuthorityBatchResult result,
+        int secondPutsBefore, int secondPutsAfter, IReadOnlyList<string> callbacks, string state)
+    {
+        var items = string.Join(" ; ", result.Items.Select(item => item.Pair.Id + "{failure=" +
+            (item.FailureType ?? "none") + ",result=" + (item.Result is { } r
+                ? "uploaded=" + r.Uploaded + ",downloaded=" + r.Downloaded + ",blocked=" + r.Blocked +
+                  ",applied=" + r.AppliedItems + ",decisions=" + r.Decisions.Count
+                : "null") + "}"));
+        Console.WriteLine("[pause-diag] " + label + " stopped=" + result.Stopped + " items=" + result.Items.Count +
+            " [" + items + "] secondPuts(before=" + secondPutsBefore + ",after=" + secondPutsAfter +
+            ",delta=" + (secondPutsAfter - secondPutsBefore) + ") callbacks[" + string.Join(" -> ", callbacks) +
+            "] " + state);
     }
 
     // Save through the real preferences store during pair 1, without setting the temporary active-run flag.

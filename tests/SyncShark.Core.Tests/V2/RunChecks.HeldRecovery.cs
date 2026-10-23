@@ -27,7 +27,8 @@ internal static partial class RunChecks
         fx.A.Seed("held.txt", "local");
         fx.B.Seed("ordinary.txt", "cloud");
         fx.Provider.AddInventory(fx.Pair.B, new DeferredInventory(fx.B) { ProviderOutage = true });
-        var run = fx.Run();
+        var clock = new CompletionClock();
+        var run = new SyncRun(fx.Store, fx.Executor, fx.Provider, Settings, clock);
         var root = Path.Combine(Path.GetTempPath(), "evidence-retry-" + Guid.NewGuid().ToString("N"));
         var runtime = new V2CliRuntime(null, fx.Store, run, new EndpointRootProbe(fx.Provider), root);
         var preparation = await runtime.PrepareFirstSyncAsync(fx.Pair.PairId, _ => { }, default);
@@ -40,9 +41,22 @@ internal static partial class RunChecks
         Require(!fx.Store.FirstSyncDone(fx.Pair.PairId) && fx.WriterA.Puts == 1 && fx.WriterB.Puts == 0,
             "evidence outage keeps reviewed pending while unrelated download completes");
         fx.Provider.AddInventory(fx.Pair.B, new DeferredInventory(fx.B));
-        var resumed = await runtime.ApplyFirstSyncAsync(fx.Pair.PairId, null, true, null, _ => { }, default);
-        Console.WriteLine($"HELD-RESUME done={fx.Store.FirstSyncDone(fx.Pair.PairId)}; puts-a={fx.WriterA.Puts}; puts-b={fx.WriterB.Puts}; " +
-            $"result={System.Text.Json.JsonSerializer.Serialize(resumed)}; retry={System.Text.Json.JsonSerializer.Serialize(fx.Store.SyncRetryAt(fx.Pair.PairId, "held.txt"))}");
+        // docs/design/retry-resume-rewind.md: failure deadlines gate automatic work. Re-applying
+        // the same prepare is not an explicit Retry and must not bypass the persisted deadline.
+        var sleeping = fx.Store.SyncRetryAt(fx.Pair.PairId, "held.txt");
+        Require(sleeping is { ReprobeEvidence: true, HeldReviewed: true, Held: not null } &&
+            sleeping.RetryAfter > clock.Now,
+            "the outage retains reviewed evidence debt with a future retry deadline");
+        clock.Now = sleeping!.RetryAfter.AddTicks(-1);
+        // D85: an early apply may complete first sync with durable debt; preview keeps this prepare available.
+        var beforeDue = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        Require(beforeDue.HeldDeletions.All(item => item.Path != "held.txt") &&
+            beforeDue.Actions.All(action => action.Path != "held.txt") &&
+            fx.Store.SyncRetryAt(fx.Pair.PairId, "held.txt") == sleeping &&
+            fx.WriterA.Puts == 1 && fx.WriterB.Puts == 0 && fx.WriterA.Deletes == 0 && fx.WriterB.Deletes == 0,
+            "before its deadline held evidence stays dormant with unchanged debt and zero new effects");
+        clock.Now = sleeping.RetryAfter;
+        await runtime.ApplyFirstSyncAsync(fx.Pair.PairId, null, true, null, _ => { }, default);
         Require(fx.Store.FirstSyncDone(fx.Pair.PairId) && fx.WriterA.Puts == 1 && fx.WriterB.Puts == 1,
             "same prepare resumes evidence without duplicate ordinary download");
         Console.WriteLine("PASS HeldRecovery_EvidenceOutageRerun");

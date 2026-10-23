@@ -255,7 +255,13 @@ internal static partial class RunChecks
             var notice = fx.Store.OpenNotices(fx.Pair.PairId).Single(n => NoticeChoices.IsPairRetryNotice(n));
             var runtime = new V2CliRuntime(null, fx.Store, run, new EndpointRootProbe(fx.Provider), Path.GetTempPath());
             await runtime.ResolveConflictAsync(fx.Pair.PairId, "", NoticeChoices.Ignore, notice.NoticeId, 0, null, default).WaitAsync(TimeSpan.FromSeconds(2));
-            Require(fx.Store.NoticeById(fx.Pair.PairId, notice.NoticeId!) is { Closed: true }, "pair Ignore closes the notice");
+            // E9 (docs/design/notices-and-decision-log.md): Ignore suppresses the cause,
+            // not its unresolved authority. CI39912492605 reached this stale terminal assertion.
+            var ignored = fx.Store.NoticeById(fx.Pair.PairId, notice.NoticeId!);
+            Require(ignored is { Closed: false } && ignored.Value.Notice == notice &&
+                fx.Store.OpenNotices(fx.Pair.PairId).All(n => n.NoticeId != notice.NoticeId) &&
+                fx.Store.UnresolvedNotices(fx.Pair.PairId).Any(n => n.NoticeId == notice.NoticeId),
+                "pair Ignore hides only presentation and retains the unchanged actionable notice");
             Require(!pending.IsCompleted && fx.Store.Pair(fx.Pair.PairId)!.Excluded.Count == 0,
                 "Ignore responds while the run remains active and never excludes the root");
         }

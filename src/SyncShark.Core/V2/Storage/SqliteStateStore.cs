@@ -36,6 +36,9 @@ public sealed partial class SqliteStateStore : IStateStore
     {
         _connection = connection;
         _connection.CreateFunction<string, string>("choice_key", PathKey.Of, isDeterministic: true);
+        _connection.CreateFunction<string, long, bool>("sync_retry_due", (deadline, nowTicks) =>
+            FailureRetryOwner.IsDue(DateTimeOffset.Parse(deadline, System.Globalization.CultureInfo.InvariantCulture),
+                new DateTimeOffset(nowTicks, TimeSpan.Zero)), isDeterministic: true);
         _settings = settings;
         _clock = clock;
         _dir = new DirTable(connection);

@@ -17,6 +17,10 @@ public sealed partial class SyncRun
 
     private async Task<Plan> ApplyReviewedRetriesAsync(PairDef pair, Plan plan, IReadOnlyList<SyncRetry> retries, CancellationToken ct)
     {
+        // Re-read persisted scheduling authority: neither a rounded index candidate nor a stale
+        // caller snapshot may replay a reviewed effect before its exact current deadline.
+        retries = retries.Select(retry => _store.SyncRetryAt(pair.PairId, retry.Path))
+            .OfType<SyncRetry>().Where(retry => FailureRetryOwner.IsDue(retry.RetryAfter, _time.GetUtcNow())).ToArray();
         var replacements = new List<SyncAction>();
         var replaced = new List<string>();
         var folders = new List<string>();

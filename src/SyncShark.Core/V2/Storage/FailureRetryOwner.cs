@@ -9,6 +9,9 @@ public static class FailureRetryOwner
 {
     public readonly record struct State(int Attempts, DateTimeOffset RetryAfter);
 
+    /// <summary>Retry authority starts at the exact persisted instant, never at a rounded index key.</summary>
+    public static bool IsDue(DateTimeOffset retryAfter, DateTimeOffset now) => now >= retryAfter;
+
     public enum FailureScope { Item, Endpoint, Stop, State }
 
     /// <summary>

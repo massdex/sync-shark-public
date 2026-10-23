@@ -80,6 +80,7 @@ internal static partial class StorageChecks
         CommitUnknownMoveContentKeepsBaseline(root);
         SleepingRemovalObservationSurvivesReopen(root);
         MissingPrepareMatchReadIsFilteredAndPaged(root);
+        RetryDeadlineUsesExactPersistedInstant(root);
         CommitResultOtherPairThrows(root);
         await Executor_FolderDeleteExpansion_RealStore(root);
         await Executor_MoveThenUpdate_RealStore(root);

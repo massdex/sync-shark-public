@@ -131,8 +131,14 @@ internal static partial class RunChecks
             Require(result.Outcome == Outcome.Skipped && store.DefenderGrantById(grant.GrantId) == grant,
                 "legacy hashless notice never grants on the first Keep confirmation");
             if (closed)
-                Require(saved.Closed && saved.Notice.Quarantine!.ExpectedTarget!.Hash is null && result.Reason!.Contains("not refreshed"),
-                    "closed ignored notice reports accurately when its hash refresh is not persisted");
+            {
+                // E9: docs/design/notices-and-decision-log.md:30-39 defines Ignore as
+                // suppressed-open, not terminal; it never releases the security hold.
+                Require(!saved.Closed && store.OpenNotices("p1").All(n => n.NoticeId != notice.NoticeId) &&
+                    store.UnresolvedNotices("p1").Any(n => n.NoticeId == notice.NoticeId) &&
+                    store.DefenderGrantById(grant.GrantId) == grant,
+                    "ignored quarantine notice stays suppressed and unresolved without changing the grant");
+            }
             else
             {
                 Require(saved.Notice.Quarantine!.ExpectedTarget!.Hash == local.Hash,
