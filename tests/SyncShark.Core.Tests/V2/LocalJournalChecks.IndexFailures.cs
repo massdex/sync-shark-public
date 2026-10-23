@@ -181,6 +181,7 @@ internal static partial class LocalJournalChecks
         IndexFailureAtomicDeferralChecks(Path.Combine(folder, "atomic-deferral"));
         IndexFailureClassSuppressionChecks(Path.Combine(folder, "class-suppression"));
         IndexFailureSchemaUpgradeChecks(Path.Combine(folder, "schema-upgrade"));
+        IndexRetryPlanChecks(Path.Combine(folder, "index-retry-plan"));
         await GapDamageChecksAsync(Path.Combine(folder, "damage-filters"));
         await GapUnchangedRequiresContentProofChecksAsync(Path.Combine(folder, "gap-proof"));
         Console.WriteLine("PASS root indexing failure notice: one physical row, projection, Ignore episode, cause reopen, Retry deadline");
@@ -296,6 +297,13 @@ internal static partial class LocalJournalChecks
             command.Parameters.AddWithValue("$c", column);
             return Convert.ToInt64(command.ExecuteScalar()) == 1;
         }
+        static long Index(SqliteConnection connection, string name)
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=$n;";
+            command.Parameters.AddWithValue("$n", name);
+            return Convert.ToInt64(command.ExecuteScalar());
+        }
         static (string State, string? Choice, long? ClosedAt) NoticeState(SqliteConnection connection, string id)
         {
             using var command = connection.CreateCommand();
@@ -344,6 +352,9 @@ internal static partial class LocalJournalChecks
                 closedBefore = Query(connection,
                     "SELECT closed_at FROM notice WHERE notice_id='" + closedId + "';");
                 Execute(connection, "DROP INDEX IF EXISTS planning_deferred_root_version;");
+                // The deadline indexes reference retry_after, which the older shapes do not have; SQLite
+                // refuses to drop an indexed column, so remove them first to simulate that shape.
+                Execute(connection, "DROP INDEX IF EXISTS gap_retry_due; DROP INDEX IF EXISTS rehash_retry_due;");
                 // INDEX-25 owns all of these; none of the older shapes has them.
                 Execute(connection,
                     "ALTER TABLE local_gap_item DROP COLUMN retry_after;" +
@@ -378,8 +389,9 @@ internal static partial class LocalJournalChecks
                     "v" + fromVersion + " upgrade keeps the closed notice closed with its choice and " +
                     (fromVersion == 22 ? "stamps closure at migration" : "preserves its original closure time"));
                 LocalChecks.Require(Query(check, "PRAGMA user_version;") == StoreSchema.Version &&
-                    Query(check, "SELECT COUNT(*) FROM sqlite_master WHERE type='index' " +
-                        "AND name='planning_deferred_root_version';") == 1 &&
+                    Index(check, "planning_deferred_root_version") == 1 &&
+                    Index(check, "gap_retry_due") == 1 &&
+                    Index(check, "rehash_retry_due") == 1 &&
                     Column(check, "local_gap_item", "retry_after") &&
                     Column(check, "local_rehash", "failure_count") &&
                     Column(check, "local_rehash", "retry_after") &&
@@ -391,5 +403,31 @@ internal static partial class LocalJournalChecks
                     " index, closure timestamp and every additive deadline column");
             }
         }
+    }
+
+    // The indexing loop's wake probe runs every few seconds inside the one shared store gate. At scale it must be
+    // two indexed MINs, one per deadline table, never a whole-root scan of a WITHOUT ROWID table.
+    private static void IndexRetryPlanChecks(string folder)
+    {
+        using (SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash)) { }
+        // The live store is already at the current version, so the additive index must be repaired on the next
+        // open without a version bump. Drop it to prove the every-open path recreates it.
+        using (var db = new SqliteConnection(new SqliteConnectionStringBuilder
+            { DataSource = SqliteStateStore.DatabasePath(folder), Pooling = false }.ToString()))
+        {
+            db.Open();
+            StoreSchema.Execute(db, null, "DROP INDEX gap_retry_due; DROP INDEX rehash_retry_due;");
+        }
+        using (SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash)) { }
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        { DataSource = SqliteStateStore.DatabasePath(folder), Pooling = false }.ToString());
+        connection.Open();
+        var plans = StoreSchema.QueryPlan(connection, "index-retry", SqliteStateStore.NextIndexRetrySql, "$r", "$now");
+        LocalChecks.Require(
+            plans.Any(line => line.Contains("gap_retry_due", StringComparison.Ordinal)) &&
+            plans.Any(line => line.Contains("rehash_retry_due", StringComparison.Ordinal)) &&
+            plans.All(line => !line.Contains("SCAN", StringComparison.Ordinal)),
+            "the indexing wake probe seeks both per-root deadlines through the deadline indexes, never a scan: " +
+            string.Join("; ", plans));
     }
 }

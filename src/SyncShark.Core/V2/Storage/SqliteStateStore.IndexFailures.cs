@@ -21,6 +21,19 @@ public sealed partial class SqliteStateStore
         "SELECT 1 FROM root WHERE root_id=$id AND index_retry_after<=$now;", ("$id", rootId), ("$now", NowMs())) is not null);
 
     /// <summary>
+    /// The earliest future gap or rehash deadline for one root. Each leg is an indexed MIN: the
+    /// (root_no,retry_after) partial indexes make it a bounded seek, not a whole-root scan. The literal
+    /// retry_after&gt;0 keeps the partial indexes inferable from a bound retry_after&gt;$now term; every stored
+    /// deadline is non-negative, so it never changes the result.
+    /// </summary>
+    internal const string NextIndexRetrySql = """
+        SELECT MIN(due) FROM (
+          SELECT MIN(retry_after) AS due FROM local_gap_item WHERE root_no=$r AND retry_after>$now AND retry_after>0
+          UNION ALL
+          SELECT MIN(retry_after) FROM local_rehash WHERE root_no=$r AND retry_after>$now AND retry_after>0);
+        """;
+
+    /// <summary>
     /// The next future durable indexing deadline, or null when work is due now. A future root-wide gate
     /// supersedes item deadlines; otherwise this is the earliest future gap or rehash deadline. Read-only.
     /// </summary>
@@ -33,10 +46,7 @@ public sealed partial class SqliteStateStore
             "SELECT index_retry_after FROM root WHERE root_no=$r AND index_retry_after>$now;",
             ("$r", root.Value), ("$now", now));
         if (gate is not null and not DBNull) return DateTimeOffset.FromUnixTimeMilliseconds(Convert.ToInt64(gate));
-        var item = StoreSchema.Scalar(_connection, null,
-            "SELECT MIN(due) FROM (SELECT retry_after AS due FROM local_gap_item WHERE root_no=$r AND retry_after>$now " +
-            "UNION ALL SELECT retry_after FROM local_rehash WHERE root_no=$r AND retry_after>$now);",
-            ("$r", root.Value), ("$now", now));
+        var item = StoreSchema.Scalar(_connection, null, NextIndexRetrySql, ("$r", root.Value), ("$now", now));
         return item is null or DBNull ? null : DateTimeOffset.FromUnixTimeMilliseconds(Convert.ToInt64(item));
     });
 

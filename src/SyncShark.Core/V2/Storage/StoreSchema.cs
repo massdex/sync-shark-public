@@ -299,7 +299,7 @@ internal static class StoreSchema
                 if (table == "local_gap" && column == "worker_done")
                     Execute(connection, transaction, "UPDATE local_gap SET worker_done=discovery_done;");
             }
-        // Replace only the old ready predicate; the entity work and legacy gap_retry remain intact.
+        // Replace only the old ready predicate; entity work and legacy gap_retry remain intact. The last two partial indexes keep the per-root MIN(retry_after) wake probe an indexed seek, not a whole-root scan.
         if (Scalar(connection, transaction, "SELECT sql FROM sqlite_master WHERE name='gap_ready';") is string ready &&
             !ready.Contains("metadata_ready=0", StringComparison.Ordinal))
             Execute(connection, transaction, "DROP INDEX gap_ready;");
@@ -308,7 +308,7 @@ internal static class StoreSchema
             "CREATE INDEX IF NOT EXISTS gap_metadata ON local_gap_item(root_no,epoch,object_id) WHERE metadata_ready=1;" +
             "CREATE INDEX IF NOT EXISTS gap_waiting ON local_gap_item(root_no,object_id) WHERE hash IS NULL AND retry_allowed=0;" +
             "CREATE INDEX IF NOT EXISTS gap_failed ON local_gap_item(root_no,object_id) WHERE failure_count>=3;" +
-            "CREATE INDEX IF NOT EXISTS gap_results ON local_gap_item(root_no,result_seq,object_id) WHERE hash IS NOT NULL;");
+            "CREATE INDEX IF NOT EXISTS gap_results ON local_gap_item(root_no,result_seq,object_id) WHERE hash IS NOT NULL;CREATE INDEX IF NOT EXISTS gap_retry_due ON local_gap_item(root_no,retry_after) WHERE retry_after>0;CREATE INDEX IF NOT EXISTS rehash_retry_due ON local_rehash(root_no,retry_after) WHERE retry_after>0;");
     }
 
     // one bounded summary per finished run. AUTOINCREMENT keeps the paging cursor unique and
@@ -708,7 +708,7 @@ internal static class StoreSchema
     private static readonly string[] ExpectedNames =
     [
         "planning_deferred", "planning_deferred_pair", "planning_deferred_pair_version", "planning_deferred_root_version", "journal_volume", "dir", "root", "pair", "generation", "file_state", "tombstone", "sync_point", "pending_effect", "sync_retry", "sync_retry_due", "sync_retry_kind", "sync_retry_delete_blocked", "sync_retry_delete_review", "sync_retry_review_path", "nt_groupable_delete", "pe_uncertain_delete", "recovery",
-        "notice", "notice_legacy_fold", "local_gap", "local_gap_item", "gap_ready", "gap_failed", "gap_waiting", "gap_results", "gap_metadata", "local_rehash", "rehash_retry", "deletion_evidence", "dir_key", "dir_mapped_key", "fs_obj", "fs_flagged", "fs_refused", "sp_a_obj", "sp_b_obj", "sp_a_dir", "sp_b_dir",
+        "notice", "notice_legacy_fold", "local_gap", "local_gap_item", "gap_ready", "gap_failed", "gap_waiting", "gap_results", "gap_metadata", "gap_retry_due", "local_rehash", "rehash_retry", "rehash_retry_due", "deletion_evidence", "dir_key", "dir_mapped_key", "fs_obj", "fs_flagged", "fs_refused", "sp_a_obj", "sp_b_obj", "sp_a_dir", "sp_b_dir",
 
         "removal_review", "pe_unresolved", "pe_intent_order", "rc_pair", "rc_page", "rc_path", "rc_path_missing", "nt_open", "nt_terminal", "nt_restore_page", "nt_restore_path", "nt_restore_path_ready",
         "nt_restore_hold_path", "nt_restore_reason_page", "prepare_header", "prepare_row", "prepare_lookup", "prepare_cursor",

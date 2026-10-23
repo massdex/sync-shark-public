@@ -98,7 +98,7 @@ internal static partial class RunChecks
             });
             evidence.Release.TrySetResult();
             var report = await applying;
-            Require(report.Deferred == 0 && fx.Store.FirstSyncDone(fx.Pair.PairId) &&
+            Require(report.Deferred == 1 && fx.Store.FirstSyncDone(fx.Pair.PairId) &&
                 fx.Store.SyncRetryAt(fx.Pair.PairId, "held.txt")?.Held is not null &&
                 fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0,
                 "fresh held-file link/stub flags prevent all effects despite the cached lane snapshot");

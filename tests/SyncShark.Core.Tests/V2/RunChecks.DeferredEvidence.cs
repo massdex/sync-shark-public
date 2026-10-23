@@ -662,7 +662,12 @@ internal static partial class RunChecks
         Require(applying.All(entry => entry.Done <= entry.Total), "applying progress stays within its total");
         Require(applying[^1] is { Done: 1, Total: 1 },
             "a held path that resolves without an effect leaves no permanent shortfall");
-        Require(report.Deferred == 0 && fx.Store.FirstSyncDone(fx.Pair.PairId) &&
+        // run.md terminal boundary decisions: completing first sync does not erase retained work.
+        // A vanished held path has no executable effect, but still needs an ordinary-run recheck.
+        Require(report.Deferred == 1 && report.Outcome == RunOutcomes.Partial && report.Pending == 0 &&
+            report.Done == 1 && report.Failed == 0 && report.Uncertain == 0,
+            "the ordinary download completes while exactly one vanished held path remains deferred");
+        Require(fx.Store.FirstSyncDone(fx.Pair.PairId) &&
             fx.Store.SyncRetryAt(fx.Pair.PairId, "held.txt") is not null,
             "the vanished path remains durable recheck input without holding first-sync completion open");
         Console.WriteLine("PASS DeferredEvidence_ResolvedWithoutEffectKeepsProgressWhole");

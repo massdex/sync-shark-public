@@ -53,7 +53,8 @@ internal static partial class DropboxChecks
         var provider = JsonNode.Parse(group["ProviderState"]!.GetValue<string>())!.AsObject();
         provider["Completed"] = null;
         provider["JobId"] = "lost-job";
-        provider["SubmittedAt"] = DateTimeOffset.UtcNow;
+        var submittedAt = DateTimeOffset.UtcNow;
+        provider["SubmittedAt"] = submittedAt;
         if (!tombstones)
         {
             provider["Middle"] = "unavailable-middle";
@@ -75,7 +76,10 @@ internal static partial class DropboxChecks
             anchor = rig.Store.UnresolvedIntents("p1").Single(action => action.ProviderEffect?.Kind == "whole-folder-group");
             group = JsonNode.Parse(anchor.ProviderEffect!.Id)!.AsObject();
             provider = JsonNode.Parse(group["ProviderState"]!.GetValue<string>())!.AsObject();
-            Require(provider["JobId"] is null, "unavailable job identity is durably dropped");
+            Require(provider["JobId"]?.GetValue<string>() == "lost-job" &&
+                provider["JobUnavailable"]?.GetValue<bool>() == true &&
+                provider["SubmittedAt"]?.GetValue<DateTimeOffset>() == submittedAt,
+                "unavailable job retains its durable identity and submission age without remaining pollable");
             provider["SubmittedAt"] = DateTimeOffset.UtcNow - TimeSpan.FromHours(3);
             group["ProviderState"] = provider.ToJsonString();
             rig.Store.RecordIntent("p1", anchor with { ProviderEffect = anchor.ProviderEffect with { Id = group.ToJsonString() } });
