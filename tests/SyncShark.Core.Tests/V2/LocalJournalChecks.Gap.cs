@@ -71,7 +71,7 @@ internal static partial class LocalJournalChecks
                 "fresh ordinary write invalidates a queued gap result even before promotion");
             var completed = results.Single(result => result.Expected.ObjectId == rows[2].ObjectId);
             io.UsnOverride = 101;
-            LocalGapWorker.Promote(gaps, store, io, root, watermark, new NtfsUsnCheckpoint(1, 0, 200, 0), path => path == completed.Expected.Path, _ => { }, default);
+            LocalGapWorker.Promote(gaps, store, io, root, watermark, new NtfsUsnCheckpoint(1, 0, 200, 0), path => path == completed.Expected.Path, _ => { }, default, StorageFailureClassifier.IsStateDamage);
             LocalChecks.Require(store.Live(root.RootId, [alias.Path]).Single().Hash == oldHash &&
                 gaps.GapResults(root.RootId, watermark, 128).Count == 0,
                 "same-size same-mtime edit with changed file USN rejects stale staged content");
@@ -314,11 +314,11 @@ internal static partial class LocalJournalChecks
             if (scenario == "replaced") start = start with { JournalId = 2 };
             if (scenario == "backward") start = start with { NextUsn = 199 };
             if (scenario == "missing-start") start = null;
-            LocalGapWorker.Promote(gaps, store, io, root, beforeStage, start, _ => true, _ => { }, default);
+            LocalGapWorker.Promote(gaps, store, io, root, beforeStage, start, _ => true, _ => { }, default, StorageFailureClassifier.IsStateDamage);
             LocalChecks.Require(io.Probes == 0 && store.Live(root.RootId).All(r => r.Hash == oldHash),
                 "same-run staged results cannot pass next-run watermark eligibility: " + scenario);
             var cutoff = gaps.GapResultWatermark(root.RootId);
-            LocalGapWorker.Promote(gaps, store, io, root, cutoff, start, _ => true, _ => { }, default);
+            LocalGapWorker.Promote(gaps, store, io, root, cutoff, start, _ => true, _ => { }, default, StorageFailureClassifier.IsStateDamage);
             var published = store.Live(root.RootId).Count(r => r.Hash == newHash);
             var expected = scenario is "stable" or "wrapped-range" ? 3 : 0;
             LocalChecks.Require(published == expected,
@@ -371,7 +371,7 @@ internal static partial class LocalJournalChecks
         // local_rehash obligation and the bounded index transfer publishes it to the pair's queue.
         LocalGapWorker.Promote(gaps, store, io, root, gaps.GapResultWatermark(root.RootId),
             new(1, 0, 200, 0), path => path == many[^1].Path,
-            _ => throw new InvalidOperationException("promotion must not call a planning-touch callback"), default);
+            _ => throw new InvalidOperationException("promotion must not call a planning-touch callback"), default, StorageFailureClassifier.IsStateDamage);
         LocalChecks.Require(!gaps.HasGapProtection(root.RootId) && store.Live(root.RootId).All(item => item.Hash == newHash) &&
             store.RehashPendingCount(root.RootId) == many.Length,
             "promotion records every root entity's durable obligation; a pair selection no longer filters touches");
@@ -394,7 +394,7 @@ internal static partial class LocalJournalChecks
         }
         io.Unavailable = item => item.Path != many[^1].Path;
         var watermark = gaps.GapResultWatermark(root.RootId);
-        LocalGapWorker.Promote(gaps, store, io, root, watermark, new(1, 0, 200, 0), _ => true, _ => { }, default);
+        LocalGapWorker.Promote(gaps, store, io, root, watermark, new(1, 0, 200, 0), _ => true, _ => { }, default, StorageFailureClassifier.IsStateDamage);
         LocalChecks.Require(gaps.GapResults(root.RootId, gaps.GapResultWatermark(root.RootId), 128).Count == 0 &&
             gaps.HasGapProtection(root.RootId) && store.NextIndexRetry(root.RootId) > DateTimeOffset.UtcNow,
             "failed proof validation stays protected behind its durable retry deadline");
@@ -421,10 +421,10 @@ internal static partial class LocalJournalChecks
         gaps.GapDiscoveryDone(root.RootId, epoch);
         gaps.PromoteGapDiscovery(root.RootId); // Simulate the next run's metadata entrypoint.
         var beforeProbes = io.Probes;
-        LocalGapWorker.Promote(gaps, store, io, root, gaps.GapResultWatermark(root.RootId), new(1, 0, 200, 0), _ => true, _ => { }, default);
+        LocalGapWorker.Promote(gaps, store, io, root, gaps.GapResultWatermark(root.RootId), new(1, 0, 200, 0), _ => true, _ => { }, default, StorageFailureClassifier.IsStateDamage);
         LocalChecks.Require(io.Probes - beforeProbes == 512 && gaps.GapResults(root.RootId, gaps.GapResultWatermark(root.RootId), 128).Count == 88,
             "planning pass has fixed 512-probe budget and leaves remaining verified work staged");
-        LocalGapWorker.Promote(gaps, store, io, root, gaps.GapResultWatermark(root.RootId), new(1, 0, 200, 0), _ => true, _ => { }, default);
+        LocalGapWorker.Promote(gaps, store, io, root, gaps.GapResultWatermark(root.RootId), new(1, 0, 200, 0), _ => true, _ => { }, default, StorageFailureClassifier.IsStateDamage);
         LocalChecks.Require(!gaps.HasGapProtection(root.RootId), "next pass completes remaining promotion work");
 
         root = original with { RootId = "defer-and-foreground" };
@@ -434,7 +434,7 @@ internal static partial class LocalJournalChecks
         gaps.GapDiscovered(root.RootId, epoch, itemToVerify, true);
         gaps.StageGapHash(root.RootId, epoch, itemToVerify, newHash, io.Proof(itemToVerify, 100));
         io.UsnOverride = null; // id 13 has a transiently unavailable probe.
-        LocalGapWorker.Promote(gaps, store, io, root, gaps.GapResultWatermark(root.RootId), new(1, 0, 200, 0), _ => true, _ => { }, default);
+        LocalGapWorker.Promote(gaps, store, io, root, gaps.GapResultWatermark(root.RootId), new(1, 0, 200, 0), _ => true, _ => { }, default, StorageFailureClassifier.IsStateDamage);
         using (var retained = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
         { DataSource = Path.Combine(product, "v2", "state.db"), Pooling = false }.ToString()))
         {
@@ -453,12 +453,12 @@ internal static partial class LocalJournalChecks
             "retained transient proof stays protected and ineligible until its retry deadline");
         var deferredProbes = io.Probes;
         for (var run = 0; run < 2; run++)
-            LocalGapWorker.Promote(gaps, store, io, root, gaps.GapResultWatermark(root.RootId), new(1, 0, 200, 0), _ => true, _ => { }, default);
+            LocalGapWorker.Promote(gaps, store, io, root, gaps.GapResultWatermark(root.RootId), new(1, 0, 200, 0), _ => true, _ => { }, default, StorageFailureClassifier.IsStateDamage);
         LocalChecks.Require(io.Probes == deferredProbes,
             "repeated passes before the shared retry deadline do not retry a deferred proof");
         io.UsnOverride = 101;
         store.RequestIndexRetry(root.RootId);
-        LocalGapWorker.Promote(gaps, store, io, root, gaps.GapResultWatermark(root.RootId), new(1, 0, 200, 0), _ => true, _ => { }, default);
+        LocalGapWorker.Promote(gaps, store, io, root, gaps.GapResultWatermark(root.RootId), new(1, 0, 200, 0), _ => true, _ => { }, default, StorageFailureClassifier.IsStateDamage);
         LocalChecks.Require(gaps.GapHashPage(root.RootId, epoch, 128).Count == 0, "rejected proof does not immediately enter background rehash in the same pass");
         gaps.RetryGapFailures(root.RootId);
         LocalChecks.Require(gaps.GapHashPage(root.RootId, epoch, 128).Count == 1, "rejected proof becomes eligible on the next run");

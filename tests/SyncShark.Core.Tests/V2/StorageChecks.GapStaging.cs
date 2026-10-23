@@ -34,7 +34,7 @@ internal static partial class StorageChecks
             StoreSchema.Execute(fault, null,
                 "CREATE TRIGGER fail_metadata_promotion BEFORE DELETE ON local_gap_item " +
                 "WHEN OLD.object_id='object-0002' BEGIN SELECT RAISE(ABORT,'synthetic promotion failure'); END;");
-            LocalGapWorker.PromoteDiscovery(gaps, new(root, SyncProviders.Local, null, product, "root-object"), default);
+            LocalGapWorker.PromoteDiscovery(gaps, new(root, SyncProviders.Local, null, product, "root-object"), default, StorageFailureClassifier.IsStateDamage);
             Require(gaps.GapProgress(root).Contains("metadata promotion deferred", StringComparison.Ordinal) &&
                 (long?)StoreSchema.Scalar(fault, null, "SELECT COUNT(*) FROM local_gap_item;") == 600,
                 "unknown promotion failure rolls back all discharges and reports retry rather than aborting run");
@@ -140,7 +140,7 @@ internal static partial class StorageChecks
         StoreSchema.Execute(db, null,
             "CREATE TRIGGER fail_second_promotion_page BEFORE DELETE ON local_gap_item " +
             "WHEN OLD.object_id='object-0066' BEGIN SELECT RAISE(ABORT,'synthetic second page failure'); END;");
-        LocalGapWorker.PromoteDiscovery(gaps, new(root, SyncProviders.Local, null, product, "root-object"), default);
+        LocalGapWorker.PromoteDiscovery(gaps, new(root, SyncProviders.Local, null, product, "root-object"), default, StorageFailureClassifier.IsStateDamage);
         Require((long?)StoreSchema.Scalar(db, null, "SELECT COUNT(*) FROM local_gap_item;") == 536 &&
             (string?)StoreSchema.Scalar(db, null, "SELECT after_object FROM local_gap;") == "" &&
             (long?)StoreSchema.Scalar(db, null, "SELECT discovery_done FROM local_gap;") == 0,

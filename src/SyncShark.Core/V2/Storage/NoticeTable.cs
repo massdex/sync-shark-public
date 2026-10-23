@@ -321,8 +321,8 @@ internal sealed partial class NoticeTable
             ("$detail", NoticeDetailCodec.Encode(notice)), ("$id", original.NoticeId), ("$p", pairNo));
     }
 
-    public void CloseFamily(long pairNo, string prefix, string? exceptReason) =>
-        CloseWhere(null, "resolved",
+    public void CloseFamily(long pairNo, string prefix, string? exceptReason, SqliteTransaction? transaction = null) =>
+        CloseWhere(transaction, "resolved",
             "pair_no=$pair " +
             "AND reason_key >= $prefix AND reason_key < $end " +
             "AND ($except IS NULL OR reason_key <> $except) AND (" + ActionableSql("state") + " OR " + IgnoredSql("choice") + ");",

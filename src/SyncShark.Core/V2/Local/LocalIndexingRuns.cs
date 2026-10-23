@@ -145,9 +145,9 @@ internal sealed class LocalIndexingRuns : IAsyncDisposable
                 {
                     try { await PassAsync(root, continuous, ct).ConfigureAwait(false); }
                     catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-                    catch (Exception error)
+                    catch (Exception error) when (!_gaps.IsStateDamage(error))
                     {
-                        _store.RecordIndexFailure(root.RootId, error.Message);
+                        _gaps.RecordFailure(root, error);
                         RunOutput.Observe(error);
                     }
                 }
@@ -158,19 +158,30 @@ internal sealed class LocalIndexingRuns : IAsyncDisposable
                     return "complete";
                 }
                 if (!continuous) return "pending";
-                using var wait = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                if (_store.NextIndexRetry(root.RootId) is { } due)
-                {
-                    var delay = due - DateTimeOffset.UtcNow;
-                    if (delay <= TimeSpan.Zero) continue;
-                    wait.CancelAfter(delay);
-                }
-                try { await _store.WaitForIndexingWorkAsync(version, wait.Token).ConfigureAwait(false); }
-                catch (OperationCanceledException) when (!ct.IsCancellationRequested && wait.IsCancellationRequested) { }
+                await WaitForWorkAsync(root, version, ct).ConfigureAwait(false);
             } while (true);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { return "stopped"; }
+        catch (Exception error) when (!_gaps.IsStateDamage(error))
+        {
+            _gaps.RecordFailure(root, error);
+            RunOutput.Observe(error);
+            return "pending";
+        }
         finally { await _gaps.StopAsync(root.RootId).ConfigureAwait(false); }
+    }
+
+    private async Task WaitForWorkAsync(RootDef root, long version, CancellationToken ct)
+    {
+        using var wait = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        if (_store.NextIndexRetry(root.RootId) is { } due)
+        {
+            var delay = due - DateTimeOffset.UtcNow;
+            if (delay <= TimeSpan.Zero) return;
+            wait.CancelAfter(delay);
+        }
+        try { await _store.WaitForIndexingWorkAsync(version, wait.Token).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested && wait.IsCancellationRequested) { }
     }
 
     private async Task PassAsync(RootDef root, bool continuous, CancellationToken ct)
@@ -182,9 +193,9 @@ internal sealed class LocalIndexingRuns : IAsyncDisposable
             else if (gaps.GapEpoch(root.RootId) is { } epoch)
                 await Task.WhenAll(Task.Run(() => _gaps.Discover(root, epoch, ct), ct),
                     _gaps.HashPage(root, epoch, ct)).ConfigureAwait(false);
-            LocalGapWorker.PromoteDiscovery(gaps, root, ct);
+            LocalGapWorker.PromoteDiscovery(gaps, root, ct, _gaps.IsStateDamage);
             LocalGapWorker.Promote(gaps, _store, _io, root, gaps.GapResultWatermark(root.RootId),
-                _checkpoint(root), _ => true, _ => { }, ct);
+                _checkpoint(root), _ => true, _ => { }, ct, _gaps.IsStateDamage);
         }
         await _inventory(root, ct).ConfigureAwait(false);
         // Selection is bounded by entities; the existing planning owner pages aliases later.

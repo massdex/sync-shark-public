@@ -22,7 +22,8 @@ CLI. --update-baseline is atomic and refuses ALL additions or increases. Source
 is processed one file at a time; a temporary SQLite index orders the comparison.
 Members use project/namespace/type/signature, never file paths or line numbers.
 Class sizes pair descending per-type declaration sizes; new/larger slots fail.
-File categories follow one-to-one Git renames from 832e0009 (history required).
+File categories follow one-to-one type/content matches from the committed file
+identity manifest. No Git executable or history is needed at runtime.
 Baseline paths remain provenance only for members; remove-only updates retain
 original spelling so rename lineage survives subsequent runs. '~' splits identifiers to
 respect the repository privacy guard without storing literal text or hash IDs.
@@ -38,13 +39,15 @@ import re
 import sys
 import tempfile
 import sqlite3
-import subprocess
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('spec_cslex', HERE / 'spec_cslex.py')
 lex = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(lex)
+identity_spec = importlib.util.spec_from_file_location("spec_file_identity", HERE / "spec_file_identity.py")
+identity = importlib.util.module_from_spec(identity_spec)
+identity_spec.loader.exec_module(identity)
 METHOD_LIMIT = 40
 SIZE_LIMIT = 300
 TYPE = re.compile(r'\b(class|struct|interface|enum|record(?:\s+(?:class|struct))?)\s+(@?[A-Za-z_]\w*)')
@@ -291,30 +294,12 @@ def write_row(stream, row):
     stream.write(json.dumps({'key': row[0], 'value': row[1]}, ensure_ascii=True) + '\n')
 
 
-BASE_REVISION = '832e0009'
 COUNTED = ('user-strings', 'magic-tunables', 'data-outside-storage')
 COUNTED_SQL = '(' + ','.join("'" + category + "'" for category in COUNTED) + ')'
 
 
-def rename_paths(root):
-    """Only Git's one-to-one rename pairs may carry a file allowance forward."""
-    probe = subprocess.run(['git', '-C', str(root), 'rev-parse', '--is-inside-work-tree'],
-                           capture_output=True, text=True)
-    if probe.returncode:
-        return {}
-    result = subprocess.run(['git', '-C', str(root), 'diff', '--name-status', '-z',
-                             '--find-renames=50%', BASE_REVISION, '--', 'src'],
-                            capture_output=True, check=True)
-    fields = iter(result.stdout.decode('utf-8').split('\0'))
-    renamed = {}
-    for status in fields:
-        if not status:
-            break
-        path = next(fields)
-        if status.startswith('R'):
-            destination = next(fields)
-            renamed[safe_key(destination)] = safe_key(path)
-    return renamed
+def identity_manifest(baseline):
+    return baseline.with_name(baseline.stem + '-files.jsonl')
 
 
 def canonical_rows(rows, connection, table, renames=None):
@@ -356,7 +341,8 @@ def canonical_rows(rows, connection, table, renames=None):
 def compare(root, baseline, update=False):
     with tempfile.TemporaryDirectory(prefix='spec-ratchet-index-') as directory:
         with closing(sqlite3.connect(str(Path(directory) / 'index.sqlite'))) as connection:
-            renames = rename_paths(root)
+            renames = identity.match_paths(root, identity_manifest(baseline), connection,
+                                           lex, type_declarations, safe_key)
             current = iter(canonical_rows(scan(root), connection, 'current_rows', renames))
             old = iter(canonical_rows(baseline_rows(baseline), connection, 'old_rows'))
             return compare_rows(current, old, baseline, update, connection)
@@ -441,8 +427,7 @@ def main():
     args = parser.parse_args()
     try:
         return compare(args.root.resolve(), args.baseline.resolve(), args.update_baseline)
-    except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError,
-            subprocess.SubprocessError) as error:
+    except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError, sqlite3.Error) as error:
         print('ERROR:', error, file=sys.stderr)
         return 2
 

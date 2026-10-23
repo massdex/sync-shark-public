@@ -70,7 +70,7 @@ internal static partial class LocalJournalChecks
             var horizon = gaps.GapResultWatermark(cloudRoot.RootId);
             LocalChecks.Require(gaps.GapResults(cloudRoot.RootId, horizon, 10).Single().Proof.File.RequiresHash,
                 "hydrated proof requirement survives durable hash staging");
-            LocalGapWorker.Promote(gaps, cloudStore, io, cloudRoot, horizon, new(1, 0, 200, 0), _ => true, _ => { }, default);
+            LocalGapWorker.Promote(gaps, cloudStore, io, cloudRoot, horizon, new(1, 0, 200, 0), _ => true, _ => { }, default, StorageFailureClassifier.IsStateDamage);
             LocalChecks.Require(cloudStore.Live(cloudRoot.RootId).Single().Hash == new string('b', 64) &&
                 !gaps.HasGapProtection(cloudRoot.RootId), "validated hash proof can discharge hydrated cloud debt");
         }

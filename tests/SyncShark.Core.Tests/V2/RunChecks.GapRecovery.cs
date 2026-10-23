@@ -151,7 +151,7 @@ internal static partial class RunChecks
         {
             gaps.GapDiscovered(root.RootId, epoch, original, false);
             gaps.GapDiscoveryDone(root.RootId, epoch);
-            LocalGapWorker.PromoteDiscovery(gaps, root, default);
+            LocalGapWorker.PromoteDiscovery(gaps, root, default, StorageFailureClassifier.IsStateDamage);
         }
         // Discard only this fixture's resumable walk to model a crash before a page checkpoint.
         store.ForgetLocalWalk(root.RootId);

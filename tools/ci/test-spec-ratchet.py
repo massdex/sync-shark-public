@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import sys
-import subprocess
+from unittest import mock
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
@@ -31,6 +31,8 @@ class RatchetChecks(unittest.TestCase):
         with self.baseline.open('w', encoding='utf-8', newline='\n') as stream:
             for row in ratchet.scan(self.root):
                 ratchet.write_row(stream, row)
+
+        self.seed_identity()
 
     def put(self, members):
         self.source.write_text('namespace Example;\npublic class Example\n{\n' + members + '}\n', encoding='utf-8')
@@ -123,29 +125,21 @@ class RatchetChecks(unittest.TestCase):
         keys = [row[0] for row in ratchet.scan(self.root)]
         self.assertFalse(any('.in' in key[2] or '.is' in key[2] for key in keys))
 
-    def git_baseline(self):
-        def git(*args):
-            return subprocess.check_output(['git', '-C', str(self.root), *args], text=True).strip()
-        git('init', '-q')
-        git('add', 'src')
-        git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
-            'commit', '-q', '-m', 'Fixture')
-        old = ratchet.BASE_REVISION
-        ratchet.BASE_REVISION = git('rev-parse', 'HEAD')
-        self.addCleanup(setattr, ratchet, 'BASE_REVISION', old)
-        return git
+    def seed_identity(self):
+        ratchet.identity.write_manifest(self.root, ratchet.identity_manifest(self.baseline),
+                                        ratchet.lex, ratchet.type_declarations, ratchet.safe_key)
 
     def test_pure_rename_passes(self):
-        git = self.git_baseline()
-        git('mv', 'src/Example.cs', 'src/Example.Moved.cs')
+        self.seed_identity()
+        self.source.rename(self.root / 'src' / 'Example.Moved.cs')
         self.assertEqual(0, self.check()[0])
         before = self.baseline.read_bytes()
         self.assertEqual(0, self.check(update=True)[0])
         self.assertEqual(before, self.baseline.read_bytes())
 
     def test_rename_with_growth_fails(self):
-        git = self.git_baseline()
-        git('mv', 'src/Example.cs', 'src/Example.Moved.cs')
+        self.seed_identity()
+        self.source.rename(self.root / 'src' / 'Example.Moved.cs')
         self.source = self.root / 'src' / 'Example.Moved.cs'
         self.put(long_method(extra=1))
         self.assertEqual(1, self.check()[0])
@@ -161,8 +155,8 @@ class RatchetChecks(unittest.TestCase):
         with self.baseline.open('w', encoding='utf-8', newline='\n') as stream:
             for row in ratchet.scan(self.root):
                 ratchet.write_row(stream, row)
-        git = self.git_baseline()
-        git('mv', 'src/Example.cs', 'src/Example.Moved.cs')
+        self.seed_identity()
+        self.source.rename(self.root / 'src' / 'Example.Moved.cs')
         self.assertEqual(0, self.check()[0])
         self.source = self.root / 'src' / 'Example.Moved.cs'
         self.put('void Text() { Console.WriteLine("Please retry this operation."); '
@@ -170,6 +164,7 @@ class RatchetChecks(unittest.TestCase):
         self.assertEqual(1, self.check()[0])
 
     def seed_current(self):
+        self.seed_identity()
         with self.baseline.open('w', encoding='utf-8', newline='\n') as stream:
             for row in ratchet.scan(self.root):
                 ratchet.write_row(stream, row)
@@ -207,6 +202,22 @@ class RatchetChecks(unittest.TestCase):
         self.assertNotIn('user-strings', self.baseline.read_text())
         for key, value in ratchet.baseline_rows(self.baseline):
             self.assertLessEqual(value, before[key])
+
+    def test_snapshot_without_git_or_history(self):
+        self.assertFalse((self.root / '.git').exists())
+        self.source.rename(self.root / 'src' / 'Example.Snapshot.cs')
+        with mock.patch('subprocess.run', side_effect=AssertionError('Git must not run')):
+            self.assertEqual(0, self.check()[0])
+
+    def test_identity_ties_do_not_transfer_file_ceiling(self):
+        # Two equally plausible oversized destinations cannot share one allowance.
+        self.put('    int Value;\n' * 310)
+        self.seed_current()
+        source = self.source.read_text()
+        self.source.unlink()
+        for name in ('Example.One.cs', 'Example.Two.cs'):
+            (self.root / 'src' / name).write_text(source, encoding='utf-8')
+        self.assertEqual(1, self.check()[0])
 
     def test_long_names_are_privacy_safe_and_reversible(self):
         name = 'Long' * 15

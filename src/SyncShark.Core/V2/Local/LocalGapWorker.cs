@@ -3,7 +3,7 @@ using System.Collections.Concurrent;
 namespace Massdex.SyncShark.V2;
 
 /// <summary>Composition-owned, root-deduplicated background work. Never joined by planning.</summary>
-internal sealed class LocalGapWorker(ILocalGapStore store, ILocalGapIo io, Func<Exception, bool> isStateDamage) : IAsyncDisposable
+internal sealed partial class LocalGapWorker(ILocalGapStore store, ILocalGapIo io, Func<Exception, bool> isStateDamage) : IAsyncDisposable
 {
     private readonly Func<Exception, bool> _isStateDamage = isStateDamage ?? throw new ArgumentNullException(nameof(isStateDamage));
     private readonly object _gate = new();
@@ -81,14 +81,14 @@ internal sealed class LocalGapWorker(ILocalGapStore store, ILocalGapIo io, Func<
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
-        catch (Exception error) when (!_isStateDamage(error))
+        catch (Exception error) when (!IsStateDamage(error))
         {
-            if (store is IStateStore sql) sql.RecordIndexFailure(root.RootId, error.Message);
-            RunTrace.Emit($"local gap worker failed ({root.RootId}): {error}");
-            try { store.SetGapStatus(root.RootId, discovery, $"worker failed: {error.Message}; retry on next sync"); }
-            catch (Exception noticeError) { RunTrace.Emit($"local gap failure status unavailable: {noticeError.Message}"); }
-            // Stop the sibling lane too, so Start can restart this root on the next run.
+            ReportFailure(root, discovery, stop, error);
+        }
+        catch (Exception error) when (IsStateDamage(error))
+        {
             stop.Cancel();
+            throw;
         }
     }
 
@@ -141,7 +141,7 @@ internal sealed class LocalGapWorker(ILocalGapStore store, ILocalGapIo io, Func<
                 Record(item, reason);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
-            catch (Exception error)
+            catch (Exception error) when (!IsStateDamage(error))
             {
                 discovered.Add((item, true));
                 failures.Add((item, error.Message));
@@ -230,7 +230,7 @@ internal sealed class LocalGapWorker(ILocalGapStore store, ILocalGapIo io, Func<
                 RunTrace.Emit($"local gap file interrupted; next attempt restarts from byte zero: {item.Path}");
                 throw;
             }
-            catch (Exception error)
+            catch (Exception error) when (!IsStateDamage(error))
             {
                 store.FailGapItem(root.RootId, epoch, item, error.Message);
                 store.SetGapStatus(root.RootId, false, $"cannot verify {item.Path}: {error.Message}; retry pending");
@@ -252,75 +252,6 @@ internal sealed class LocalGapWorker(ILocalGapStore store, ILocalGapIo io, Func<
     private static bool ProofFollows(string current, string previous) =>
         NtfsUsnCheckpoint.TryParseCursor(current, out var id, out var next) &&
         NtfsUsnCheckpoint.TryParseCursor(previous, out var oldId, out var oldNext) && id == oldId && next >= oldNext;
-
-    internal static void PromoteDiscovery(ILocalGapStore store, RootDef root, CancellationToken ct)
-    {
-        ct.ThrowIfCancellationRequested();
-        try { store.PromoteGapDiscovery(root.RootId); }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-        catch (Exception error)
-        {
-            store.SetGapStatus(root.RootId, true, $"metadata promotion deferred: {error.Message}; retry next sync");
-            RunTrace.Emit($"local gap metadata promotion deferred: {root.RootId}: {error}");
-            return;
-        }
-    }
-
-    internal static void Promote(ILocalGapStore store, IStateStore known, ILocalGapIo io, RootDef root,
-        long through, NtfsUsnCheckpoint? runStart, Func<string, bool> include, Action<string> touched, CancellationToken ct)
-    {
-        // At most four pages (512 probes) per planning pass; remaining work waits for the next pass.
-        // Selection belongs only to planning touches, never entity verification.
-        if (runStart is null) return;
-        long after = 0;
-        for (var pageNumber = 0; pageNumber < 4; pageNumber++)
-        {
-            ct.ThrowIfCancellationRequested();
-            var results = store.GapResults(root.RootId, through, 128, after);
-            if (results.Count == 0) return;
-            using var probes = io.OpenProbes(root);
-            foreach (var result in results)
-            {
-                ct.ThrowIfCancellationRequested();
-                after = result.Sequence;
-                try
-                {
-                    var currentItem = known.ByObject(root.RootId, result.Expected.ObjectId);
-                    if (currentItem is null || MetadataOnly(currentItem) || io.Excluded(root, currentItem))
-                    {
-                        if (store.GapEpoch(root.RootId) is { } epoch)
-                            store.RetireGapItem(root.RootId, epoch, currentItem ?? result.Expected);
-                        continue;
-                    }
-                    if (!ProofFollows(runStart.Cursor, result.Proof.JournalCursor))
-                    {
-                        store.RejectGapResult(root.RootId, result);
-                        continue;
-                    }
-                    var current = probes.Probe(currentItem);
-                    if (current is null)
-                    {
-                        store.DeferGapResult(root.RootId, result, probes.UnavailableReason ?? "file identity proof temporarily unavailable");
-                        continue;
-                    }
-                    if (!ProofFollows(current.JournalCursor, runStart.Cursor) ||
-                        current.File != result.Proof.File || !store.AcceptGapResult(root.RootId, result))
-                    {
-                        store.RejectGapResult(root.RootId, result);
-                        continue;
-                    }
-                    // AcceptGapResult retained the entity's durable publication obligation.
-                    // The indexer's bounded planning handoff owns alias expansion; no direct touches here.
-                }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-                catch (Exception error)
-                {
-                    store.DeferGapResult(root.RootId, result, error.Message);
-                    RunTrace.Emit($"local gap result validation deferred: {result.Expected.Path}: {error}");
-                }
-            }
-        }
-    }
 
     public async ValueTask DisposeAsync()
     {

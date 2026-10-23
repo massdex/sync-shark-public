@@ -4,6 +4,8 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SqliteStateStore
 {
+    internal Action? IndexFailureTransitionForTest { get; set; }
+
     internal const string IndexFailurePrefix = NoticeVocabulary.IndexFailurePrefix;
 
     // The one notice cause for a root: a root-level pass failure, one item's metadata/hash failure,
@@ -64,20 +66,26 @@ public sealed partial class SqliteStateStore
     private void SaveGapFailure(string rootId, long root, string epoch, string objectId, string reason,
         string cause = ItemCause) => InIndexingStore(() =>
     {
-        var count = StoreSchema.Scalar(_connection, null,
+        var owner = IndexNoticeOwner(rootId);
+        using var tx = _connection.BeginTransaction();
+        SaveGapFailure(tx, rootId, root, epoch, objectId, reason, cause, owner);
+        tx.Commit();
+    });
+
+    private void SaveGapFailure(SqliteTransaction tx, string rootId, long root, string epoch,
+        string objectId, string reason, string cause, (string PairId, long PairNo)? owner)
+    {
+        var count = StoreSchema.Scalar(_connection, tx,
             "SELECT failure_count FROM local_gap_item WHERE root_no=$r AND object_id=$o AND epoch=$e;",
             ("$r", root), ("$o", objectId), ("$e", epoch));
         if (count is null) return;
         var retry = FailureRetryOwner.Failed(Convert.ToInt32(count), _clock.GetUtcNow());
-        var owner = IndexNoticeOwner(rootId);
-        using var tx = _connection.BeginTransaction();
         StoreSchema.Execute(_connection, tx,
             "UPDATE local_gap_item SET failure_count=$n,failure_reason=$why,retry_after=$due,retry_allowed=1 WHERE root_no=$r AND object_id=$o AND epoch=$e;",
             ("$r", root), ("$o", objectId), ("$e", epoch), ("$n", retry.Attempts),
             ("$why", reason), ("$due", retry.RetryAfter.ToUnixTimeMilliseconds()));
         if (owner is { } noticeOwner) PublishIndexFailure(tx, noticeOwner, rootId, cause, reason, retry);
-        tx.Commit();
-    });
+    }
 
     /// <summary>Records one background rehash failure against its exact attempt revision; a stale attempt is refused.</summary>
     public bool FailIndexingRehash(string rootId, ItemState item, long revision, string reason) => InIndexingStore(() =>
@@ -127,13 +135,18 @@ public sealed partial class SqliteStateStore
         if (StoreSchema.Scalar(_connection, null,
             "SELECT 1 FROM root WHERE root_no=$r AND (index_failure_count!=0 OR index_failure_reason IS NOT NULL OR index_retry_after!=0);",
             ("$r", root.Value)) is null) return;
+        var pairs = Pairs().Where(pair => pair.A.RootId == rootId || pair.B.RootId == rootId)
+            .Select(pair => RequirePair(pair.PairId)).ToArray();
+        using var tx = _connection.BeginTransaction();
         // Clear only what still exists; repeated completion of a restored root must change nothing.
-        StoreSchema.Execute(_connection, null,
+        StoreSchema.Execute(_connection, tx,
             "UPDATE root SET index_failure_count=0,index_retry_after=0,index_failure_reason=NULL WHERE root_no=$r " +
             "AND (index_failure_count!=0 OR index_failure_reason IS NOT NULL OR index_retry_after!=0);", ("$r", root.Value));
+        IndexFailureTransitionForTest?.Invoke();
         // One physical notice exists at the lowest pair; closing its family also resolves every projection.
-        foreach (var pair in Pairs().Where(pair => pair.A.RootId == rootId || pair.B.RootId == rootId))
-            _notices.CloseFamily(RequirePair(pair.PairId), IndexFailurePrefix + rootId, null);
+        foreach (var pair in pairs)
+            _notices.CloseFamily(pair, IndexFailurePrefix + rootId, null, tx);
+        tx.Commit();
     });
 
     /// <summary>The lowest-numbered pair that owns the root's one physical notice; projections derive from it.</summary>

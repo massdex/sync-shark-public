@@ -30,6 +30,7 @@ public sealed record V2Settings(
 
     /// <summary>Maximum identities examined per rehash gate lease, including ineligible identities.</summary>
     public int StoreRehashPageRows { get; init; } = 128;
+    internal const int MinimumStoreRehashPageRows = 1;
 
     /// <summary>Shared background gap-verification byte budget; never used for foreground transfers.</summary>
     public long LocalGapBytesPerSecond { get; init; } = 30_000_000;

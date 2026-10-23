@@ -11,7 +11,7 @@ public sealed partial class SqliteStateStore
         var now = NowMs();
         while (result.Count < limit)
         {
-            var pageSize = Math.Min(Math.Max(1, _settings.StoreRehashPageRows), limit - result.Count);
+            var pageSize = Math.Min(Math.Max(V2Settings.MinimumStoreRehashPageRows, _settings.StoreRehashPageRows), limit - result.Count);
             var page = InStore(() => ReadRehashCandidatePage(rootId, through, needsVerification, now, after, pageSize));
             if (page.Rows.Count == 0) break;
             result.AddRange(page.Items);

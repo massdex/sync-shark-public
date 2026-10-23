@@ -160,6 +160,17 @@ internal static partial class LocalJournalChecks
 
         LocalChecks.Require(store.CompleteRehash(local.RootId, item, new string('b', 64)),
             "accepted verification publishes the recovered content");
+        var beforeCompletion = RootState();
+        store.IndexFailureTransitionForTest = () => throw new IOException("completion interruption");
+        try
+        {
+            store.CompleteIndexFailure(local.RootId);
+            throw new InvalidOperationException("completion interruption was not injected");
+        }
+        catch (IOException) { }
+        finally { store.IndexFailureTransitionForTest = null; }
+        LocalChecks.Require(RootState() == beforeCompletion && NoticeRow().State == "open",
+            "interruption between root clear and notice closure rolls back both changes");
         store.CompleteIndexFailure(local.RootId);
         var cleared = RootState();
         LocalChecks.Require(cleared.Count == 0 && cleared.Due == 0 && GapState() == (0L, 0L) &&
@@ -167,10 +178,61 @@ internal static partial class LocalJournalChecks
             store.OpenNotices(pairA.PairId).All(notice => notice.ReasonKey != reasonKey) &&
             ((IStateStore)store).UnresolvedNotices(pairB.PairId).All(notice => notice.ReasonKey != reasonKey),
             "only accepted success clears the root evidence and closes the notice");
+        IndexFailureAtomicDeferralChecks(Path.Combine(folder, "atomic-deferral"));
         IndexFailureClassSuppressionChecks(Path.Combine(folder, "class-suppression"));
         IndexFailureSchemaUpgradeChecks(Path.Combine(folder, "schema-upgrade"));
+        await GapDamageChecksAsync(Path.Combine(folder, "damage-filters"));
         await GapUnchangedRequiresContentProofChecksAsync(Path.Combine(folder, "gap-proof"));
         Console.WriteLine("PASS root indexing failure notice: one physical row, projection, Ignore episode, cause reopen, Retry deadline");
+    }
+
+    private static void IndexFailureAtomicDeferralChecks(string folder)
+    {
+        var root = new RootDef("atomic-root", SyncProviders.Local, null, "/local", "id:root");
+        var remote = new RootDef("atomic-remote", SyncProviders.Dropbox, "account", "/remote", "id:remote");
+        var pair = new PairDef("atomic-pair", "Pair A", root, remote, [], [], true);
+        var item = new ItemState("file.txt", ItemKind.File, SyncLocalEndpointStore.ObjectId(1, 20), null,
+            new string('a', 64), 3, DateTimeOffset.UtcNow, ItemFlags.None);
+        var cursor = new NtfsUsnCheckpoint(1, 0, 200, 0).Cursor;
+        LocalGapResult staged;
+        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
+        {
+            store.SavePair(pair);
+            var generation = store.BeginGeneration(root.RootId, "full");
+            store.WriteSnapshot(new Snapshot(root.RootId, Side.A, generation, cursor, [item], []));
+            store.CompleteGeneration(generation, cursor, true);
+            var gaps = (ILocalGapStore)store;
+            gaps.BeginGap(root.RootId, cursor, 100, true);
+            var epoch = gaps.GapEpoch(root.RootId)!;
+            gaps.GapDiscovered(root.RootId, epoch, item, true);
+            gaps.StageGapHash(root.RootId, epoch, item, new string('b', 64),
+                new LocalGapProof(cursor, new NtfsFileUsn(1, 20, 100, item.Size, item.Mtime.UtcDateTime.ToFileTimeUtc())));
+            var watermark = gaps.GapResultWatermark(root.RootId);
+            staged = gaps.GapResults(root.RootId, watermark, 1).Single();
+            store.IndexFailureTransitionForTest = () => throw new IOException("deferral interruption");
+            try
+            {
+                gaps.DeferGapResult(root.RootId, staged, "proof unavailable");
+                throw new InvalidOperationException("deferral interruption was not injected");
+            }
+            catch (IOException) { }
+            finally { store.IndexFailureTransitionForTest = null; }
+            LocalChecks.Require(gaps.GapResultWatermark(root.RootId) == watermark &&
+                gaps.GapResults(root.RootId, watermark, 1).Single().Sequence == staged.Sequence &&
+                store.NextIndexRetry(root.RootId) is null && store.OpenNotices(pair.PairId).Count == 0,
+                "interrupted deferral rolls back sequence, deadline and notice together");
+        }
+        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
+        {
+            var gaps = (ILocalGapStore)store;
+            LocalChecks.Require(gaps.GapResults(root.RootId, staged.Sequence, 1).Single().Sequence == staged.Sequence,
+                "reopened store retains the original proof after interrupted deferral");
+            gaps.DeferGapResult(root.RootId, staged, "proof unavailable");
+            var notices = store.OpenNotices(pair.PairId);
+            LocalChecks.Require(gaps.HasGapProtection(root.RootId) && store.NextIndexRetry(root.RootId) > DateTimeOffset.UtcNow &&
+                notices.Count == 1 && notices[0].FailureRetry?.Attempts == 1,
+                "successful deferral commits one retry and notice while retaining protection");
+        }
     }
 
     // Owner decision: a summary episode is root + failure class, not the latest failed item.
