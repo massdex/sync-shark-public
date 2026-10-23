@@ -532,14 +532,21 @@ internal static partial class RunChecks
             {
                 db.Open();
                 using var cmd = db.CreateCommand();
+                // E9, docs/design/notices-and-decision-log.md:18-23,30: retention starts
+                // at terminal closure, not creation; ignored unresolved rows must not acquire it.
                 cmd.CommandText = (interrupted ? "DELETE FROM defender_grant; " : "DROP TABLE defender_grant; DROP TABLE defender_deferral; ") +
-                    "DELETE FROM quarantine_upgrade; UPDATE notice SET created=0; PRAGMA user_version=" + prior + ";";
+                    "DELETE FROM quarantine_upgrade; UPDATE notice SET created=0; " +
+                    "UPDATE notice SET closed_at=0 WHERE state='closed'; PRAGMA user_version=" + prior + ";";
                 cmd.ExecuteNonQuery(); // synthetic isolated prior-version fixture, never a live rollback
             }
             using (var store = SqliteStateStore.Open(data, Settings, TimeProvider.System))
             {
                 var action = new SyncAction("new-folder", 30, ActionKind.MkDir, Side.A, "legacy", null, null, null, false, null);
                 Require(store.DefenderGrantConflict("p1", action) is not null, "schema " + prior + " to12 preserves legacy granted path before notice pruning");
+                Require(store.NoticeById("p1", legacyId) is { Closed: true } &&
+                    store.NoticeById("p1", ignoredId) is { Closed: false } &&
+                    store.UnresolvedNotices("p1").Any(n => n.NoticeId == ignoredId),
+                    "migration retains terminal history and unresolved ignored authority before age pruning");
                 store.Prune();
                 Require(store.DefenderGrantConflict("p1", action) is not null &&
                     store.QuarantineRecoveryRetained("p1", ignoredId),

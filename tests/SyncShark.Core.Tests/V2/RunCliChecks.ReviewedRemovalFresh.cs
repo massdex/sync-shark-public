@@ -30,6 +30,9 @@ internal static partial class RunCliChecks
                     null, null, folder, false, null)
                 {
                     FirstSyncChoice = true, ChoiceRemove = true,
+                    // Consent-time freeze: persist the disclosed ceiling with the full proof,
+                    // as production BindCarriedIgnoredBudgets/FreezeFolderDeletes do.
+                    CarriedIgnoredBudget = carried ? new(1, 0, child.Size) : new(0, 0, 0),
                     FrozenVictimSignature = FolderDelete.Signature(carried ? [] : [child])
                 };
                 if (change != "legacy")

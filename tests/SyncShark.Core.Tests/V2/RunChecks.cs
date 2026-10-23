@@ -758,8 +758,11 @@ internal static partial class RunChecks
         fx.A.Seed("changed.txt", "different bytes");
         var report = await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), CancellationToken.None);
         Console.WriteLine($"CHANGED SOURCE MEASUREMENT outcome={report.Outcome}; skipped={report.Skipped}; deferred={report.Deferred}; done={report.Done}; failed={report.Failed}; firstSyncDone={fx.Store.FirstSyncDone(fx.Pair.PairId)}");
-        Require(report.Skipped == 1 && report.Deferred == 0 && report.Done == 0 && report.Failed == 0,
-            "a changed source is counted as skipped, but no longer blocks first-sync completion");
+        // Decision 85(b/c), docs/design/run.md "Terminal boundary decisions": completion retires
+        // first-sync authorization, not unfinished work. CI measured skipped=1/deferred=1 with the
+        // marker set; Deferred is retained work, not a disjoint terminal-result bucket.
+        Require(report.Skipped == 1 && report.Deferred == 1 && report.Done == 0 && report.Failed == 0,
+            "a changed source remains skipped and deferred without blocking first-sync completion");
         Require(report.Outcome == RunOutcomes.Partial && fx.Store.FirstSyncDone(fx.Pair.PairId) &&
             fx.Store.OpenNotices(fx.Pair.PairId).All(notice => notice.ReasonKey != "sync-retry"),
             "decision 85: changed preconditions hand off to ordinary sync without a problem notice");
@@ -767,9 +770,13 @@ internal static partial class RunChecks
             diagnostics.SkipReasons.Values.Sum() == 1 &&
             diagnostics.SkipReasons.Keys.Single().Contains("changed", StringComparison.OrdinalIgnoreCase),
             "skipped effects retain their precondition reason in the separate skip histogram, not as failures");
-        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        Require(fx.Store.ReadRunHistory(fx.Pair.PairId, 1).Single() is { Outcome: RunOutcomes.Partial, Skipped: 1, Deferred: 1 },
+            "history preserves the outcome owner's unfinished changed-source accounting");
+        var next = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
         Require((await MapAsync(fx.B))["changed.txt"] == Hash("different bytes"),
             "ordinary sync transfers current content after the skipped reviewed source");
+        Require(next.Outcome == RunOutcomes.Complete && next.Done == 1 && next.Pending == 0 && next.Deferred == 0,
+            "ordinary sync settles changed-source debt rather than retaining a stale partial outcome");
         Console.WriteLine("PASS FirstSync_SkippedReasonReported");
     }
 
