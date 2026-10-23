@@ -59,8 +59,6 @@ public sealed partial class SyncRun
             .Select(item => item.Path).ToArray();
         // Establish shared classification before answering folders from indexed cursor-bound tombstones.
         var prepared = await deferred.PrepareDeletionEvidenceAsync(files, ct);
-        foreach (var (path, answer) in prepared.Resolved)
-            if (!answer.LookupFailed) CompleteEvidenceLookup(pair.PairId, path);
         var times = prepared.Resolved.Where(entry => entry.Value.DeletedUtc is not null)
             .ToDictionary(entry => entry.Key, entry => entry.Value.DeletedUtc, StringComparer.OrdinalIgnoreCase);
         scan = sides.Cloud == Side.A ? scan with { A = scan.A with { Deleted = times } }
@@ -76,6 +74,8 @@ public sealed partial class SyncRun
         var heldAncestors = pending.SelectMany(PairPath.Ancestors).ToHashSet(StringComparer.OrdinalIgnoreCase);
         // Intersect with local-only candidates so shared ancestors never enter this lane.
         pending.UnionWith(folders.Where(heldAncestors.Contains));
+        foreach (var (path, answer) in prepared.Resolved)
+            if (!answer.LookupFailed && !pending.Contains(path)) CompleteEvidenceLookup(pair.PairId, path);
         return new(scan, pending.Select(path => new HeldDeletion(path, sides.Local)).ToArray(),
             prepared.Resolved.Keys.Count(path => !pending.Contains(path)));
     }

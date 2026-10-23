@@ -4,6 +4,7 @@ internal static partial class RunChecks
 {
     private static async Task EvidenceNoticeLifecycleAsync()
     {
+        await CachedReprobeKeepsPendingNoticeAsync();
         foreach (var ignored in new[] { false, true })
         foreach (var cached in new[] { false, true })
         {
