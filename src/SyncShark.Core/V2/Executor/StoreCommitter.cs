@@ -1,4 +1,4 @@
-namespace Massdex.SyncShark.V2;
+﻿namespace Massdex.SyncShark.V2;
 
 /// <summary>
 /// Group commit for one apply (B-124): intents and results that parallel actions write while a store transaction is
@@ -184,7 +184,7 @@ internal sealed class StoreCommitter
             (actionId, path, recovery, pairId, ct) => RecordRecoveryAsync(actionId, path, recovery, ct),
             RecordProviderCheckpointsAsync), async checkpoint =>
     {
-        var updated = action with { ProviderEffect = checkpoint };
+        var updated = action with { ProviderEffect = checkpoint, ExpectedTarget = checkpoint.RetainedTarget ?? action.ExpectedTarget };
         await Enqueue(updated, null).ConfigureAwait(false);
         _providerActions[action.ActionId] = updated;
     });

@@ -316,8 +316,13 @@ internal static partial class AutoSyncChecks
             "one deduplicated watch failure notice");
         rig.Clock.Advance(Settings.AutoRetryDelay);
         await Until(() => rig.Watches.Created >= 6 && rig.Clock.ActiveTimers == 1, "watch retry uses shared backoff");
+        // Deterministic bound, not a timing tolerance: a due deadline arms the retry and the single immediate
+        // dead-watch rebuild the policy allows, then the loop parks on the next timer. No later deadline can fire.
+        Require(rig.Watches.Created is >= 6 and <= 8, "a watch retry adds only the retry pair and one bounded rebuild");
         rig.Clock.Advance(SafetyPoll);
-        await Until(() => rig.Run.Runs("p1") >= 2 && rig.Clock.ActiveTimers == 1, "periodic sync continues while watches fail");
+        await Until(() => rig.Run.Runs("p1") == 2 && rig.Clock.ActiveTimers == 1, "periodic sync continues while watches fail");
+        Require(rig.Run.Runs("p1") == 2, "the safety poll gives exactly one run while the watches fail");
+        Require(rig.Watches.Created is >= 8 and <= 10, "a safety poll creates at most one more pair, never a tight loop");
         Require(rig._store.OpenNotices("p1").Count(n => n.ReasonKey == "autosync-watch-unavailable") == 1,
             "repeated watch failure does not duplicate notice");
         Pass("DyingWatches_BoundedRebuilds");

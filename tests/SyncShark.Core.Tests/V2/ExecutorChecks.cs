@@ -59,6 +59,7 @@ internal static partial class ExecutorChecks
         await Reconcile_Move_UnrelatedDestination_Superseded();
         await Reconcile_Move_SourcePresent_NotApplied();
         await Reconcile_MissingRecoveryReceipt_Continues();
+        await Reconcile_RecoveryLookupFails_Continues();
         await FolderDelete_ExpandsPerFile();
         await FolderDelete_OwnedPointerDoesNotArchive();
         await OwnedPointerUpdates_NoDownloadAsync();
@@ -841,6 +842,33 @@ internal static partial class ExecutorChecks
         Require(results[0].Reason!.Contains("retained copy is not indexed"),
             "the uncertain outcome names the missing retained copy: " + results[0].Reason);
         Require(record.Preserves == 0, "reconciliation never repeats a destructive preserve");
+        Require(results[1].Outcome == Outcome.Done, "reconciliation continues with the next intent");
+        Require(store.UnresolvedIntents("p1").Count == 1, "only the uncertain intent stays unresolved");
+    }
+
+    // A recovery receipt read that fails must stay protective: the effect stays Uncertain (never replayed), one
+    // intent's failure never aborts the run, and every later intent still resolves.
+    private static async Task Reconcile_RecoveryLookupFails_Continues()
+    {
+        var (store, a, b, executor) = Rig();
+        var victim = b.Seed("x", "content", versionId: "v1");
+        SeedBaseline(store, "k1", a.Seed("x", "content", versionId: "v1"), victim);
+        await RemoveSourceAsync(a, "x");
+        await b.DeleteAsync(Act(ActionKind.Delete, Side.B, "x", expected: victim), CancellationToken.None);
+        var presentSource = a.Seed("present", "present-content", versionId: "v1");
+        b.Seed("present", "present-content", versionId: "v1");
+        var remove = Act(ActionKind.Delete, Side.B, "x", expected: victim, rf: true, key: "k1");
+        var copy = Act(ActionKind.CopyNew, Side.B, "present", source: presentSource, key: "k2");
+        foreach (var action in new[] { remove, copy }) store.RecordIntent("p1", action);
+        store.RecoveryForActionFault = new IOException("recovery index unavailable");
+        var record = new RecordingWriter(b);
+
+        var results = await executor.ReconcileAsync(new[] { remove, copy }, 1, a, record, CancellationToken.None);
+        Require(results[0].Outcome == Outcome.Uncertain,
+            "a failed recovery receipt lookup leaves the intent uncertain: " + results[0].Reason);
+        Require(results[0].Reason == string.Format(ExecutionReasons.RecoveryUnverified.Detail, "recovery index unavailable"),
+            "the uncertain outcome names the failed recovery lookup: " + results[0].Reason);
+        Require(record.Preserves == 0, "an unreadable receipt never repeats a destructive preserve");
         Require(results[1].Outcome == Outcome.Done, "reconciliation continues with the next intent");
         Require(store.UnresolvedIntents("p1").Count == 1, "only the uncertain intent stays unresolved");
     }

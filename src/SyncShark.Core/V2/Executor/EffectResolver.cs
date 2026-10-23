@@ -69,8 +69,8 @@ internal static partial class EffectResolver
                 return Unverified(x, "Provider recovery remains pending.");
             }
             catch (Exception error) when (Unverifiable(error, ct, isStateDamage: isStateDamage))
-            { return Unverified(x, Describe(error)) with
-                { RetryAfterSeconds = ProviderTransientFailure.VerificationRetrySeconds }; }
+            { return error is ProviderEffectBlockedException ? new(x.ActionId, Outcome.Failed, null, null, null, error.Message)
+                : Unverified(x, Describe(error)) with { RetryAfterSeconds = ProviderTransientFailure.VerificationRetrySeconds }; }
         }
         // A direct download records one narrow durable checkpoint after verifying its stage and before archiving
         // the original. Until it is finished or rolled back, the action is unresolved; the run gate keeps the path

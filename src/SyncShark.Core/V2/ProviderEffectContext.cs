@@ -1,4 +1,4 @@
-namespace Massdex.SyncShark.V2;
+﻿namespace Massdex.SyncShark.V2;
 
 /// <summary>Connects one provider operation to the Executor's durable intent without provider-owned database access.</summary>
 public sealed class ProviderEffectContext
@@ -29,11 +29,11 @@ public sealed class ProviderEffectContext
     internal ProviderEffectOwner? Owner { get; }
 
     /// <summary>Completes only after the session/job evidence is durable; an effect must not outrun this task.</summary>
-    public Task RecordAsync(string kind, string id)
+    public Task RecordAsync(string kind, string id, ItemState? retainedTarget = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(kind);
         ArgumentException.ThrowIfNullOrEmpty(id);
-        return _record(new ProviderEffectCheckpoint(kind, id, DateTimeOffset.UtcNow));
+        return _record(new ProviderEffectCheckpoint(kind, id, DateTimeOffset.UtcNow) { RetainedTarget = retainedTarget });
     }
 
     /// <summary>

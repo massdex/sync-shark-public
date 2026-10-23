@@ -987,8 +987,12 @@ internal sealed class InMemoryStateStore : IStateStore
         lock (_gate) return _recoveries.TryGetValue(pairId, out var map) ? map.Values.ToArray() : Array.Empty<RecoveryRecord>();
     }
 
+    /// <summary>When set, a RecoveryForAction lookup throws this, as an unreadable recovery index would.</summary>
+    internal Exception? RecoveryForActionFault { get; set; }
+
     public RecoveryRecord? RecoveryForAction(string pairId, string actionId)
     {
+        if (RecoveryForActionFault is { } fault) throw fault;
         lock (_gate) return _recoveries.TryGetValue(pairId, out var map) ? map.GetValueOrDefault(actionId) : null;
     }
 

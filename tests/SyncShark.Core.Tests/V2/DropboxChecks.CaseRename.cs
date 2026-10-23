@@ -74,6 +74,7 @@ internal static partial class DropboxChecks
             "Dropbox guarantees exact leaf case, not exact ancestor case");
         await CaseRenameLocalSqliteAsync();
         await CaseOutageColdReopenAsync();
+        await CaseConflictColdReopenAsync();
         foreach (var scenario in new[] { "normal", "moved", "deleted", "edited", "occupied" })
         foreach (var stopBeforeLeg in scenario == "normal" ? new[] { 0, 1, 2 } : new[] { 2 })
         {
@@ -141,8 +142,13 @@ internal static partial class DropboxChecks
             }
             if (scenario == "occupied")
             {
-                Require(reconciled.Single().Outcome == Outcome.Uncertain && store.OpenNotices(pair.PairId).Count == 0,
-                    "executor retains the intent and leaves notice ownership to the shared run failure owner");
+                Require(reconciled.Single().Outcome == Outcome.Failed && store.UnresolvedIntents(pair.PairId).Count == 1,
+                    "occupied final name keeps a known-not-applied retry after exposing the incoming identity");
+                var retained = await h.Client.FindIdentityForMoveAsync(original.ObjectId, CancellationToken.None);
+                Require(retained.Entry is not null && !LocalItems.IsArtifactPath(retained.Entry.RelativePath),
+                    "the incoming item is never left at its hidden intermediate name");
+                Require(store.OpenNotices(pair.PairId).Count == 0,
+                    "executor leaves notice ownership to the ordinary run failure owner");
                 Require((await writer.ObserveAsync("doc.txt", CancellationToken.None))!.ObjectId != original.ObjectId,
                     "recovery never overwrites the unrelated occupant");
                 continue;

@@ -16,6 +16,7 @@ internal static partial class StorageChecks
         Directory.CreateDirectory(root);
         ResultMaintenanceChecks(Path.Combine(root, "result-maintenance"));
         IntegratedSchemaChecks(root);
+        LegacyV22UpgradeChecks(root);
         IntentHorizonMigrationChecks(root);
         DeferredAliasContinuationChecks(root);
         await JournalSizingChecks.RunAsync(root);

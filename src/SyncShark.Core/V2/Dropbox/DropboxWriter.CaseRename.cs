@@ -1,4 +1,4 @@
-using System.Security.Cryptography;
+﻿using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -7,19 +7,23 @@ namespace Massdex.SyncShark.V2;
 public sealed partial class DropboxWriter
 {
     internal const string CaseRenameCheckpointKind = "case-rename";
-    private sealed record CaseRenameCheckpoint(string From, string Temporary, string To, int Step);
+    private sealed record CaseRenameCheckpoint(string From, string Temporary, string To, int Step, string? Retained = null);
 
     public bool CanResumeProviderEffect(SyncAction action) => action.ProviderEffect?.Kind == CaseRenameCheckpointKind;
 
     private async Task<bool?> ResumeCaseAsync(SyncAction action, CancellationToken ct)
     {
-        var checkpoint = JsonSerializer.Deserialize<CaseRenameCheckpoint>(action.ProviderEffect!.Id)
-            ?? throw new InvalidDataException("Invalid case rename checkpoint.");
+        var checkpoint = ReadCaseCheckpoint(action);
         try
         {
             var located = await _client.FindIdentityForMoveAsync(action.ExpectedTarget!.ObjectId, ct).ConfigureAwait(false);
             if (located.OutsideRoot || located.Entry is null) return false;
             var current = DropboxItems.ToItem(located.Entry);
+            if (checkpoint.Step == 3)
+                return await RetainCaseConflictAsync(action, checkpoint, current, ct).ConfigureAwait(false);
+            var destination = await ObserveAsync(checkpoint.To, ct).ConfigureAwait(false);
+            if (destination is not null && destination.ObjectId != current.ObjectId)
+                return await RetainCaseConflictAsync(action, checkpoint, current, ct).ConfigureAwait(false);
             if (DropboxPilotClient.SameMoveSpelling(current.Path, checkpoint.To)) return true;
             if (!DropboxPilotClient.SameMoveSpelling(current.Path, checkpoint.From) &&
                 !DropboxPilotClient.SameMoveSpelling(current.Path, checkpoint.Temporary)) return false;
@@ -28,21 +32,25 @@ public sealed partial class DropboxWriter
             await MoveCaseAsync(action with { ExpectedTarget = current }, ct).ConfigureAwait(false);
             return true;
         }
-        catch (Exception error) when (FailureRetryOwner.ScopeOf(error, ct, isStateDamage: _isStateDamage) == FailureRetryOwner.FailureScope.Item)
+        catch (Exception error) when (error is not ProviderEffectBlockedException &&
+            FailureRetryOwner.ScopeOf(error, ct, isStateDamage: _isStateDamage) == FailureRetryOwner.FailureScope.Item)
         {
             throw new UncertainEffectException("Case rename identity lookup/resume failed. Last retained locations: " +
                 checkpoint.From + " or " + checkpoint.Temporary + "; destination: " + checkpoint.To + ". " + error.Message, error);
         }
     }
 
+    private static CaseRenameCheckpoint ReadCaseCheckpoint(SyncAction action) =>
+        JsonSerializer.Deserialize<CaseRenameCheckpoint>(action.ProviderEffect!.Id)
+            ?? throw new InvalidDataException("Invalid case rename checkpoint.");
+
     // Dropbox's files.stone move:2 explicitly does not support case-only renaming.
     // Each leg is an ordinary identity-preserving move, with its intent durable first.
     private async Task<ItemState> MoveCaseAsync(SyncAction action, CancellationToken ct)
     {
-        var context = ProviderEffectContext.Current.Value ??
-            throw new InvalidOperationException("A case rename requires a durable provider context.");
-        var checkpoint = action.ProviderEffect is { Kind: CaseRenameCheckpointKind } saved
-            ? JsonSerializer.Deserialize<CaseRenameCheckpoint>(saved.Id) ?? throw new InvalidDataException("Invalid case rename checkpoint.")
+        var context = CaseContext();
+        var checkpoint = action.ProviderEffect is { Kind: CaseRenameCheckpointKind }
+            ? ReadCaseCheckpoint(action)
             : new CaseRenameCheckpoint(action.FromPath!, TemporaryCasePath(action), action.Path, 0);
         if (checkpoint.From != action.FromPath || checkpoint.To != action.Path)
             throw new InvalidDataException("Case rename checkpoint does not match its intent.");
@@ -82,6 +90,9 @@ public sealed partial class DropboxWriter
             throw new UncertainEffectException("The case rename checkpoint requires reconciliation: " + error.Message, error);
         }
     }
+
+    private static ProviderEffectContext CaseContext() => ProviderEffectContext.Current.Value ??
+        throw new InvalidOperationException("A case rename requires a durable provider context.");
 
     private static string TemporaryCasePath(SyncAction action)
     {

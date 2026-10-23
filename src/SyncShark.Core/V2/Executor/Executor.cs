@@ -176,16 +176,10 @@ public sealed partial class Executor : IExecutor
                     token).ConfigureAwait(false);
             // The archive receipt was durable before the effect began. Resolving from it is read-only, so an original
             // that reappeared after the crash can never be archived or removed by this reconciliation.
-            RecoveryRef? preserved = null;
-            if (pairId is not null && intent.RecoveryFirst)
-                await StoreAsync(() => preserved = RecoverySafety.PreservedReceipt(_store, pairId, intent),
-                    token).ConfigureAwait(false);
-            var providerCommitter = pairId is not null && resumesProviderEffect
-                ? new StoreCommitter(_store, _storeGate, pairId, gen) : null;
-            var result = await ResultVerification.ResolveAsync(intent, target, source, token, _isStateDamage,
-                _settings.UnknownCommitGracePeriod, jobChecks, materializationBlock, historicalDeleteSource,
-                preserved, deleteRestorePending, providerCommitter).ConfigureAwait(false);
-            if (providerCommitter is not null) intent = providerCommitter.LatestAction(intent);
+            var resolved = await ResolveReconciledAsync(intent, target, source, pairId, gen, resumesProviderEffect,
+                jobChecks, materializationBlock, historicalDeleteSource, deleteRestorePending, token).ConfigureAwait(false);
+            var result = resolved.Result;
+            intent = resolved.Intent;
             if (pairId is not null)
             {
                 var committedByRunner = false;
