@@ -15,57 +15,79 @@ internal static partial class DropboxChecks
         if (Directory.Exists(root)) throw new InvalidOperationException("Use a fresh bounded test directory.");
         Directory.CreateDirectory(root);
         _root = root;
-        await ProviderNamesAsync(Path.Combine(root, "provider-names"));
+        var failures = new List<string>();
+        await Group(nameof(ProviderNamesAsync), () => ProviderNamesAsync(Path.Combine(root, "provider-names")), failures);
         _root = root;
-        await RemovalReviewDropboxAsync();
-        await FullChecksAsync();
-        await ProgressCallbackFaultsAsync();
-        await ExcludedNestedListingAndReplayAsync();
-        await FullRootChecksAsync();
-        await MembershipTimeoutIsPerItemAsync();
-        await ReadBudgetScopeAsync();
-        await RetryWaitPauseAndCancelAsync();
-        await DeltaChecksAsync();
-        await IntakeChecksAsync();
-        await EvidenceHistoryPagingAsync();
-        await DeltaDeletionTimeAsync();
-        await PrepareCursorChecksAsync();
-        await DeltaFolderRunsAsync();
-        await DeltaPendingRunsAsync();
-        await DeltaEvidenceBoundAsync("permanent");
-        await DeltaEvidenceBoundAsync("attempts");
-        await DeltaEvidenceBoundAsync("age");
-        await DeltaReplacementAsync();
-        await HashFromStoreAsync();
-        await HashFallbackMatchesStoredVersionAsync();
-        await DeletionTimesFromHistoryAsync();
-        await DeletedListingChecksAsync();
-        await OnePassDeletionChecksAsync();
-        await DeletionEvidenceCacheChecksAsync();
-        await EvidenceValidationReviewChecksAsync();
-        await DeletionHistoryFailureChecksAsync();
-        await RunClientModifiedAsync(root);
-        await PutCreateAsync();
-        await BatchRootPathChecksAsync();
-        await PutOccupiedAsync();
-        await PutUpdateAsync();
-        await DeleteFileAsync();
-        await DeleteFolderAsync();
-        await FolderTreeChecksAsync();
-        await IgnoreFolderDeleteChecksAsync();
-        await DeleteUncertainAsync();
-        await MoveChecksAsync();
-        await CaseRenameSqliteAsync();
-        await MkDirChecksAsync();
-        await JobCheckCacheChecksAsync();
-        await PreserveChecksAsync();
-        await OpenReadChecksAsync(Path.Combine(root, "spool"));
-        await DownloadToChecksAsync(Path.Combine(root, "spool-direct"));
-        await DownloadSingleCallChecksAsync();
-        await DownloadRefusalChecksAsync();
-        await DownloadRefusalMappingChecksAsync();
-        await ObserveChecksAsync();
+        await Group(nameof(RemovalReviewDropboxAsync), RemovalReviewDropboxAsync, failures);
+        await Group(nameof(FullChecksAsync), FullChecksAsync, failures);
+        await Group(nameof(ProgressCallbackFaultsAsync), ProgressCallbackFaultsAsync, failures);
+        await Group(nameof(ExcludedNestedListingAndReplayAsync), ExcludedNestedListingAndReplayAsync, failures);
+        await Group(nameof(FullRootChecksAsync), FullRootChecksAsync, failures);
+        await Group(nameof(MembershipTimeoutIsPerItemAsync), MembershipTimeoutIsPerItemAsync, failures);
+        await Group(nameof(ReadBudgetScopeAsync), ReadBudgetScopeAsync, failures);
+        await Group(nameof(RetryWaitPauseAndCancelAsync), RetryWaitPauseAndCancelAsync, failures);
+        await Group(nameof(DeltaChecksAsync), DeltaChecksAsync, failures);
+        await Group(nameof(IntakeChecksAsync), IntakeChecksAsync, failures);
+        await Group(nameof(EvidenceHistoryPagingAsync), EvidenceHistoryPagingAsync, failures);
+        await Group(nameof(DeltaDeletionTimeAsync), DeltaDeletionTimeAsync, failures);
+        await Group(nameof(PrepareCursorChecksAsync), PrepareCursorChecksAsync, failures);
+        await Group(nameof(DeltaFolderRunsAsync), DeltaFolderRunsAsync, failures);
+        await Group(nameof(DeltaPendingRunsAsync), DeltaPendingRunsAsync, failures);
+        await Group(nameof(DeltaEvidenceBoundAsync) + "(permanent)", () => DeltaEvidenceBoundAsync("permanent"), failures);
+        await Group(nameof(DeltaEvidenceBoundAsync) + "(attempts)", () => DeltaEvidenceBoundAsync("attempts"), failures);
+        await Group(nameof(DeltaEvidenceBoundAsync) + "(age)", () => DeltaEvidenceBoundAsync("age"), failures);
+        await Group(nameof(DeltaReplacementAsync), DeltaReplacementAsync, failures);
+        await Group(nameof(HashFromStoreAsync), HashFromStoreAsync, failures);
+        await Group(nameof(HashFallbackMatchesStoredVersionAsync), HashFallbackMatchesStoredVersionAsync, failures);
+        await Group(nameof(DeletionTimesFromHistoryAsync), DeletionTimesFromHistoryAsync, failures);
+        await Group(nameof(DeletedListingChecksAsync), DeletedListingChecksAsync, failures);
+        await Group(nameof(OnePassDeletionChecksAsync), OnePassDeletionChecksAsync, failures);
+        await Group(nameof(DeletionEvidenceCacheChecksAsync), DeletionEvidenceCacheChecksAsync, failures);
+        await Group(nameof(EvidenceValidationReviewChecksAsync), EvidenceValidationReviewChecksAsync, failures);
+        await Group(nameof(DeletionHistoryFailureChecksAsync), DeletionHistoryFailureChecksAsync, failures);
+        await Group(nameof(RunClientModifiedAsync), () => RunClientModifiedAsync(root), failures);
+        await Group(nameof(PutCreateAsync), PutCreateAsync, failures);
+        await Group(nameof(BatchRootPathChecksAsync), BatchRootPathChecksAsync, failures);
+        await Group(nameof(PutOccupiedAsync), PutOccupiedAsync, failures);
+        await Group(nameof(PutUpdateAsync), PutUpdateAsync, failures);
+        await Group(nameof(DeleteFileAsync), DeleteFileAsync, failures);
+        await Group(nameof(DeleteFolderAsync), DeleteFolderAsync, failures);
+        await Group(nameof(FolderTreeChecksAsync), FolderTreeChecksAsync, failures);
+        await Group(nameof(IgnoreFolderDeleteChecksAsync), IgnoreFolderDeleteChecksAsync, failures);
+        await Group(nameof(DeleteUncertainAsync), DeleteUncertainAsync, failures);
+        await Group(nameof(MoveChecksAsync), MoveChecksAsync, failures);
+        await Group(nameof(CaseRenameSqliteAsync), CaseRenameSqliteAsync, failures);
+        await Group(nameof(MkDirChecksAsync), MkDirChecksAsync, failures);
+        await Group(nameof(JobCheckCacheChecksAsync), JobCheckCacheChecksAsync, failures);
+        await Group(nameof(PreserveChecksAsync), PreserveChecksAsync, failures);
+        await Group(nameof(OpenReadChecksAsync), () => OpenReadChecksAsync(Path.Combine(root, "spool")), failures);
+        await Group(nameof(DownloadToChecksAsync), () => DownloadToChecksAsync(Path.Combine(root, "spool-direct")), failures);
+        await Group(nameof(DownloadSingleCallChecksAsync), DownloadSingleCallChecksAsync, failures);
+        await Group(nameof(DownloadRefusalChecksAsync), DownloadRefusalChecksAsync, failures);
+        await Group(nameof(DownloadRefusalMappingChecksAsync), DownloadRefusalMappingChecksAsync, failures);
+        await Group(nameof(ObserveChecksAsync), ObserveChecksAsync, failures);
+        if (failures.Count > 0)
+        {
+            Console.WriteLine("CHECK-GROUP-FAILURES " + failures.Count + ": " + string.Join(", ", failures));
+            throw new InvalidOperationException("v2-dropbox-checks failed in " + failures.Count +
+                " check group(s); see CHECK-GROUP-FAIL lines above.");
+        }
         Console.WriteLine("--v2-dropbox-checks passed.");
+    }
+
+    // Runs one top-level check group; a failing group is reported and recorded so it cannot hide the rest.
+    private static async Task Group(string name, Func<Task> body, List<string> failures)
+    {
+        try
+        {
+            await body();
+        }
+        catch (Exception error)
+        {
+            Console.WriteLine("CHECK-GROUP-FAIL " + name + ": " + error.GetType().Name + ": " + error.Message);
+            Console.WriteLine(error);
+            failures.Add(name);
+        }
     }
 
     private static async Task FullChecksAsync()

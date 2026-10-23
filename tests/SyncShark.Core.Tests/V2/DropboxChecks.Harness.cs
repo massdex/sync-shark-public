@@ -38,7 +38,7 @@ internal static partial class DropboxChecks
         }
     }
 
-    private static RootDef Root() => new(RootId, "Dropbox", "acc", "/Pilot", DropboxWire.RootId);
+    private static RootDef Root() => new(RootId, ProviderIds.Dropbox, "acc", "/Pilot", DropboxWire.RootId);
 
     private static DropboxConnectionBinding Binding() => new(
         DropboxProviderConfiguration.RegisteredClientId, "account-id", "root-namespace", "home-namespace",

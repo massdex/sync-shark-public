@@ -9,124 +9,150 @@ internal static partial class RunChecks
 {
     public static async Task RunAsync()
     {
-        await ProvenanceAsync();
-        await RehearsalAsync();
-        await HotfixCompletionChecksAsync();
-        await PlanOnlyAsync();
-        await FirstSyncOutageRetainsReadDebtAsync();
-        await ReadOutageCompletesSafelyAsync();
-        await ItemReadTimeoutBecomesRetryAsync();
-        await HashFallbackBreakerAsync();
-        await PlanningDeferredReplaysNextRunAsync();
-        await PairSummaryDoesNotHoldSiblingsAsync();
-        await HeldRetriesSurviveAsync();
-        await ReleasedSurvivor_FlaggedAsync();
-        await HeldIntentsDoNotStarveAsync();
-        await HeldIntentBoundariesAsync();
-        await HeldIntentSummaryAsync();
-        await HeldIntentRetryParksAsync();
-        await HeldIntentUnparkAfterOutsideCommitAsync();
-        await HeldIntentLinkAndStubRetireAsync();
-        await HeldIntentDestructiveLinkAndStubStayPendingAsync();
-        await HeldIntentPendingStaysUnsyncedAsync();
-        await HeldIntentPendingNoticeCountsAsync();
-        await HeldIntentQuarantineChoiceReconcilesAsync();
-        await HeldIntentApplySummaryUsesPostClassificationAsync();
-        await HeldRetryRotationAndReleaseAsync();
-        await HeldRetryExclusionAndContainersAsync();
-        await ItemIgnoreWaitsForSettingsSaveAsync();
-        await HistoryFailureDoesNotFailCompletedRunAsync();
-        PairMissing_Refused();
-        DisabledPair_Refused();
-        FirstSyncNotDone_Refused();
-        await FirstSync_PreviewIsEffectFreeAsync();
-        await FirstSync_SkippedReasonReportedAsync();
-        await FirstSync_ApplyThenIncrementalIsEmptyAsync();
-        await FirstSync_MoveDuringReview_IsMoveAsync();
-        await FirstSync_PreviewHashesBeforeDecidingAsync();
-        await FirstSync_IncompleteScanRefusedAsync();
-        await FirstSync_DeletionWinsRepeatablyAsync();
-        await MissingDeleteIdentityChoicesAsync();
-        await FirstSync_DeletionLookupIgnoresCaseAsync();
-        await Incremental_UnconfirmedContentReplannedAsync();
-        await Incremental_DeleteSourceNoticeSettlesWithoutActionAsync();
-        await Incremental_FreeSpacePendingRetriedAsync();
-        await Incremental_ConvergesAfterApplyAsync();
-        await NestedPair_OuterCannotMoveContainingFolderAsync();
-        await Apply_SkipsWhenExclusionsChangedAsync();
-        await NarrowedSafetyChecksAsync();
-        await NoticeRestoreChecksAsync();
-        await Notice_ClosedWhenFileSyncsCleanlyAsync();
-        await Notice_ClosedWhenPathDiffersOnlyInCaseAsync();
-        await Notice_HoldSurvivesEmptyRunAsync();
-        await Notice_UntouchedFileKeepsNoticeAsync();
-        await Notice_KeepBothSurvivesEchoAndCleanSyncAsync();
-        await Notice_EditBeatsDeleteSurvivesEchoAsync();
-        await Notice_ClosePolicyByReasonAsync();
-        await AccessLost_ScanPropagatesAsync();
-        await AccessLost_EffectKeepsIntentAsync();
-        await AccessLost_UncertainStaysUncertainAsync();
-        await CliRuntime_AccountsArePassedThroughAsync();
-        await CliRuntime_CreatePairAwaitsRootObservationAsync();
-        await Incremental_OneSidedEditAsync();
-        await Incremental_DeletedIdenticalSkipsRecoveryAsync();
-        await Incremental_LocalLocalDeleteCreatesRecoveryAsync();
-        await Incremental_NoChanges_WritesNothingAsync();
-        await Incremental_SleepingRetryIsPartialAsync();
-        await Incremental_SleepingRootRetryAvoidsWholePairLoadAsync();
-        await RecoveryRestore_NoNoticeRunsWithoutLookupsAsync();
-        await Incremental_FullRescanAfterForgetCursorAsync();
-        await RequestRescan_WaitsForRunningScanAsync();
-        await RequestRescan_ReconcilesBeforeInventoryAsync();
-        await Reconcile_ExcludedIntentSettlesAsync();
-        await Reconcile_ExcludedUncertainHonorsGraceAsync();
-        await Reconcile_ExcludedMoveCompletesFirstSyncAsync();
-        await Reconcile_ExcludedFolderDeleteNeverExpandsAsync();
-        await Reconcile_ExcludedAppliedIntentIsDoneAsync();
-        await Incremental_FailedEffect_RetriedNextRunAsync();
-        await Incremental_FolderDeleteChildFailureCountedAsync();
-        await Reconcile_Uncertain_StopsBeforeInventoryAsync();
-        await Reconcile_UncertainItemsConcurrentlyAsync();
-        await Reconcile_AllPagesAsync();
-        await StoredClash_RefusedBeforeReconcileAsync();
-        await LegacyEmptyIdPairs_DoNotBlockDisjointPairAsync();
-        await KillMidApply_NoDuplicatesNoPartialsAsync();
-        await KillBeforeEffect_SkippedAndReplannedAsync();
-        await Stop_KeepsFinishedWorkAsync();
-        await Progress_ThrottledAsync();
-        await Progress_CountsPlannedActionsOnlyAsync();
-        await ReviewedPropagationStillRequiresSourceAbsenceAsync();
-        Tally_DuplicateTerminalResultCountsOnce();
-        await Activity_ProcessMessagesReachSinkAsync();
-        await Activity_HeartbeatWhileQuietAsync();
-        Operations_SweepWarns();
-        await Operations_QuietWhenFastAsync();
-        Operations_RegistrationCheap();
-        RunLog_WritesAndRotatesAsync();
-        await Output_RegressionChecksAsync();
-        Operations_DisposedNoOp();
-        Progress_UnknownTotalAsync();
-        Mapping_StablePhaseWithDetail();
-        await Activity_DuplicateSuppressionAsync();
-        Include_NestedPairExcludedAndIgnoreRules();
-        await SafetyFilter_DropsOutsidePairAreaAsync();
-        await ProductOwned_RemoteOnlyChildNotPlannedAsync();
-        await ProductOwned_AncestorMoveAndDeleteDroppedAsync();
-        await CopyHash_OneSidedCopiesCarryHashesAsync();
-        await CopyHash_UnhashableSourceHeldAsync();
-        await CopyHash_IncrementalCopyHashedAsync();
-        await CopyHash_KeepBothHeldTogetherAsync();
-        await CopyHash_SourceUnderMovedFolderAsync();
-        await CopyHash_FolderRemoveHashesVictimsAsync();
-        await LinkExclusionChecks.RunAsync();
-        await DecisionHoldChecks.RunAsync();
-        await ConcurrentScanChecks.RunAsync();
-        await AccountVerificationDedupeAsync();
-        await RebuildableChecks.RunAsync();
-        await DeferredEvidenceChecksAsync();
-        await MemoryReductionChecksAsync();
+        var failures = new List<string>();
+        await Group(nameof(ProvenanceAsync), ProvenanceAsync, failures);
+        await Group(nameof(RehearsalAsync), RehearsalAsync, failures);
+        await Group(nameof(HotfixCompletionChecksAsync), HotfixCompletionChecksAsync, failures);
+        await Group(nameof(PlanOnlyAsync), PlanOnlyAsync, failures);
+        await Group(nameof(FirstSyncOutageRetainsReadDebtAsync), FirstSyncOutageRetainsReadDebtAsync, failures);
+        await Group(nameof(ReadOutageCompletesSafelyAsync), ReadOutageCompletesSafelyAsync, failures);
+        await Group(nameof(ItemReadTimeoutBecomesRetryAsync), ItemReadTimeoutBecomesRetryAsync, failures);
+        await Group(nameof(HashFallbackBreakerAsync), HashFallbackBreakerAsync, failures);
+        await Group(nameof(PlanningDeferredReplaysNextRunAsync), PlanningDeferredReplaysNextRunAsync, failures);
+        await Group(nameof(PairSummaryDoesNotHoldSiblingsAsync), PairSummaryDoesNotHoldSiblingsAsync, failures);
+        await Group(nameof(HeldRetriesSurviveAsync), HeldRetriesSurviveAsync, failures);
+        await Group(nameof(ReleasedSurvivor_FlaggedAsync), ReleasedSurvivor_FlaggedAsync, failures);
+        await Group(nameof(HeldIntentsDoNotStarveAsync), HeldIntentsDoNotStarveAsync, failures);
+        await Group(nameof(HeldIntentBoundariesAsync), HeldIntentBoundariesAsync, failures);
+        await Group(nameof(HeldIntentSummaryAsync), HeldIntentSummaryAsync, failures);
+        await Group(nameof(HeldIntentRetryParksAsync), HeldIntentRetryParksAsync, failures);
+        await Group(nameof(HeldIntentUnparkAfterOutsideCommitAsync), HeldIntentUnparkAfterOutsideCommitAsync, failures);
+        await Group(nameof(HeldIntentLinkAndStubRetireAsync), HeldIntentLinkAndStubRetireAsync, failures);
+        await Group(nameof(HeldIntentDestructiveLinkAndStubStayPendingAsync), HeldIntentDestructiveLinkAndStubStayPendingAsync, failures);
+        await Group(nameof(HeldIntentPendingStaysUnsyncedAsync), HeldIntentPendingStaysUnsyncedAsync, failures);
+        await Group(nameof(HeldIntentPendingNoticeCountsAsync), HeldIntentPendingNoticeCountsAsync, failures);
+        await Group(nameof(HeldIntentQuarantineChoiceReconcilesAsync), HeldIntentQuarantineChoiceReconcilesAsync, failures);
+        await Group(nameof(HeldIntentApplySummaryUsesPostClassificationAsync), HeldIntentApplySummaryUsesPostClassificationAsync, failures);
+        await Group(nameof(HeldRetryRotationAndReleaseAsync), HeldRetryRotationAndReleaseAsync, failures);
+        await Group(nameof(HeldRetryExclusionAndContainersAsync), HeldRetryExclusionAndContainersAsync, failures);
+        await Group(nameof(ItemIgnoreWaitsForSettingsSaveAsync), ItemIgnoreWaitsForSettingsSaveAsync, failures);
+        await Group(nameof(HistoryFailureDoesNotFailCompletedRunAsync), HistoryFailureDoesNotFailCompletedRunAsync, failures);
+        await Group(nameof(PairMissing_Refused), PairMissing_Refused, failures);
+        await Group(nameof(DisabledPair_Refused), DisabledPair_Refused, failures);
+        await Group(nameof(FirstSyncNotDone_Refused), FirstSyncNotDone_Refused, failures);
+        await Group(nameof(FirstSync_PreviewIsEffectFreeAsync), FirstSync_PreviewIsEffectFreeAsync, failures);
+        await Group(nameof(FirstSync_SkippedReasonReportedAsync), FirstSync_SkippedReasonReportedAsync, failures);
+        await Group(nameof(FirstSync_ApplyThenIncrementalIsEmptyAsync), FirstSync_ApplyThenIncrementalIsEmptyAsync, failures);
+        await Group(nameof(FirstSync_MoveDuringReview_IsMoveAsync), FirstSync_MoveDuringReview_IsMoveAsync, failures);
+        await Group(nameof(FirstSync_PreviewHashesBeforeDecidingAsync), FirstSync_PreviewHashesBeforeDecidingAsync, failures);
+        await Group(nameof(FirstSync_IncompleteScanRefusedAsync), FirstSync_IncompleteScanRefusedAsync, failures);
+        await Group(nameof(FirstSync_DeletionWinsRepeatablyAsync), FirstSync_DeletionWinsRepeatablyAsync, failures);
+        await Group(nameof(MissingDeleteIdentityChoicesAsync), MissingDeleteIdentityChoicesAsync, failures);
+        await Group(nameof(FirstSync_DeletionLookupIgnoresCaseAsync), FirstSync_DeletionLookupIgnoresCaseAsync, failures);
+        await Group(nameof(Incremental_UnconfirmedContentReplannedAsync), Incremental_UnconfirmedContentReplannedAsync, failures);
+        await Group(nameof(Incremental_DeleteSourceNoticeSettlesWithoutActionAsync), Incremental_DeleteSourceNoticeSettlesWithoutActionAsync, failures);
+        await Group(nameof(Incremental_FreeSpacePendingRetriedAsync), Incremental_FreeSpacePendingRetriedAsync, failures);
+        await Group(nameof(Incremental_ConvergesAfterApplyAsync), Incremental_ConvergesAfterApplyAsync, failures);
+        await Group(nameof(NestedPair_OuterCannotMoveContainingFolderAsync), NestedPair_OuterCannotMoveContainingFolderAsync, failures);
+        await Group(nameof(Apply_SkipsWhenExclusionsChangedAsync), Apply_SkipsWhenExclusionsChangedAsync, failures);
+        await Group(nameof(NarrowedSafetyChecksAsync), NarrowedSafetyChecksAsync, failures);
+        await Group(nameof(NoticeRestoreChecksAsync), NoticeRestoreChecksAsync, failures);
+        await Group(nameof(Notice_ClosedWhenFileSyncsCleanlyAsync), Notice_ClosedWhenFileSyncsCleanlyAsync, failures);
+        await Group(nameof(Notice_ClosedWhenPathDiffersOnlyInCaseAsync), Notice_ClosedWhenPathDiffersOnlyInCaseAsync, failures);
+        await Group(nameof(Notice_HoldSurvivesEmptyRunAsync), Notice_HoldSurvivesEmptyRunAsync, failures);
+        await Group(nameof(Notice_UntouchedFileKeepsNoticeAsync), Notice_UntouchedFileKeepsNoticeAsync, failures);
+        await Group(nameof(Notice_KeepBothSurvivesEchoAndCleanSyncAsync), Notice_KeepBothSurvivesEchoAndCleanSyncAsync, failures);
+        await Group(nameof(Notice_EditBeatsDeleteSurvivesEchoAsync), Notice_EditBeatsDeleteSurvivesEchoAsync, failures);
+        await Group(nameof(Notice_ClosePolicyByReasonAsync), Notice_ClosePolicyByReasonAsync, failures);
+        await Group(nameof(AccessLost_ScanPropagatesAsync), AccessLost_ScanPropagatesAsync, failures);
+        await Group(nameof(AccessLost_EffectKeepsIntentAsync), AccessLost_EffectKeepsIntentAsync, failures);
+        await Group(nameof(AccessLost_UncertainStaysUncertainAsync), AccessLost_UncertainStaysUncertainAsync, failures);
+        await Group(nameof(CliRuntime_AccountsArePassedThroughAsync), CliRuntime_AccountsArePassedThroughAsync, failures);
+        await Group(nameof(CliRuntime_CreatePairAwaitsRootObservationAsync), CliRuntime_CreatePairAwaitsRootObservationAsync, failures);
+        await Group(nameof(Incremental_OneSidedEditAsync), Incremental_OneSidedEditAsync, failures);
+        await Group(nameof(Incremental_DeletedIdenticalSkipsRecoveryAsync), Incremental_DeletedIdenticalSkipsRecoveryAsync, failures);
+        await Group(nameof(Incremental_LocalLocalDeleteCreatesRecoveryAsync), Incremental_LocalLocalDeleteCreatesRecoveryAsync, failures);
+        await Group(nameof(Incremental_NoChanges_WritesNothingAsync), Incremental_NoChanges_WritesNothingAsync, failures);
+        await Group(nameof(Incremental_SleepingRetryIsPartialAsync), Incremental_SleepingRetryIsPartialAsync, failures);
+        await Group(nameof(Incremental_SleepingRootRetryAvoidsWholePairLoadAsync), Incremental_SleepingRootRetryAvoidsWholePairLoadAsync, failures);
+        await Group(nameof(RecoveryRestore_NoNoticeRunsWithoutLookupsAsync), RecoveryRestore_NoNoticeRunsWithoutLookupsAsync, failures);
+        await Group(nameof(Incremental_FullRescanAfterForgetCursorAsync), Incremental_FullRescanAfterForgetCursorAsync, failures);
+        await Group(nameof(RequestRescan_WaitsForRunningScanAsync), RequestRescan_WaitsForRunningScanAsync, failures);
+        await Group(nameof(RequestRescan_ReconcilesBeforeInventoryAsync), RequestRescan_ReconcilesBeforeInventoryAsync, failures);
+        await Group(nameof(Reconcile_ExcludedIntentSettlesAsync), Reconcile_ExcludedIntentSettlesAsync, failures);
+        await Group(nameof(Reconcile_ExcludedUncertainHonorsGraceAsync), Reconcile_ExcludedUncertainHonorsGraceAsync, failures);
+        await Group(nameof(Reconcile_ExcludedMoveCompletesFirstSyncAsync), Reconcile_ExcludedMoveCompletesFirstSyncAsync, failures);
+        await Group(nameof(Reconcile_ExcludedFolderDeleteNeverExpandsAsync), Reconcile_ExcludedFolderDeleteNeverExpandsAsync, failures);
+        await Group(nameof(Reconcile_ExcludedAppliedIntentIsDoneAsync), Reconcile_ExcludedAppliedIntentIsDoneAsync, failures);
+        await Group(nameof(Incremental_FailedEffect_RetriedNextRunAsync), Incremental_FailedEffect_RetriedNextRunAsync, failures);
+        await Group(nameof(Incremental_FolderDeleteChildFailureCountedAsync), Incremental_FolderDeleteChildFailureCountedAsync, failures);
+        await Group(nameof(Reconcile_Uncertain_StopsBeforeInventoryAsync), Reconcile_Uncertain_StopsBeforeInventoryAsync, failures);
+        await Group(nameof(Reconcile_UncertainItemsConcurrentlyAsync), Reconcile_UncertainItemsConcurrentlyAsync, failures);
+        await Group(nameof(Reconcile_AllPagesAsync), Reconcile_AllPagesAsync, failures);
+        await Group(nameof(StoredClash_RefusedBeforeReconcileAsync), StoredClash_RefusedBeforeReconcileAsync, failures);
+        await Group(nameof(LegacyEmptyIdPairs_DoNotBlockDisjointPairAsync), LegacyEmptyIdPairs_DoNotBlockDisjointPairAsync, failures);
+        await Group(nameof(KillMidApply_NoDuplicatesNoPartialsAsync), KillMidApply_NoDuplicatesNoPartialsAsync, failures);
+        await Group(nameof(KillBeforeEffect_SkippedAndReplannedAsync), KillBeforeEffect_SkippedAndReplannedAsync, failures);
+        await Group(nameof(Stop_KeepsFinishedWorkAsync), Stop_KeepsFinishedWorkAsync, failures);
+        await Group(nameof(Progress_ThrottledAsync), Progress_ThrottledAsync, failures);
+        await Group(nameof(Progress_CountsPlannedActionsOnlyAsync), Progress_CountsPlannedActionsOnlyAsync, failures);
+        await Group(nameof(ReviewedPropagationStillRequiresSourceAbsenceAsync), ReviewedPropagationStillRequiresSourceAbsenceAsync, failures);
+        await Group(nameof(Tally_DuplicateTerminalResultCountsOnce), Tally_DuplicateTerminalResultCountsOnce, failures);
+        await Group(nameof(Activity_ProcessMessagesReachSinkAsync), Activity_ProcessMessagesReachSinkAsync, failures);
+        await Group(nameof(Activity_HeartbeatWhileQuietAsync), Activity_HeartbeatWhileQuietAsync, failures);
+        await Group(nameof(Operations_SweepWarns), Operations_SweepWarns, failures);
+        await Group(nameof(Operations_QuietWhenFastAsync), Operations_QuietWhenFastAsync, failures);
+        await Group(nameof(Operations_RegistrationCheap), Operations_RegistrationCheap, failures);
+        await Group(nameof(RunLog_WritesAndRotatesAsync), RunLog_WritesAndRotatesAsync, failures);
+        await Group(nameof(Output_RegressionChecksAsync), Output_RegressionChecksAsync, failures);
+        await Group(nameof(Operations_DisposedNoOp), Operations_DisposedNoOp, failures);
+        await Group(nameof(Progress_UnknownTotalAsync), Progress_UnknownTotalAsync, failures);
+        await Group(nameof(Mapping_StablePhaseWithDetail), Mapping_StablePhaseWithDetail, failures);
+        await Group(nameof(Activity_DuplicateSuppressionAsync), Activity_DuplicateSuppressionAsync, failures);
+        await Group(nameof(Include_NestedPairExcludedAndIgnoreRules), Include_NestedPairExcludedAndIgnoreRules, failures);
+        await Group(nameof(SafetyFilter_DropsOutsidePairAreaAsync), SafetyFilter_DropsOutsidePairAreaAsync, failures);
+        await Group(nameof(ProductOwned_RemoteOnlyChildNotPlannedAsync), ProductOwned_RemoteOnlyChildNotPlannedAsync, failures);
+        await Group(nameof(ProductOwned_AncestorMoveAndDeleteDroppedAsync), ProductOwned_AncestorMoveAndDeleteDroppedAsync, failures);
+        await Group(nameof(CopyHash_OneSidedCopiesCarryHashesAsync), CopyHash_OneSidedCopiesCarryHashesAsync, failures);
+        await Group(nameof(CopyHash_UnhashableSourceHeldAsync), CopyHash_UnhashableSourceHeldAsync, failures);
+        await Group(nameof(CopyHash_IncrementalCopyHashedAsync), CopyHash_IncrementalCopyHashedAsync, failures);
+        await Group(nameof(CopyHash_KeepBothHeldTogetherAsync), CopyHash_KeepBothHeldTogetherAsync, failures);
+        await Group(nameof(CopyHash_SourceUnderMovedFolderAsync), CopyHash_SourceUnderMovedFolderAsync, failures);
+        await Group(nameof(CopyHash_FolderRemoveHashesVictimsAsync), CopyHash_FolderRemoveHashesVictimsAsync, failures);
+        await Group("LinkExclusionChecks.RunAsync", LinkExclusionChecks.RunAsync, failures);
+        await Group("DecisionHoldChecks.RunAsync", DecisionHoldChecks.RunAsync, failures);
+        await Group("ConcurrentScanChecks.RunAsync", ConcurrentScanChecks.RunAsync, failures);
+        await Group(nameof(AccountVerificationDedupeAsync), AccountVerificationDedupeAsync, failures);
+        await Group("RebuildableChecks.RunAsync", RebuildableChecks.RunAsync, failures);
+        await Group(nameof(DeferredEvidenceChecksAsync), DeferredEvidenceChecksAsync, failures);
+        await Group(nameof(MemoryReductionChecksAsync), MemoryReductionChecksAsync, failures);
+        if (failures.Count > 0)
+        {
+            Console.WriteLine("CHECK-GROUP-FAILURES " + failures.Count + ": " + string.Join(", ", failures));
+            throw new InvalidOperationException("v2 run checks failed in " + failures.Count +
+                " check group(s); see CHECK-GROUP-FAIL lines above.");
+        }
         Console.WriteLine("v2 run checks passed.");
     }
+
+    // Runs one top-level check group; a failing group is reported and recorded so it cannot hide the rest.
+    private static async Task Group(string name, Func<Task> body, List<string> failures)
+    {
+        try
+        {
+            await body();
+        }
+        catch (Exception error)
+        {
+            Console.WriteLine("CHECK-GROUP-FAIL " + name + ": " + error.GetType().Name + ": " + error.Message);
+            Console.WriteLine(error);
+            failures.Add(name);
+        }
+    }
+
+    // A synchronous check group runs through the same reporting without being turned into a Task.
+    private static Task Group(string name, Action body, List<string> failures) =>
+        Group(name, () => { body(); return Task.CompletedTask; }, failures);
 
     private static async Task PairSummaryDoesNotHoldSiblingsAsync()
     {

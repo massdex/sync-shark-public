@@ -8,6 +8,7 @@ internal static partial class DropboxChecks
     {
         foreach (var mode in new[] { "rejected", "pre-send", "lost-response", "lost-response-again", "lost-response-live", "confirmed-then-deleted" })
             await FolderRestoreColdReopenAsync(mode);
+        await FolderRestoreColdReopenAsync("lost-response-again", legacyProvider: true);
         await UnknownFolderRestoreProtectsChildrenAsync();
         await PermanentRestoreRejectionAsync();
         await OccupiedFolderRestoreAsync();
@@ -91,15 +92,17 @@ internal static partial class DropboxChecks
         finally { store.Dispose(); }
     }
 
-    private static async Task FolderRestoreColdReopenAsync(string mode)
+    private static async Task FolderRestoreColdReopenAsync(string mode, bool legacyProvider = false)
     {
         using var rig = await TreeRigAsync(60);
-        var folder = Path.Combine(_root, "restore-safety-" + mode);
+        var folder = Path.Combine(_root, "restore-safety-" + mode + (legacyProvider ? "-legacy-provider" : ""));
         var settings = V2Settings.Default with { AutoRetryDelay = TimeSpan.FromHours(1) };
         var store = SqliteStateStore.Open(folder, settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         try
         {
-            store.SavePair(rig.Store.Pair("p1")!);
+            var savedPair = rig.Store.Pair("p1")!;
+            if (legacyProvider) savedPair = savedPair with { B = savedPair.B with { Provider = "Dropbox" } };
+            store.SavePair(savedPair);
             var gen = store.BeginGeneration(RootId, "snapshot");
             store.WriteSnapshot(new Snapshot(RootId, Side.B, gen, rig.Cursor,
                 FolderDelete.LiveDescendants(rig.Store, RootId, "big").Append(rig.Delete.ExpectedTarget!).ToArray(), []));
@@ -188,7 +191,12 @@ internal static partial class DropboxChecks
             if (mode == "lost-response-again")
             {
                 var revisionReads = rig.H.Wire.Calls.Count(call => call == "/2/files/list_revisions");
-                var run = new SyncRun(store, executor, new FakeEndpointProvider(), settings, TimeProvider.System);
+                var pair = store.Pair("p1")!;
+                Require(pair.B.Provider == (legacyProvider ? "Dropbox" : ProviderIds.Dropbox),
+                    "cold reopen preserves the provider spelling being tested");
+                var endpoints = new FakeEndpointProvider().Add(pair.A, rig.A)
+                    .AddInventory(pair.B, rig.H.Inventory).AddWriter(pair.B, writer);
+                var run = new SyncRun(store, executor, endpoints, settings, TimeProvider.System);
                 await run.ApplyRetryNoticeChoiceAsync("p1", notice.NoticeId!, NoticeChoices.RestoreAgain, default);
                 Require(store.OpenNotices("p1").Any(n => n.NoticeId == notice.NoticeId),
                     "explicit authorization does not prematurely close the notice");

@@ -278,7 +278,7 @@ public sealed partial class SyncRun
             {
                 if (choice == NoticeChoices.RestoreAgain)
                 {
-                    var cloud = new[] { pair.A, pair.B }.FirstOrDefault(root => root.Provider == ProviderIds.Dropbox)
+                    var cloud = new[] { pair.A, pair.B }.FirstOrDefault(root => string.Equals(root.Provider, ProviderIds.Dropbox, StringComparison.OrdinalIgnoreCase))
                         ?? throw new SyncRunRefusedException("This pair has no Dropbox endpoint.");
                     await _endpoints.PrepareAsync(pair, token);
                     var endpoint = _endpoints.Writer(cloud) as IFolderTreeDeleter

@@ -9,7 +9,7 @@ internal static partial class DropboxChecks
             using var h = new Harness();
             var directory = Path.Combine(_root, "case-conflict-" + scenario);
             var pair = new PairDef("case-conflict", "Case conflict", new RootDef("case-a", "Fake", "account", "/A", "id-a"), Root(), [], [], true);
-            var a = new FakeEndpoint(Side.A, pair.A.RootId);
+            var a = new FakeEndpoint(Side.A, pair.A.RootId) { DropboxHashes = true };
             var source = a.Seed("doc.txt", "content");
             h.Wire.SeedFile("Doc.txt", "content");
             var writer = h.Writer();
@@ -25,6 +25,10 @@ internal static partial class DropboxChecks
                     basisSource, original, false, "case-key");
                 store.RecordIntent(pair.PairId, adopt);
                 store.CommitResult(pair.PairId, 1, adopt, new(adopt.ActionId, Outcome.Done, basisSource, original, null, null));
+                Require(store.Baselines(pair.PairId, ["case-key"]).SingleOrDefault() is { } baseline &&
+                    baseline.A.ObjectId == basisSource.ObjectId && baseline.B.ObjectId == original.ObjectId &&
+                    Content.SameContent(baseline.A, baseline.B) == true && store.UnresolvedIntents(pair.PairId).Count == 0,
+                    "case conflict starts with a content-verified baseline and a settled adoption");
                 store.RecordIntent(pair.PairId, action);
                 var previous = ProviderEffectContext.Current.Value;
                 using var crash = new CancellationTokenSource();
