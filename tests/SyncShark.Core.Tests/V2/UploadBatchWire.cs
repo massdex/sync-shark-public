@@ -88,8 +88,13 @@ internal sealed class UploadBatchWire : HttpMessageHandler
             if (LoseAcknowledgement)
             {
                 foreach (var entry in entries.EnumerateArray().Take(ApplyBeforeLostAcknowledgement))
-                    AppliedPaths[entry.GetProperty("commit").GetProperty("path").GetString()!] =
-                        entry.GetProperty("cursor").GetProperty("session_id").GetString()!;
+                {
+                    var path = entry.GetProperty("commit").GetProperty("path").GetString()!;
+                    // Commits use the verified namespace path; metadata reads use the same root's ID.
+                    if (path.StartsWith("/Pilot/", StringComparison.OrdinalIgnoreCase))
+                        path = DropboxWire.RootId + path["/Pilot".Length..];
+                    AppliedPaths[path] = entry.GetProperty("cursor").GetProperty("session_id").GetString()!;
+                }
                 throw new HttpRequestException("scripted lost acknowledgement");
             }
             if (FinishFault is { } fault) throw fault;

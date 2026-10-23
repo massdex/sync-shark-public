@@ -9,6 +9,8 @@ namespace Massdex.SyncShark.V2;
 /// <summary>An in-memory Dropbox account under the root "/Pilot" (folder id id:pilot-folder) for the v2 checks.</summary>
 internal sealed partial class DropboxWire : HttpMessageHandler
 {
+    // Explicit opt-in for fixtures with an isolated account/namespace; other fixtures retain the default identity.
+    public DropboxConnectionBinding? AccountBinding { get; set; }
     public bool QuotaFull { get; set; }
     public long QuotaFreeBytes { get; set; } = 999;
 
@@ -220,8 +222,12 @@ internal sealed partial class DropboxWire : HttpMessageHandler
             case "/2/users/get_current_account":
                 return Json(new
                 {
-                    account_id = "account-id",
-                    root_info = new { root_namespace_id = "root-namespace", home_namespace_id = "home-namespace" }
+                    account_id = AccountBinding?.AccountId ?? "account-id",
+                    root_info = new
+                    {
+                        root_namespace_id = AccountBinding?.RootNamespaceId ?? "root-namespace",
+                        home_namespace_id = AccountBinding?.HomeNamespaceId ?? "home-namespace"
+                    }
                 });
             case "/2/files/list_folder/get_latest_cursor":
                 return Json(new { cursor = LatestCursor });

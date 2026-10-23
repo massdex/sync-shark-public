@@ -72,6 +72,12 @@ internal static partial class DropboxChecks
         // After the job window closes, this feed must never be read again, even if it reports user changes.
         rig.H.Wire.FailFeedAfterFolderDelete = true;
         rig.H.Wire.AfterBuriedRevisionRead = null;
+        // Model the next due retry without sleeping or changing production backoff/the frozen feed.
+        var recovery = System.Text.Json.Nodes.JsonNode.Parse(durable)!;
+        Require(recovery["RestoreRetryAfter"]?["big/late.txt"] is not null,
+            "the failed pre-send restore retains a durable retry deadline");
+        recovery["RestoreRetryAfter"]!["big/late.txt"] = DateTimeOffset.MinValue;
+        durable = recovery.ToJsonString();
         var resumed = await rig.B.ReconcileFolderTreesAsync(rig.Cursor, [tree], durable, state =>
         { durable = state; return Task.CompletedTask; }, CancellationToken.None);
         Require(resumed.Single().Status == FolderTreeStatus.Completed && rig.H.Wire.Restores.Count == 1,

@@ -23,6 +23,8 @@ internal static partial class DropboxChecks
         var binding = GateBinding("readback");
         using var holding = new Harness(binding);
         using var competing = new Harness(binding);
+        // Account verification must see the same isolated identity that keys the shared commit gate.
+        holding.Wire.AccountBinding = competing.Wire.AccountBinding = binding;
         var readback = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         holding.Wire.RootMetadataHoldAfter = 1;
         holding.Wire.RootMetadataGate = readback.Task;
@@ -58,6 +60,8 @@ internal static partial class DropboxChecks
         var binding = GateBinding("poll");
         using var holding = new Harness(binding);
         using var competing = new Harness(binding);
+        // Account verification must see the same isolated identity that keys the shared commit gate.
+        holding.Wire.AccountBinding = competing.Wire.AccountBinding = binding;
         holding.Wire.MkDirBatchAsyncJob = true;
         // Enough in-progress answers to outlast the assertion window, bounded by a 6 s natural worst case; the
         // fixture clears the count in its finally so the held job finishes on its next poll.

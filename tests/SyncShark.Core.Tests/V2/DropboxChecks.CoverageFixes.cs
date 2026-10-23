@@ -96,15 +96,31 @@ internal static partial class DropboxChecks
         await runtime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { }, CancellationToken.None);
         h.Wire.MoveOutsideRoot("gone.txt", "/Outside/gone.txt");
         h.Wire.SeedChangePage("pending-c0", [h.Wire.ChangeDeleted("/Pilot/gone.txt")], false, "pending-c1");
+        h.Wire.SeedChangePage("pending-c1", [], false, "pending-c1");
         h.Client.ReadTransientBudget = TimeSpan.FromMilliseconds(50);
         h.Wire.OnRevisionAsync = _ => throw new HttpRequestException("transient evidence outage");
-        await run.IncrementalAsync(pair.PairId, new RecordingProgress(), CancellationToken.None);
-        Require(store.Cursor(RootId) == "pending-c0", "pending evidence pins committed cursor");
+        var writes = local.WriteCalls; var calls = h.Wire.Calls.Count;
+        var held = await run.IncrementalAsync(pair.PairId, new RecordingProgress(), CancellationToken.None);
+        // Decision 85(c), RQ-052: 65e61a62 releases the feed only after saving item-owned retry input.
+        Require(store.Cursor(RootId) == "pending-c1" && held.Deferred == 1 &&
+            store.SyncRetryAt(pair.PairId, "gone.txt") is { Held: not null, ReprobeEvidence: true, EvidenceReleased: false },
+            "pending evidence permits cursor promotion only with a durable unreleased survivor hold");
+        Require(await local.ObserveAsync("gone.txt", CancellationToken.None) is not null &&
+            await h.Client.FindEntryAtPathAsync("gone.txt") is null && local.WriteCalls == writes &&
+            !h.Wire.Calls.Skip(calls).Any(call => call.Contains("/delete", StringComparison.Ordinal) ||
+                call.Contains("/upload", StringComparison.Ordinal) || call.Contains("/move", StringComparison.Ordinal)),
+            "pending deletion evidence neither deletes the survivor nor restores it to Dropbox");
+        Require(store.OpenNotices(pair.PairId).Any(row => row.Path == "gone.txt" && row.ReasonKey == "deletion-evidence-pending"),
+            "pending evidence retains its actionable notice after cursor promotion");
         var lists = h.Wire.ListRequests.Count; var feeds = h.Wire.ContinueCursors.Count;
+        var probes = h.Wire.Calls.Count(call => call == "/2/files/list_revisions");
         h.Wire.OnRevisionAsync = null;
+        var retry = store.SyncRetryAt(pair.PairId, "gone.txt")!;
+        store.SaveSyncRetry(pair.PairId, retry with { RetryAfter = DateTimeOffset.MinValue });
         await run.IncrementalAsync(pair.PairId, new RecordingProgress(), CancellationToken.None);
-        Require(h.Wire.ListRequests.Count == lists && h.Wire.ContinueCursors.Skip(feeds).First() == "pending-c0",
-            "classification-ahead/pending evidence retries targeted feed without full-root relisting");
+        Require(h.Wire.ListRequests.Count == lists && h.Wire.ContinueCursors.Skip(feeds).First() == "pending-c1" &&
+            h.Wire.Calls.Count(call => call == "/2/files/list_revisions") > probes,
+            "durable pending evidence retries targeted history from the promoted feed without full-root relisting");
     }
 
     private static async Task CoverageHydrationFallbackAsync()
@@ -124,7 +140,8 @@ internal static partial class DropboxChecks
             var included = pair with { Excluded = [] }; store.SavePairIncluded(pair, included);
             if (invalid) h.Wire.AfterListingCaptured = () => {
                 h.Wire.AfterListingCaptured = null; throw new InvalidDataException("Injected malformed subtree listing."); };
-            else h.Wire.Script("/2/files/list_folder", HttpStatusCode.Conflict, 2);
+            // 4b0d9040: fail hydration, the initial full listing, AND its checkpoint-reset retry.
+            else h.Wire.Script("/2/files/list_folder", HttpStatusCode.Conflict, 3);
             h.Wire.LatestCursor = "fallback-full"; h.Wire.SeedChangePage("fallback-full", [], false, "fallback-full");
             var lists = h.Wire.ListRequests.Count;
             if (!invalid)
@@ -134,7 +151,7 @@ internal static partial class DropboxChecks
                     await runtime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { }, CancellationToken.None);
                     throw new InvalidOperationException("Incomplete fallback must not authorize apply.");
                 }
-                catch (SyncCliReviewException) { }
+                catch (SyncRunPendingVerificationException) { }
                 Require(store.ReadInventoryObservation(pair.B) is null && store.ReadDeletionClassification(pair.B) is null &&
                     store.Cursor(RootId) is null && !store.FirstSyncDone(pair.PairId) &&
                     store.OpenNotices(pair.PairId).Any(row => row.ReasonKey == "inventory-hydration-fallback"),
@@ -144,9 +161,13 @@ internal static partial class DropboxChecks
                     "fallback notice identifies its stable root and explains its readable location");
                 // Recreate the same narrower coverage, then fail hydration and bootstrap again.
                 store.SaveInventoryObservation(narrowObservation.Coverage, narrowObservation.Cursor);
-                h.Wire.Script("/2/files/list_folder", HttpStatusCode.Conflict, 2);
-                try { await runtime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { }, CancellationToken.None); }
-                catch (SyncCliReviewException) { }
+                h.Wire.Script("/2/files/list_folder", HttpStatusCode.Conflict, 3);
+                try
+                {
+                    await runtime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { }, CancellationToken.None);
+                    throw new InvalidOperationException("Repeated incomplete fallback must not authorize apply.");
+                }
+                catch (SyncRunPendingVerificationException) { }
                 var repeated = store.OpenNotices(pair.PairId).Single(row => row.ReasonKey == notice.ReasonKey);
                 Require(repeated.NoticeId == notice.NoticeId, "repeated failed hydration deduplicates one notice per root");
                 // Another root identity (same pair and display text) is an independent problem. It is one this run

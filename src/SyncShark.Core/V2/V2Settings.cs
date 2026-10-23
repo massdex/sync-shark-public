@@ -26,6 +26,9 @@ public sealed record V2Settings(
     TimeSpan AutoRetryDelay,
     TimeSpan MinSafetyPoll)
 {
+    // Diagnostic write batches bound commit latency without buffering a root-sized set.
+    internal const int DefaultProvenanceBatchRows = 512;
+
     internal const long DefaultUploadPayloadBudgetBytes = 256L * 1024 * 1024;
 
     /// <summary>Maximum identities examined per rehash gate lease, including ineligible identities.</summary>

@@ -80,8 +80,8 @@ internal static class ContractsSmokeChecks
         Require(store.LiveUnder("root", new[] { "D" }).Count == 2, "LiveUnder ignores case (owner decision 34)");
 
         store.SavePair(Pair("p1"));
-        SeedBaseline(store, "p1", "k1", Item("a.txt", "id:a", "ha"), Item("b.txt", "id:b", "hb"));
-        SeedBaseline(store, "p1", "k2", Item("d/x.txt", "id:x", "hx"), Item("d/y.txt", "id:y", "hy"));
+        SeedBaseline(store, "p1", "k1", Item("a.txt", "id:a", "ha"), Item("b.txt", "id:b", "ha"));
+        SeedBaseline(store, "p1", "k2", Item("d/x.txt", "id:x", "hx"), Item("d/y.txt", "id:y", "hx"));
         Require(store.BaselinesTouching("p1", Side.A, new[] { "id:a" }, Array.Empty<string>()).Count == 1,
             "BaselinesTouching finds a baseline by object id");
         Require(store.BaselinesTouching("p1", Side.A, new[] { "id:b" }, Array.Empty<string>()).Count == 0,

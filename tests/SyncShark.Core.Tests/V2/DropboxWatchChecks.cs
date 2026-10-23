@@ -405,10 +405,19 @@ internal static class DropboxWatchChecks
         var writer = rig.Writer();
         var current = (await writer.ObserveAsync("s.txt", CancellationToken.None).ConfigureAwait(false))!;
         rig.Wire.Script("/2/files/delete_batch", HttpStatusCode.InternalServerError, 1);
-        var error = await FaultAsync(writer.DeleteAsync(
-            new SyncAction("a-del", 3, ActionKind.Delete, Side.B, "s.txt", null, null, current, false, "k"),
-            CancellationToken.None)).ConfigureAwait(false);
-        Require(error is UncertainEffectException, "an uncertain write stays UncertainEffectException");
+        var action = new SyncAction("a-del", 3, ActionKind.Delete, Side.B, "s.txt", null, null, current, false, "k");
+        var previous = ProviderEffectContext.Current.Value;
+        try
+        {
+            // This provider-boundary check needs explicit source-absence authority to reach the scripted write.
+            ProviderEffectContext.Current.Value = new ProviderEffectContext(_ => Task.CompletedTask)
+            { Action = action, RevalidateDelete = () => Task.FromResult(new AbsenceObservation(true, null)) };
+            var error = await FaultAsync(writer.DeleteAsync(action, CancellationToken.None)).ConfigureAwait(false);
+            Require(error is UncertainEffectException, "an uncertain write stays UncertainEffectException");
+            Require(rig.Wire.Calls.Count(route => route == "/2/files/delete_batch") == 1,
+                "an uncertain delete is submitted once and never blindly retried");
+        }
+        finally { ProviderEffectContext.Current.Value = previous; }
     }
 
     private static async Task<DropboxChangeWatch> ArmedAsync(WatchRig rig, CancellationToken ct)

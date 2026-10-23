@@ -20,8 +20,8 @@ internal static partial class RunChecks
             provenance.BeginRun(7);
             var sample = new ItemState("first", ItemKind.File, "item", null, new string('a', 64), 1,
                 DateTimeOffset.UnixEpoch, ItemFlags.None);
-            // BeginRun contributes one operation; the next 4999 reach the existing 5000 flush threshold.
-            for (var i = 0; i < 4999; i++)
+            // BeginRun contributes one operation; the next 511 reach the bounded 512 flush threshold.
+            for (var i = 0; i < 511; i++)
                 provenance.Visibility(Side.A, sample with { Path = "row/" + i }, false, "visible");
             using (var reader = new Microsoft.Data.Sqlite.SqliteConnection(
                 new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString()))
@@ -29,7 +29,7 @@ internal static partial class RunChecks
                 reader.Open();
                 using var command = reader.CreateCommand();
                 command.CommandText = "SELECT COUNT(*) FROM visibility";
-                Require(Convert.ToInt64(command.ExecuteScalar()) == 4999, "batch threshold commits without requiring Summary");
+                Require(Convert.ToInt64(command.ExecuteScalar()) == 511, "batch threshold commits without requiring Summary");
             }
             var first = new SyncAction("first-action", 1, ActionKind.CopyNew, Side.B, "first", null, sample, null, false, null);
             var second = first with { ActionId = "second-action", Path = "second", Source = sample with { Path = "second" } };
@@ -58,7 +58,7 @@ internal static partial class RunChecks
     {
         var root = LocalChecks.FreshRoot("provenance");
         using var store = SqliteStateStore.Open(Path.Combine(root, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
-        await CheckProvenancePortAsync(root, store);
+        await CheckProvenancePortAsync(root, store); ProvenanceClaimChecks.Run(root);
         var fx = Build(suppliedStore: store);
         fx.A.Seed("same.txt", "same");
         fx.A.Seed("held.txt", "held");

@@ -70,7 +70,11 @@ internal static partial class DropboxChecks
             rig.H.Wire.FailFeedAfterFolderDelete = true;
             var resumed = await rig.B.ReconcileFolderTreesAsync(rig.Cursor, [tree], durable, state =>
             { durable = state; return Task.CompletedTask; }, CancellationToken.None);
-            Require(resumed.Single().Status == FolderTreeStatus.Completed && rig.H.Wire.Restores.Count == 2 &&
+            // , E8 restore clarification (owner-decisions.md:134): absence after
+            // Started is neither success nor replay authority; an unverified restore stays Uncertain.
+            var expectedStatus = userRemoved && !settleWasDurable
+                ? FolderTreeStatus.Uncertain : FolderTreeStatus.Completed;
+            Require(resumed.Single().Status == expectedStatus && rig.H.Wire.Restores.Count == 2 &&
                 rig.H.Wire.Restores.Count(p => p == first) == 1,
                 "resume restores only the unopened second candidate, never the completed first effect");
             if (userRemoved) Require(await rig.B.ObserveAsync(first, CancellationToken.None) is null,
@@ -146,6 +150,13 @@ internal static partial class DropboxChecks
         var item = (await rig.B.ObserveAsync("big/f0.txt", CancellationToken.None))!;
         rig.H.Wire.DeleteWriteRefusals[item.Path] = 2;
         var action = DeleteAction(item.Path, item);
+        // Rule 6 needs a trusted, now-absent source before it can reach the scripted throttle.
+        rig.A.DropboxHashes = true;
+        var source = rig.A.Seed(item.Path, "content 0");
+        var adopt = action with { ActionId = "adopt-throttle", Kind = ActionKind.Adopt, Source = source };
+        rig.Store.CommitResult("p1", 1, adopt, new ActionResult(adopt.ActionId, Outcome.Done, source, item, null, null));
+        await rig.A.DeleteAsync(action with { Target = Side.A, ExpectedTarget = source }, default);
+        Require(rig.Store.Baselines("p1").Count == 1, "throttle fixture has a confirmed source identity baseline");
         var results = await rig.ApplyAsync(new Plan("p1", 1, [action], []));
         Require(results.Single().Outcome == Outcome.Skipped &&
             results.Single().Reason!.Contains("throttled", StringComparison.OrdinalIgnoreCase) &&

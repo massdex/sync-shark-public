@@ -18,12 +18,16 @@ internal static partial class RunChecks
         };
         using var deadline = new CancellationTokenSource(GateTimeout);
         var plan = await fx.Run().PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), deadline.Token);
+        // RQ-150: explicitly exercise the bounded merged lane, not the direct executor path.
+        plan = plan with { Actions = plan.Actions.Where(action => action.Path == "ordinary.txt").ToArray(),
+            HeldDeletions = [new HeldDeletion("held.txt", Side.A)] };
         var executor = new BufferedResultProbe(settings.ResultBufferCapacity);
         var run = new SyncRun(fx.Store, executor, fx.Provider, settings, TimeProvider.System);
         using var progress = new PausedApplyProgress();
         var applying = Task.Run(() => run.ApplyAsync(fx.Pair.PairId, plan, progress, deadline.Token, ReviewedHeld(plan)));
         try
         {
+            await evidence.Started.Task.WaitAsync(deadline.Token);
             await progress.Paused.Task.WaitAsync(deadline.Token);
             await executor.Saturated.Task.WaitAsync(deadline.Token);
             var exceeded = false;
@@ -46,7 +50,7 @@ internal static partial class RunChecks
         public ManualResetEventSlim Release { get; } = new(false);
         public void Report(RunProgress value)
         {
-            if (value.Phase != RunPhases.Applying || value.Done == 0 || !Paused.TrySetResult()) return;
+            if (value.Phase != RunPhases.Applying || value.Path != "ordinary.txt" || !Paused.TrySetResult()) return;
             if (!Release.Wait(GateTimeout)) throw new TimeoutException("result consumer was not released");
         }
         public void Dispose() => Release.Dispose();

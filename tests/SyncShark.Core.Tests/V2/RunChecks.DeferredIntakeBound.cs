@@ -152,7 +152,9 @@ internal static partial class RunChecks
             var anchor = new ItemState("Anchor", ItemKind.File, "anchor-object", null, new string('b', 64),
                 1, DateTimeOffset.UnixEpoch, ItemFlags.None);
             SeedRoot(store, pair.A, Side.A, [anchor]);
-            store.DeferPlanning(pair.PairId, new[] { (pair.B.RootId, aliases[0]) });
+            // 9f22aed0 reserves one slot for the queued spelling before reading current aliases.
+            // Use a distinct former spelling so this exact-cap fixture contains 1024 unique paths.
+            store.DeferPlanning(pair.PairId, new[] { (pair.B.RootId, aliases[0] with { Path = "Former/alias" }) });
             var page = store.AdmitDeferredPlanning(pair.PairId, DeferredVersions(folder).Values.Max() + 1);
             Require(page.Count == 1 && page[0].Paths.Count == DeferredIntakePaths && !page[0].AllAliases,
                 "an entity with more aliases than the run budget is admitted bounded and flagged partial");

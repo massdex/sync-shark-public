@@ -46,7 +46,7 @@ internal static partial class ExecutorChecks
         var writer = new DropboxWriter(Pair().B, Side.B, UploadSafetyClient(http, new FixedTokenSource()), "unused", isStateDamage: StorageFailureClassifier.IsStateDamage, settings);
         wire.SeedFile("delete-restart", "old");
         var victim = (await writer.ObserveAsync("delete-restart", default))!;
-        var source = new FakeEndpoint(Side.A, "ra");
+        var source = new FakeEndpoint(Side.A, "ra") { DropboxHashes = true };
         var original = source.Seed(victim.Path, "old");
         var action = Act(ActionKind.Delete, Side.B, victim.Path, expected: victim, rf: true, key: "delete-key", rule: 6);
         var folder = Path.Combine(root, "delete-job-" + Guid.NewGuid().ToString("N"));
@@ -57,6 +57,7 @@ internal static partial class ExecutorChecks
             var adopt = Act(ActionKind.Adopt, Side.B, victim.Path, source: original, expected: victim, key: "delete-key");
             store.RecordIntent("p1", adopt);
             store.CommitResult("p1", 1, adopt, new ActionResult(adopt.ActionId, Outcome.Done, original, victim, null, null));
+            Require(store.Baselines("p1").Count == 1, "delete restart fixture has a confirmed baseline");
             await RemoveSourceAsync(source, victim.Path);
             store.RecordIntent("p1", action);
             ProviderEffectContext.Current.Value = new ProviderEffectContext(checkpoint =>

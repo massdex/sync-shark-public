@@ -9,18 +9,23 @@ internal sealed class SqlitePlanProvenance : PlanProvenance
     private readonly TextWriter _output;
     private readonly object _gate = new();
     private SqliteTransaction? _transaction;
+    private readonly int _transactionBatchSize;
+    private SqliteCommand? _claim;
     private int _pending;
     private int _run;
     private string _scope = "Touched";
-    internal SqlitePlanProvenance(string database, TextWriter output)
+    internal SqlitePlanProvenance(string database, TextWriter output,
+        int transactionBatchSize = V2Settings.DefaultProvenanceBatchRows)
     {
         try
         {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(transactionBatchSize);
+            _transactionBatchSize = transactionBatchSize;
             _output = output;
             using (new FileStream(database, FileMode.CreateNew, FileAccess.Write, FileShare.None)) { }
             _db = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = database, Pooling = false }.ToString());
             _db.Open();
-            Execute("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; CREATE TABLE visibility(side TEXT,path TEXT,hidden INTEGER,reason TEXT,PRIMARY KEY(side,path)) WITHOUT ROWID; CREATE TABLE claims(kind TEXT,path TEXT,PRIMARY KEY(kind,path)) WITHOUT ROWID; CREATE TABLE rejected(kind TEXT,path TEXT,side TEXT,PRIMARY KEY(kind,path,side)) WITHOUT ROWID; CREATE TABLE emitted(id TEXT PRIMARY KEY) WITHOUT ROWID; CREATE TABLE decided(id TEXT PRIMARY KEY,baseline INTEGER,scope TEXT,ha TEXT,ra TEXT,hb TEXT,rb TEXT) WITHOUT ROWID;");
+            Execute("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=FILE; PRAGMA temp.cache_size=-2048; CREATE TABLE visibility(side TEXT,path TEXT,hidden INTEGER,reason TEXT,PRIMARY KEY(side,path)) WITHOUT ROWID; CREATE TABLE claims(kind TEXT,path TEXT); CREATE TABLE rejected(kind TEXT,path TEXT,side TEXT,PRIMARY KEY(kind,path,side)) WITHOUT ROWID; CREATE TABLE emitted(id TEXT PRIMARY KEY) WITHOUT ROWID; CREATE TABLE decided(id TEXT PRIMARY KEY,baseline INTEGER,scope TEXT,ha TEXT,ra TEXT,hb TEXT,rb TEXT) WITHOUT ROWID;");
             Row("run", "kind", "rule", "targetSide", "baselinePresent", "sourcePath", "destinationPath", "scope", "hiddenA", "reasonA", "hiddenB", "reasonB");
 
         }
@@ -41,17 +46,13 @@ internal sealed class SqlitePlanProvenance : PlanProvenance
         try
         {
             var batch = !sql.StartsWith("PRAGMA", StringComparison.Ordinal);
-            if (batch) _transaction ??= _db.BeginTransaction();
             var command = _db.CreateCommand();
             Exception? cleanupPrimary0 = null;
             try
             {
                 command.CommandText = sql;
-                command.Transaction = _transaction;
                 foreach (var entry in parameters) command.Parameters.AddWithValue(entry.Name, entry.Value);
-                var changed = command.ExecuteNonQuery();
-                if (batch && ++_pending >= 5000) Flush();
-                return changed;
+                return Execute(command, batch);
 
             }
             catch (Exception cleanupError) { cleanupPrimary0 = cleanupError; throw; }
@@ -60,6 +61,15 @@ internal sealed class SqlitePlanProvenance : PlanProvenance
         catch (SqliteException error) when (StoreSchema.IsDamaged(error))
         { throw new StateDamagedException($"v2 state is damaged: {error.Message}", error); }
     }
+    private int Execute(SqliteCommand command, bool batch = true)
+    {
+        if (batch) _transaction ??= _db.BeginTransaction();
+        command.Transaction = _transaction;
+        var changed = command.ExecuteNonQuery();
+        if (batch && ++_pending >= _transactionBatchSize) Flush();
+        return changed;
+    }
+
     private void Flush()
     {
         try
@@ -88,7 +98,26 @@ internal sealed class SqlitePlanProvenance : PlanProvenance
     }
     internal override void Claim(string kind, ItemState item)
     {
-        lock (_gate) Execute("INSERT OR IGNORE INTO claims VALUES($k,$p)", ("$k", kind), ("$p", item.ObjectId + ":" + PathKey.Of(item.Path)));
+        lock (_gate)
+        {
+            SqliteStateStore.DamageBoundary(() =>
+            {
+                if (_claim is null)
+                {
+                    // Append in rowid order; deduplicate on the disk-backed summary sort,
+                    // not by random b-tree insertion on the planner's critical path.
+                    _claim = _db.CreateCommand();
+                    _claim.CommandText = "INSERT INTO claims VALUES($k,$p)";
+                    _claim.Parameters.Add("$k", SqliteType.Text);
+                    _claim.Parameters.Add("$p", SqliteType.Text);
+                    _claim.Transaction = _transaction;
+                    _claim.Prepare();
+                }
+                _claim.Parameters["$k"].Value = kind;
+                _claim.Parameters["$p"].Value = item.ObjectId + ":" + PathKey.Of(item.Path);
+                Execute(_claim);
+            });
+        }
     }
     internal override void Rejected(SyncAction action, string reason)
     {
@@ -198,7 +227,7 @@ internal sealed class SqlitePlanProvenance : PlanProvenance
                 Exception? cleanupPrimary5 = null;
                 try
                 {
-                    command.CommandText = "SELECT 'raw-same-path-pairs',COUNT(*) FROM visibility a JOIN visibility b ON a.path=b.path AND a.side='A' AND b.side='B' UNION ALL SELECT 'both-hidden',COUNT(*) FROM visibility a JOIN visibility b ON a.path=b.path AND a.side='A' AND b.side='B' WHERE a.hidden=1 AND b.hidden=1 UNION ALL SELECT 'one-visible:A:opposite-'||COALESCE(b.reason,'absent-in-raw-scope'),COUNT(*) FROM visibility a LEFT JOIN visibility b ON a.path=b.path AND b.side='B' WHERE a.side='A' AND a.hidden=0 AND (b.path IS NULL OR b.hidden=1) GROUP BY 1 UNION ALL SELECT 'one-visible:B:opposite-'||COALESCE(a.reason,'absent-in-raw-scope'),COUNT(*) FROM visibility b LEFT JOIN visibility a ON a.path=b.path AND a.side='A' WHERE b.side='B' AND b.hidden=0 AND (a.path IS NULL OR a.hidden=1) GROUP BY 1 UNION ALL SELECT 'claims:'||kind,COUNT(*) FROM claims GROUP BY kind UNION ALL SELECT 'CopyNew-rejected:'||kind,COUNT(*) FROM rejected GROUP BY kind";
+                    command.CommandText = "SELECT 'raw-same-path-pairs',COUNT(*) FROM visibility a JOIN visibility b ON a.path=b.path AND a.side='A' AND b.side='B' UNION ALL SELECT 'both-hidden',COUNT(*) FROM visibility a JOIN visibility b ON a.path=b.path AND a.side='A' AND b.side='B' WHERE a.hidden=1 AND b.hidden=1 UNION ALL SELECT 'one-visible:A:opposite-'||COALESCE(b.reason,'absent-in-raw-scope'),COUNT(*) FROM visibility a LEFT JOIN visibility b ON a.path=b.path AND b.side='B' WHERE a.side='A' AND a.hidden=0 AND (b.path IS NULL OR b.hidden=1) GROUP BY 1 UNION ALL SELECT 'one-visible:B:opposite-'||COALESCE(a.reason,'absent-in-raw-scope'),COUNT(*) FROM visibility b LEFT JOIN visibility a ON a.path=b.path AND a.side='A' WHERE b.side='B' AND b.hidden=0 AND (a.path IS NULL OR a.hidden=1) GROUP BY 1 UNION ALL SELECT 'claims:'||kind,COUNT(DISTINCT path) FROM claims GROUP BY kind UNION ALL SELECT 'CopyNew-rejected:'||kind,COUNT(*) FROM rejected GROUP BY kind";
                     var reader = command.ExecuteReader();
                     Exception? cleanupPrimary6 = null;
                     try
@@ -235,7 +264,7 @@ internal sealed class SqlitePlanProvenance : PlanProvenance
             Exception? primary = null;
             try { Flush(); }
             catch (Exception error) { primary = error; throw; }
-            finally { SqliteStateStore.DisposePreserving(primary, _transaction, _db); }
+            finally { SqliteStateStore.DisposePreserving(primary, _claim, _transaction, _db); }
         }
     }
 }
