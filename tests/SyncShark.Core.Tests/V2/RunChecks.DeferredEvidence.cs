@@ -260,6 +260,9 @@ internal static partial class RunChecks
             "tokenless item evidence cancellation is durable retry work, not caller cancellation or a proven outage");
         Require(fx.WriterA.Puts == 1 && await fx.A.ObserveAsync("ordinary.txt", deadline.Token) is not null,
             "evidence cancellation never cancels the ordinary executor");
+        Require(report.Deferred == 1 && report.Done == 1 && report.Outcome == "partial" &&
+            report.ReviewedDeletionEvidencePendingCount == 1,
+            "only the ordinary download counts as done; unanswered held evidence remains deferred after first-sync completion");
         Require(!report.CompletionFailed && !report.AttemptFailed &&
             fx.Store.SyncRetryAt(fx.Pair.PairId, string.Empty) is null &&
             !fx.Store.UnresolvedNotices(fx.Pair.PairId).Any(notice => notice.ReasonKey == "run-unavailable"),

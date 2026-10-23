@@ -303,6 +303,9 @@ public sealed partial class SyncRun
             .GroupBy(action => action.ActionId).Select(group => group.Last())
             .ToLookup(action => action.Path, StringComparer.OrdinalIgnoreCase);
         var reasons = FailureReasons(plan, tally);
+        var oldEvidenceRetries = (held.Count == 0 ? Enumerable.Empty<Notice>() : _store.UnresolvedNotices(pair.PairId))
+            .Where(notice => notice.ReasonKey == "sync-retry" && held.ContainsKey(notice.Path))
+            .ToLookup(notice => notice.Path, StringComparer.OrdinalIgnoreCase);
         foreach (var path in pending.Concat(unconfirmed).Concat(blocked)
             .Concat(plan.Actions.Where(action => action.Kind != ActionKind.Hold && !tally.WasSettled(action.ActionId))
                 .Select(action => action.Path)).Distinct(StringComparer.OrdinalIgnoreCase))
@@ -343,6 +346,14 @@ public sealed partial class SyncRun
             // quota condition: the generic notice's Ignore cannot resolve the frozen original authority.
             if (conflictSuccessor is not null)
                 WriteNotices([ConflictCopyBlockedNotice(pair.PairId, conflictSuccessor, reason)]);
+            else if (held.ContainsKey(path) && !evidenceUnavailable)
+            {
+                foreach (var old in oldEvidenceRetries[path])
+                    if (old.NoticeId is not null) _store.CloseNotice(old.NoticeId, "evidence-pending");
+                WriteNotices([new Notice(pair.PairId, 4, NoticeKind.Info, path,
+                    "Deletion evidence is pending: " + reason +
+                    " Retry or Ignore this item; other files continue.", "deletion-evidence-pending")]);
+            }
             else if (reason != DropboxQuota.Detail && !(evidenceUnavailable && held.ContainsKey(path)))
                 WriteNotices([FailureRetryOwner.RetryNotice(pair.PairId, path, reason, failure.Attempts)]);
         }
