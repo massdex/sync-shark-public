@@ -10,7 +10,7 @@ internal static partial class StorageChecks
         var clock = new TestClock();
         var pair = Pair("p1") with { Excluded = ["Excluded"] };
         string excludedId, activeId;
-        using (var store = SqliteStateStore.Open(folder, Fast, clock))
+        using (var store = SqliteStateStore.Open(folder, Fast, clock, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(pair);
             store.AddNotices([new("p1", 40, NoticeKind.Info, "Excluded/item", "failed", "sync-retry"),
@@ -25,7 +25,7 @@ internal static partial class StorageChecks
             command.CommandText = "UPDATE notice SET state='closed',choice='ignore',closed_at=NULL; PRAGMA user_version=22;";
             command.ExecuteNonQuery();
         }
-        using (var store = SqliteStateStore.Open(folder, Fast, clock))
+        using (var store = SqliteStateStore.Open(folder, Fast, clock, LocalItems.CaptureOptionalHash))
         {
             Require(store.NoticeById("p1", excludedId) is { Closed: true }, "legacy excluded-path Ignore remains terminal");
             Require(store.NoticeById("p1", activeId) is { Closed: false } && store.OpenNotices("p1").Count == 0,

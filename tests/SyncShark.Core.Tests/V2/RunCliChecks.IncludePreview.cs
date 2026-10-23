@@ -23,7 +23,7 @@ internal static partial class RunCliChecks
         var root = TempRoot();
         try
         {
-            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(store: store);
             // Production local full scans have no provider revision-history API after history is forgotten.
             fx.A.ReportsDeletionHistory = false;
@@ -59,7 +59,7 @@ internal static partial class RunCliChecks
         var root = TempRoot();
         try
         {
-            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(store: store);
             foreach (var path in new[] { "again/survivor.txt", "again/clash.txt", "again/cloud-newer.txt", "outside.txt" })
             {
@@ -145,7 +145,7 @@ internal static partial class RunCliChecks
         var root = TempRoot();
         try
         {
-            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(store: store);
             var local = fx.A.Seed("again/x", "same");
             var remote = fx.B.Seed("again/x", "same");
@@ -168,7 +168,7 @@ internal static partial class RunCliChecks
                 "include reports and retains started-zero and uncertain intents for verification");
             var calls = fx.WriterA.Calls + fx.WriterB.Calls;
             var gen = store.BeginGeneration(fx.Pair.A.RootId, "include-reconcile-test");
-            var executor = new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+            var executor = new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
             // Pass stale in-memory actions from before include: durable metadata must win.
             var results = await executor.ReconcileAsync([delete, upload], gen,
                 fx.WriterA, fx.WriterB, CancellationToken.None);
@@ -203,7 +203,7 @@ internal static partial class RunCliChecks
         var root = TempRoot();
         try
         {
-            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(store: store);
             var time = DateTimeOffset.UtcNow.AddDays(-2);
             foreach (var path in new[] { "again/tie", "again/unknown", "baseline.txt" })
@@ -251,7 +251,7 @@ internal static partial class RunCliChecks
         const int affected = 300;
         try
         {
-            using (var store = SqliteStateStore.Open(root, Settings, TimeProvider.System))
+            using (var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 var fx = Build(store: store);
                 var excluded = fx.Pair with { Excluded = ["again"] };
@@ -271,7 +271,7 @@ internal static partial class RunCliChecks
                 Require(store.SavePairIncluded(included, included) == 0,
                     "repeating an include with no new scope never recounts retained intents");
             }
-            using (var reopened = SqliteStateStore.Open(root, Settings, TimeProvider.System))
+            using (var reopened = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 Require(reopened.UnresolvedIntents("p1").Count(a => a.SuppressReconciledBaseline) == affected,
                     "verification-only intent flags persist across SQLite reopen");

@@ -12,7 +12,7 @@ internal static partial class StorageChecks
         var both = F("other/both", "id:both", "33") with { Flags = ItemFlags.Link | ItemFlags.Placeholder };
         var ignored = F("ignored", "id:ignored", "44") with { Flags = ItemFlags.Ignored };
         var plain = F("plain", "id:plain", "55");
-        using (var store = SqliteStateStore.Open(folder, Fast, new TestClock()))
+        using (var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             store.SavePair(Pair("p1"));
             var gen = store.BeginGeneration("ra", "snapshot");
@@ -28,7 +28,7 @@ internal static partial class StorageChecks
         StorageDamage.RemoveFlaggedIndex(DbPath(folder));
         for (var reopen = 0; reopen < 2; reopen++)
         {
-            using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+            using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
             Require(store.Live("ra").Count == 5 && store.Baselines("p1").Count == 1 && store.Cursor("ra") == "cursor",
                 "index addition and repeated opens preserve live rows, baselines and cursors");
             Require(store.LiveFlagged("ra", ItemFlags.Link).Select(item => item.Path)
@@ -47,7 +47,7 @@ internal static partial class StorageChecks
         var repaired = StorageDamage.FlaggedIndexState(DbPath(folder));
         Require(repaired.Version == initial.Version && repaired.Sql.Contains("WHERE flags != 0"),
             "existing v6 regains the partial nonzero-flags index without a version bump");
-        using (var store = SqliteStateStore.Open(folder, Fast, new TestClock())) { }
+        using (var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash)) { }
         Require(StorageDamage.FlaggedIndexState(DbPath(folder)) == repaired,
             "index initialization is idempotent across repeated opens");
         Console.WriteLine("PASS HeldPerformance_FlaggedIndexExistingV6");

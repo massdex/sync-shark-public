@@ -9,6 +9,8 @@ internal static partial class RunCliChecks
         Cli_Choices_EquivalentShareDigest();
         Cli_Choices_HeldDeletionDigest();
         Cli_Choices_HeldDeletionReviewGuard();
+        await Cli_Choices_UnreviewedDeletesHeldAsync();
+        await Cli_Choices_ReviewedParentKeepsRetryAsync();
         await Cli_Choices_FailedPrepareAuthorizesNothingAsync();
         await Cli_Choices_MalformedPrepareAuthorizesNothingAsync();
         await Cli_Choices_UnreadablePrepareMeansPrepareAgainAsync();
@@ -323,7 +325,7 @@ internal static partial class RunCliChecks
             await Runtime(fx, root).PrepareFirstSyncAsync(fx.Pair.PairId, _ => { }, CancellationToken.None, copy);
             Require(File.Exists(record), "a legacy prepare record exists to import");
             using var store = SqliteStateStore.Open(Path.Combine(root, "state"), StorageChecks.Fast,
-                TimeProvider.System);
+                TimeProvider.System, LocalItems.CaptureOptionalHash);
             store.SavePair(fx.Pair);
             var reads = 0;
             var waits = new List<TimeSpan>();
@@ -506,17 +508,9 @@ internal static partial class RunCliChecks
                     partitioned.UnreviewedHeldDeletions.SequenceEqual([extra]),
                     "new held path, side, rule or descendant stays pending while reviewed work proceeds");
             }
-            FirstSyncChoicesState.RefuseUnreviewedDeletes(prepared, ["A:old.txt", "A:FOLDER", "B:x.txt"]);
             var reviewed = FirstSyncChoicesState.ReviewedDeleteKeys(prepared);
             Require(reviewed.SetEquals(["A:old.txt", "A:folder", "B:x.txt"]),
                 "execution review includes exact held local victims and existing reviewed deletes");
-            foreach (var victim in new[] { "B:folder", "A:folder/child.txt", "A:new.txt" })
-            {
-                var refused = false;
-                try { FirstSyncChoicesState.RefuseUnreviewedDeletes(prepared, [victim]); }
-                catch (SyncCliReviewException) { refused = true; }
-                Require(refused, "held approval does not authorize opposite side, descendants or new paths");
-            }
             var retained = FirstSyncChoicesState.Load(root, "held")!;
             Require(retained.HeldDeletions.SequenceEqual(held) && retained.Digest == prepared.Digest,
                 "shrinking current holds never mutates the retained list or digest");
@@ -524,6 +518,112 @@ internal static partial class RunCliChecks
         finally { Cleanup(root); }
         Console.WriteLine("PASS Cli_Choices_HeldDeletionReviewGuard");
     }
+
+    // Decision 54 addendum narrowed by 71/85: an unreviewed delete is held on its own item, never refused for the
+    // whole apply. The reviewed prepare showed only the folder itself, so the opposite side (B:folder), a descendant
+    // (A:folder/child.txt) and a path it never saw (A:new.txt) each keep both copies, one notice and durable held
+    // state, while unrelated reviewed work still completes and the apply is partial rather than a refusal.
+    private static async Task Cli_Choices_UnreviewedDeletesHeldAsync()
+    {
+        var fx = Build();
+        var ct = CancellationToken.None;
+        // Every victim also exists on the other endpoint: the hold must leave both surviving copies untouched.
+        fx.A.Seed("folder", "", ItemKind.Folder);
+        fx.B.Seed("folder", "", ItemKind.Folder);
+        fx.A.Seed("folder/child.txt", "same child");
+        fx.B.Seed("folder/child.txt", "same child");
+        fx.A.Seed("new.txt", "same new");
+        fx.B.Seed("new.txt", "same new");
+        fx.A.Seed("keep.txt", "independent reviewed work");
+        var run = fx.Run();
+        var plan = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), ct);
+        var bFolder = await fx.B.ObserveAsync("folder", ct);
+        var aChild = await fx.A.ObserveAsync("folder/child.txt", ct);
+        var aNew = await fx.A.ObserveAsync("new.txt", ct);
+        Require(bFolder is not null && aChild is not null && aNew is not null &&
+            plan.Actions.Any(action => action.Kind == ActionKind.CopyNew && action.Path == "keep.txt"),
+            "the fixture plans independent reviewed work beside every unreviewed victim");
+        var actions = plan.Actions.Concat(new[]
+        {
+            UnreviewedDelete("unreviewed-opposite-side", Side.B, "folder", bFolder),
+            UnreviewedDelete("unreviewed-descendant", Side.A, "folder/child.txt", aChild),
+            UnreviewedDelete("unreviewed-new-path", Side.A, "new.txt", aNew)
+        }).ToArray();
+        // The reviewed prepare listed only the folder itself; everything above is unreviewed.
+        var reviewed = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "A:folder" };
+        var report = await run.ApplyAsync(fx.Pair.PairId, plan with { Actions = actions },
+            new RecordingProgress(), ct, reviewed);
+        Require(report.Outcome == RunOutcomes.Partial,
+            "unreviewed deletes leave the apply partial, never a refusal");
+        Require(fx.WriterB.Puts == 1 && await fx.B.ObserveAsync("keep.txt", ct) is not null,
+            "unrelated reviewed copy completes in the same apply");
+        foreach (var path in new[] { "folder", "folder/child.txt", "new.txt" })
+        {
+            Require(await fx.A.ObserveAsync(path, ct) is not null && await fx.B.ObserveAsync(path, ct) is not null,
+                "unreviewed victim " + path + " remains on both endpoints");
+            Require(fx.Store.SyncRetryAt(fx.Pair.PairId, path) is not null,
+                "unreviewed victim " + path + " keeps durable held state");
+            Require(fx.Store.UnresolvedNotices(fx.Pair.PairId).Count(notice => notice.Path == path) == 1,
+                "unreviewed victim " + path + " has exactly one notice");
+        }
+        // Later success: both copies agree on every victim. Mark the held work due and let ordinary sync adopt it;
+        // each path must retire independently, close its one notice and delete nothing.
+        foreach (var path in new[] { "folder", "folder/child.txt", "new.txt" })
+        {
+            var retry = fx.Store.SyncRetryAt(fx.Pair.PairId, path)!;
+            fx.Store.SaveSyncRetry(fx.Pair.PairId, retry with { RetryAfter = DateTimeOffset.MinValue });
+        }
+        // Re-publishing the still-open explanation keeps the same open notice, never a second one.
+        fx.Store.AddNotices(fx.Store.UnresolvedNotices(fx.Pair.PairId).ToArray());
+        Require(fx.Store.UnresolvedNotices(fx.Pair.PairId).Count(notice => notice.ReasonKey == "sync-retry") == 3,
+            "repeated publication keeps exactly one open notice per held path");
+        await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), ct);
+        Require(fx.WriterA.Deletes == 0 && fx.WriterB.Deletes == 0,
+            "later success never deletes a previously held victim");
+        foreach (var path in new[] { "folder", "folder/child.txt", "new.txt" })
+        {
+            Require(fx.Store.SyncRetryAt(fx.Pair.PairId, path) is null,
+                "later success retires the held retry for " + path + " independently");
+            Require(!fx.Store.UnresolvedNotices(fx.Pair.PairId).Any(notice => notice.Path == path),
+                "later success closes the one notice for " + path + " independently");
+            Require(await fx.A.ObserveAsync(path, ct) is not null && await fx.B.ObserveAsync(path, ct) is not null,
+                "later success adopts both matching copies for " + path + " without deleting either");
+        }
+        Console.WriteLine("PASS Cli_Choices_" + "UnreviewedDeletesHeld");
+    }
+
+    private static async Task Cli_Choices_ReviewedParentKeepsRetryAsync()
+    {
+        var fx = Build();
+        var ct = CancellationToken.None;
+        foreach (var endpoint in new[] { fx.A, fx.B })
+        {
+            endpoint.Seed("folder", "", ItemKind.Folder);
+            endpoint.Seed("folder/child.txt", "retained");
+        }
+        var run = fx.Run();
+        var plan = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), ct);
+        var folder = await fx.A.ObserveAsync("folder", ct);
+        // Exercise the general authority hold, not the separate grown explicit-remove choice branch.
+        var deletion = UnreviewedDelete("reviewed-parent", Side.A, "folder", folder) with
+            { ChoiceRemove = false, DescendantsPlanned = false };
+        var report = await run.ApplyAsync(fx.Pair.PairId, plan with { Actions = plan.Actions.Append(deletion).ToArray() },
+            new RecordingProgress(), ct, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "A:folder" });
+        Require(report.Outcome == RunOutcomes.Partial && fx.WriterA.Deletes == 0 && fx.WriterB.Deletes == 0,
+            "an unreviewed child holds the reviewed parent without deleting anything");
+        foreach (var path in new[] { "folder", "folder/child.txt" })
+            Require(fx.Store.SyncRetryAt(fx.Pair.PairId, path) is not null &&
+                await fx.A.ObserveAsync(path, ct) is not null && await fx.B.ObserveAsync(path, ct) is not null,
+                "held parent and child retain retry work and both copies");
+        var notices = fx.Store.UnresolvedNotices(fx.Pair.PairId);
+        Require(notices.Count == 1 && notices[0].Path == "folder/child.txt" && notices[0].ReasonKey == "sync-retry",
+            "one child authority notice explains the hold without a false area-exclusion notice");
+        Console.WriteLine("PASS Cli_Choices_ReviewedParentKeepsRetry");
+    }
+
+    private static SyncAction UnreviewedDelete(string id, Side side, string path, ItemState? expected) =>
+        new(id, 32, ActionKind.Delete, side, path, null, null, expected, false, null)
+        { ChoiceRemove = true, FirstSyncChoice = true, DescendantsPlanned = true };
 
     private static string DigestOf(Fixture fx, string json) =>
         FirstSyncChoices.Digest(FirstSyncChoices.Parse(json, fx.Pair), []);

@@ -15,7 +15,7 @@ internal static partial class RunCliChecks
                 string? cursor;
                 var due = DateTimeOffset.UtcNow.AddHours(1);
                 var clock = new ReviewedRemovalRetryClock { Now = due.AddMinutes(-1) };
-                using (var store = SqliteStateStore.Open(state, Settings, TimeProvider.System))
+                using (var store = SqliteStateStore.Open(state, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
                 {
                     fx = Build(store: store);
                     fx.A.Seed("reviewed", "", ItemKind.Folder);
@@ -39,7 +39,7 @@ internal static partial class RunCliChecks
                     var child = target.Seed("reviewed/new.txt", "new during sleep");
                     target.Seed("reviewed/private/hidden.txt", "selectively excluded");
                     target.Seed("selective/hidden.txt", "unrelated exclusion");
-                    var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), fx.Provider, Settings, clock);
+                    var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), fx.Provider, Settings, clock);
                     var interrupted = false;
                     run.AfterReviewedRemovalObservationsForTest = () =>
                     {
@@ -59,12 +59,12 @@ internal static partial class RunCliChecks
                         store.SyncRetryAt(fx.Pair.PairId, "reviewed")!.RetryAfter == due,
                         "observation cannot bypass the unchanged removal deadline");
                 }
-                using (var reopened = SqliteStateStore.Open(state, Settings, TimeProvider.System))
+                using (var reopened = SqliteStateStore.Open(state, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
                 {
                     var targetRoot = side == Side.A ? fx.Pair.A.RootId : fx.Pair.B.RootId;
                     Require(reopened.Cursor(targetRoot) == cursor && reopened.DeferredPlanningDisplayPage(fx.Pair.PairId)
                         .Any(row => row.Path == "reviewed/new.txt"), "cold reopen retains both the old cursor and dirty child");
-                    var resumed = new SyncRun(reopened, new Executor(reopened, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), fx.Provider, Settings, clock);
+                    var resumed = new SyncRun(reopened, new Executor(reopened, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), fx.Provider, Settings, clock);
                     await resumed.IncrementalAsync(fx.Pair.PairId, new Progress<RunProgress>(), default);
                     Require(reopened.Live(targetRoot, ["reviewed/new.txt"]).Count == 1 &&
                         fx.WriterA.Deletes == 0 && fx.WriterB.Deletes == 0,

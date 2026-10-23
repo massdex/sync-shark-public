@@ -58,7 +58,7 @@ internal static class StorageExplicitRetryChecks
             expectedDue = fixture.Clock.NowMs + 20_000;
             Require(fixture.Due(0) == expectedDue, queue + ": shared owner applies second-attempt twenty-second delay");
         }
-        using var reopened = SqliteStateStore.Open(root, V2Settings.Default, new RetryClock());
+        using var reopened = SqliteStateStore.Open(root, V2Settings.Default, new RetryClock(), LocalItems.CaptureOptionalHash);
         using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
             { DataSource = SqliteStateStore.DatabasePath(root), Mode = SqliteOpenMode.ReadOnly }.ToString());
         connection.Open();
@@ -373,7 +373,7 @@ internal static class StorageExplicitRetryChecks
             if (Directory.Exists(root)) throw new InvalidOperationException("Use a fresh disposable retry fixture directory.");
             _root = root;
             _queue = queue;
-            Store = SqliteStateStore.Open(root, V2Settings.Default, Clock);
+            Store = SqliteStateStore.Open(root, V2Settings.Default, Clock, LocalItems.CaptureOptionalHash);
             var local = new RootDef("local", SyncProviders.Local, null, root, "id:local:00000001:0000000000000001");
             var remote = new RootDef("remote", SyncProviders.Dropbox, "account", "/Remote", "remote-root");
             Pair = new("pair", "Pair A", local, remote, [], [], true);

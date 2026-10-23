@@ -27,7 +27,7 @@ internal static partial class LocalJournalChecks
             null, null, 3, stamp, ItemFlags.None);
         var needs = new ItemState("needs-rehash.txt", ItemKind.File, SyncLocalEndpointStore.ObjectId(1, 12),
             null, hash, 3, stamp, ItemFlags.NeedsRehash);
-        using var store = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         store.SavePair(pair);
         var generation = store.BeginGeneration(root.RootId, "full");
         store.WriteSnapshot(new Snapshot(root.RootId, Side.A, generation, cursor, [proved, missing, needs], []));

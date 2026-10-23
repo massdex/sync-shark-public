@@ -15,10 +15,13 @@ internal static partial class DateRepair
         return pair.GetString() ?? throw new SyncCliUsageException("Audit pair is missing.");
     }
 
-    internal static async Task<DateRepairReport> RestoreAsync(SqliteStateStore store, PairDef pair, string audit,
-        string productRoot, bool dryRun, IReadOnlyList<string> productOwned, CancellationToken ct, Func<Exception, bool> isStateDamage, Func<Func<Task>, Task>? withPageLock = null)
+    internal static async Task<DateRepairReport> RestoreAsync(IStateStore store, PairDef pair, string audit,
+        string productRoot, bool dryRun, IReadOnlyList<string> productOwned, CancellationToken ct, Func<Exception, bool> isStateDamage,
+        Func<Exception, bool> isDirectStateDamage, Func<Func<Task>, Task>? withPageLock = null)
     {
         ArgumentNullException.ThrowIfNull(isStateDamage);
+        ArgumentNullException.ThrowIfNull(isDirectStateDamage);
+        var dates = (IDateRepairStore)store;
         if (AuditPair(audit) != pair.PairId) throw new SyncCliUsageException("Audit belongs to another pair.");
         var side = pair.A.Provider == SyncProviders.Local ? Side.A : Side.B;
         var localRoot = side == Side.A ? pair.A : pair.B;
@@ -73,7 +76,7 @@ internal static partial class DateRepair
                     throw new IOException("Baseline changed since repair.");
                 var local = store.Live(localRoot.RootId, [path]).SingleOrDefault()
                     ?? throw new IOException("Local inventory is missing.");
-                if (!includes(path) || SyncIgnorePolicy.IsIgnored(path, false, ignores) || store.DateRepairHeld(pair, baseline))
+                if (!includes(path) || SyncIgnorePolicy.IsIgnored(path, false, ignores) || dates.DateRepairHeld(pair, baseline))
                     throw new IOException("Excluded, ignored, held or quarantined.");
                 _ = PilotPath.NormalizeRelative(path);
                 var full = LocalItems.FullPath(localRoot.RootPath, path);
@@ -98,7 +101,7 @@ internal static partial class DateRepair
                 Record(example);
                 if (!dryRun)
                 {
-                    var observed = store.RepairDate(baseline, side, entry.OldUtc, time =>
+                    var observed = dates.RepairDate(baseline, side, entry.OldUtc, time =>
                     {
                         File.SetLastWriteTimeUtc(file.SafeFileHandle, time.UtcDateTime);
                         return new DateTimeOffset(File.GetLastWriteTimeUtc(file.SafeFileHandle), TimeSpan.Zero);
@@ -109,7 +112,7 @@ internal static partial class DateRepair
                 }
                 lock (logGate) if (examples.Count < 10) examples.Add(example);
             }
-            catch (Exception error) when (ItemFailure(error, isStateDamage) && error is not SyncCliUsageException)
+            catch (Exception error) when (ItemFailure(error, isStateDamage, isDirectStateDamage) && error is not SyncCliUsageException)
             {
                 Interlocked.Increment(ref skipped); Record(new { Path = path, Outcome = "skipped", Reason = error.Message });
             }
@@ -120,7 +123,7 @@ internal static partial class DateRepair
             {
                 if (JsonSerializer.Serialize(store.Pair(pair.PairId)) != JsonSerializer.Serialize(pair))
                     throw new IOException("Pair settings changed. Restart dates restore.");
-                store.PrepareDateRepair(pair.PairId);
+                dates.PrepareDateRepair(pair.PairId);
                 await Parallel.ForEachAsync(page, new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = ct },
                     async (line, _) => await ProcessLine(line)).ConfigureAwait(false);
             }

@@ -10,7 +10,7 @@ internal static partial class RunChecks
             Directory.CreateDirectory(folder);
             var product = Path.Combine(folder, "product");
             var export = Path.Combine(folder, "effects.csv");
-            using var store = SqliteStateStore.Open(product, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(product, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             fx.A.Seed("original.txt", "original");
             await FirstSyncAsync(fx.Run(), fx);
@@ -30,7 +30,7 @@ internal static partial class RunChecks
                     "zero bound admits no fresh endpoint effects");
                 Require(output.ToString().Contains("plan_bound_exceeded", StringComparison.Ordinal),
                     "CLI bound failure carries the explicit outcome");
-                using var reopened = SqliteStateStore.Open(product, Settings, TimeProvider.System);
+                using var reopened = SqliteStateStore.Open(product, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
                 Require(reopened.OpenNotices(fx.Pair.PairId).Count == 1,
                     "zero-bound CLI persists one review notice across store reopen");
             }

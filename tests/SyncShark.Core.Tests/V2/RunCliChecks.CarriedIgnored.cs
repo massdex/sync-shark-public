@@ -58,7 +58,7 @@ internal static partial class RunCliChecks
                         action.ActionId == folder.ActionId ? action with { DescendantsPlanned = descendantsPlanned } : action).ToArray() };
                     var calls = fx.WriterA.Calls + fx.WriterB.Calls;
                     var results = new List<ActionResult>();
-                    var executor = new Executor(fx.Store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+                    var executor = new Executor(fx.Store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
                     await foreach (var result in executor.ApplyAsync(guardedPlan, fx.WriterA, fx.WriterB, CancellationToken.None))
                         results.Add(result);
                     Require(results.Any(result => result.ActionId == folder.ActionId && result.Outcome == Outcome.Skipped &&
@@ -87,7 +87,7 @@ internal static partial class RunCliChecks
             var folder = plan.Actions.Single(action => action.Kind == ActionKind.Delete && action.Path == "folder");
             Require(folder.CarriedIgnoredBudget is { Files: 1 } budget && budget.Bytes == test.Size,
                 "trivial carried files remain in prepare budgets");
-            var executor = new Executor(fx.Store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+            var executor = new Executor(fx.Store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
             await foreach (var result in executor.ApplyAsync(plan, fx.WriterA, fx.WriterB, CancellationToken.None)) { }
             Require(fx.Store.OpenNotices(fx.Pair.PairId).Any(notice =>
                     notice.ReasonKey == "folder-delete-carried-ignored") == test.Notice,

@@ -57,7 +57,7 @@ internal static partial class RunChecks
     internal static async Task ProvenanceAsync()
     {
         var root = LocalChecks.FreshRoot("provenance");
-        using var store = SqliteStateStore.Open(Path.Combine(root, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         await CheckProvenancePortAsync(root, store);
         var fx = Build(suppliedStore: store);
         fx.A.Seed("same.txt", "same");

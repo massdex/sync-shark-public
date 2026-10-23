@@ -6,6 +6,9 @@ namespace Massdex.SyncShark.V2;
 /// </summary>
 public interface IFolderTreeDeleter
 {
+    string AuthorizeRestoreAgain(string providerState, string folderPath) =>
+        throw new NotSupportedException("This endpoint cannot authorize a folder restore.");
+
     /// <summary>
     /// Deletes each folder whole. <paramref name="scanCursor"/> is the change-feed cursor taken before the plan's
     /// scan. <paramref name="beforeSubmit"/> runs with the trees about to be sent, before any effect, so their intents

@@ -6,7 +6,7 @@ internal static class FilesOnDemandServiceChecks
     internal static async Task RunAsync(string root)
     {
         var clock = new OfflineClock();
-        using var store = SqliteStateStore.Open(root, V2Settings.Default, clock);
+        using var store = SqliteStateStore.Open(root, V2Settings.Default, clock, LocalItems.CaptureOptionalHash);
         var a = new RootDef("local", SyncProviders.Local, null, root, SyncLocalEndpointStore.ObjectId(1, 1));
         var b = new RootDef("remote", SyncProviders.Dropbox, "account", "/Remote", "remote-root");
         var pair = new PairDef("pair", "Pair A", a, b, [], [], true);
@@ -81,7 +81,7 @@ internal static class FilesOnDemandServiceChecks
 
     private static async Task CheckRefreshClassification(string root)
     {
-        using var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System);
+        using var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var a = new RootDef("local", SyncProviders.Local, null, root, SyncLocalEndpointStore.ObjectId(1, 1));
         var b = new RootDef("remote", SyncProviders.Dropbox, "account", "/Remote", "remote-root");
         var pair = new PairDef("pair", "Pair A", a, b, [], [], true);
@@ -122,7 +122,7 @@ internal static class FilesOnDemandServiceChecks
     private static async Task CheckSettlementSchedulingAsync(string root)
     {
         var clock = new OfflineClock();
-        using var store = SqliteStateStore.Open(root, V2Settings.Default, clock);
+        using var store = SqliteStateStore.Open(root, V2Settings.Default, clock, LocalItems.CaptureOptionalHash);
         var a = new RootDef("local", SyncProviders.Local, null, root, SyncLocalEndpointStore.ObjectId(1, 1));
         var b = new RootDef("remote", SyncProviders.Dropbox, "account", "/Remote", "remote-root");
         var pair = new PairDef("pair", "Pair A", a, b, [], [], true);
@@ -200,7 +200,7 @@ internal static class FilesOnDemandServiceChecks
     private static async Task CheckOfflinePairRaceAsync(string root)
     {
         var clock = new OfflineClock();
-        using var store = SqliteStateStore.Open(root, V2Settings.Default, clock);
+        using var store = SqliteStateStore.Open(root, V2Settings.Default, clock, LocalItems.CaptureOptionalHash);
         var a = new RootDef("local", SyncProviders.Local, null, root, SyncLocalEndpointStore.ObjectId(1, 1));
         var b = new RootDef("remote", SyncProviders.Dropbox, "account", "/Remote", "remote-root");
         var pair = new PairDef("pair", "Pair A", a, b, [], [], true);

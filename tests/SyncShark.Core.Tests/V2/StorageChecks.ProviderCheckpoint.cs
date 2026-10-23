@@ -14,7 +14,7 @@ internal static partial class StorageChecks
             ProviderEffect = new ProviderEffectCheckpoint("upload-session", "opaque-session-evidence", T0)
         };
         long gen;
-        using (var store = SqliteStateStore.Open(folder, Fast, new TestClock()))
+        using (var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             store.SavePair(Pair("p1"));
             gen = store.BeginGeneration("ra", "run");
@@ -24,7 +24,7 @@ internal static partial class StorageChecks
             store.RecordIntents("p1", [checkpointed]);
         }
 
-        using (var reopened = SqliteStateStore.Open(folder, Fast, new TestClock()))
+        using (var reopened = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             var persisted = reopened.UnresolvedIntents("p1").Single();
             Require(persisted == checkpointed,
@@ -35,7 +35,7 @@ internal static partial class StorageChecks
                 "an uncertain result retains its provider checkpoint");
         }
 
-        using (var reopened = SqliteStateStore.Open(folder, Fast, new TestClock()))
+        using (var reopened = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             var persisted = reopened.UnresolvedIntents("p1").Single();
             Require(persisted.ProviderEffect == checkpointed.ProviderEffect,
@@ -47,7 +47,7 @@ internal static partial class StorageChecks
                 "a done result closes the checkpointed intent");
         }
 
-        using (var reopened = SqliteStateStore.Open(folder, Fast, new TestClock()))
+        using (var reopened = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
             Require(reopened.UnresolvedIntents("p1").Count == 0 && reopened.Baselines("p1").Count == 1,
                 "the resolved intent stays closed and its baseline survives reopen");
     }

@@ -7,7 +7,7 @@ internal static partial class RunChecks
         foreach (var reason in new[] { PlanNotices.ContentUnconfirmed.Key, FreeSpaceRefusal.InsufficientReasonKey, "name-mapping-collision" })
         foreach (var kind in new[] { "deletion-evidence", "decision" })
         {
-            using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "held-notice-overlap-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "held-notice-overlap-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             fx.A.Seed("held.txt", "original");
             var remote = fx.B.Seed("held.txt", "original");
@@ -32,7 +32,7 @@ internal static partial class RunChecks
 
     private static async Task RemovalCorruptionPropagatesAsync()
     {
-        using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "removal-corrupt-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "removal-corrupt-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.Seed("folder", "", ItemKind.Folder);
         fx.A.SubtreeTransform = _ => throw new StateDamagedException("simulated storage corruption");
@@ -45,7 +45,7 @@ internal static partial class RunChecks
 
     private static async Task RemovalListingFailureAsync()
     {
-        using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "removal-list-failure-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "removal-list-failure-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         store.MarkFirstSyncDone(fx.Pair.PairId);
         IInventorySource unsupported = new ScriptedInventory(fx.A);
@@ -70,13 +70,13 @@ internal static partial class RunChecks
         for (var version = 13; version <= 17; version++)
         {
             var root = Path.Combine(Path.GetTempPath(), "removal-unsupported-schema-" + Guid.NewGuid().ToString("N"));
-            using (var store = SqliteStateStore.Open(root, Settings, TimeProvider.System)) { }
+            using (var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash)) { }
             using (var connection = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + SqliteStateStore.DatabasePath(root)))
             {
                 connection.Open();
                 StoreSchema.Execute(connection, null, $"DROP TABLE removal_review; PRAGMA user_version={version};");
             }
-            using (var migrated = SqliteStateStore.Open(root, Settings, TimeProvider.System)) { }
+            using (var migrated = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash)) { }
             using var check = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + SqliteStateStore.DatabasePath(root));
             check.Open();
             Require((long)StoreSchema.Scalar(check, null, "PRAGMA user_version;")! == StoreSchema.Version &&
@@ -87,13 +87,13 @@ internal static partial class RunChecks
         foreach (var present in new[] { false, true })
         {
             var root = Path.Combine(Path.GetTempPath(), "removal-migration-" + Guid.NewGuid().ToString("N"));
-            using (var store = SqliteStateStore.Open(root, Settings, TimeProvider.System)) { }
+            using (var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash)) { }
             using (var connection = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + SqliteStateStore.DatabasePath(root)))
             {
                 connection.Open();
                 StoreSchema.Execute(connection, null, (present ? "" : "DROP TABLE removal_review;") + "PRAGMA user_version=12;");
             }
-            using (var migrated = SqliteStateStore.Open(root, Settings, TimeProvider.System)) { }
+            using (var migrated = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash)) { }
             using var check = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + SqliteStateStore.DatabasePath(root));
             check.Open();
             Require((long)StoreSchema.Scalar(check, null, "PRAGMA user_version;")! == StoreSchema.Version,
@@ -107,7 +107,7 @@ internal static partial class RunChecks
     {
         foreach (var mode in new[] { "notice", "nested-pair", "link", "placeholder", "unverified", "incomplete", "unknown" })
         {
-            using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "removal-protected-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "removal-protected-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             fx.A.Seed("folder", "", ItemKind.Folder);
             fx.A.Seed("folder/keep", "", ItemKind.Folder);
@@ -143,7 +143,7 @@ internal static partial class RunChecks
 
     private static async Task RemovalListingOutsideGateAsync()
     {
-        using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "removal-gate-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "removal-gate-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         store.MarkFirstSyncDone(fx.Pair.PairId);
         fx.A.Seed("folder", "", ItemKind.Folder);
@@ -177,7 +177,7 @@ internal static partial class RunChecks
             var root = Path.Combine(Path.GetTempPath(), "removal-open-" + Guid.NewGuid().ToString("N"));
             PairDef pair;
             string generation;
-            using (var store = SqliteStateStore.Open(root, Settings, TimeProvider.System))
+            using (var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 var fx = Build(suppliedStore: store); pair = fx.Pair;
                 fx.A.Seed("folder", "", ItemKind.Folder);
@@ -190,7 +190,7 @@ internal static partial class RunChecks
                 if (mode == "roots") store.SavePair(pair with { A = pair.A with { RootPath = @"C:\replacement" } });
                 if (mode == "missing-notice") foreach (var n in store.OpenNotices(pair.PairId)) store.CloseNotice(n.NoticeId!, "dismiss");
             }
-            using var reopened = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var reopened = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             Require((reopened.ReadRemovalReview(pair, "folder") is not null) == (mode == "live"), "open retires orphaned reviews but preserves live review");
             using var connection = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + SqliteStateStore.DatabasePath(root));
             connection.Open();
@@ -213,7 +213,7 @@ internal static partial class RunChecks
         foreach (var mode in new[] { "ignore", "exclude", "content", "excluded", "unrelated", "side-b", "nested", "failed", "interrupt", "consumed", "stale", "stale-dismiss" })
         {
             var root = Path.Combine(Path.GetTempPath(), "removal-regression-" + Guid.NewGuid().ToString("N"));
-            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             var target = mode == "side-b" ? fx.B : fx.A;
             var writer = mode == "side-b" ? fx.WriterB : fx.WriterA;
@@ -297,7 +297,7 @@ internal static partial class RunChecks
     private static async Task RemovalReviewIndependentFoldersAsync()
     {
         var root = Path.Combine(Path.GetTempPath(), "removal-independent-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         store.MarkFirstSyncDone(fx.Pair.PairId);
         var run = fx.Run();

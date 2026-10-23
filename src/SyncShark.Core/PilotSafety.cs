@@ -9,125 +9,50 @@ namespace Massdex.SyncShark;
 
 public static class PilotPath
 {
-    private const FileAttributes RecallOnOpen = (FileAttributes)0x00040000;
-    private const FileAttributes RecallOnDataAccess = (FileAttributes)0x00400000;
 
     /// <summary>Extended-length form for native Windows opens; stored paths remain unchanged.</summary>
-    internal static string ToExtendedWindowsPath(string path)
-    {
-        var fullPath = Path.GetFullPath(path);
-        if (fullPath.StartsWith("\\\\?\\", StringComparison.Ordinal)) return fullPath;
-        return fullPath.StartsWith("\\\\", StringComparison.Ordinal)
-            ? "\\\\?\\UNC\\" + fullPath[2..]
-            : "\\\\?\\" + fullPath;
-    }
+    internal static string ToExtendedWindowsPath(string path) =>
+        V2.PathRules.ToExtendedWindowsPath(path);
 
-    public static string NormalizeRelative(string value)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(value);
-        var normalized = value.Replace('\\', '/').Trim('/');
-        if (normalized.Length == 0 || Path.IsPathRooted(normalized)) throw new ArgumentException("A relative path is required.", nameof(value));
-        var parts = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Any(part => part is "." or ".." || part.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 ||
-                              IsUnsupportedWindowsSegment(part)))
-            throw new ArgumentException("The relative path contains an unsafe segment.", nameof(value));
-        return string.Join('/', parts);
-    }
+    public static string NormalizeRelative(string value) =>
+        V2.PathRules.NormalizeRelative(value);
 
-    private static bool IsUnsupportedWindowsSegment(string value)
-    {
-        if (value.EndsWith(' ') || value.EndsWith('.')) return true;
-        var stem = value.Split('.', 2)[0];
-        return stem.Equals("CON", StringComparison.OrdinalIgnoreCase) ||
-               stem.Equals("PRN", StringComparison.OrdinalIgnoreCase) ||
-               stem.Equals("AUX", StringComparison.OrdinalIgnoreCase) ||
-               stem.Equals("NUL", StringComparison.OrdinalIgnoreCase) ||
-               stem.Length == 4 &&
-               (stem.StartsWith("COM", StringComparison.OrdinalIgnoreCase) ||
-                stem.StartsWith("LPT", StringComparison.OrdinalIgnoreCase)) &&
-               stem[3] is >= '1' and <= '9';
-    }
+
 
     public static string CanonicalComparisonKey(string value) =>
-        NormalizeRelative(value).Normalize(NormalizationForm.FormC).ToUpperInvariant();
+        V2.PathRules.CanonicalComparisonKey(value);
 
     // Metadata only. A provider may retain a name Windows cannot materialize. Such an
     // item must remain visible as blocked evidence, not abort its healthy siblings or
     // become proof of absence. NEVER use this method to authorize a filesystem effect.
-    internal static string NormalizeInventoryPath(string value)
-    {
-        ArgumentException.ThrowIfNullOrEmpty(value);
-        if (value.StartsWith('/') || value.Contains('\\') ||
-            value.Any(char.IsControl) || value.Split('/').Any(part => part.Length == 0 || part is "." or ".."))
-            throw new ArgumentException("Inventory metadata requires a contained relative provider path.", nameof(value));
-        return value;
-    }
+    internal static string NormalizeInventoryPath(string value) =>
+        V2.PathRules.NormalizeInventoryPath(value);
 
     // Provider-relative paths are not Windows paths: a colon is a filename character, not a drive.
     // This validator never authorizes a local filesystem operation.
-    internal static string NormalizeDropboxRelative(string value)
-    {
-        ArgumentException.ThrowIfNullOrEmpty(value);
-        if (value.StartsWith('/') || value.Contains('\\') || value.Any(char.IsControl) ||
-            value.Split('/').Any(part => part.Length == 0 || part is "." or ".."))
-            throw new ArgumentException("A contained relative Dropbox path is required.", nameof(value));
-        return value;
-    }
+    internal static string NormalizeDropboxRelative(string value) =>
+        V2.PathRules.NormalizeDropboxRelative(value);
 
     internal static string DropboxComparisonKey(string value) =>
-        NormalizeDropboxRelative(value).Normalize(NormalizationForm.FormC).ToUpperInvariant();
+        V2.PathRules.DropboxComparisonKey(value);
 
-    internal static bool IsWindowsTransferPath(string value)
-    {
-        try { return string.Equals(NormalizeRelative(value), value, StringComparison.Ordinal); }
-        catch (ArgumentException) { return false; }
-    }
+    internal static bool IsWindowsTransferPath(string value) =>
+        V2.PathRules.IsWindowsTransferPath(value);
 
-    public static string ResolveContainedPath(string root, string relativePath)
-    {
-        var normalizedRoot = NormalizeLocalRoot(root);
-        var normalizedRelative = NormalizeRelative(relativePath);
-        var combined = Path.GetFullPath(Path.Combine(normalizedRoot,
-            normalizedRelative.Replace('/', Path.DirectorySeparatorChar)));
-        if (!combined.StartsWith(normalizedRoot + Path.DirectorySeparatorChar,
-                StringComparison.OrdinalIgnoreCase))
-            throw new IOException("The relative path escapes the selected local root.");
-        return combined;
-    }
+    public static string ResolveContainedPath(string root, string relativePath) =>
+        V2.PathRules.ResolveContainedPath(root, relativePath);
 
-    public static bool IsPathInside(string root, string candidate)
-    {
-        var normalizedRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar,
-            Path.AltDirectorySeparatorChar);
-        var normalizedCandidate = Path.GetFullPath(candidate).TrimEnd(Path.DirectorySeparatorChar,
-            Path.AltDirectorySeparatorChar);
-        return normalizedCandidate.StartsWith(normalizedRoot + Path.DirectorySeparatorChar,
-            StringComparison.OrdinalIgnoreCase);
-    }
+    public static bool IsPathInside(string root, string candidate) =>
+        V2.PathRules.IsPathInside(root, candidate);
 
-    public static bool HasExactRelativePath(string root, string candidate, string expectedRelativePath)
-    {
-        if (!IsPathInside(root, candidate)) return false;
-        var observed = NormalizeRelative(Path.GetRelativePath(Path.GetFullPath(root),
-            Path.GetFullPath(candidate)));
-        return string.Equals(observed, NormalizeRelative(expectedRelativePath), StringComparison.Ordinal);
-    }
+    public static bool HasExactRelativePath(string root, string candidate, string expectedRelativePath) =>
+        V2.PathRules.HasExactRelativePath(root, candidate, expectedRelativePath);
 
-    public static string NormalizeTopLevelName(string value)
-    {
-        var normalized = NormalizeRelative(value);
-        if (normalized.Contains('/')) throw new ArgumentException("The legacy upload-only workflow accepts top-level files only.", nameof(value));
-        return normalized;
-    }
+    public static string NormalizeTopLevelName(string value) =>
+        V2.PathRules.NormalizeTopLevelName(value);
 
-    public static string NormalizeLocalRoot(string value)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(value);
-        var full = Path.GetFullPath(value).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        if (string.IsNullOrWhiteSpace(full) || string.Equals(full, Path.GetPathRoot(full)?.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase))
-            throw new ArgumentException("A bounded local folder below the volume root is required.", nameof(value));
-        return full;
-    }
+    public static string NormalizeLocalRoot(string value) =>
+        V2.PathRules.NormalizeLocalRoot(value);
 
     public static void RequireSeparatedFromProductState(string localRoot) =>
         RequireSeparatedFromProductState(localRoot, SyncSharkRuntimePaths.ProductRoot);
@@ -148,37 +73,26 @@ public static class PilotPath
         string.Equals(candidateAncestor, candidateChild, StringComparison.OrdinalIgnoreCase) ||
         candidateChild.StartsWith(candidateAncestor + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
 
-    public static string NormalizeDropboxRoot(string value)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(value);
-        var normalized = "/" + string.Join('/', value.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries));
-        if (normalized.Split('/', StringSplitOptions.RemoveEmptyEntries).Any(part => part is "." or ".."))
-            throw new ArgumentException("The Dropbox path contains an unsafe segment.", nameof(value));
-        return normalized;
-    }
+    public static string NormalizeDropboxRoot(string value) =>
+        V2.PathRules.NormalizeDropboxRoot(value);
 
-    public static string DropboxNamespaceRootIdentity(string rootNamespaceId)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(rootNamespaceId);
-        return "ns:" + rootNamespaceId.Trim();
-    }
+    public static string DropboxNamespaceRootIdentity(string rootNamespaceId) =>
+        V2.PathRules.DropboxNamespaceRootIdentity(rootNamespaceId);
 
     public static bool IsDropboxNamespaceRootIdentity(string? value) =>
-        !string.IsNullOrWhiteSpace(value) && value.StartsWith("ns:", StringComparison.Ordinal) && value.Length > 3;
+        V2.PathRules.IsDropboxNamespaceRootIdentity(value);
 
     public static bool IsDropboxFolderIdentity(string? value) =>
-        !string.IsNullOrWhiteSpace(value) &&
-        ((value.StartsWith("id:", StringComparison.Ordinal) && value.Length > 3) ||
-         IsDropboxNamespaceRootIdentity(value));
+        V2.PathRules.IsDropboxFolderIdentity(value);
 
     public static bool IsUnsafeAttributes(FileAttributes attributes) =>
-        (attributes & (FileAttributes.ReparsePoint | FileAttributes.Offline | RecallOnDataAccess | RecallOnOpen)) != 0;
+        V2.PathRules.IsUnsafeAttributes(attributes);
 
     public static bool IsOnlineOnlyAttributes(FileAttributes attributes) =>
-        (attributes & (FileAttributes.Offline | RecallOnDataAccess | RecallOnOpen)) != 0;
+        V2.PathRules.IsOnlineOnlyAttributes(attributes);
 
     /// <summary>IO_REPARSE_TAG_CLOUD (0x9000001A) and its sixteen IO_REPARSE_TAG_CLOUD_1..F variants (0x9000x01A).</summary>
-    public static bool IsCloudFilesReparseTag(uint tag) => (tag & 0xFFFF0FFFu) == 0x9000001Au;
+    public static bool IsCloudFilesReparseTag(uint tag) => V2.PathRules.IsCloudFilesReparseTag(tag);
 
     /// <summary>
     /// A Windows cloud-files placeholder (any provider, connected or not) whose content is fully on this device: a
@@ -187,8 +101,7 @@ public static class PilotPath
     /// junctions, mount points and every other tag stay unsafe.
     /// </summary>
     public static bool IsLocalCloudFilesObject(FileAttributes attributes, uint reparseTag) =>
-        (attributes & FileAttributes.ReparsePoint) != 0 && IsCloudFilesReparseTag(reparseTag) &&
-        !IsOnlineOnlyAttributes(attributes);
+        V2.PathRules.IsLocalCloudFilesObject(attributes, reparseTag);
 
     /// <summary>
     /// An online-only stub candidate OFFLINE / RECALL bits and a cloud tag or hidden reparse
@@ -197,30 +110,26 @@ public static class PilotPath
     /// becomes unreadable. Another tag (HSM etc.) is not a candidate.
     /// </summary>
     public static bool IsOnlineOnlyStub(FileAttributes attributes, uint reparseTag) =>
-        (attributes & FileAttributes.Directory) == 0 && IsOnlineOnlyAttributes(attributes) &&
-        ((attributes & FileAttributes.ReparsePoint) == 0 || IsCloudFilesReparseTag(reparseTag));
+        V2.PathRules.IsOnlineOnlyStub(attributes, reparseTag);
 
     /// <summary>A link that is never followed (decision 59): a junction or mount point, a symlink, or a WSL symlink.</summary>
-    public static bool IsLinkReparseTag(uint tag) => tag is 0xA0000003u or 0xA000000Cu or 0xA000001Du;
+    public static bool IsLinkReparseTag(uint tag) =>
+        V2.PathRules.IsLinkReparseTag(tag);
 
     /// <summary>A reparse point carrying a link tag (decision 59), whatever other attribute bits it has.</summary>
     public static bool IsLink(FileAttributes attributes, uint reparseTag) =>
-        (attributes & FileAttributes.ReparsePoint) != 0 && IsLinkReparseTag(reparseTag);
+        V2.PathRules.IsLink(attributes, reparseTag);
 
     /// <summary>
     /// The one classification order for an unsafe-looking listed item (core v2): a link first (a file symlink can carry
     /// OFFLINE/RECALL bits), then a fully local cloud placeholder, then an online-only file; anything else is None.
     /// </summary>
     public static ForeignObjectKind ClassifyForeign(FileAttributes attributes, uint reparseTag) =>
-        IsLink(attributes, reparseTag) ? ForeignObjectKind.Link
-        : IsLocalCloudFilesObject(attributes, reparseTag) ? ForeignObjectKind.LocalCloud
-        : (attributes & FileAttributes.Directory) == 0 && IsOnlineOnlyAttributes(attributes)
-            ? ForeignObjectKind.OnlineOnlyFile
-            : ForeignObjectKind.None;
+        V2.PathRules.ClassifyForeign(attributes, reparseTag);
 
     /// <summary><see cref="IsUnsafeAttributes"/> except a fully local cloud-files placeholder, which is safe.</summary>
     public static bool IsUnsafeObject(FileAttributes attributes, uint reparseTag) =>
-        IsUnsafeAttributes(attributes) && !IsLocalCloudFilesObject(attributes, reparseTag);
+        V2.PathRules.IsUnsafeObject(attributes, reparseTag);
 
     /// <summary>Unsafe attributes on a held object, except a fully local cloud-files placeholder .</summary>
     internal static bool IsUnsafeHandle(SafeFileHandle handle, FileAttributes attributes)
@@ -287,8 +196,6 @@ public static class PilotPath
         out FileAttributeTagInfo information, uint bufferSize);
 }
 
-/// <summary>How core v2 treats an unsafe-looking listed item (see PilotPath.ClassifyForeign).</summary>
-public enum ForeignObjectKind { None, Link, LocalCloud, OnlineOnlyFile }
 
 public sealed record PilotDirectoryIdentity(uint VolumeSerialNumber, ulong FileId);
 

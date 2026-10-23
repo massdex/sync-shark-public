@@ -26,7 +26,7 @@ internal static partial class RunChecks
                 "changed version or unverified baseline leaves historical arrival held");
         }
         var root = LocalChecks.FreshRoot("historical-recovery-authority");
-        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.DropboxHashes = fx.B.DropboxHashes = true;
         var gen = store.BeginGeneration(fx.Pair.A.RootId, "fixture");
@@ -49,7 +49,7 @@ internal static partial class RunChecks
     internal static async Task LocalStubRecoveryPolicyAsync()
     {
         var root = LocalChecks.FreshRoot("local-stub-recovery-policy");
-        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store, localLocal: true);
         fx.A.Seed("stub.txt", "stub metadata");
         fx.B.Seed("stub.txt", "readable source");
@@ -69,7 +69,7 @@ internal static partial class RunChecks
         foreach (var mode in new[] { "dry", "identical", "conflict", "conflict-apply", "opposite-dry", "opposite-apply", "apply", "copy", "failure", "no-version" })
         {
             var root = LocalChecks.FreshRoot("recovery-page-" + mode + "-" + Guid.NewGuid().ToString("N"));
-            using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             fx.A.DropboxHashes = fx.B.DropboxHashes = true;
             var bytes = Encoding.UTF8.GetBytes("retained bytes");
@@ -246,7 +246,7 @@ internal static partial class RunChecks
     private static async Task RecoveryBulkSelectionCheckAsync()
     {
         var root = LocalChecks.FreshRoot("recovery-bulk-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.DropboxHashes = fx.B.DropboxHashes = true;
         var bytes = Encoding.UTF8.GetBytes("retained bytes");
@@ -287,7 +287,7 @@ internal static partial class RunChecks
         foreach (var effectWritten in new[] { false, true })
         {
             var root = LocalChecks.FreshRoot("recovery-crash-" + Guid.NewGuid().ToString("N"));
-            using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             fx.A.DropboxHashes = fx.B.DropboxHashes = true;
             var bytes = Encoding.UTF8.GetBytes("retained bytes");
@@ -354,7 +354,7 @@ internal static partial class RunChecks
         foreach (var readyBeforeCrash in new[] { false, true })
         {
         var root = LocalChecks.FreshRoot("recovery-late-opposite-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.DropboxHashes = fx.B.DropboxHashes = true;
         var bytes = Encoding.UTF8.GetBytes("retained bytes");
@@ -422,7 +422,7 @@ internal static partial class RunChecks
     {
         {
             var root = LocalChecks.FreshRoot("recovery-absent-conflict-" + Guid.NewGuid().ToString("N"));
-            using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             fx.A.DropboxHashes = fx.B.DropboxHashes = true;
             var bytes = Encoding.UTF8.GetBytes("retained bytes");
@@ -461,7 +461,7 @@ internal static partial class RunChecks
         {
             var clock = new RecoveryClock(DateTimeOffset.UtcNow);
             var root = LocalChecks.FreshRoot("recovery-absent-expired-" + Guid.NewGuid().ToString("N"));
-            using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, clock);
+            using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, clock, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             fx.A.DropboxHashes = fx.B.DropboxHashes = true;
             var bytes = Encoding.UTF8.GetBytes("retained bytes");
@@ -494,7 +494,7 @@ internal static partial class RunChecks
             // day, so a fresh copy name would differ: Retry must reuse the notice's destination, not derive one.
             var clock = new RecoveryClock(DateTimeOffset.UtcNow);
             var root = LocalChecks.FreshRoot("recovery-absent-copy-retry-" + Guid.NewGuid().ToString("N"));
-            using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, clock);
+            using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, clock, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             fx.A.DropboxHashes = fx.B.DropboxHashes = true;
             var bytes = Encoding.UTF8.GetBytes("retained bytes");
@@ -529,7 +529,7 @@ internal static partial class RunChecks
             // freshly derived copy name would differ from the one the failed attempt froze.
             var clock = new RecoveryClock(DateTimeOffset.UtcNow);
             var root = LocalChecks.FreshRoot("recovery-absent-auto-copy-" + Guid.NewGuid().ToString("N"));
-            using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, clock);
+            using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, clock, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             fx.A.DropboxHashes = fx.B.DropboxHashes = true;
             var bytes = Encoding.UTF8.GetBytes("retained bytes");
@@ -562,7 +562,7 @@ internal static partial class RunChecks
     private static async Task RecoveryHashCasingCheckAsync()
     {
         var root = LocalChecks.FreshRoot("recovery-hash-case-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.DropboxHashes = fx.B.DropboxHashes = true;
         var bytes = Encoding.UTF8.GetBytes("retained bytes");
@@ -593,7 +593,7 @@ internal static partial class RunChecks
     private static async Task RecoveryLowSpaceKeepsOneRestoreNoticeAsync(bool upFront)
     {
         var root = LocalChecks.FreshRoot("recovery-low-space-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.DropboxHashes = fx.B.DropboxHashes = true;
         var bytes = Encoding.UTF8.GetBytes("retained bytes");
@@ -647,7 +647,7 @@ internal static partial class RunChecks
         foreach (var restoredSide in new[] { Side.A, Side.B })
         {
             var root = LocalChecks.FreshRoot("recovery-tombstone-" + Guid.NewGuid().ToString("N"));
-            using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             var source = new ItemState("restored.txt", ItemKind.File, "verified-restored-object", "restored-revision",
                 DropboxContentHash.Compute(Encoding.UTF8.GetBytes("original")), 8, DateTimeOffset.UnixEpoch, ItemFlags.None);
@@ -681,7 +681,7 @@ internal static partial class RunChecks
     private static void RecoveryPlanningSnapshotCheck()
     {
         var root = LocalChecks.FreshRoot("recovery-snapshot-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var pending = new Notice(fx.Pair.PairId, 0, NoticeKind.UserDecision, "Folder/file.txt", "pending",
             SyncRun.RecoveryRestorePending, ConflictOperation: new ConflictNoticeOperation("snapshot-recovery", null,

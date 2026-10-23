@@ -85,7 +85,8 @@ public sealed partial class SyncRun
                     sql.BeginPrefixHydration(root.RootId, ct);
                     var failures = await RehearsalEndpoints.HydrateAsync(inventory, dropbox, scopes, rows =>
                     {
-                        sql.StagePrefixHydration(root.RootId, rows, include);
+                        sql.StagePrefixHydration(root.RootId, rows.Where(row => include(row.Path))
+                        .Select(row => (row.Path, row.Entry is null ? null : DropboxItems.ToItem(row.Entry))).ToArray());
                         return Task.CompletedTask;
                     }, ct);
                     bool observed(string path) => include(path) && !DropboxPathIdentity.InScope(failures, path);

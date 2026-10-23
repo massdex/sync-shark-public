@@ -30,7 +30,7 @@ public sealed partial class ProductionEndpoints
         static PreviewSide Protect(PreviewSide scan, Func<string, bool> include) => scan with
         { Entries = scan.Entries.Select(entry => entry with { Held = entry.Held || !include(entry.Path) }).ToArray() };
         return SummarizeIncludePreview(pair.PairId, prefix, Protect(await a, includeA), Protect(await b, includeB),
-            PairInclude.IgnoreRules(pair));
+            _settings, PairInclude.IgnoreRules(pair), pair.A.Provider, pair.B.Provider, _time.GetUtcNow());
     }
 
     internal sealed record PreviewEntry(string Path, PilotEntryKind Kind, long Size, string? Hash, bool Held,
@@ -130,7 +130,8 @@ public sealed partial class ProductionEndpoints
     }
 
     internal static SyncCliIncludePreviewData SummarizeIncludePreview(string pairId, string prefix,
-        PreviewSide a, PreviewSide b, IReadOnlyList<SyncIgnoreRule>? ignores = null)
+        PreviewSide a, PreviewSide b, V2Settings settings, IReadOnlyList<SyncIgnoreRule>? ignores = null,
+        string? providerA = null, string? providerB = null, DateTimeOffset? observedAt = null)
     {
         var warnings = new List<string>();
         if (a.Warning is not null) warnings.Add("A: " + a.Warning);
@@ -138,6 +139,7 @@ public sealed partial class ProductionEndpoints
         var complete = a.Complete && b.Complete;
         if (!complete) warnings.Add("Incomplete inventory: observed counts are lower bounds; no one-sided absence claims are made.");
         warnings.Add("Metadata-only preview: equal sizes do not prove identical bytes. Content checks occur during ordinary sync.");
+        var observed = observedAt ?? DateTimeOffset.UtcNow;
         var examples = new List<SyncCliIncludePreviewExample>();
         var heldPaths = new HashSet<string>(StringComparer.Ordinal);
         var heldFolders = new HashSet<string>(StringComparer.Ordinal);
@@ -175,9 +177,38 @@ public sealed partial class ProductionEndpoints
             }
             return false;
         }
-        var observedAt = DateTimeOffset.UtcNow;
-        bool KnownTime(DateTimeOffset? value) => value is { } time &&
-            ModificationTime.IsPlausible(time, observedAt);
+        static ItemState ToItem(Side side, PreviewEntry entry) => new(entry.Path,
+            entry.Kind == PilotEntryKind.Directory ? ItemKind.Folder : ItemKind.File,
+            "preview:" + (side == Side.A ? "a:" : "b:") + PreviewKey(entry.Path), null, entry.Hash, entry.Size,
+            entry.ModifiedUtc ?? DateTimeOffset.MinValue, ItemFlags.None);
+        // One snapshot row per path; the Planner stays the single owner of every no-baseline decision
+        // (one-sided copy, adopt-identical, newest-wins, the tie window and held rows), so this preview
+        // cannot drift from ordinary sync and reads no tunable of its own.
+        var rows = new List<PlanRow>();
+        foreach (var key in aByPath.Keys.Union(bByPath.Keys, StringComparer.Ordinal))
+        {
+            aByPath.TryGetValue(key, out var left);
+            bByPath.TryGetValue(key, out var right);
+            // Protected rows and incomplete one-sided rows make no absence claim; both sides are marked
+            // unknown together so the Planner's own no-evidence guard cannot turn one into a copy.
+            if (Protected(key) || !complete && (left is null || right is null)) continue;
+            rows.Add(new PlanRow(null, left is null ? null : ToItem(Side.A, left),
+                right is null ? null : ToItem(Side.B, right), new Evidence(false, false, complete, complete)));
+        }
+        var plan = Planner.Decide(pairId, 0, rows, new PlanOptions(settings.TieWindow, false,
+            new LabelRule(settings.KeepBothLabelFormat, settings.KeepBothTimeFormat, TimeSpan.Zero, "A", "B"),
+            settings.MaxLabelAttempts)
+        { ObservedAt = observed, ProviderA = providerA, ProviderB = providerB });
+        var actionByKey = new Dictionary<string, SyncAction>(StringComparer.Ordinal);
+        foreach (var action in plan.Actions) actionByKey.TryAdd(PreviewKey(action.Path), action);
+        var noticeByKey = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var notice in plan.Notices)
+            if (notice.Rule == 30 && notice.Kind == NoticeKind.Info)
+                noticeByKey.TryAdd(PreviewKey(notice.Path), notice.ReasonKey);
+        // Rule 5 fires only for an implausible time or a within-window difference; both plausible means a tie.
+        bool BothTimesKnown(PreviewEntry? left, PreviewEntry? right) =>
+            left?.ModifiedUtc is { } leftTime && right?.ModifiedUtc is { } rightTime &&
+            ModificationTime.IsPlausible(leftTime, observed) && ModificationTime.IsPlausible(rightTime, observed);
         int copyA = 0, copyB = 0, newest = 0, ties = 0, folders = 0, identical = 0, held = 0;
         foreach (var key in aByPath.Keys.Union(bByPath.Keys, StringComparer.Ordinal))
         {
@@ -187,38 +218,50 @@ public sealed partial class ProductionEndpoints
             string action, reason;
             if (Protected(key) || !complete && (left is null || right is null))
             { held++; action = "held-unknown"; reason = "Unreadable, protected or incompletely inventoried; no absence inferred."; }
-            else if (left is null)
-            { copyB++; action = "copy-b-to-a"; reason = "One-sided item under ordinary no-baseline rules; never delete."; }
-            else if (right is null)
-            { copyA++; action = "copy-a-to-b"; reason = "One-sided item under ordinary no-baseline rules; never delete."; }
-            else if (left.Kind == PilotEntryKind.Directory && right.Kind == PilotEntryKind.Directory)
-            { folders++; action = "matching-folders"; reason = "Both folders exist; descendants are considered separately."; }
-            else if (left.Kind != right.Kind)
-            { held++; action = "held-unknown"; reason = "File/folder collision needs the ordinary planner's safe resolution."; }
-            else if (Content.SameContent(left.Size, left.Hash, right.Size, right.Hash) == true)
-            { identical++; action = "identical"; reason = "Matching size and content identity; no copy needed."; }
-            else if (Content.SameContent(left.Size, left.Hash, right.Size, right.Hash) == false)
+            else if (actionByKey.TryGetValue(key, out var planned))
             {
-                if (!KnownTime(left.ModifiedUtc) || !KnownTime(right.ModifiedUtc))
-                { held++; action = "held-unknown"; reason = "Different files, but a modification time is missing, a sentinel or implausibly in the future; no winner is guessed."; }
-                else if ((left.ModifiedUtc!.Value - right.ModifiedUtc!.Value).Duration() <= V2Settings.Default.TieWindow)
-                { ties++; action = "held-tie"; reason = "Different files within the tie window require a user decision; no automatic tie-breaker."; }
-                else
+                switch (planned.Kind)
                 {
-                    newest++;
-                    action = left.ModifiedUtc > right.ModifiedUtc ? "newest-a-to-b" : "newest-b-to-a";
-                    reason = "Different files with known modification times: the newer version wins on reinclude.";
+                    case ActionKind.Update when planned.Rule == 4:
+                        newest++;
+                        action = planned.Target == Side.B ? "newest-a-to-b" : "newest-b-to-a";
+                        reason = "Different files with known modification times: the newer version wins on reinclude.";
+                        break;
+                    case ActionKind.Adopt:
+                        if (planned.Source?.Kind == ItemKind.Folder)
+                        { folders++; action = "matching-folders"; reason = "Both folders exist; descendants are considered separately."; }
+                        else
+                        { identical++; action = "identical"; reason = "Matching size and content identity; no copy needed."; }
+                        break;
+                    case ActionKind.CopyNew:
+                    case ActionKind.MkDir:
+                        if (planned.Target == Side.B) { copyA++; action = "copy-a-to-b"; }
+                        else { copyB++; action = "copy-b-to-a"; }
+                        reason = "One-sided item under ordinary no-baseline rules; never delete.";
+                        break;
+                    case ActionKind.Hold when planned.Rule == 5:
+                        if (BothTimesKnown(left, right))
+                        { ties++; action = "held-tie"; reason = "Different files within the tie window require a user decision; no automatic tie-breaker."; }
+                        else
+                        { held++; action = "held-unknown"; reason = "Different files, but a modification time is missing, a sentinel or implausibly in the future; no winner is guessed."; }
+                        break;
+                    default:
+                        // Rule 14 and any future no-baseline hold: never infer absence or a winner here.
+                        held++; action = "held-unknown"; reason = "File/folder collision needs the ordinary planner's safe resolution.";
+                        break;
                 }
             }
-            else
+            else if (noticeByKey.TryGetValue(key, out var reasonKey) && reasonKey == PlanNotices.ContentUnconfirmed.Key)
             { held++; action = "content-check-needed"; reason = "Equal sizes without comparable hashes: content must be checked before declaring a difference or choosing a winner."; }
+            else
+            { held++; action = "held-unknown"; reason = "Unreadable, protected or incompletely inventoried; no absence inferred."; }
             if (examples.Count < IncludePreviewExampleLimit) examples.Add(new(path, action, reason));
         }
         return new(pairId, prefix, complete, a.Entries.Count, b.Entries.Count,
             new(copyA, copyB, 0, folders, identical, held, NewestWins: newest, HeldTies: ties), examples, warnings,
             ["Only excluded subtrees removed by this include request are inspected; already-included siblings are not scanned.",
              "Hypothetical reinclude preview, not an executable plan; existing baselines are not consulted.",
-             $"One-sided items copy; identical files adopt; known differing files use newest-wins. Differences within {V2Settings.Default.TieWindow.TotalSeconds:g} seconds are held ties; unknown times are held, never guessed.",
+             $"One-sided items copy; identical files adopt; known differing files use newest-wins. Differences within {settings.TieWindow.TotalSeconds:g} seconds are held ties; unknown times are held, never guessed.",
              "No deletes, deletion evidence, baseline writes, policy writes, file hydration or endpoint writers.",
              "Include removes exclusions at or below the requested path. Ignore rules, protected folders and artifacts remain held; this inventory is not effect authority.",
              $"At most {IncludePreviewEntryLimit:N0} entries per side and {IncludePreviewExampleLimit} examples are retained."]);

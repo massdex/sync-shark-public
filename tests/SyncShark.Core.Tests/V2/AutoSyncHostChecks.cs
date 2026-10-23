@@ -107,14 +107,14 @@ internal static class AutoSyncHostChecks
         Require(recovered.Detail.StartsWith(notice.Detail + "\n\n", StringComparison.Ordinal) &&
             recovered.Detail.Contains("simulated settings write failure", StringComparison.Ordinal),
             "SQLite recovery retains original why/fix text and appends the failure");
-        using var reopened = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
         Require(reopened.NoticeById("pair-1", notice.NoticeId!) is { Closed: false } saved &&
             saved.Notice.Detail == recovered.Detail, "recovery is durable in the real SQLite store");
     }
 
     private static SqliteStateStore OpenChoiceStore(string root)
     {
-        var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System);
+        var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
         store.SavePair(new PairDef("pair-1", "Pair A",
             new RootDef("ra", "Local", null, Path.Combine(root, "a"), "local-a"),
             new RootDef("rb", "Dropbox", "account-fixture", "/b", "remote-b"), [], [], true));

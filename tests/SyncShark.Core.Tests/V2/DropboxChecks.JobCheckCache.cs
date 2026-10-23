@@ -145,7 +145,7 @@ internal static partial class DropboxChecks
     private static async Task<IReadOnlyList<ActionResult>> ReconcileCheckedAsync(Harness h, DropboxWriter writer,
         IReadOnlyList<SyncAction> intents, IEndpointWriter? source = null)
     {
-        var executor = new Executor(h.Known, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor = new Executor(h.Known, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         return await executor.ReconcileAsync(intents, 1, source ?? writer, writer, CancellationToken.None)
             .WaitAsync(TimeSpan.FromSeconds(60));
     }

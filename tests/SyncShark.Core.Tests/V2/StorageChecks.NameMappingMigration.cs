@@ -7,7 +7,7 @@ internal static partial class StorageChecks
     public static void NameMappingMigration(string root)
     {
         var data = Path.Combine(root, "mapping-v6");
-        using (var store = SqliteStateStore.Open(data, Fast, new TestClock()))
+        using (var store = SqliteStateStore.Open(data, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             store.SavePair(Pair("p1"));
             var gen = store.BeginGeneration("rb", "snapshot");
@@ -23,7 +23,7 @@ internal static partial class StorageChecks
             StoreSchema.Execute(connection, null,
                 "DROP INDEX dir_mapped_key; DROP INDEX fs_refused; ALTER TABLE dir DROP COLUMN mapped_key; PRAGMA user_version=6;");
         }
-        using (var store = SqliteStateStore.Open(data, Fast, new TestClock()))
+        using (var store = SqliteStateStore.Open(data, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             Require(store.Live("rb").Count == 601, "v7 additive migration preserves every v6 entity");
             Require(store.DirectorySpellings("rb", "dir_599").Single() == "dir:599",

@@ -48,7 +48,7 @@ internal static class ConflictTransitionChecks
         Plan plan = null!;
         SyncAction forget = null!;
         SyncAction[] successors = [];
-        var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
+        var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         try
         {
             var gen = SeedBaseline(store, rig);
@@ -56,7 +56,7 @@ internal static class ConflictTransitionChecks
 
             rig.WriterA.PutFailure = FailConflictCopy;
             rig.WriterB.PutFailure = FailConflictCopy;
-            var results = await ApplyAsync(new Executor(store, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), plan, rig.WriterA, rig.WriterB);
+            var results = await ApplyAsync(new Executor(store, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), plan, rig.WriterA, rig.WriterB);
             Require(results.Count(result => result.Outcome == Outcome.Done) == 1 &&
                 results.Count(result => result.Outcome == Outcome.Failed) == 2,
                 "forget commits Done while both create-only successors fail before any copy exists");
@@ -76,7 +76,7 @@ internal static class ConflictTransitionChecks
             await rig.B.ObserveAsync(successors.Single(action => action.Target == Side.B).Path, CancellationToken.None) is null,
             "no conflict copy reached either endpoint before the restart");
 
-        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var run = NewRun(reopened, rig);
         var report = await run.IncrementalAsync(PairId, new RecordingProgress(), CancellationToken.None);
         Require(report.FailureCount == 0 && report.KeptBoth == 0, "the resumed create-only copies complete without new failures");
@@ -99,7 +99,7 @@ internal static class ConflictTransitionChecks
         Plan plan = null!;
         SyncAction forget = null!;
         SyncAction[] successors = [];
-        var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
+        var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         try
         {
             var gen = SeedBaseline(store, rig);
@@ -110,7 +110,7 @@ internal static class ConflictTransitionChecks
             var failedTarget = successors[0].Target;
             if (failedTarget == Side.A) rig.WriterA.PutFailure = FailConflictCopy;
             else rig.WriterB.PutFailure = FailConflictCopy;
-            var results = await ApplyAsync(new Executor(store, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), plan, rig.WriterA, rig.WriterB);
+            var results = await ApplyAsync(new Executor(store, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), plan, rig.WriterA, rig.WriterB);
             Require(results.Count(result => result.Outcome == Outcome.Done) == 2 &&
                 results.Count(result => result.Outcome == Outcome.Failed) == 1,
                 "forget and one conflict copy commit while the other successor fails");
@@ -125,7 +125,7 @@ internal static class ConflictTransitionChecks
             store.Dispose();
         }
 
-        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var putsBefore = rig.WriterA.Puts + rig.WriterB.Puts;
         var run = NewRun(reopened, rig);
         var report = await run.IncrementalAsync(PairId, new RecordingProgress(), CancellationToken.None);
@@ -147,7 +147,7 @@ internal static class ConflictTransitionChecks
         SyncAction forget = null!;
         SyncAction[] successors = [];
         ItemState occupant = null!;
-        var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
+        var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         try
         {
             var gen = SeedBaseline(store, rig);
@@ -158,7 +158,7 @@ internal static class ConflictTransitionChecks
 
             rig.WriterA.PutFailure = FailConflictCopy;
             rig.WriterB.PutFailure = FailConflictCopy;
-            await ApplyAsync(new Executor(store, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), plan, rig.WriterA, rig.WriterB);
+            await ApplyAsync(new Executor(store, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), plan, rig.WriterA, rig.WriterB);
             Require(store.UnresolvedIntents(PairId).Count == 2, "both successors remain unresolved before the restart");
         }
         finally
@@ -168,7 +168,7 @@ internal static class ConflictTransitionChecks
             store.Dispose();
         }
 
-        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var run = NewRun(reopened, rig);
         var report = await run.IncrementalAsync(PairId, new RecordingProgress(), CancellationToken.None);
         Require(report.KeptBoth == 0 && report.Uncertain >= 1, "the occupied successor stays pending, never retired as not applied");
@@ -225,14 +225,14 @@ internal static class ConflictTransitionChecks
     {
         var rig = NewRig("conflict-transition-resumed-failure");
         SyncAction[] successors;
-        using (var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var gen = SeedBaseline(store, rig);
             Plan plan;
             (plan, _, successors) = await ConflictPlanAsync(store, rig, gen, CancellationToken.None);
             rig.WriterA.PutFailure = FailConflictCopy;
             rig.WriterB.PutFailure = FailConflictCopy;
-            try { await ApplyAsync(new Executor(store, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), plan, rig.WriterA, rig.WriterB); }
+            try { await ApplyAsync(new Executor(store, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), plan, rig.WriterA, rig.WriterB); }
             finally
             {
                 rig.WriterA.PutFailure = null;
@@ -243,7 +243,7 @@ internal static class ConflictTransitionChecks
         }
         // The approved replay refreshes the current source, so fail the resumed write itself. The first failure
         // of the resumed create-only attempt must still carry the dedicated Retry-only notice.
-        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var run = NewRun(reopened, rig);
         rig.WriterA.PutFailure = FailConflictCopy;
         rig.WriterB.PutFailure = FailConflictCopy;
@@ -278,7 +278,7 @@ internal static class ConflictTransitionChecks
     private static async Task OrdinaryNotAppliedStaysSkippedAsync()
     {
         var rig = NewRig("conflict-transition-ordinary");
-        using (var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(rig.Pair);
             store.MarkFirstSyncDone(PairId);
@@ -287,9 +287,9 @@ internal static class ConflictTransitionChecks
                 null, source, null, false, PlanIds.ObjectKey(PairId, Side.A, source.ObjectId));
             store.RecordIntent(PairId, ordinary);
         }
-        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var gen = reopened.BeginGeneration(rig.Pair.A.RootId, "test");
-        var executor = new Executor(reopened, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor = new Executor(reopened, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         var results = await executor.ReconcileAsync(reopened.UnresolvedIntents(PairId), gen, rig.WriterA, rig.WriterB,
             CancellationToken.None);
         var result = results.Single();
@@ -304,7 +304,7 @@ internal static class ConflictTransitionChecks
     private static async Task TransitionRollbackAsync()
     {
         var rig = NewRig("conflict-transition-rollback");
-        using (var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var gen = SeedBaseline(store, rig);
             var (_, forget, successors) = await ConflictPlanAsync(store, rig, gen, CancellationToken.None);
@@ -316,7 +316,7 @@ internal static class ConflictTransitionChecks
             catch (InvalidOperationException) { failed = true; }
             Require(failed, "transition failure is injected after the first successor insert");
         }
-        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         Require(reopened.Baselines(PairId, [SharedKey]).Count == 1 && reopened.UnresolvedIntents(PairId).Count == 0,
             "cold reopen after transaction rollback retains correspondence and neither successor");
     }
@@ -325,7 +325,7 @@ internal static class ConflictTransitionChecks
     {
         var rig = NewRig("conflict-transition-unknown-copy");
         SyncAction successor;
-        using (var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var gen = SeedBaseline(store, rig);
             var (_, forget, successors) = await ConflictPlanAsync(store, rig, gen, CancellationToken.None);
@@ -333,8 +333,8 @@ internal static class ConflictTransitionChecks
             successor = successors.Single(action => action.Target == Side.B);
             rig.B.Seed(successor.Path, "edit-a", versionId: "landed-copy");
         }
-        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
-        var result = (await new Executor(reopened, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage).ReconcileAsync([successor],
+        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
+        var result = (await new Executor(reopened, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException).ReconcileAsync([successor],
             reopened.BeginGeneration(rig.Pair.A.RootId, "test"), rig.WriterA, new HashlessWriter(rig.WriterB), CancellationToken.None)).Single();
         Require(result.Outcome == Outcome.Uncertain && rig.WriterB.Puts == 0,
             "hash-unknown possible completed copy stays verify-only, never Done or replayed");
@@ -357,7 +357,7 @@ internal static class ConflictTransitionChecks
     private static async Task PendingCheckpointDoesNotReplayAsync()
     {
         var rig = NewRig("conflict-transition-pending-checkpoint");
-        using (var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var gen = SeedBaseline(store, rig);
             var (_, forget, successors) = await ConflictPlanAsync(store, rig, gen, CancellationToken.None);
@@ -365,8 +365,8 @@ internal static class ConflictTransitionChecks
             foreach (var successor in successors)
                 store.RecordIntent(PairId, successor with { ProviderEffect = new("upload-commit", "session", DateTimeOffset.UtcNow) });
         }
-        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
-        var results = await new Executor(reopened, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage).ReconcileAsync(reopened.UnresolvedIntents(PairId),
+        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
+        var results = await new Executor(reopened, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException).ReconcileAsync(reopened.UnresolvedIntents(PairId),
             reopened.BeginGeneration(rig.Pair.A.RootId, "test"), rig.WriterA, rig.WriterB, CancellationToken.None);
         Require(results.All(result => result.Outcome == Outcome.Uncertain) && rig.WriterA.Puts + rig.WriterB.Puts == 0,
             "a checkpoint within the unknown-commit grace remains verify-only with no replay");
@@ -376,7 +376,7 @@ internal static class ConflictTransitionChecks
     {
         var rig = NewRig("conflict-transition-source-" + (checkpointKind ?? "none"));
         SyncAction[] successors;
-        using (var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var gen = SeedBaseline(store, rig);
             var (_, forget, frozen) = await ConflictPlanAsync(store, rig, gen, CancellationToken.None);
@@ -399,8 +399,8 @@ internal static class ConflictTransitionChecks
         rig.WriterA.PutFailure = CheckAdmission;
         rig.WriterB.PutFailure = CheckAdmission;
         rig.A.Seed(OriginalPath, "edit-after-crash", versionId: "changed-after-crash", mtime: T0.AddHours(1));
-        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
-        var results = await new Executor(reopened, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage).ReconcileAsync(reopened.UnresolvedIntents(PairId),
+        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
+        var results = await new Executor(reopened, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException).ReconcileAsync(reopened.UnresolvedIntents(PairId),
             reopened.BeginGeneration(rig.Pair.A.RootId, "test"), rig.WriterA, rig.WriterB, CancellationToken.None);
         Require(results.All(result => result.Outcome == Outcome.Done) && admitted == 2,
             "changed-source successors resume through admission after " + (checkpointKind ?? "no checkpoint"));
@@ -418,7 +418,7 @@ internal static class ConflictTransitionChecks
         var rig = NewRig("conflict-transition-observe-error-" + occupantCheck);
         SyncAction successor;
         ItemState? occupant = null;
-        using (var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var gen = SeedBaseline(store, rig);
             var (_, forget, successors) = await ConflictPlanAsync(store, rig, gen, CancellationToken.None);
@@ -445,7 +445,7 @@ internal static class ConflictTransitionChecks
                 throw new IOException("transient source observation");
             }
         };
-        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var run = NewRun(reopened, rig);
         var report = await run.IncrementalAsync(PairId, new RecordingProgress(), CancellationToken.None);
         Require(reads > 0 && report.Outcome != RunOutcomes.Failed && report.Uncertain > 0,
@@ -474,7 +474,7 @@ internal static class ConflictTransitionChecks
         var rig = NewRig("conflict-transition-deleted-source-" + unknown);
         SyncAction successor;
         string noticeId;
-        using (var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var gen = SeedBaseline(store, rig);
             var (_, forget, successors) = await ConflictPlanAsync(store, rig, gen, CancellationToken.None);
@@ -488,7 +488,7 @@ internal static class ConflictTransitionChecks
         await rig.A.DeleteAsync(new SyncAction("user-delete", 0, ActionKind.Delete, Side.A,
             OriginalPath, null, null, successor.Source, false, null), CancellationToken.None);
         rig.WriterA.AbsenceUnknown = unknown;
-        using (var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System))
+        using (var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var report = await NewRun(reopened, rig).IncrementalAsync(PairId, new RecordingProgress(), CancellationToken.None);
             Require(report.Outcome != RunOutcomes.Failed, "deleted source does not abort the run");
@@ -500,7 +500,7 @@ internal static class ConflictTransitionChecks
                 rig.WriterB.Deletes == 0,
                 "source deletion never removes or overwrites the other version");
         }
-        using var cold = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
+        using var cold = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         Require((cold.IntentById(PairId, successor.ActionId) is null) == !unknown &&
             cold.NoticeById(PairId, noticeId)!.Value.Closed == !unknown,
             "cold reopen sees successor retirement and notice closure together, or both retained");
@@ -511,7 +511,7 @@ internal static class ConflictTransitionChecks
         var rig = NewRig("conflict-transition-protected-" + flags);
         SyncAction forget;
         SyncAction[] successors;
-        using (var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var gen = SeedBaseline(store, rig);
             (_, forget, successors) = await ConflictPlanAsync(store, rig, gen, CancellationToken.None);
@@ -522,9 +522,9 @@ internal static class ConflictTransitionChecks
             if (flags == ItemFlags.None)
                 store.SavePair(rig.Pair with { Excluded = successors.Select(action => action.Path).ToArray() });
         }
-        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var settings = Settings with { ReplaceOnlineOnlyStubs = false };
-        var run = new SyncRun(reopened, new Executor(reopened, settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), rig.Provider, settings, TimeProvider.System);
+        var run = new SyncRun(reopened, new Executor(reopened, settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), rig.Provider, settings, TimeProvider.System);
         await run.IncrementalAsync(PairId, new RecordingProgress(), CancellationToken.None);
         Require(reopened.UnresolvedIntents(PairId).Count == 2 && rig.WriterA.Puts + rig.WriterB.Puts == 0,
             flags + ": temporary source protection or copy-only exclusion retains both successor authorities");
@@ -611,7 +611,7 @@ internal static class ConflictTransitionChecks
     }
 
     private static SyncRun NewRun(IStateStore store, Rig rig) =>
-        new(store, new Executor(store, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), rig.Provider, Settings, TimeProvider.System);
+        new(store, new Executor(store, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), rig.Provider, Settings, TimeProvider.System);
 
     private static async Task<List<ActionResult>> ApplyAsync(Executor executor, Plan plan, IEndpointWriter a,
         IEndpointWriter b)

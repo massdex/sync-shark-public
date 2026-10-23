@@ -81,7 +81,7 @@ internal static class ConcurrentScanChecks
             [], [], true);
         store.SavePair(pair);
         var provider = new FakeEndpointProvider().Add(pair.A, a).Add(pair.B, b);
-        var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider, Settings,
+        var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), provider, Settings,
             TimeProvider.System);
         return new Fixture(pair, store, a, b, provider, run);
     }

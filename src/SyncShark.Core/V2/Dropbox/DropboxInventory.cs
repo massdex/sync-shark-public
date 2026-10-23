@@ -34,14 +34,14 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
         _client.HydratePrefixAsync(path, rows =>
         {
             ProgressGuard.Report(progress, $"Review listing {path}: {rows.Count:N0} entries in page", ct);
-            return accept(rows.Where(r => r.Entry is not null && !LocalItems.IsArtifactPath(r.Path)).Select(r => DropboxItems.ToItem(r.Entry!)).ToArray());
+            return accept(rows.Where(r => r.Entry is not null && !ArtifactPaths.IsArtifactPath(r.Path)).Select(r => DropboxItems.ToItem(r.Entry!)).ToArray());
         }, ct);
 
     internal async Task<IReadOnlyDictionary<string, string>> HydratePrefixesAsync(IReadOnlyList<string> prefixes,
         Func<IReadOnlyList<DropboxChange>, Task> accept, CancellationToken ct)
     {
         var requested = accept;
-        accept = changes => requested(changes.Where(change => !LocalItems.IsArtifactPath(change.Path)).ToArray());
+        accept = changes => requested(changes.Where(change => !ArtifactPaths.IsArtifactPath(change.Path)).ToArray());
         if (prefixes.Contains(string.Empty))
         {
             // Root scope is "", never "id:/". A required full re-list uses the durable

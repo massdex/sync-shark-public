@@ -63,7 +63,7 @@ internal static partial class DropboxChecks
         rig.Store.RecordIntent("p1", anchor with { ProviderEffect = anchor.ProviderEffect with { Id = group.ToJsonString() } });
         rig.H.Wire.FailFeedAfterFolderDelete = false;
         rig.H.Wire.DeleteJobTerminal = terminal;
-        var executor = new Executor(rig.Store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor = new Executor(rig.Store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         var results = await executor.ReconcileAsync(rig.Store.UnresolvedIntents("p1"), 2, rig.A, rig.B, CancellationToken.None);
         if (tombstones)
             Require(results.All(result => result.Outcome == Outcome.Done),

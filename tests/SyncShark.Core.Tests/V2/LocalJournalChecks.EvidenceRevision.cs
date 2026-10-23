@@ -10,7 +10,7 @@ internal static partial class LocalJournalChecks
         var item = new ItemState("file.txt", ItemKind.File, "revision-item", null, new string('a', 64), 3,
             DateTimeOffset.UnixEpoch, ItemFlags.None);
         long oldRevision;
-        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var gen = store.BeginGeneration(root, "seed");
             store.WriteSnapshot(new(root, Side.A, gen, "saved-cursor", [item], []));
@@ -29,7 +29,7 @@ internal static partial class LocalJournalChecks
             LocalChecks.Require(Convert.ToInt64(command.ExecuteScalar()) == 0, "upgrade fixture has genuine v26 rehash shape with existing rows");
         }
         long nextRevision;
-        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             LocalChecks.Require(store.RehashRevision(root, item.ObjectId) == oldRevision && store.Cursor(root) == "saved-cursor" &&
                 store.RehashReasons(root, 1).Single().Contains("existing v26 obligation"),
@@ -47,7 +47,7 @@ internal static partial class LocalJournalChecks
             LocalChecks.Require(nextRevision != oldRevision && !store.CompleteIndexingRehash(root, item, new string('b', 64), oldRevision),
                 "actual newer write changes evidence revision and rejects older proof");
         }
-        using (var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
+        using (var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
             LocalChecks.Require(reopened.RehashRevision(root, item.ObjectId) == nextRevision && reopened.HasPendingRehashVerification(root),
                 "repeated compatible open leaves migrated and subsequently updated evidence unchanged");
     }

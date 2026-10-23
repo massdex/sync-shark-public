@@ -15,7 +15,7 @@ internal static partial class StorageChecks
 
     private static void PairOutageIgnoreResets(string folder)
     {
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock { UtcNow = T0 });
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock { UtcNow = T0 }, LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         var outage = new Notice("p1", 0, NoticeKind.Info, "", "Network unavailable; retry", "autosync-failed-network");
         store.AddNotices([outage]);
@@ -37,7 +37,7 @@ internal static partial class StorageChecks
     private static void RunHistoryPaging(string folder)
     {
         var clock = new TestClock { UtcNow = T0 };
-        using var store = SqliteStateStore.Open(folder, Fast with { RunSummaryMaximumRows = 10 }, clock);
+        using var store = SqliteStateStore.Open(folder, Fast with { RunSummaryMaximumRows = 10 }, clock, LocalItems.CaptureOptionalHash);
         // Four runs, two sharing one start instant: the sequence, never the timestamp, orders the pages.
         store.RecordRunSummary(Run("r1", "p1", T0.AddSeconds(1)));
         store.RecordRunSummary(Run("r2", "p1", T0.AddSeconds(2)));
@@ -74,7 +74,7 @@ internal static partial class StorageChecks
     {
         var clock = new TestClock { UtcNow = T0 };
         using var store = SqliteStateStore.Open(folder,
-            Fast with { RunSummaryMaximumRows = 2, HistoryRetention = TimeSpan.FromDays(1) }, clock);
+            Fast with { RunSummaryMaximumRows = 2, HistoryRetention = TimeSpan.FromDays(1) }, clock, LocalItems.CaptureOptionalHash);
         store.RecordRunSummary(Run("a", "p1", T0.AddSeconds(1)));
         store.RecordRunSummary(Run("b", "p1", T0.AddSeconds(2)));
         store.RecordRunSummary(Run("c", "p1", T0.AddSeconds(3)));
@@ -94,13 +94,13 @@ internal static partial class StorageChecks
     {
         var folder = Fresh(root, "run-history-presence");
         var clock = new TestClock { UtcNow = T0 };
-        using (var store = SqliteStateStore.Open(folder, Fast, clock))
+        using (var store = SqliteStateStore.Open(folder, Fast, clock, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(Pair("p1"));
             store.RecordRunSummary(Run("keep", "p1", T0));
         }
         DropTable(DbPath(folder), "run_summary");
-        using (var store = SqliteStateStore.Open(folder, Fast, clock))
+        using (var store = SqliteStateStore.Open(folder, Fast, clock, LocalItems.CaptureOptionalHash))
         {
             Require(store.ReadRunHistory(null, 10).Count == 0 && store.Pair("p1") is not null,
                 "a missing run_summary table is recreated on open and existing rows are preserved");

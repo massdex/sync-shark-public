@@ -4,7 +4,7 @@ internal static partial class RunChecks
 {
     private static async Task HashPauseAsync(string root)
     {
-        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System);
+        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: sql, accountId: PauseAccount);
         for (var i = 0; i < 5; i++) { fx.A.Seed($"{i}.txt", "same"); fx.B.Seed($"{i}.txt", "same"); }
         var inventory = new ScriptedInventory(fx.A) { Hashless = true, OnHash = () => sql.SetPairPaused("p1", true) };
@@ -22,7 +22,7 @@ internal static partial class RunChecks
     private static void PauseCacheChecks(string root)
     {
         var clock = new OutputClock();
-        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, clock);
+        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, clock, LocalItems.CaptureOptionalHash);
         using var external = SqliteStateStore.OpenPauseControl(root);
         Require(!sql.CachedPairPaused("p1"), "initial cached state is running");
         external.SetPairPaused("p1", true);
@@ -42,7 +42,7 @@ internal static partial class RunChecks
 
     private static async Task FinishedApplyPauseAsync(string root)
     {
-        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System);
+        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: sql, accountId: PauseAccount);
         fx.A.Seed("only.txt", "data");
         var run = fx.Run();
@@ -65,7 +65,7 @@ internal static partial class RunChecks
     // exits leaves an explicit pair pause untouched. The durable global and account scopes have their own checks.
     private static async Task ScopePauseAsync(string root, string scope)
     {
-        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System);
+        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: sql, accountId: PauseAccount);
         var run = fx.Run();
         var plan = await run.PreviewFirstSyncAsync("p1", new RecordingProgress(), CancellationToken.None);
@@ -104,7 +104,7 @@ internal static partial class RunChecks
     {
         Directory.CreateDirectory(root);
         using var instance = PilotInstanceLock.Acquire(Path.Combine(root, "state", "instance.lock"));
-        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System);
+        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: sql, accountId: PauseAccount);
         var run = fx.Run();
         Require((await FirstSyncAsync(run, fx)).Outcome == RunOutcomes.Complete,
@@ -193,7 +193,7 @@ internal static partial class RunChecks
     private static async Task AccountPauseBetweenPairsAsync(string root)
     {
         Directory.CreateDirectory(root);
-        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System);
+        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: sql, accountId: PauseAccount);
         var run = fx.Run();
         Require((await FirstSyncAsync(run, fx)).Outcome == RunOutcomes.Complete,
@@ -329,7 +329,7 @@ internal static partial class RunChecks
         Directory.CreateDirectory(root);
         using var instance = PilotInstanceLock.Acquire(Path.Combine(root, "state", "instance.lock"));
         var clock = new OutputClock();
-        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, clock);
+        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, clock, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: sql, accountId: PauseAccount);
         var run = fx.Run();
         Require((await FirstSyncAsync(run, fx)).Outcome == RunOutcomes.Complete,
@@ -505,7 +505,7 @@ internal static partial class RunChecks
 
     private static async Task DeferredEvidencePauseAsync(string root)
     {
-        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System);
+        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: sql, accountId: PauseAccount);
         fx.A.Seed("held.txt", "data");
         var evidence = new DeferredInventory(fx.B);
@@ -523,7 +523,7 @@ internal static partial class RunChecks
     // nothing, commit no blocked-delete result or notice, and leave the delete for the next run to replan.
     private static async Task DeleteSourceAbsencePauseAsync(string root)
     {
-        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System);
+        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: sql, accountId: PauseAccount);
         fx.A.Seed("gone.txt", "same");
         var run = fx.Run();
@@ -556,7 +556,7 @@ internal static partial class RunChecks
     // replans the copy instead of leaving the item stuck.
     private static async Task SourceReadPauseAsync(string root)
     {
-        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System);
+        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: sql, accountId: PauseAccount);
         fx.A.Seed("anchor.txt", "anchor");
         var run = fx.Run();
@@ -588,7 +588,7 @@ internal static partial class RunChecks
     // Move admission performs, before the delete records any intent or result.
     private static async Task PairedDeleteAdmissionPauseAsync(string root)
     {
-        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System);
+        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: sql, accountId: PauseAccount);
         var incoming = fx.A.Seed("new", "incoming");
         var occupant = fx.B.Seed("new", "loser");
@@ -625,7 +625,7 @@ internal static partial class RunChecks
 
     internal static async Task PauseChecksAsync(string root)
     {
-        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System);
+        using var sql = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: sql, accountId: PauseAccount);
         for (var i = 0; i < 12; i++) fx.A.Seed($"{i:D2}.txt", "payload");
         var run = fx.Run();

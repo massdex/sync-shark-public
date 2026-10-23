@@ -23,7 +23,7 @@ internal static partial class RunChecks
         var provider = new ConcurrentVerifyProbe(new FakeEndpointProvider()
             .Add(pair.A, new FakeEndpoint(Side.A, "ra"))
             .Add(pair.B, new FakeEndpoint(Side.B, "rb")), client, ConcurrentOperations);
-        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider,
+        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), provider,
             settings, TimeProvider.System);
 
         await run.PreviewFirstSyncAsync(pair.PairId, new RecordingProgress(), CancellationToken.None);

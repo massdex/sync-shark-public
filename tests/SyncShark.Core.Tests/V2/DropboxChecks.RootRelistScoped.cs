@@ -9,7 +9,7 @@ internal static partial class DropboxChecks
         _root = root;
         var folder = Path.Combine(root, "root-relist-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
-        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         IStateStore listingStore = store;
         IStateStore unsupported = new InMemoryStateStore();
         Require(!unsupported.SupportsListingCheckpoint && !unsupported.CachedPairPaused("p1") &&
@@ -59,7 +59,7 @@ internal static partial class DropboxChecks
         var provider = new FakeEndpointProvider().Add(pair.A, local).AddInventory(pair.B, inventory)
             .AddWriter(pair.B, h.Writer(Path.Combine(folder, "spool")));
         var settings = V2Settings.Default with { ProgressInterval = TimeSpan.Zero, MaxWorkers = 1 };
-        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider, settings, TimeProvider.System);
+        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), provider, settings, TimeProvider.System);
         var retry = typeof(SyncRun).GetMethod("RetryScanScopesAsync", BindingFlags.Instance | BindingFlags.NonPublic)
             ?? throw new InvalidOperationException("Missing targeted scan owner.");
         var gen = store.BeginGeneration(RootId, "delta");

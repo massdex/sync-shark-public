@@ -170,7 +170,7 @@ internal static partial class LocalInventoryChecks
         {
             LocalChecks.Require(PilotPath.IsUnsafeAttributes(File.GetAttributes(offline)),
                 "the fixture entry is an unsafe-attribute placeholder candidate");
-            using var known = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System);
+            using var known = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
             LocalInventory Inventory()
             {
                 var inventory = new LocalInventory(

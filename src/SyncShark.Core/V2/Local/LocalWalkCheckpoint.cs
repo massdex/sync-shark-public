@@ -5,7 +5,7 @@ using System.Text.Json.Serialization;
 namespace Massdex.SyncShark.V2;
 
 // Completed directories are atomic; an abrupt exit can lose only the uncommitted batch.
-internal sealed class LocalWalkCheckpoint(SqliteStateStore store, string root, string rootPath)
+internal sealed class LocalWalkCheckpoint(ILocalWalkStore store, string root, string rootPath)
 {
     private static readonly JsonSerializerOptions Json = new() { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingDefault };
     private readonly int _savedCount = store.LocalWalkPageCount(root);

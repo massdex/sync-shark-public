@@ -1,18 +1,5 @@
 namespace Massdex.SyncShark;
 
-public enum SyncIgnoreKind { FileExtension, FileName, FolderName }
-
-public sealed record SyncIgnoreRule(SyncIgnoreKind Kind, string Value)
-{
-    public string Description => Kind switch
-    {
-        SyncIgnoreKind.FileExtension => $"Files ending in {Value}",
-        SyncIgnoreKind.FileName => $"Files named {Value}",
-        SyncIgnoreKind.FolderName => $"Folders named {Value} and everything inside",
-        _ => throw new InvalidDataException("Unknown ignore rule.")
-    };
-}
-
 public static class SyncIgnorePolicy
 {
     /// <summary>Parses one 'kind:value;kind:value' rule list as written by 'ignores set'; does not normalize.</summary>
@@ -57,7 +44,7 @@ public static class SyncIgnorePolicy
     public static bool IsIgnored(string relativePath, bool isDirectory, IReadOnlyList<SyncIgnoreRule> rules)
     {
         if (relativePath.Length == 0 || rules.Count == 0) return false;
-        var path = PilotPath.NormalizeInventoryPath(relativePath.Replace('\\', '/'));
+        var path = V2.PathRules.NormalizeInventoryPath(relativePath.Replace('\\', '/'));
         var components = path.Split('/');
         var name = components[^1];
         foreach (var rule in rules)
@@ -71,5 +58,3 @@ public static class SyncIgnorePolicy
         return false;
     }
 }
-
-public sealed record SyncIgnorePreview(int MatchCount, IReadOnlyList<string> Examples);

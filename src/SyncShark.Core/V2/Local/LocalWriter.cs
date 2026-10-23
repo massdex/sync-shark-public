@@ -330,7 +330,7 @@ public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResource
             var originalPresent = current is { Kind: PilotEntryKind.File } && action.ExpectedTarget is { } victim &&
                 Content.SameContent(current.Size, current.ContentHash, victim.Size, victim.Hash) == true;
             if (cleaned && (originalPresent || (action.ExpectedTarget is null && current is null)))
-                return new(action.ActionId, Outcome.Skipped, null, null, recovery, EffectResolver.NotApplied)
+                return new(action.ActionId, Outcome.Skipped, null, null, recovery, EffectReasons.NotApplied)
                 { ForgetAbsentDownloadBaseline = current is null };
             return Settled(action, "Download superseded; current destination left unchanged. " +
                 (recovery is null ? "No verified Recovery copy is available. " : "Original retained at " + recovery.Location + ". ") +
@@ -357,7 +357,7 @@ public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResource
             1 << 16, FileOptions.Asynchronous | FileOptions.SequentialScan);
         await _store.UploadAsync(action.Path, archived, recovery.Hash!, null, ct, action.ExpectedTarget?.Mtime)
             .ConfigureAwait(false);
-        return new(action.ActionId, Outcome.Skipped, null, null, recovery, EffectResolver.NotApplied);
+        return new(action.ActionId, Outcome.Skipped, null, null, recovery, EffectReasons.NotApplied);
     }
 
     private static ActionResult ResumeUncertain(SyncAction action, string reason) =>
@@ -365,7 +365,7 @@ public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResource
 
     private ActionResult Settled(SyncAction action, string detail, RecoveryRef? recovery = null) =>
         new(action.ActionId, Outcome.Skipped, null, null, recovery,
-            SyncDirectDownloadCheckpoint.NoticePrefix + EffectResolver.Superseded + ". " + detail)
+            SyncDirectDownloadCheckpoint.NoticePrefix + EffectReasons.Superseded + ". " + detail)
         { ForgetAbsentDownloadBaseline = TargetAbsent(action.Path) };
 
     private bool TargetAbsent(string path)
@@ -446,7 +446,7 @@ public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResource
             var expected = a.ExpectedTarget ?? throw new ArgumentException("A local Delete requires its expected target.", nameof(a));
             if (expected.Flags.HasFlag(ItemFlags.OwnedPointer))
             {
-                await DeleteSourceGuard.RevalidateCurrentAsync(a).ConfigureAwait(false);
+                await DeleteRevalidation.RevalidateCurrentAsync(a).ConfigureAwait(false);
                 DeleteOwnedPointer(a, ct);
                 return;
             }
@@ -455,10 +455,10 @@ public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResource
             var entry = expected.Kind == ItemKind.Folder ? LocalItems.ToStoreEntry(expected) : current;
             if (expected.Kind == ItemKind.Folder && !a.PreserveIgnoredChildren && (_ignoreRules.Count != 0 || _providerNameRefused is not null))
             {
-                await DeleteSourceGuard.RevalidateCurrentAsync(a).ConfigureAwait(false);
+                await DeleteRevalidation.RevalidateCurrentAsync(a).ConfigureAwait(false);
                 await CleanIgnoredChildrenAsync(a, ct).ConfigureAwait(false);
             }
-            await DeleteSourceGuard.RevalidateCurrentAsync(a).ConfigureAwait(false);
+            await DeleteRevalidation.RevalidateCurrentAsync(a).ConfigureAwait(false);
             await _store.DeleteAsync(entry, ct).ConfigureAwait(false);
         }
         catch (Exception error) when (LocalItems.MapWriteError(error) is var mapped && mapped != error) { throw mapped; }
@@ -518,7 +518,7 @@ public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResource
                 (archive, token) => ProviderEffectContext.Current.Value is { } context
                     ? context.RecordRecoveryAsync(actionId, victim.Path,
                         new RecoveryRef(_side, archive.RecoveryPath, null, archive.ContentHash, archive.Size), _pairId, token)
-                    : Task.CompletedTask, ct, () => DeleteSourceGuard.RevalidateCurrentAsync(removalAuthority)).ConfigureAwait(false);
+                    : Task.CompletedTask, ct, () => DeleteRevalidation.RevalidateCurrentAsync(removalAuthority)).ConfigureAwait(false);
             return new RecoveryRef(_side, archived.RecoveryPath, null, archived.ContentHash, archived.Size);
         }
         catch (Exception error) when (LocalItems.MapWriteError(error) is var mapped && mapped != error) { throw mapped; }
@@ -772,7 +772,7 @@ public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResource
             if (child.Kind == ItemKind.Folder)
             {
                 await RemoveAsync(child).ConfigureAwait(false);
-                await DeleteSourceGuard.RevalidateCurrentAsync(action).ConfigureAwait(false);
+                await DeleteRevalidation.RevalidateCurrentAsync(action).ConfigureAwait(false);
                 await _store.DeleteAsync(LocalItems.ToStoreEntry(child), ct).ConfigureAwait(false);
                 return;
             }
@@ -797,7 +797,7 @@ public sealed partial class LocalWriter : IEndpointWriter, ISyncTransferResource
             else
             {
                 var current = await RequireTargetAsync(child.Path, child, ct).ConfigureAwait(false);
-                await DeleteSourceGuard.RevalidateCurrentAsync(action).ConfigureAwait(false);
+                await DeleteRevalidation.RevalidateCurrentAsync(action).ConfigureAwait(false);
                 await _store.DeleteAsync(current, ct).ConfigureAwait(false);
             }
         }

@@ -5,6 +5,21 @@ internal static class JournalSizingChecks
 {
     public static async Task RunAsync(string root)
     {
+        Require(JournalPolicy.Delta == SyncSharkJournalNative.Delta, "lower/native allocation constants agree");
+        foreach (var value in new string?[] { null, "", "C:", "Z:", "A:", "c:", "C:\\", "AA:", "1:", " C:", "C:evil" })
+        {
+            string? lower = null, native = null;
+            Exception? lowerError = null, nativeError = null;
+            try { lower = JournalPolicy.Volume(value!); } catch (ArgumentException error) { lowerError = error; }
+            try { native = SyncSharkJournalNative.Volume(value!); } catch (ArgumentException error) { nativeError = error; }
+            Require(lower == native && lowerError?.GetType() == nativeError?.GetType() && lowerError?.Message == nativeError?.Message,
+                "standalone volume validation retains exact result and exception parity");
+        }
+        var defaults = System.Text.Json.JsonSerializer.Deserialize<JournalSizingState>("{\"JournalId\":1,\"NextUsn\":100,\"Observed\":\"2026-01-01T00:00:00+00:00\"}")!;
+        Require(defaults.Allocation == JournalPolicy.Delta && defaults.Requested == 0 && defaults.NotBefore is null &&
+            defaults.NoticePair is null && !defaults.Never, "old state JSON retains omitted-property defaults");
+        Require(System.Text.Json.JsonSerializer.Deserialize<JournalSizingState>(System.Text.Json.JsonSerializer.Serialize(defaults)) == defaults,
+            "journal state record round trips unchanged");
         const long gb = JournalSizing.Minimum;
         var now = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
         var first = JournalSizing.Observe(null, 1, 100, now);
@@ -43,7 +58,7 @@ internal static class JournalSizingChecks
 
         var folder = Path.Combine(root, "journal-sizing-" + Guid.NewGuid().ToString("N"));
         var clock = new Clock(now);
-        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, clock))
+        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, clock, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(Pair("p1")); store.SavePair(Pair("p2"));
             void Observe(string pair = "p1") => store.ObserveJournal(pair, "C:", 123, 1, 100, 32 * 1024 * 1024, 100 * gb, true, clock.GetUtcNow());
@@ -70,7 +85,7 @@ internal static class JournalSizingChecks
             notice = store.OpenNotices(null).Single();
             await JournalSizing.ApplyCoreAsync(store, notice, JournalSizing.Never, fake, CancellationToken.None, _ => [1, 0, 0, 0, gb, SyncSharkJournalNative.Delta, 100 * gb, 123]);
         }
-        using (var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, clock))
+        using (var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, clock, LocalItems.CaptureOptionalHash))
         {
             reopened.ObserveJournal("p2", "C:", 123, 1, 1000, 32 * 1024 * 1024, 1000 * gb, true, now.AddDays(100));
             Require(reopened.OpenNotices(null).Count == 0, "Never survives process restart and other pairs");
@@ -127,7 +142,7 @@ internal static class JournalSizingChecks
         Require(await SyncDiscoveryClient.TryGrowJournalCoreAsync(Fail, retryClock) is null && attempts == 2, "busy maintenance falls back without queuing");
         held.SetResult(0); Require(await holding == 0, "maintenance releases gate after success");
         await SyncDiscoveryClient.ResetAfterSetupAsync();
-        using (var store = SqliteStateStore.Open(folder + "-silent", StorageChecks.Fast, clock))
+        using (var store = SqliteStateStore.Open(folder + "-silent", StorageChecks.Fast, clock, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(Pair("p1")); store.SavePair(Pair("p2"));
             long size = 32 * 1024 * 1024;
@@ -175,7 +190,7 @@ internal static class JournalSizingChecks
         Require(SyncSharkJournalNative.Target(gb, 40 * gb, 2 * gb, false, 3 * gb) == gb,
             "attended oversized delta cannot underflow or shrink");
         var legacy = folder + "-v12";
-        using (var store = SqliteStateStore.Open(legacy, StorageChecks.Fast, clock)) store.SavePair(Pair("p1"));
+        using (var store = SqliteStateStore.Open(legacy, StorageChecks.Fast, clock, LocalItems.CaptureOptionalHash)) store.SavePair(Pair("p1"));
         using (var raw = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + SqliteStateStore.DatabasePath(legacy)))
         {
             raw.Open();
@@ -184,11 +199,11 @@ internal static class JournalSizingChecks
         }
         for (int i = 0; i < 2; i++)
         {
-            using var store = SqliteStateStore.Open(legacy, StorageChecks.Fast, clock);
+            using var store = SqliteStateStore.Open(legacy, StorageChecks.Fast, clock, LocalItems.CaptureOptionalHash);
             store.ObserveJournal("p1", "C:", 789, 1, 100, 32 * 1024 * 1024, 100 * gb, true, clock.GetUtcNow(), true);
             Require(store.PendingJournal(789) is not null, "v12 open gains optional table and second open preserves it");
         }
-        using (var store = SqliteStateStore.Open(folder + "-results", StorageChecks.Fast, clock))
+        using (var store = SqliteStateStore.Open(folder + "-results", StorageChecks.Fast, clock, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(Pair("p1")); store.SavePair(Pair("p2"));
             void Observe(long size = 32 * 1024 * 1024, string pair = "p1", bool gap = true) =>
@@ -226,7 +241,7 @@ internal static class JournalSizingChecks
             Observe(4 * gb, "p2", false);
             Require(store.PendingJournal(789) is null && store.OpenNotices(null).Count == 0, "observation clears satisfied request");
         }
-        using (var store = SqliteStateStore.Open(folder + "-capacity-floor", StorageChecks.Fast, clock))
+        using (var store = SqliteStateStore.Open(folder + "-capacity-floor", StorageChecks.Fast, clock, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(Pair("p1"));
             long size = gb, allocation = SyncSharkJournalNative.Delta;
@@ -253,7 +268,7 @@ internal static class JournalSizingChecks
             Require(store.OpenNotices(null).Single().Detail.Contains("a=" + gb),
                 "repair command preserves larger observed allocation rather than shrinking it");
         }
-        using (var store = SqliteStateStore.Open(folder + "-preview", StorageChecks.Fast, clock))
+        using (var store = SqliteStateStore.Open(folder + "-preview", StorageChecks.Fast, clock, LocalItems.CaptureOptionalHash))
         {
             var pair = Pair("preview") with { A = new RootDef("ra", SyncProviders.Local, null,
                 @"C:\Parent", SyncLocalEndpointStore.ObjectId(123, 456)) };

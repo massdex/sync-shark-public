@@ -278,7 +278,7 @@ public sealed partial class V2SyncHost
     }
 
     private static bool IsFatalStore(Exception error) => error is StateDamagedException or StateNeedsFreshDatabaseException ||
-        error is Microsoft.Data.Sqlite.SqliteException sql && StoreSchema.IsDamaged(sql);
+        StorageFailureClassifier.IsDirectStateDamage(error);
 
     private void SetActiveProgress(string runId, SyncAuthorityBatchProgress progress)
     {

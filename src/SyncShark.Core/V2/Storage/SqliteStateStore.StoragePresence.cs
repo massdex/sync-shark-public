@@ -7,7 +7,7 @@ public sealed partial class SqliteStateStore
     public bool PairUsesStorage(PairDef pair) => InStore(() =>
     {
         if (!IsStorageEnabled) return false; // Explicit projection must observe another process's opt-in.
-        foreach (var root in new[] { pair.A, pair.B }.Where(root => root.Provider == SyncProviders.Local))
+        foreach (var root in new[] { pair.A, pair.B }.Where(root => root.Provider == ProviderIds.Local))
         {
             if (HasOwnedPointers(root.RootId) || HasStorageRootWork(root.RootId)) return true;
             if (Convert.ToInt64(StoreSchema.Scalar(_connection, null, """

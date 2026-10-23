@@ -8,7 +8,7 @@ internal static partial class RunCliChecks
         var root = TempRoot();
         try
         {
-            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(store: store);
             store.MarkFirstSyncDone(fx.Pair.PairId);
             var other = new PairDef("p2", "Pair B",

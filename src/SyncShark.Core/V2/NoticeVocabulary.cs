@@ -3,6 +3,8 @@ namespace Massdex.SyncShark.V2;
 /// <summary>Lower notice vocabulary shared by producers and the choice catalogue.</summary>
 internal static class NoticeVocabulary
 {
+    internal const string LinksExcluded = "links-excluded";
+    internal const string StubsLeftAlone = "stubs-left-alone";
     internal const string JournalNoticeKey = "journal-capacity";
     internal const string JournalEnlarge = "enlarge-journal";
     internal const string JournalNotNow = "journal-not-now";

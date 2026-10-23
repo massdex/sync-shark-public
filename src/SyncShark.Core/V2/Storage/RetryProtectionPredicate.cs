@@ -4,8 +4,7 @@ namespace Massdex.SyncShark.V2;
 internal static class RetryProtectionPredicate
 {
     internal static bool Includes(SyncRetry retry, bool restoredOnly = false) =>
-        (!retry.ReprobeEvidence || retry.RetryAfter < DateTimeOffset.MaxValue) &&
-        (!restoredOnly || retry.ReprobeEvidence);
+        RetryProtectionDomain.Includes(retry, restoredOnly);
 
     internal static string Sql(bool restoredOnly = false) =>
         " AND NOT (retry_after=" + DateTimeOffset.MaxValue.ToUnixTimeMilliseconds() +

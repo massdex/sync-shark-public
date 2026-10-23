@@ -22,7 +22,7 @@ internal static partial class DropboxChecks
         var localPath = Path.Combine(product, "local");
         Directory.CreateDirectory(localPath);
         var settings = StorageChecks.Fast with { MaxWorkers = 1, ProgressInterval = TimeSpan.Zero };
-        using var store = SqliteStateStore.Open(Path.Combine(product, "state"), settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(product, "state"), settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pair = new PairDef("pf", "throwing progress", LocalChecks.RootOf(localPath, "local"), Root(), [], [], true);
         store.SavePair(pair);
         store.MarkFirstSyncDone(pair.PairId);
@@ -32,7 +32,7 @@ internal static partial class DropboxChecks
             .AddInventory(pair.A, new LocalInventory(pair.A, Side.A, store, new HashSet<string>(), settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage))
             .AddInventory(pair.B, new DropboxInventory(pair.B, Side.B, h.Client, store, pair.PairId))
             .AddWriter(pair.B, h.Writer(Path.Combine(product, "spool")));
-        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), endpoints, settings,
+        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), endpoints, settings,
             TimeProvider.System);
         h.Wire.LatestCursor = "pf-c0";
         h.Wire.SeedChangePage("pf-c0", [], false, "pf-c0");

@@ -5,7 +5,7 @@ internal static partial class RunChecks
     private static async Task LiveLedgerAndAdmissionAsync()
     {
         var root = LocalChecks.FreshRoot("live-ledger");
-        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var run = fx.Run();
         await FirstSyncAsync(run, fx);
@@ -69,7 +69,7 @@ internal static partial class RunChecks
 
     private static async Task LedgerFailureAndObserverAsync()
     {
-        using var store = SqliteStateStore.Open(LocalChecks.FreshRoot("ledger-failure"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(LocalChecks.FreshRoot("ledger-failure"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var run = fx.Run();
         await FirstSyncAsync(run, fx);
@@ -130,7 +130,7 @@ internal static partial class RunChecks
 
     private static async Task PlanBoundNoticeChoicesAsync()
     {
-        using var store = SqliteStateStore.Open(LocalChecks.FreshRoot("bound-choices"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(LocalChecks.FreshRoot("bound-choices"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var run = fx.Run();
         await FirstSyncAsync(run, fx);
@@ -163,7 +163,7 @@ internal static partial class RunChecks
     private static async Task InterruptedLiveLedgerAsync()
     {
         var root = LocalChecks.FreshRoot("interrupted-ledger");
-        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var run = fx.Run();
         await FirstSyncAsync(run, fx);

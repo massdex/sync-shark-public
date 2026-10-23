@@ -7,7 +7,7 @@ internal static partial class DropboxChecks
         foreach (var edited in new[] { false, true })
         {
             var home = Path.Combine(folder, edited ? "edited" : "unchanged");
-            using var store = SqliteStateStore.Open(home, StorageChecks.Fast, TimeProvider.System);
+            using var store = SqliteStateStore.Open(home, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
             using var h = new Harness();
             var local = new FakeEndpoint(Side.A, "ra") { DropboxHashes = true };
             local.Seed("Folder", "", ItemKind.Folder);
@@ -23,7 +23,7 @@ internal static partial class DropboxChecks
             var writer = h.Writer(Path.Combine(home, "spool"));
             var provider = new FakeEndpointProvider().Add(pair.A, local).AddInventory(pair.B, inventory).AddWriter(pair.B, writer);
             var settings = V2Settings.Default with { ProgressInterval = TimeSpan.Zero, MaxWorkers = 1 };
-            var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider, settings, TimeProvider.System);
+            var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), provider, settings, TimeProvider.System);
             var runtime = new V2CliRuntime(null, store, run, new EndpointRootProbe(provider), Path.Combine(home, "prepare"));
             await runtime.PrepareFirstSyncAsync(pair.PairId, _ => { }, default);
             var initial = await runtime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { }, default);
@@ -61,7 +61,7 @@ internal static partial class DropboxChecks
     // finds under a gap is retained and replayed instead of merely touched.
     internal static async Task PlanningGapScanRetryAsync(string folder)
     {
-        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         using var h = new Harness();
         var local = new FakeEndpoint(Side.A, "ra") { DropboxHashes = true };
         local.Seed("Folder", "", ItemKind.Folder);
@@ -76,7 +76,7 @@ internal static partial class DropboxChecks
         var writer = h.Writer(Path.Combine(folder, "spool"));
         var provider = new FakeEndpointProvider().Add(pair.A, local).AddInventory(pair.B, inventory).AddWriter(pair.B, writer);
         var settings = V2Settings.Default with { ProgressInterval = TimeSpan.Zero, MaxWorkers = 1 };
-        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider, settings, TimeProvider.System);
+        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), provider, settings, TimeProvider.System);
         var runtime = new V2CliRuntime(null, store, run, new EndpointRootProbe(provider), Path.Combine(folder, "prepare"));
         await runtime.PrepareFirstSyncAsync(pair.PairId, _ => { }, default);
         var initial = await runtime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { }, default);

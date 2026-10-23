@@ -18,7 +18,7 @@ internal static partial class RunCliChecks
         var root = TempRoot();
         try
         {
-            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(store: store);
             fx.A.Seed("a", "", ItemKind.Folder);
             fx.A.Seed("a/x.txt", "hi");
@@ -63,7 +63,7 @@ internal static partial class RunCliChecks
         var root = TempRoot();
         try
         {
-            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(store: store);
             // Production local items have no revision ID; prepare must retain the historical content hash.
             // A synthetic v: stamp cannot authorize a later local deletion (nor prove edit-vs-delete).
@@ -110,7 +110,7 @@ internal static partial class RunCliChecks
         var root = TempRoot();
         try
         {
-            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(store: store);
             var local = fx.A.Seed("d/x.txt", "local only");
             var runtime = Runtime(fx, root);

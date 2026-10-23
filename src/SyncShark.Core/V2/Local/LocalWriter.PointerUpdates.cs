@@ -54,12 +54,12 @@ public sealed partial class LocalWriter : IOwnedPointerUpdateTarget
                 pointer.Identity.ModifiedUtc != expected.Mtime ||
                 SyncLocalEndpointStore.ObjectId(_rootIdentity.VolumeSerialNumber, pointer.FileId) != expected.ObjectId)
                 throw new ExpectedTargetMismatchException("The online-only target identity changed. Rescan and retry; no bytes were read.");
-            var previous = DropboxItems.ToEntry(expected with { Path = action.Path,
+            var previous = RemoteEntries.ToEntry(expected with { Path = action.Path,
                 ObjectId = pointer.Identity.DropboxId!, VersionId = pointer.Identity.DropboxRevision,
                 Flags = ItemFlags.None });
             var (volume, id) = LocalItems.ParseObjectId(expected.ObjectId);
             var result = provider.UpdateDehydratedPlaceholder(previous,
-                DropboxItems.ToEntry(confirmed! with { Path = action.Path }), new(volume, id), () =>
+                RemoteEntries.ToEntry(confirmed! with { Path = action.Path }), new(volume, id), () =>
                 {
                     ct.ThrowIfCancellationRequested();
                     root.VerifyBinding();

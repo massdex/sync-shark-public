@@ -13,7 +13,7 @@ internal static partial class CliChecks
         }
         catch (InvalidOperationException error) when (error.Message.Contains("No state yet", StringComparison.Ordinal)) { }
         if (Directory.Exists(noState)) throw new InvalidOperationException("Pause control created a missing state directory");
-        using var owner = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System);
+        using var owner = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         owner.SavePair(new PairDef("pause-pair", "Pause fixture",
             new RootDef("a", "Local", null, root, "a"),
             new RootDef("b", "Dropbox", "acc", "/fixture", "id:b"), [], [], true));

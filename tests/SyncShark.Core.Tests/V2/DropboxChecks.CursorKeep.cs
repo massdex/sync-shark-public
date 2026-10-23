@@ -16,7 +16,7 @@ internal static partial class DropboxChecks
             "C:\\offline-historical-folder", "id:ra"), Root(), [], [], true);
         h.Wire.LatestCursor = "folder-start";
         h.Wire.SeedChangePage("folder-start", [], false, "folder-start");
-        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(pair);
             var (runtime, _) = PrepareCursorRuntime(h, local, pair, store, product);
@@ -24,7 +24,7 @@ internal static partial class DropboxChecks
         }
         var lists = h.Wire.ListRequests.Count;
         h.Wire.SeedChangePage("folder-start", [], false, "folder-next");
-        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var (_, run) = PrepareCursorRuntime(h, local, pair, store, product);
             var prepared = FirstSyncChoicesState.Load(product, pair.PairId, store)!;
@@ -54,7 +54,7 @@ internal static partial class DropboxChecks
             new RootDef("ra", SyncProviders.Local, null, "C:\\offline-cursor-held", "id:ra"), Root(), [], [], true);
         h.Wire.LatestCursor = "held-start";
         h.Wire.SeedChangePage("held-start", [], false, "held-start");
-        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(pair);
             var (runtime, _) = PrepareCursorRuntime(h, local, pair, store, product);
@@ -62,7 +62,7 @@ internal static partial class DropboxChecks
         }
         h.Wire.SeedChangePage("held-start", [], false, "held-failed");
         var lists = h.Wire.ListRequests.Count;
-        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             local.FailNextWrites = 1;
             var (runtime, _) = PrepareCursorRuntime(h, local, pair, store, product);
@@ -75,7 +75,7 @@ internal static partial class DropboxChecks
         // gates retry effects across reopen; an immediate run must not bypass its backoff.
         DateTimeOffset retryAt;
         h.Wire.SeedChangePage("held-failed", [], false, "held-waiting");
-        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var retry = store.SyncRetryAt(pair.PairId, "download.txt");
             Require(retry is not null, "failed ordinary download has a durable retry after reopen");
@@ -101,7 +101,7 @@ internal static partial class DropboxChecks
                 "waiting ordinary retry never records a successful held baseline");
         }
         h.Wire.SeedChangePage("held-waiting", [], false, "held-resumed");
-        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var (_, run) = PrepareCursorRuntime(h, local, pair, store, product,
                 new LocalChecks.FixedClock(retryAt));
@@ -137,7 +137,7 @@ internal static partial class DropboxChecks
             "C:\\offline-reprepare", "id:ra"), Root(), [], [], true);
         h.Wire.LatestCursor = "prepare-one";
         h.Wire.SeedChangePage("prepare-one", [], false, "prepare-one");
-        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(pair);
             var (runtime, _) = PrepareCursorRuntime(h, local, pair, store, product);
@@ -146,7 +146,7 @@ internal static partial class DropboxChecks
         var lists = h.Wire.ListRequests.Count;
         h.Wire.SeedFile("new.txt", "new");
         h.Wire.SeedChangePage("prepare-one", [h.Wire.ChangeExistingFile("new.txt")], false, "prepare-two");
-        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var (runtime, _) = PrepareCursorRuntime(h, local, pair, store, product);
             await runtime.PrepareFirstSyncAsync(pair.PairId, _ => { }, CancellationToken.None);
@@ -174,7 +174,7 @@ internal static partial class DropboxChecks
             "C:\\offline-released", "id:ra"), Root(), [], [], true);
         h.Wire.LatestCursor = "released-start";
         h.Wire.SeedChangePage("released-start", [], false, "released-start");
-        using var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         store.SavePair(pair);
         var (runtime, _) = PrepareCursorRuntime(h, local, pair, store, product);
         await runtime.PrepareFirstSyncAsync(pair.PairId, _ => { }, CancellationToken.None);
@@ -204,7 +204,7 @@ internal static partial class DropboxChecks
 
     private static void CursorKeepPairScope()
     {
-        using var store = SqliteStateStore.Open(Path.Combine(_root, "cursor-scope"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(_root, "cursor-scope"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pair = new PairDef("p1", "scope", new RootDef("ra", SyncProviders.Local, null,
             "C:\\offline-scope", "id:ra"), Root(), ["nested/child"], ["FileName:old.tmp"], true);
         store.SavePair(pair);

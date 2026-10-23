@@ -10,7 +10,7 @@ internal static partial class RunChecks
             var rootHold = mode != "quarantine";
             var quarantine = mode != "root";
             using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "held-retries-" + Guid.NewGuid().ToString("N")),
-                Settings, TimeProvider.System);
+                Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             var local = fx.A.Seed("held.txt", "surviving bytes");
             await FirstSyncAsync(fx.Run(), fx);
@@ -52,7 +52,7 @@ internal static partial class RunChecks
     private static async Task HeldRetryRotationAndReleaseAsync()
     {
         var clock = new CompletionClock();
-        using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "retry-rotation-" + Guid.NewGuid().ToString("N")), Settings, clock);
+        using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "retry-rotation-" + Guid.NewGuid().ToString("N")), Settings, clock, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         await FirstSyncAsync(fx.Run(), fx);
         store.AddNotices([new(fx.Pair.PairId, 30, NoticeKind.UserDecision, "held", "hold", QuarantineFailure.NoticeKey,
@@ -86,7 +86,7 @@ internal static partial class RunChecks
     {
         foreach (var scenario in new[] { "excluded", "container", "rebuildable" })
         {
-            using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "retry-scope-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "retry-scope-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             await FirstSyncAsync(fx.Run(), fx);
             var path = scenario == "rebuildable" ? "junction/gone" : "folder";
@@ -158,7 +158,7 @@ internal static partial class RunChecks
         foreach (var quarantine in new[] { true, false })
         {
             using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "held-intents-" + Guid.NewGuid().ToString("N")),
-                Settings, TimeProvider.System);
+                Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             store.MarkFirstSyncDone(fx.Pair.PairId);
             var sources = Enumerable.Range(0, 300).Select(i => fx.A.Seed($"held/{i:D4}.txt", "held content")).ToArray();

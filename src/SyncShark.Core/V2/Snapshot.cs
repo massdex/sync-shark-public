@@ -5,7 +5,7 @@ public sealed record Snapshot(string RootId, Side Side, long Gen, string CursorA
     IReadOnlyList<ItemState> Items, IReadOnlyList<string> IncompleteSubtrees)
 {
     public IReadOnlyDictionary<string, string> IncompleteReasons { get; init; } = new Dictionary<string, string>();
-    internal Func<LocalFileAbsence>? OpenAbsenceVerifier { get; init; }
+    internal Func<IFileAbsenceVerifier>? OpenAbsenceVerifier { get; init; }
     internal Func<ItemState, FileAbsence>? VerifyAbsence { get; init; }
     // The snapshot writer emits only its actual change set, not unchanged observations.
     internal Action<string>? ChangedObject { get; init; }

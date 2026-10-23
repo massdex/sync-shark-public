@@ -13,7 +13,7 @@ internal static partial class LocalJournalChecks
         var before = new NtfsUsnCheckpoint(1, 0, 100, 0);
         var covered = new NtfsUsnCheckpoint(1, 0, 200, 0);
         string epochId;
-        using (var store = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var gen = store.BeginGeneration(root.RootId, "full");
             store.WriteSnapshot(new(root.RootId, Side.A, gen, before.Cursor, [row], []));
@@ -41,7 +41,7 @@ internal static partial class LocalJournalChecks
                 new GapCheckIo(row.Mtime, covered.Cursor).Proof(row, 100));
             gaps.GapDiscoveryDone(root.RootId, epoch);
         }
-        using (var store = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var gaps = (ILocalGapStore)store;
             gaps.PromoteGapDiscovery(root.RootId);

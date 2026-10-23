@@ -53,14 +53,14 @@ internal static class SyncHostChecks
         Directory.CreateDirectory(root);
         var opted = PairDefOf("storage-pair", "Storage pair");
         var ordinary = PairDefOf("ordinary-pair", "Ordinary pair");
-        using (var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(opted);
             store.SavePair(ordinary);
             var host = Host(store);
             Require((await host.LoadPairsAsync()).Pairs.All(pair => !pair.FilesOnDemandEnabled),
                 "a host opened before storage opt-in projects no enabled pairs");
-            using (var otherProcess = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System))
+            using (var otherProcess = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 otherProcess.EnableStorage();
                 Require((await host.LoadPairsAsync()).Pairs.All(pair => !pair.FilesOnDemandEnabled),
@@ -88,7 +88,7 @@ internal static class SyncHostChecks
             store.RecordStorageRegistration(opted.A.RootId, opted.A.RootPath, "fixture-registration");
             store.SetStoragePolicy(opted.A.RootId, opted.A.RootObjectId, "inherit");
         }
-        using (var reopened = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System))
+        using (var reopened = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var pairs = await Host(reopened).LoadPairsAsync();
             Require(pairs.Pairs.Single(pair => pair.Id == opted.PairId).FilesOnDemandEnabled &&
@@ -397,7 +397,7 @@ internal static class SyncHostChecks
     {
         Directory.CreateDirectory(root);
         string id;
-        using (var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(PairDefOf("p1", "Alpha"));
             store.AddNotices([new Notice("p1", 38, NoticeKind.Info, "", "binding changed",
@@ -408,7 +408,7 @@ internal static class SyncHostChecks
             await host.ResolveConflictSelectionCommandAsync([new(selection,
                 SyncAuthorityConflictResolutionKind.PreserveBoth, NoticeChoices.ReviewRebind)]);
         }
-        using (var reopened = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System))
+        using (var reopened = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash))
             Require(reopened.OpenNotices("p1").Count == 0, "recorded choice survives store reopen");
         using var connection = new Microsoft.Data.Sqlite.SqliteConnection(
             new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
@@ -420,7 +420,7 @@ internal static class SyncHostChecks
         Require((string?)command.ExecuteScalar() == NoticeChoices.ReviewRebind,
             "existing SQLite choice and state columns retain the pending review choice");
         // Inject only a storage failure, offline: pause persists but acknowledgement fails.
-        using (var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash))
         using (var write = new Microsoft.Data.Sqlite.SqliteConnection(
             "Data Source=" + SqliteStateStore.DatabasePath(root)))
         {

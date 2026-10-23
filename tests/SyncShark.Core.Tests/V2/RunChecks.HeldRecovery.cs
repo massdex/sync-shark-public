@@ -82,7 +82,7 @@ internal static partial class RunChecks
     private static async Task HeldRecovery_RefreshClosedGenerationsAsync()
     {
         var root = Path.Combine(Path.GetTempPath(), "held-refresh-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var at = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
         fx.A.Seed("folder", "", ItemKind.Folder, mtime: at);
@@ -107,7 +107,7 @@ internal static partial class RunChecks
     private static async Task HeldRecovery_EmptyFolderRerunAsync(bool tombstone)
     {
         var root = Path.Combine(Path.GetTempPath(), "held-rerun-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var at = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
         fx.A.Seed("folder", "", ItemKind.Folder, mtime: at);
@@ -128,7 +128,7 @@ internal static partial class RunChecks
         Require(first.Deferred == 0 && store.FirstSyncDone(fx.Pair.PairId) && await fx.A.ObserveAsync("folder/file.txt", CancellationToken.None) is null,
             "child finishes and first sync completes while the unreviewed empty parent remains held");
         store.Dispose();
-        using var reopened = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var restarted = new SyncRun(reopened, NewExecutor(reopened), fx.Provider, Settings, TimeProvider.System);
         var result = await restarted.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
         if (tombstone)

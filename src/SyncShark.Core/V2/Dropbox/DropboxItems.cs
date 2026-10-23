@@ -19,10 +19,7 @@ internal static class DropboxItems
     }
 
     /// <summary>Builds the provider entry a conditional write is conditioned on.</summary>
-    internal static PilotRemoteEntry ToEntry(ItemState state) => new(
-        state.Path,
-        state.Kind == ItemKind.Folder ? PilotEntryKind.Directory : PilotEntryKind.File,
-        state.ObjectId, state.VersionId, state.Size, state.Hash, state.Mtime);
+    internal static PilotRemoteEntry ToEntry(ItemState state) => RemoteEntries.ToEntry(state);
 
     /// <summary>
     /// The one account-access mapping (continuous-sync.md section 5): a Dropbox account-access refusal becomes

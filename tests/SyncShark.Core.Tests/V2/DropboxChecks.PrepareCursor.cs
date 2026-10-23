@@ -59,7 +59,7 @@ internal static partial class DropboxChecks
         h.Wire.LatestCursor = preparedCursor;
         h.Wire.SeedChangePage(preparedCursor, [], false, preparedCursor);
 
-        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(pair);
             var (runtime, _) = PrepareCursorRuntime(h, local, pair, store, productRoot);
@@ -99,7 +99,7 @@ internal static partial class DropboxChecks
         {
             var feedsBeforeFailure = h.Wire.ContinueCursors.Count;
             var listingsBeforeFailure = h.Wire.ListRequests.Count;
-            using var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System);
+            using var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var (runtime, _) = PrepareCursorRuntime(h, local, pair, store, productRoot);
             Require(FirstSyncChoicesState.Load(productRoot, pair.PairId, store) is not null,
                 "a retained reviewed prepare authorizes the initial attempt");
@@ -128,7 +128,7 @@ internal static partial class DropboxChecks
         var callsBeforeApply = h.Wire.Calls.Count;
         var feedsBeforeApply = h.Wire.ContinueCursors.Count;
         string committedCursor;
-        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             // No prepare inventory, run, runtime or open store survives this boundary.
             // RQ-032/RQ-130, docs/design/retry-resume-rewind.md: reopen preserves backoff.
@@ -203,7 +203,7 @@ internal static partial class DropboxChecks
         h.Wire.SeedChangePage(committedCursor, [], false, nextCursor);
         var listingsBeforeNext = h.Wire.ListRequests.Count;
         var feedsBeforeNext = h.Wire.ContinueCursors.Count;
-        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             Require(store.Cursor(RootId) == committedCursor,
                 scenario + ": successful root cursor survives a second SQLite reopen");
@@ -228,7 +228,7 @@ internal static partial class DropboxChecks
             Root(), [], [], true);
         h.Wire.LatestCursor = "race-prepare";
         h.Wire.SeedChangePage("race-prepare", [], false, "race-prepare");
-        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(pair);
             var (runtime, _) = PrepareCursorRuntime(h, local, pair, store, productRoot);
@@ -252,7 +252,7 @@ internal static partial class DropboxChecks
             h.Wire.SeedChangePage("race-list-drained",
                 [h.Wire.ChangeExistingFile("between-list-and-refresh.txt")], false, "race-retried");
         };
-        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var (runtime, _) = PrepareCursorRuntime(h, local, pair, store, productRoot);
             local.FailNextWrites = 1;
@@ -267,7 +267,7 @@ internal static partial class DropboxChecks
         }
         var feedsBefore = h.Wire.ContinueCursors.Count;
         var listsBefore = h.Wire.ListRequests.Count;
-        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             // The retained copy is eligible at its exact durable deadline, not immediately on reopen
             // (RQ-032/RQ-130, docs/design/retry-resume-rewind.md).
@@ -311,7 +311,7 @@ internal static partial class DropboxChecks
             [], [], true);
         h.Wire.LatestCursor = "narrow-scope";
         h.Wire.SeedChangePage("narrow-scope", [], false, "narrow-scope");
-        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(pair);
             if (scope == "nested-root") store.SavePair(inner);
@@ -342,7 +342,7 @@ internal static partial class DropboxChecks
         var listingsBefore = h.Wire.ListRequests.Count;
         var callsBefore = h.Wire.Calls.Count;
         var feedsBefore = h.Wire.ContinueCursors.Count;
-        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var (runtime, _) = PrepareCursorRuntime(h, local, pair, store, productRoot);
             var applied = await runtime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { },
@@ -369,7 +369,7 @@ internal static partial class DropboxChecks
         h.Wire.SeedFile("nested/later.txt", "later delta");
         h.Wire.SeedChangePage(committed, [h.Wire.ChangeExistingFile("nested/later.txt")], false, "wide-later");
         var listsAfterWidening = h.Wire.ListRequests.Count;
-        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var (_, run) = PrepareCursorRuntime(h, local, pair, store, productRoot);
             var next = await run.IncrementalAsync(pair.PairId, new Progress<RunProgress>(), CancellationToken.None);
@@ -390,7 +390,7 @@ internal static partial class DropboxChecks
         var provider = new FakeEndpointProvider().Add(pair.A, local)
             .AddInventory(pair.B, new DropboxInventory(pair.B, Side.B, h.Client, store, pair.PairId))
             .AddWriter(pair.B, h.Writer(Path.Combine(productRoot, "spool")));
-        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
+        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException),
             provider, settings, time);
         return (new V2CliRuntime(null, store, run, new EndpointRootProbe(provider), productRoot), run);
     }

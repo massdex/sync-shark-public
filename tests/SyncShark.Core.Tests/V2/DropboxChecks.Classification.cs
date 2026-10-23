@@ -25,7 +25,7 @@ internal static partial class DropboxChecks
         var pair = ClassificationPair();
         h.Wire.LatestCursor = "new-start";
         h.Wire.SeedChangePage("new-start", [], false, "new-start");
-        using var store = SqliteStateStore.Open(Path.Combine(product, "state"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(product, "state"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         store.SavePair(pair);
         var (runtime, _) = PrepareCursorRuntime(h, local, pair, store, product);
         await runtime.PrepareFirstSyncAsync(pair.PairId, _ => { }, CancellationToken.None);
@@ -44,13 +44,13 @@ internal static partial class DropboxChecks
         var state = Path.Combine(_root, "classification-scale");
         h.Wire.LatestCursor = "scale-start";
         h.Wire.SeedChangePage("scale-start", [], false, "scale-start");
-        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(ClassificationPair());
             var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, "p1");
             await inventory.FullAsync(1, _ => true, new Progress<string>(), CancellationToken.None);
         }
-        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, "p1");
             var lists = h.Wire.ListRequests.Count;
@@ -80,7 +80,7 @@ internal static partial class DropboxChecks
         h.Wire.LatestCursor = "cache-start";
         h.Wire.SeedChangePage("cache-start", [], false, "cache-start");
         var state = Path.Combine(_root, "classification-cache");
-        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(ClassificationPair());
             var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, "p1");
@@ -88,7 +88,7 @@ internal static partial class DropboxChecks
             await inventory.DeletionTimesAsync(["gone.txt"], CancellationToken.None);
         }
         var revisions = h.Wire.Calls.Count(call => call.Contains("list_revisions", StringComparison.Ordinal));
-        using var reopened = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var resumed = new DropboxInventory(Root(), Side.B, h.Client, reopened, "p1");
         h.Wire.SeedChangePage("cache-start", [], false, "cache-next");
         await resumed.ChangesSinceAsync("cache-start", 2, _ => true, CancellationToken.None, true);
@@ -105,7 +105,7 @@ internal static partial class DropboxChecks
         h.Wire.SeedFile("held.txt", "keep");
         h.Wire.LatestCursor = "transient-start";
         h.Wire.SeedChangePage("transient-start", [], false, "transient-start");
-        using var store = SqliteStateStore.Open(Path.Combine(_root, "released-transient"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(_root, "released-transient"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         store.SavePair(ClassificationPair());
         var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, "p1");
         var gen = store.BeginGeneration(RootId, "full");
@@ -137,7 +137,7 @@ internal static partial class DropboxChecks
     private static void CursorClassificationMigration()
     {
         var state = Path.Combine(_root, "classification-migration");
-        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(ClassificationPair());
             var gen = store.BeginGeneration(RootId, "full");
@@ -148,7 +148,7 @@ internal static partial class DropboxChecks
             connection.Open();
             StoreSchema.Execute(connection, null, "DROP TABLE deletion_classification_path; DROP TABLE deletion_classification; PRAGMA user_version=8;");
         }
-        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
             Require(store.Pairs().Count == 1 && store.Cursor(RootId) == "preserved-v8-cursor" &&
                 store.ReadDeletionClassification(Root()) is null,
                 "v8 migration preserves pair/cursor rows but never invents empty tombstone coverage");
@@ -163,7 +163,7 @@ internal static partial class DropboxChecks
     private static async Task CursorClassificationInterruptedAsync()
     {
         using var h = new Harness();
-        using var store = SqliteStateStore.Open(Path.Combine(_root, "classification-interrupted"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(_root, "classification-interrupted"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         store.SavePair(ClassificationPair());
         var empty = new HashSet<string>();
         store.ReplaceDeletionClassification(Root(), "old-complete", empty, empty);

@@ -13,6 +13,7 @@ internal static partial class PlannerChecks
     /// <summary>Runs every Planner check; the dispatch flag is --v2-planner-checks.</summary>
     public static Task RunAsync()
     {
+        PathRuleChecks.Run();
         ContentEvidence_OneOwner();
         Rule01_Unchanged();
         Rule02_EditedOneSide();

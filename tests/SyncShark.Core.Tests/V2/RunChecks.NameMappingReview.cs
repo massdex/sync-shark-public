@@ -73,7 +73,7 @@ internal static partial class RunChecks
     private static (SqliteStateStore Store, PairDef Pair) MappingStore(string name)
     {
         var root = Path.Combine(Path.GetTempPath(), "mapping-review-" + name + "-" + Guid.NewGuid().ToString("N"));
-        var store = SqliteStateStore.Open(root, Settings with { StoreDurableCommits = false }, TimeProvider.System);
+        var store = SqliteStateStore.Open(root, Settings with { StoreDurableCommits = false }, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pair = Pair("mapping-review", "C:\\local", "/cloud");
         store.SavePair(pair);
         return (store, pair);

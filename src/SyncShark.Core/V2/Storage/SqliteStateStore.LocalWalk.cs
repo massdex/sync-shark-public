@@ -2,8 +2,17 @@ using System.Text.Json;
 
 namespace Massdex.SyncShark.V2;
 
-public sealed partial class SqliteStateStore
+public sealed partial class SqliteStateStore : ILocalWalkStore
 {
+    string ILocalWalkStore.BeginLocalWalk(RootDef root, string options, NtfsUsnCheckpoint? current) => BeginLocalWalk(root, options, current);
+    bool ILocalWalkStore.HasLocalWalk(string root) => HasLocalWalk(root);
+    string? ILocalWalkStore.LocalWalkPage(string root, int ordinal) => LocalWalkPage(root, ordinal);
+    int ILocalWalkStore.LocalWalkPageCount(string root) => LocalWalkPageCount(root);
+    void ILocalWalkStore.SaveLocalWalkPages(string root, IReadOnlyList<(int Ordinal, string Payload)> pages) => SaveLocalWalkPages(root, pages);
+    SemaphoreSlim ILocalWalkStore.LocalWalkGate(string root) => LocalWalkGate(root);
+    void ILocalWalkStore.ForgetLocalWalk(string root) => ForgetLocalWalk(root);
+    bool ILocalWalkStore.GapInventoryPending(string rootId) => GapInventoryPending(rootId);
+
     // Unfinished observations never enter file_state, generation completion, or deletion coverage.
     internal string BeginLocalWalk(RootDef root, string options, NtfsUsnCheckpoint? current) => InStore(() =>
     {

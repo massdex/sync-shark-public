@@ -12,7 +12,7 @@ internal static partial class RunChecks
             var expected = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(payload);
             string pairId;
             Notice notice;
-            using (var sql = SqliteStateStore.Open(root, Settings, clock))
+            using (var sql = SqliteStateStore.Open(root, Settings, clock, LocalItems.CaptureOptionalHash))
             {
                 var failing = new RecordingStore(sql);
                 var fx = Build(suppliedStore: failing);
@@ -29,7 +29,7 @@ internal static partial class RunChecks
                     System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(saved.PendingNotice!.FailureRetry!.Value).SequenceEqual(expected),
                     reason + ": failed delivery leaves payload failure state byte-identical and file count unchanged");
             }
-            using (var sql = SqliteStateStore.Open(root, Settings, clock))
+            using (var sql = SqliteStateStore.Open(root, Settings, clock, LocalItems.CaptureOptionalHash))
             {
                 var saved = sql.SyncRetryAt(pairId, "payload.txt")!;
                 Require(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(saved.PendingNotice!.FailureRetry!.Value).SequenceEqual(expected),
@@ -55,7 +55,7 @@ internal static partial class RunChecks
     private static async Task Completion_UnknownDeleteReplansAsync()
     {
         var folder = Path.Combine(Path.GetTempPath(), "unknown-delete-replan-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.Seed("present.txt", "keep both");
         fx.B.Seed("present.txt", "keep both");
@@ -86,7 +86,7 @@ internal static partial class RunChecks
         var root = Path.Combine(Path.GetTempPath(), "ignore-reopen-" + Guid.NewGuid().ToString("N"));
         string pairId, noticeId;
         var due = DateTimeOffset.UtcNow.AddMinutes(1);
-        using (var store = SqliteStateStore.Open(root, Settings, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var fx = Build(suppliedStore: store);
             pairId = fx.Pair.PairId;
@@ -104,7 +104,7 @@ internal static partial class RunChecks
                 "unreadable Retry records exact durable read work, not a generic planning-only retry");
             store.CloseNotice(unreadable.NoticeId!, "resolved");
         }
-        using (var reopened = SqliteStateStore.Open(root, Settings, TimeProvider.System))
+        using (var reopened = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             Require(reopened.SyncRetryAt(pairId, "unreadable.txt") is { Kind: "scan", ReadRoots.Count: 2 },
                 "exact unreadable retry roots survive a cold reopen");
@@ -138,7 +138,7 @@ internal static partial class RunChecks
             "restored evidence has one attempt owner, never a second counter increment");
         var root = Path.Combine(Path.GetTempPath(), "failure-owner-" + Guid.NewGuid().ToString("N"));
         string pairId;
-        using (var store = SqliteStateStore.Open(root, Settings, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var fx = Build(suppliedStore: store);
             pairId = fx.Pair.PairId;
@@ -168,7 +168,7 @@ internal static partial class RunChecks
                 FailureRetryOwner.RunFailureState(store, pairId) is { Attempts: 2 },
                 "pair/run notice owns its counter without changing the root decision entity");
         }
-        using (var store = SqliteStateStore.Open(root, Settings, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             Require(store.SyncRetryAt(pairId, "failures/299.txt")?.LastError == "cause-299",
                 "per-item diagnosis survives cold reopen beyond the display sample");

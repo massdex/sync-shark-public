@@ -13,6 +13,7 @@ public sealed partial class SqliteStateStore : IStateStore
     private readonly SqliteConnection _connection;
     private readonly V2Settings _settings;
     private readonly TimeProvider _clock;
+    private readonly Func<RootDef, ItemState, CancellationToken, ItemState> _captureOptionalHash;
     private readonly DirTable _dir;
     private readonly FileStateReader _reads;
     private readonly FileStateTable _files;
@@ -32,8 +33,10 @@ public sealed partial class SqliteStateStore : IStateStore
     /// <summary>Test-only: how many one-time legacy identity sweeps this store has run.</summary>
     internal int LegacyFoldPassesForTest => _notices.LegacyFoldPasses;
 
-    private SqliteStateStore(SqliteConnection connection, V2Settings settings, TimeProvider clock)
+    private SqliteStateStore(SqliteConnection connection, V2Settings settings, TimeProvider clock,
+        Func<RootDef, ItemState, CancellationToken, ItemState> captureOptionalHash)
     {
+        _captureOptionalHash = captureOptionalHash ?? throw new ArgumentNullException(nameof(captureOptionalHash));
         _connection = connection;
         _connection.CreateFunction<string, string>("choice_key", PathKey.Of, isDeterministic: true);
         _connection.CreateFunction<string, long, bool>("sync_retry_due", (deadline, nowTicks) =>
@@ -62,15 +65,20 @@ public sealed partial class SqliteStateStore : IStateStore
     public static string DatabasePath(string dataRoot) => Path.Combine(dataRoot, StoreSchema.DatabaseRelativePath);
 
     /// <summary>Opens (creating when fresh) the store beneath <paramref name="dataRoot"/>; a damaged DB throws on use.</summary>
-    public static SqliteStateStore Open(string dataRoot, V2Settings settings, TimeProvider clock) =>
-        OpenCore(dataRoot, settings, clock, sweepPrepare: true);
+    public static SqliteStateStore Open(string dataRoot, V2Settings settings, TimeProvider clock,
+        Func<RootDef, ItemState, CancellationToken, ItemState> captureOptionalHash) =>
+        OpenCore(dataRoot, settings, clock, captureOptionalHash, sweepPrepare: true);
 
     // The pause control plane can coexist with a run publishing a prepare. It must not sweep that run's staging.
     internal static SqliteStateStore OpenPauseControl(string dataRoot) =>
-        OpenCore(dataRoot, V2Settings.Default, TimeProvider.System, sweepPrepare: false);
+        OpenCore(dataRoot, V2Settings.Default, TimeProvider.System,
+            (_, _, _) => throw new NotSupportedException("Hash capture is unavailable on the pause control store."),
+            sweepPrepare: false);
 
-    private static SqliteStateStore OpenCore(string dataRoot, V2Settings settings, TimeProvider clock, bool sweepPrepare)
+    private static SqliteStateStore OpenCore(string dataRoot, V2Settings settings, TimeProvider clock,
+        Func<RootDef, ItemState, CancellationToken, ItemState> captureOptionalHash, bool sweepPrepare)
     {
+        ArgumentNullException.ThrowIfNull(captureOptionalHash);
         Validate(settings);
         var dbPath = DatabasePath(dataRoot);
         if (!sweepPrepare && (!File.Exists(dbPath) || new FileInfo(dbPath).Length == 0))
@@ -92,7 +100,7 @@ public sealed partial class SqliteStateStore : IStateStore
             else StoreSchema.Verify(connection, clock);
             StoreSchema.CreateTemporary(connection);
             SnapshotTemporary.Sweep(connection);
-            var store = new SqliteStateStore(connection, settings, clock);
+            var store = new SqliteStateStore(connection, settings, clock, captureOptionalHash);
             if (sweepPrepare) store.TrySweepPrepareGenerations(propagateDamage: true);
             return store;
         }
@@ -483,7 +491,7 @@ public sealed partial class SqliteStateStore : IStateStore
             // so the notice stays open with its retained intent. Closure shares this result transaction.
             if (action.ConflictTransitionKey is not null && committed is Outcome.Done or Outcome.Skipped or Outcome.Refused)
                 _notices.CloseResolved(transaction, pairNo, ExecutionReasons.ConflictCopyNoticeId(pairId, action), "resolved");
-            var superseded = result.Outcome == Outcome.Skipped && result.Reason == EffectResolver.Superseded;
+            var superseded = result.Outcome == Outcome.Skipped && result.Reason == EffectReasons.Superseded;
             // M1: a resolved or retired intent must not leave a parked verification retry behind. Clear only the
             // parked shape this run owns (Kind sync, no held evidence, deadline at MaxValue); decision, deletion
             // evidence and restored-held rows are different owners.
@@ -497,12 +505,12 @@ public sealed partial class SqliteStateStore : IStateStore
                     UncertainDeleteWhere + " LIMIT 21);", ("$p", pairNo))! <= 20)
                 _notices.Add(transaction, pairNo, new Notice(pairId, action.Rule, NoticeKind.Info, action.Path,
                     result.Reason ?? "Interrupted deletion could not be verified; Retry checks both endpoints again.",
-                    "interrupted-delete-unverified"), now);
+                    InterruptedDelete.UnverifiedReason), now);
             else if (!superseded && action.Kind == ActionKind.Delete && committed is Outcome.Done or Outcome.Skipped)
                 _notices.CloseWhere(transaction, "resolved",
                     "notice_id=$id;",
                     ("$id", ShortId.Make("n", pairId, action.Rule.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                        RowCodec.Key(action.Path), "interrupted-delete-unverified")));
+                        RowCodec.Key(action.Path), InterruptedDelete.UnverifiedReason)));
             if (SyncDirectDownloadCheckpoint.NoticeFor(pairId, action, result) is { } notice)
                 _notices.Add(transaction, pairNo, notice, now);
             if (result.Outcome == Outcome.Skipped && result.DeleteSourceUnconfirmed)
@@ -542,7 +550,7 @@ public sealed partial class SqliteStateStore : IStateStore
             }
             else if (result.Outcome == Outcome.Done)
             {
-                _notices.CloseResolved(transaction, pairNo, DeleteSourceGuard.NoticeId(pairId, action.Path), "resolved");
+                _notices.CloseResolved(transaction, pairNo, DeleteSourceNotice.NoticeId(pairId, action.Path), "resolved");
                 if (action.ExpectedTarget is { } oldStorageItem &&
                     (action.Kind == ActionKind.Delete ||
                      (action.Target == Side.A ? result.NewA : result.NewB) is { } newStorageItem && newStorageItem.ObjectId != oldStorageItem.ObjectId))

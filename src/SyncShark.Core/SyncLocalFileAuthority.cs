@@ -30,7 +30,7 @@ internal sealed class SyncLocalFileAuthority : IDisposable, IAsyncDisposable
     private const int ErrorPathNotFound = 3;
     private const uint CryptProtectUiForbidden = 0x1;
     private const int MaximumRecoveryEnvelopeBytes = 128 * 1024;
-    internal const string AccessRecoverySuffix = ".syncshark-acl";
+    internal const string AccessRecoverySuffix = V2.ArtifactPaths.AccessRecoverySuffix;
     private static readonly byte[] RecoveryPayloadMagic = "SSACL001"u8.ToArray();
     private static readonly byte[] RecoveryEntropy = Encoding.UTF8.GetBytes("Massdex.SyncShark.WritableAcl.v1");
     internal sealed class RecoveryEnvelopeException(string message, Exception? inner = null) : IOException(message, inner);

@@ -32,7 +32,7 @@ internal static class RecoveryFirstRestartChecks
             Directory.CreateDirectory(otherPath);
             var other = LocalChecks.RootOf(otherPath, "root-other");
             var pair = fixture.Pair with { B = other };
-            using var store = SqliteStateStore.Open(fixture.StatePath, V2Settings.Default, TimeProvider.System);
+            using var store = SqliteStateStore.Open(fixture.StatePath, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
             store.SavePair(pair);
             var generation = store.BeginGeneration(pair.A.RootId, "fixture");
             var a = await OpenWriterAsync(fixture).ConfigureAwait(false);
@@ -63,7 +63,7 @@ internal static class RecoveryFirstRestartChecks
             var indexedBeforeRemoval = false;
             SyncLocalRecovery.SourceRemovedBeforeRecoveryCloseForTest = _ => indexedBeforeRemoval =
                 store.Recoveries(PairId).Any(record => record.ActionId == action.ActionId);
-            var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+            var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
             try
             {
                 await foreach (var result in executor.ApplyAsync(plan, a, b, default))
@@ -108,7 +108,7 @@ internal static class RecoveryFirstRestartChecks
                 File.ReadAllText(Path.Combine(targetRoot, "file.txt")) == "next replacement bytes",
                 "restore-as-copy keeps the replacement and recovers the exact old bytes");
             store.Dispose();
-            using var reopened = SqliteStateStore.Open(fixture.StatePath, V2Settings.Default, TimeProvider.System);
+            using var reopened = SqliteStateStore.Open(fixture.StatePath, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var coldReceipt = reopened.Recoveries(PairId).Single(record => record.RecoveryId == receipt.RecoveryId);
             await using var archived = await ((IRecoveryRecordReader)(side == Side.A ? a : b))
                 .OpenRecoveryRecordAsync(coldReceipt, default);
@@ -171,7 +171,7 @@ internal static class RecoveryFirstRestartChecks
     private static async Task GenericColdReopenAsync(string name, bool cancelSourceRead)
     {
         var fixture = NewFixture(name);
-        var store = SqliteStateStore.Open(fixture.StatePath, V2Settings.Default, TimeProvider.System);
+        var store = SqliteStateStore.Open(fixture.StatePath, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
         long generation = 0;
         try
         {
@@ -227,7 +227,7 @@ internal static class RecoveryFirstRestartChecks
         }
         finally { store.Dispose(); }
 
-        using var reopened = SqliteStateStore.Open(fixture.StatePath, V2Settings.Default, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(fixture.StatePath, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var reopenedWriter = await OpenWriterAsync(fixture).ConfigureAwait(false);
         var intents = reopened.UnresolvedIntents(PairId);
         LocalChecks.Require(intents.Count == 1, name + ": the cold store still holds exactly the interrupted intent");
@@ -242,7 +242,7 @@ internal static class RecoveryFirstRestartChecks
                 name + ": the cold store's receipt opens the exact original bytes");
         }
         var counted = new PreserveCounter(reopenedWriter);
-        var reconciled = (await new Executor(reopened, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage)
+        var reconciled = (await new Executor(reopened, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException)
             .ReconcileAsync(intents, generation, counted, new FailingSource(), CancellationToken.None)
             .ConfigureAwait(false)).Single();
         LocalChecks.Require(reconciled.Outcome == Outcome.Uncertain && reconciled.Recovery is not null,
@@ -266,7 +266,7 @@ internal static class RecoveryFirstRestartChecks
             new SyncIgnoreRule(SyncIgnoreKind.FileExtension, "tmp"),
             new SyncIgnoreRule(SyncIgnoreKind.FileName, "desktop.ini")
         };
-        var store = SqliteStateStore.Open(fixture.StatePath, V2Settings.Default, TimeProvider.System);
+        var store = SqliteStateStore.Open(fixture.StatePath, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
         RecoveryRecord? child = null;
         try
         {
@@ -322,7 +322,7 @@ internal static class RecoveryFirstRestartChecks
         }
         finally { store.Dispose(); }
 
-        using var reopened = SqliteStateStore.Open(fixture.StatePath, V2Settings.Default, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(fixture.StatePath, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var reopenedWriter = await OpenWriterAsync(fixture, rules).ConfigureAwait(false);
         var records = reopened.Recoveries(PairId);
         LocalChecks.Require(records.Count == 1 &&
@@ -330,7 +330,7 @@ internal static class RecoveryFirstRestartChecks
             name + ": the cold store still holds the carried child's Recovery row");
         var opposite = new FakeEndpoint(Side.B, fixture.Pair.B.RootId);
         var provider = new FakeEndpointProvider().Add(fixture.Pair.B, opposite).AddWriter(fixture.Pair.A, reopenedWriter);
-        var run = new SyncRun(reopened, new Executor(reopened, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider,
+        var run = new SyncRun(reopened, new Executor(reopened, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), provider,
             V2Settings.Default, TimeProvider.System);
         var restored = (await run.RestoreRecoveryPageAsync(PairId,
                 new RecoveryQuery(Id: child!.RecoveryId), asCopy: false, dryRun: false, CancellationToken.None)
@@ -350,7 +350,7 @@ internal static class RecoveryFirstRestartChecks
     {
         const string name = "recovery-first-throttle";
         var fixture = NewFixture(name);
-        using var store = SqliteStateStore.Open(fixture.StatePath, V2Settings.Default, TimeProvider.System);
+        using var store = SqliteStateStore.Open(fixture.StatePath, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
         store.SavePair(fixture.Pair);
         var generation = store.BeginGeneration(fixture.Local.RootId, "fixture");
         var writer = await OpenWriterAsync(fixture).ConfigureAwait(false);

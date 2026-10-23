@@ -46,7 +46,7 @@ internal static class RecoveryAdapterChecks
     private static async Task RecoveryListStoreOnlyAsync()
     {
         var root = LocalChecks.FreshRoot("recovery-list-store-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pair = Pair();
         store.SavePair(pair);
         var bytes = Encoding.UTF8.GetBytes("retained bytes");
@@ -69,7 +69,7 @@ internal static class RecoveryAdapterChecks
             .Add(pair.A, endpointA)
             .Add(pair.B, new FakeEndpoint(Side.B, pair.B.RootId))
             .AddWriter(pair.A, writer));
-        var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider, Settings,
+        var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), provider, Settings,
             TimeProvider.System);
         var runtime = new V2CliRuntime(null, store, run, new EndpointRootProbe(provider), root);
 
@@ -111,8 +111,8 @@ internal static class RecoveryAdapterChecks
     private static async Task RecoveryHostQueuedGateAsync()
     {
         var root = LocalChecks.FreshRoot("recovery-host-gate-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System);
-        var executor = new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
+        var executor = new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         var run = new SyncRun(store, executor, new FakeEndpointProvider(), Settings, TimeProvider.System);
         var host = new V2SyncHost(store, run, new ObservedExecutor(executor), null!, Settings, TimeProvider.System,
             SqliteStateStore.DatabasePath(Path.Combine(root, "state")));

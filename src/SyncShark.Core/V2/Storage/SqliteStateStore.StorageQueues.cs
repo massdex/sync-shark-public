@@ -5,6 +5,8 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SqliteStateStore
 {
+    bool IStateStore.HasOwnedPointers(string rootId) => HasOwnedPointers(rootId);
+
     void IStateStore.ClearStorageRootBackoff(string rootId) => ClearStorageRootBackoff(rootId);
 
     // The caller supplies roots after global/account pause projection. With no projection,

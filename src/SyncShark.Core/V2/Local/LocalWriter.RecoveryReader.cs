@@ -4,15 +4,15 @@ namespace Massdex.SyncShark.V2;
 public sealed partial class LocalWriter
 {
     internal ItemState DescribeRecoveryReadOnly(RecoveryRecord recovery, CancellationToken ct) =>
-        RecoveryRecordPreviews.DescribeLocal(_pairId, _side, _recoveryRoot, recovery, ct);
+        LocalWriter.DescribeRecoveryLocalPreview(_pairId, _side, _recoveryRoot, recovery, ct);
 
     Task<ItemState> IRecoveryRecordReader.DescribeRecoveryAsync(RecoveryRecord recovery, CancellationToken ct)
     {
         // This is the confirmed-operation writer, not the read-only preview facade. An interrupted archive
         // envelope denies even metadata access, so repair the exact owned envelope before describing it.
-        // Preview calls RecoveryRecordPreviews.DescribeLocal directly and never enters this method.
+        // Preview calls LocalWriter.DescribeRecoveryLocalPreview directly and never enters this method.
         PrepareRecoveryRecordRead(recovery, ct);
-        return Task.FromResult(RecoveryRecordPreviews.DescribeLocal(_pairId, _side, _recoveryRoot, recovery, ct));
+        return Task.FromResult(LocalWriter.DescribeRecoveryLocalPreview(_pairId, _side, _recoveryRoot, recovery, ct));
     }
 
     async Task<Stream> IRecoveryRecordReader.OpenRecoveryRecordAsync(RecoveryRecord recovery, CancellationToken ct)
@@ -47,9 +47,54 @@ public sealed partial class LocalWriter
         ct.ThrowIfCancellationRequested();
         using var lease = PilotDirectoryLease.Open(_recoveryRoot);
         var path = RecoveryPath(lease, recovery.ActionId);
-        if (!RecoveryRecordPreviews.IsExactLocalLocation(recovery.Location, path))
+        if (!RecoveryRecordReads.IsExactLocalLocation(recovery.Location, path))
             throw new InvalidDataException(
                 "The Recovery record is not bound to this pair's exact operation path; nothing was read or changed.");
         SyncLocalRecovery.RestoreInterruptedArchiveAccess(path);
     }
+
+    /// <summary>Describes one local archive using metadata reads only.</summary>
+    internal static ItemState DescribeRecoveryLocalPreview(string pairId, Side writerSide, string recoveryRoot,
+        RecoveryRecord recovery, CancellationToken ct)
+    {
+        RecoveryRecordReads.RequireComplete(recovery);
+        RecoveryRecordReads.RequireOwnership(pairId, recovery.PairId, writerSide, recovery.Side);
+        if (!string.IsNullOrEmpty(recovery.VersionId))
+            throw new InvalidDataException(
+                "This Recovery record is not a local archive reference; nothing was read or changed.");
+        ct.ThrowIfCancellationRequested();
+        using var lease = PilotDirectoryLease.Open(recoveryRoot);
+        var path = SyncLocalRecovery.BuildRecoveryPath(lease, pairId, LocalWriter.OperationId(recovery.ActionId));
+        if (!RecoveryRecordReads.IsExactLocalLocation(recovery.Location, path))
+            throw new InvalidDataException(
+                "The Recovery record is not bound to this pair's exact operation path; nothing was read or changed.");
+        if (!File.Exists(path))
+            throw new FileNotFoundException(
+                "The local Recovery copy is no longer available at its exact operation path; nothing was read or changed.",
+                path);
+        PilotDirectoryIdentity identity;
+        long size;
+        DateTime lastWriteUtc;
+        try
+        {
+            // The archive's own NTFS identity is the retained source identity the record cannot store.
+            identity = SyncLocalRecovery.ParseSourceIdentity(LocalWriter.DurableIdentity(path));
+            var info = new FileInfo(path);
+            size = info.Length;
+            lastWriteUtc = info.LastWriteTimeUtc;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            throw new IOException(
+                "The local Recovery copy's identity could not be verified; nothing was read or changed. " + error.Message,
+                error);
+        }
+        if (size != recovery.Size)
+            throw new InvalidDataException(
+                "The local Recovery copy no longer matches the recorded size; nothing was read or changed.");
+        return new ItemState(recovery.Path, ItemKind.File,
+            SyncLocalEndpointStore.ObjectId(identity.VolumeSerialNumber, identity.FileId), null, recovery.Hash,
+            recovery.Size, new DateTimeOffset(lastWriteUtc), ItemFlags.None);
+    }
+
 }

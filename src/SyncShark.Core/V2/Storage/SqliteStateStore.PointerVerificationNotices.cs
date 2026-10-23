@@ -29,7 +29,7 @@ public sealed partial class SqliteStateStore
         }
         // An ignored pair cause suppresses the whole family: the debt stays durable, but no notice reopens.
         if (StoreSchema.Scalar(_connection, tx,
-            "SELECT 1 FROM notice INDEXED BY nt_pair_reason WHERE pair_no=$p AND reason_key=$reason AND choice='ignore' LIMIT 1;",
+            "SELECT 1 FROM notice INDEXED BY nt_pair_reason WHERE pair_no=$p AND reason_key=$reason AND choice='ignore' AND " + NoticeTable.ActionableSql("state") + " LIMIT 1;",
             ("$p", pair), ("$reason", summaryNotice.ReasonKey)) is not null)
         {
             CloseFamily(tx, pair, summaryFamily);
@@ -86,12 +86,24 @@ public sealed partial class SqliteStateStore
     {
         if (!_storageEnabled) return;
         var family = StorageNotices.Prefix(summary);
-        if (!HasOpenFamily(null, pair, family)) return;
+        // An ignored row still names a live episode even though it is not an actionable family member; it
+        // must reach the debt check so success can retire it.
+        if (!HasFamilyRow(pair, family)) return;
         // Deaggregation would hide unresolved failures until the next scan, so the summary stands until every
         // affected entity's durable debt is gone, not merely until the count is back under the limit.
         if (PointerVerificationDebtCount(summary.RootId, summary.RemoteBinding, 1) != 0) return;
-        CloseFamily(null, pair, family);
+        // Ignore covers only the verification episode it silenced: the success close retires ignored rows too,
+        // so a later outage raises an actionable summary instead of staying suppressed.
+        CloseFamily(null, pair, family, includeIgnored: true);
     }
+
+    // Live family rows include an ignored cause (still 'open') but never retained closed history, so a
+    // finished summary does not turn every later entity success into another pass.
+    private bool HasFamilyRow(long pair, string familyPrefix) =>
+        StoreSchema.Scalar(_connection, null,
+            "SELECT 1 FROM notice INDEXED BY nt_pair_reason WHERE pair_no=$p AND reason_key>=$lo AND reason_key<$hi AND " +
+            NoticeTable.ActionableSql("state") + " LIMIT 1;",
+            ("$p", pair), ("$lo", familyPrefix), ("$hi", familyPrefix + "￿")) is not null;
 
     /// <summary>Queues the same durable offline request that per-item Retry uses, for every affected entity in the
     /// pair. Returns how many rows were inserted or re-requested; never loads item states into memory.</summary>
@@ -137,12 +149,12 @@ public sealed partial class SqliteStateStore
               AND COALESCE(choice,'')<>'ignore' LIMIT 1;
             """, ("$p", pair), ("$lo", familyPrefix), ("$hi", familyPrefix + "￿")) is not null;
 
-    private void CloseFamily(SqliteTransaction? tx, long pair, string familyPrefix) =>
-        CloseRange(tx, pair, familyPrefix, familyPrefix + "￿");
+    private void CloseFamily(SqliteTransaction? tx, long pair, string familyPrefix, bool includeIgnored = false) =>
+        CloseRange(tx, pair, familyPrefix, familyPrefix + "￿", includeIgnored);
 
-    private void CloseRange(SqliteTransaction? tx, long pair, string lo, string hi) =>
+    private void CloseRange(SqliteTransaction? tx, long pair, string lo, string hi, bool includeIgnored = false) =>
         _notices.CloseWhere(tx, "resolved", $"""
             pair_no=$p AND reason_key>=$lo AND reason_key<$hi AND {NoticeTable.ActionableSql("state")}
-              AND COALESCE(choice,'')<>'ignore';
+              {(includeIgnored ? "" : "AND COALESCE(choice,'')<>'ignore'")};
             """, ("$p", pair), ("$lo", lo), ("$hi", hi));
 }

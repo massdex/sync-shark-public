@@ -6,7 +6,7 @@ internal static partial class StorageChecks
     {
         try
         {
-            using (var store = SqliteStateStore.Open(folder, Fast, TimeProvider.System))
+            using (var store = SqliteStateStore.Open(folder, Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 store.ResultMaintenanceForTest = () => throw new IOException("injected post-commit cleanup failure");
                 CommitDoneBaselineAndIntent(store);
@@ -19,7 +19,7 @@ internal static partial class StorageChecks
                 Require(store.OpenNotices("p1").Count(n => n.ReasonKey == "store-maintenance") == 1,
                     "repeated maintenance failure retains one notice");
             }
-            using (var reopened = SqliteStateStore.Open(folder, Fast, TimeProvider.System))
+            using (var reopened = SqliteStateStore.Open(folder, Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 Require(reopened.UnresolvedIntents("p1").Count == 0 && reopened.Baselines("p1").Count == 1,
                     "cold reopen retains committed baseline and settled intent after cleanup fault");

@@ -4,7 +4,7 @@ internal static partial class RunChecks
 {
     internal static async Task PointerObservationRetryAsync(string folder)
     {
-        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var item = fx.A.Seed("pointer.txt", "same bytes");
         fx.B.Seed(item.Path, "same bytes");
@@ -40,7 +40,7 @@ internal static partial class RunChecks
     /// Ignore, then a scan with zero transient failures, then a new outage must produce an active notice.</summary>
     internal static async Task PointerObservationIgnoreExpiryAsync(string folder)
     {
-        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var count = StorageNotices.NoticeAggregateLimit + 1;
         var first = Enumerable.Range(0, count).Select(index => $"first-{index:D2}.txt").ToArray();

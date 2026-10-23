@@ -4,7 +4,7 @@ namespace Massdex.SyncShark.V2;
 
 public static class QuarantineFailure
 {
-    internal static string GrantWarning(string path) => "Defender exclusions may still cover these recorded paths: " + path + "; " + AttendedElevatedAction.DownloadStagePath(path) +
+    internal static string GrantWarning(string path) => "Defender exclusions may still cover these recorded paths: " + path + "; " + ArtifactPaths.DownloadStagePath(path) +
         ". This different entity or folder was not materialized. Review/remove the exact file and sibling-stage exclusions in Windows Security, then explicitly retry verification, or exclude/ignore this item. Sync Shark never removes exclusions automatically.";
 
     public const string NoticeKey = "antivirus-quarantine";

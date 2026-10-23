@@ -67,7 +67,7 @@ internal static partial class ExecutorChecks
         using var store = new InMemoryStateStore(); store.SavePair(Pair());
         var writer = new DropboxWriter(new RootDef("rb", "Dropbox", "acc", "/Pilot", DropboxWire.RootId),
             Side.B, client, "unused", isStateDamage: StorageFailureClassifier.IsStateDamage, settings);
-        var results = await Apply(new Executor(store, settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), Plan(action), source, writer)
+        var results = await Apply(new Executor(store, settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), Plan(action), source, writer)
             .WaitAsync(HeldEffectTimeout);
         var diagnostics = metrics.Snapshot();
         var expectedAttempts = fault switch

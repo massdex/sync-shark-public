@@ -12,7 +12,7 @@ internal static partial class RunChecks
         var path = AttendedElevatedAction.ValidatePath(localRoot, item.Path);
         var grant = new DefenderGrant("publication-grant", "prior-owner", null, null, path,
             AttendedElevatedAction.DownloadStagePath(path));
-        using (var store = SqliteStateStore.Open(state, Settings, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(state, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var fx = Build(suppliedStore: store);
             store.SavePair(fx.Pair with { A = fx.Pair.A with { RootPath = localRoot } });
@@ -26,7 +26,7 @@ internal static partial class RunChecks
                 store.DefenderGrantHoldPaths("ra").Contains(item.Path),
                 "interruption after snapshot commit leaves durable ungranted path protection before notice publication");
         }
-        using (var store = SqliteStateStore.Open(state, Settings, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(state, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var gate = (FairStoreGate)typeof(SqliteStateStore).GetField("_gate",
                 System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(store)!;
@@ -55,7 +55,7 @@ internal static partial class RunChecks
         QuarantineGrantPublicationRecoveryChecks(root);
         foreach (var side in new[] { Side.A, Side.B })
         {
-            using var store = SqliteStateStore.Open(Path.Combine(root, $"reviewed-binding-{side}"), Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(root, $"reviewed-binding-{side}"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             var rootId = side == Side.A ? "ra" : "rb";
             var reviewed = new ItemState("reviewed.txt", ItemKind.File, "reviewed-entity", "reviewed-version",

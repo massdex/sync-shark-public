@@ -5,7 +5,7 @@ using Microsoft.Win32.SafeHandles;
 namespace Massdex.SyncShark.V2;
 
 /// <summary>One identity-verification scope; an unavailable root never proves absence.</summary>
-internal sealed class LocalFileAbsence : IDisposable
+internal sealed class LocalFileAbsence : IFileAbsenceVerifier
 {
     private readonly PilotDirectoryLease? _root;
     private readonly string? _rootPath;
@@ -21,6 +21,8 @@ internal sealed class LocalFileAbsence : IDisposable
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or Win32Exception or ArgumentException) { }
     }
+
+    FileAbsence IFileAbsenceVerifier.Check(ItemState item) => Check(item);
 
     internal FileAbsence Check(ItemState item)
     {

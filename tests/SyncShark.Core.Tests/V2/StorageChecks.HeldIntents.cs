@@ -106,7 +106,7 @@ internal static partial class StorageChecks
     private static void IntentOrderIndex_RecreatedOnOpen(string root)
     {
         var folder = Fresh(root, "intent-order-index");
-        using (var store = SqliteStateStore.Open(folder, Fast, new TestClock()))
+        using (var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             store.SavePair(Pair("p1"));
             store.RecordIntent("p1", IntentFor("held-1"));
@@ -120,7 +120,7 @@ internal static partial class StorageChecks
         StorageDamage.RemoveIntentOrderIndex(DbPath(folder));
         for (var reopen = 0; reopen < 2; reopen++)
         {
-            using (var store = SqliteStateStore.Open(folder, Fast, new TestClock()))
+            using (var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
             {
                 var page = store.HeldIntentsPage("p1", null, 200);
                 Require(page.Items.Count == 2 && page.NextCursor is null &&

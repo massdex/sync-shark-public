@@ -296,18 +296,18 @@ internal static partial class DropboxChecks
             _root = root;
             WriterA = new(A);
             WriterB = new(B);
-            Store = SqliteStateStore.Open(root, _settings, TimeProvider.System);
+            Store = SqliteStateStore.Open(root, _settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             Store.SavePair(_pair);
             CreateRun();
         }
         private void CreateRun() => Run = new SyncRun(Store,
-            new Executor(Store, _settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
+            new Executor(Store, _settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException),
             new FakeEndpointProvider().Add(_pair.A, A).Add(_pair.B, B)
                 .AddWriter(_pair.A, WriterA).AddWriter(_pair.B, WriterB), _settings, TimeProvider.System);
         public void Reopen()
         {
             Store.Dispose();
-            Store = SqliteStateStore.Open(_root, _settings, TimeProvider.System);
+            Store = SqliteStateStore.Open(_root, _settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             CreateRun();
         }
         public async Task<RunReport> FirstAsync()

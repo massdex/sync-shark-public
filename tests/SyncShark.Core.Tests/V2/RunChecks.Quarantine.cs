@@ -15,7 +15,7 @@ internal static partial class RunChecks
             "deterministic crash stage replacement is never deleted");
         Require(LocalWriter.DeleteMatchingStage(checkpoint, "stage-object", () => stageExists = false) && !stageExists,
             "owned deterministic crash stage cleanup frees the exact retry name (fake handle)");
-        using (var artifactStore = SqliteStateStore.Open(Path.Combine(root, "case-artifact"), Settings, TimeProvider.System))
+        using (var artifactStore = SqliteStateStore.Open(Path.Combine(root, "case-artifact"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var artifactFx = Build(suppliedStore: artifactStore);
             var stage = ".SyncShark-Transfer-" + new string('a', 64) + ".PARTIAL";
@@ -41,7 +41,7 @@ internal static partial class RunChecks
         foreach (var code in new[] { 225, 226 })
         foreach (var mode in new[] { "open", "read", "write" })
         {
-            using var store = SqliteStateStore.Open(Path.Combine(root, code + mode), Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(root, code + mode), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             var source = mode == "write" ? fx.B : fx.A;
             source.Seed("blocked.txt", "blocked bytes");
@@ -76,7 +76,7 @@ internal static partial class RunChecks
                 "successful explicit retry clears exact hold: " + retry.Outcome + " " + retry.Reason);
             Console.WriteLine($"PASS quarantine {mode} Win32 {code}: sibling/first-sync/persistence/retry");
         }
-        using (var store = SqliteStateStore.Open(Path.Combine(root, "choices"), Settings, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(Path.Combine(root, "choices"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var fx = Build(suppliedStore: store);
             fx.B.Seed("blocked.txt", "bytes");

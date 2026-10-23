@@ -38,7 +38,7 @@ internal static partial class StorageChecks
             store.WriteSnapshot(new Snapshot("rb", Side.B, gen, "cursor", [cloud], []));
             store.CompleteGeneration(gen, "cursor", true);
         }
-        using (var store = SqliteStateStore.Open(Path.Combine(root, "mapped"), Fast, new TestClock()))
+        using (var store = SqliteStateStore.Open(Path.Combine(root, "mapped"), Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             var basis = store.Baselines("p1");
             Require(cloud.IdentityJson is not null && basis.Single().B.IdentityJson is not null &&

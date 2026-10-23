@@ -24,7 +24,7 @@ internal static class DateLogRestoreChecks
         catch (SyncCliUsageException) { needsYes = true; }
         LocalChecks.Require(needsYes, "real restore requires explicit yes");
         var files = Path.Combine(root, "files"); Directory.CreateDirectory(files);
-        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pair = new PairDef("log-repair", "Log repair", LocalChecks.RootOf(files, "a"),
             new RootDef("b", SyncProviders.Dropbox, "account", "/test", "id:root"), [], [], true);
         store.SavePair(pair);
@@ -54,24 +54,24 @@ internal static class DateLogRestoreChecks
         Task<ItemState?> Remote(string path, CancellationToken _) => Task.FromResult<ItemState?>(clouds[path]);
         File.WriteAllText(Path.Combine(files, "wrong-content"), "edit");
         File.SetLastWriteTimeUtc(Path.Combine(files, "wrong-content"), now.UtcDateTime);
-        var report = await DateRepair.RunAsync(store, pair, Remote, root, true, [], CancellationToken.None, StorageFailureClassifier.IsStateDamage,
+        var report = await DateRepair.RunAsync(store, pair, Remote, root, true, [], CancellationToken.None, [], DateRepairInputs.Provenance(evidence), true, StorageFailureClassifier.IsStateDamage, StorageFailureClassifier.IsDirectStateDamage, StorageFailureClassifier.IsBusy,
             reportMismatch: true, provenanceSources: evidence);
         LocalChecks.Require(report.Mismatches == 8 && File.ReadAllText(report.CsvFile!).Contains("log-correlated"), "mismatch includes both evidence classes");
-        var dryRun = await DateRepair.RunAsync(store, pair, Remote, root, true, [], CancellationToken.None, StorageFailureClassifier.IsStateDamage, provenanceSources: evidence);
+        var dryRun = await DateRepair.RunAsync(store, pair, Remote, root, true, [], CancellationToken.None, [], DateRepairInputs.Provenance(evidence), true, StorageFailureClassifier.IsStateDamage, StorageFailureClassifier.IsDirectStateDamage, StorageFailureClassifier.IsBusy, provenanceSources: evidence);
         LocalChecks.Require(dryRun.Eligible == 4 && dryRun.Examples.All(item => item.Evidence == "log"),
             "log required even with matching DB notice; dry-run evidence recorded");
-        var repair = await DateRepair.RunAsync(store, pair, Remote, root, false, [], CancellationToken.None, StorageFailureClassifier.IsStateDamage, provenanceSources: evidence);
+        var repair = await DateRepair.RunAsync(store, pair, Remote, root, false, [], CancellationToken.None, [], DateRepairInputs.Provenance(evidence), true, StorageFailureClassifier.IsStateDamage, StorageFailureClassifier.IsDirectStateDamage, StorageFailureClassifier.IsBusy, provenanceSources: evidence);
         LocalChecks.Require(repair.Changed == 4 && repair.Skipped == 4, "inclusive zero/two second edges; absent, outside events and changed content untouched");
         LocalChecks.Require(repair.Examples.All(item => item.Evidence == "log") &&
             File.GetLastWriteTimeUtc(Path.Combine(files, "absent")) == now.UtcDateTime,
             "DB notice alone cannot bypass supplied log; repaired evidence recorded");
-        var preview = await DateRepair.RestoreAsync(store, pair, repair.ReportFile, root, true, [], CancellationToken.None, StorageFailureClassifier.IsStateDamage);
+        var preview = await DateRepair.RestoreAsync(store, pair, repair.ReportFile, root, true, [], CancellationToken.None, StorageFailureClassifier.IsStateDamage, StorageFailureClassifier.IsDirectStateDamage);
         LocalChecks.Require(preview.Eligible == 4 && preview.Changed == 0 && File.GetLastWriteTimeUtc(Path.Combine(files, "zero")) == now.AddYears(-2).UtcDateTime,
             "restore dry-run changes no timestamp");
         File.WriteAllText(Path.Combine(files, "changed"), "edit");
         File.SetLastWriteTimeUtc(Path.Combine(files, "changed"), now.AddYears(-2).UtcDateTime);
         File.SetLastWriteTimeUtc(Path.Combine(files, "date-changed"), now.AddHours(1).UtcDateTime);
-        var restore = await DateRepair.RestoreAsync(store, pair, repair.ReportFile, root, false, [], CancellationToken.None, StorageFailureClassifier.IsStateDamage);
+        var restore = await DateRepair.RestoreAsync(store, pair, repair.ReportFile, root, false, [], CancellationToken.None, StorageFailureClassifier.IsStateDamage, StorageFailureClassifier.IsDirectStateDamage);
         LocalChecks.Require(restore.Changed == 2 && restore.Skipped == 2 && File.ReadAllText(Path.Combine(files, "changed")) == "edit" &&
             File.GetLastWriteTimeUtc(Path.Combine(files, "date-changed")) == now.AddHours(1).UtcDateTime, "restore refuses content and timestamp changes");
         foreach (var name in new[] { "zero", "two" })

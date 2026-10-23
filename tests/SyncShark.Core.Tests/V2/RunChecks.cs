@@ -131,7 +131,7 @@ internal static partial class RunChecks
     private static async Task PairSummaryDoesNotHoldSiblingsAsync()
     {
         using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "summary-scope-" + Guid.NewGuid().ToString("N")),
-            Settings, TimeProvider.System);
+            Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.Seed("held.txt", "original");
         await FirstSyncAsync(fx.Run(), fx);
@@ -893,7 +893,7 @@ internal static partial class RunChecks
     private static async Task RecoveryRestore_NoNoticeRunsWithoutLookupsAsync()
     {
         using var store = SqliteStateStore.Open(
-            Path.Combine(Path.GetTempPath(), "restore-zero-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System);
+            Path.Combine(Path.GetTempPath(), "restore-zero-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.Seed("same.txt", "same");
         fx.B.Seed("same.txt", "same");
@@ -972,12 +972,16 @@ internal static partial class RunChecks
             fx.Store.SyncRetryAt(fx.Pair.PairId, "x.txt") is { Attempts: 1 },
             "decision 85: unconfirmed content completes first sync with a durable retry and visible notice");
         var parked = fx.Store.SyncRetryAt(fx.Pair.PairId, "x.txt")!;
-        // Core no-duplicate-notice rule: NoticeTable folds rule-30 planner uncertainty into
-        // rule-40 sync-retry, retaining the actionable failure rather than a second issue.
-        Require(fx.Store.OpenNotices(fx.Pair.PairId).Single(notice => notice.Path == "x.txt") is
-            { Rule: 40, ReasonKey: "sync-retry" } issue &&
-            issue.Detail.Contains(parked.LastError, StringComparison.Ordinal),
-            "the single canonical retry notice explains the unconfirmed content failure");
+        // Specificity supersedes the old generic-retry expectation: one content diagnosis wins
+        // over the generic unavailable-proof retry, while the retry debt remains durable.
+        var issue = fx.Store.OpenNotices(fx.Pair.PairId).Single(notice => notice.Path == "x.txt");
+        Console.WriteLine($"UNCONFIRMED NOTICE reason={issue.ReasonKey}; detail={issue.Detail}; choices={string.Join(",", NoticeOptions.Options(issue).Select(option => option.Choice))}");
+        Require(issue is { Rule: 30, ReasonKey: "content-unconfirmed" } &&
+            issue.Detail == PlanNotices.ContentUnconfirmed.Detail,
+            "exactly one notice explains unconfirmed content");
+        Require(NoticeOptions.Options(issue).Any(option => option.Choice == NoticeChoices.RetryNow) &&
+            NoticeOptions.Options(issue).Any(option => option.Choice == NoticeChoices.Ignore),
+            "unconfirmed content failure offers Retry and Ignore");
         Require(parked.RetryAfter > clock.Now, "unconfirmed failure retains a future retry deadline");
         clock.Now = parked.RetryAfter.AddTicks(-1);
         await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
@@ -2084,7 +2088,7 @@ internal static partial class RunChecks
     internal static async Task HashCheckpointsAsync()
     {
         var folder = Path.Combine(Path.GetTempPath(), "resilience-hash-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         for (var i = 0; i < 5; i++) { fx.A.Seed($"{i}.txt", "same"); fx.B.Seed($"{i}.txt", "same"); }
         var inventory = new ScriptedInventory(fx.A) { Hashless = true, ThrowHashPath = "4.txt" };
@@ -2100,7 +2104,7 @@ internal static partial class RunChecks
             .Count(x => x.Hash is not null) == 4, "completed chunks are committed before the next hash call");
         inventory.ThrowHashPath = null;
         store.Dispose();
-        using var reopened = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var restarted = new SyncRun(reopened, NewExecutor(reopened), fx.Provider, settings, clock);
         // docs/design/retry-resume-rewind.md: cold reopen does not bypass the persisted deadline.
         var sleeping = reopened.SyncRetryAt(fx.Pair.PairId, "4.txt")!;
@@ -2122,7 +2126,7 @@ internal static partial class RunChecks
     {
         var folder = Path.Combine(Path.GetTempPath(), "resilience-hashbatch-" + Guid.NewGuid().ToString("N"));
         var settings = Settings with { LocalHashCheckpointFiles = 2000, StoreBatchRows = 1000 };
-        using var store = SqliteStateStore.Open(folder, settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         for (var i = 0; i < 1001; i++) { fx.A.Seed($"{i:D4}.txt", "same"); fx.B.Seed($"{i:D4}.txt", "same"); }
         var inventory = new ScriptedInventory(fx.A) { Hashless = true };
@@ -2135,7 +2139,7 @@ internal static partial class RunChecks
         Console.WriteLine("PASS hash checkpoints stay atomic: no chunk exceeds StoreBatchRows");
     }
 
-    private static Executor NewExecutor(IStateStore store) => new(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+    private static Executor NewExecutor(IStateStore store) => new(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
 
     private static Fixture Build(bool enabled = true, bool record = false, string pairId = "p1", IStateStore? suppliedStore = null, bool localLocal = false, string accountId = "acc", bool displayRoot = false)
     {

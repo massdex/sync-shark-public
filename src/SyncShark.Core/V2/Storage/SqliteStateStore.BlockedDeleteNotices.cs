@@ -52,7 +52,7 @@ public sealed partial class SqliteStateStore
         {
             _notices.CloseWhere(transaction, "aggregated",
                 "pair_no=$p AND reason_key=$reason AND " + NoticeTable.ActionableSql("state") + ";",
-                ("$p", pairNo), ("$reason", DeleteSourceGuard.ReasonKey));
+                ("$p", pairNo), ("$reason", DeleteSourceNotice.ReasonKey));
             _notices.Add(transaction, pairNo, new Notice(pairId, 0, NoticeKind.Info, "",
                 $"{(exact || count <= 20 ? count.ToString(System.Globalization.CultureInfo.InvariantCulture) : "More than 20")} deletions remain blocked because source absence or a required prerequisite could not be verified. " +
                 "Nothing was deleted for these items. Held folders (including children without a baseline) remain protected. Sync retries automatically; Show remaining lists each path and why, 50 per page.",
@@ -70,6 +70,6 @@ public sealed partial class SqliteStateStore
             while (reader.Read()) remaining.Add(new(reader.GetString(0), reader.GetString(1)));
         foreach (var item in remaining)
             _notices.Add(transaction, pairNo, new Notice(pairId, 0, NoticeKind.Info, item.Path,
-                item.Detail, DeleteSourceGuard.ReasonKey, DeleteSourceGuard.NoticeId(pairId, item.Path)), now);
+                item.Detail, DeleteSourceNotice.ReasonKey, DeleteSourceNotice.NoticeId(pairId, item.Path)), now);
     }
 }

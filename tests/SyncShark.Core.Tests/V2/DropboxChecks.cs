@@ -674,7 +674,7 @@ internal static partial class DropboxChecks
             var probes = Enumerable.Range(0, 420).Select(i => $"checkpoint-{i:D4}.txt").ToArray();
             foreach (var path in probes) h.Wire.SeedDeletedEntry(path);
             var observedCheckpoint = false;
-            using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
+            using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 store.SavePair(new PairDef("checkpoint-pair", "checkpoint", Root(),
                     Root() with { RootId = "local-checkpoint" }, [], [], true));
@@ -699,7 +699,7 @@ internal static partial class DropboxChecks
                         checkpointCommitted.TrySetResult(true);
                     }, CancellationToken.None));
             }
-            using var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+            using var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
             Require(observedCheckpoint && reopened.DeletionEvidenceRows("checkpoint-pair", RootId).Count == 200,
                 "checkpoints are committed during the batch and survive interruption and reopen");
         }

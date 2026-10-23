@@ -63,7 +63,7 @@ internal static partial class ExecutorChecks
             if (change == "edited")
                 Require(endpoint.Seed("new", "changed").ObjectId == occupant.ObjectId,
                     "edited survivor fixture preserves identity while changing bytes");
-            using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
+            using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 store.SavePair(Pair());
                 var target = new RecordingWriter(endpoint);
@@ -75,7 +75,7 @@ internal static partial class ExecutorChecks
                             RemoveSourceAsync(endpoint, "new").GetAwaiter().GetResult();
                     }
                 };
-                var results = await Apply(new Executor(recording, Settings(2), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), Plan(adopt, delete),
+                var results = await Apply(new Executor(recording, Settings(2), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), Plan(adopt, delete),
                     side == Side.A ? target : a, side == Side.B ? target : b);
                 Require(results.Single(r => r.ActionId == adopt.ActionId).Outcome == Outcome.Done,
                     "ordinary Adopt remains metadata-only: " + results.Single(r => r.ActionId == adopt.ActionId).Reason);
@@ -86,7 +86,7 @@ internal static partial class ExecutorChecks
                     target.Preserves == (change == "unchanged" ? 1 : 0),
                     "cleanup requires the exact surviving destination before destructive preservation");
             }
-            using (var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
+            using (var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 if (change != "unchanged")
                 {

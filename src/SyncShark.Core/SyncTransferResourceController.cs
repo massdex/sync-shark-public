@@ -18,14 +18,8 @@ public sealed record SyncTransferResourceStatus(string Mode, int ActiveFiles, in
         (Learning ? "Learning from this workload. " : "") + "Transfer admission: " + Reason;
 }
 
-internal interface ISyncTransferResourceEndpoint
-{
-    string TransferResourceKey { get; }
-}
 
-internal enum SyncProviderOperation { Read, Write }
 
-internal readonly record struct SyncProviderBudgetKey(string Provider, SyncProviderOperation Operation);
 
 internal readonly record struct SyncResourcePressure(double CpuFraction, double MemoryFraction,
     long AvailableBytes, long ProcessWorkingSetBytes = 0, double SystemCommitFraction = 0,

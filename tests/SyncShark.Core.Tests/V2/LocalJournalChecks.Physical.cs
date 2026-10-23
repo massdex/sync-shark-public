@@ -19,7 +19,7 @@ internal static partial class LocalJournalChecks
             using var file = File.Open(Path.Combine(root, $"physical-{n:D6}.txt"), FileMode.CreateNew, FileAccess.Write, FileShare.Read);
             if (n % 50_000 == 0) Console.WriteLine($"physical fixture {n:N0}/{count:N0}");
         }
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var inventory = LocalChecks.Inventory(root, store, TimeProvider.System);
         var gen = store.BeginGeneration("root-local", "seed");
         var seed = await inventory.ChangesForPathsAsync(["physical-000000.txt"], "", gen, _ => true, default);

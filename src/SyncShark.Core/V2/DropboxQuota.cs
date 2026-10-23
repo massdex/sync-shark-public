@@ -17,7 +17,7 @@ internal sealed class DropboxQuota(PairDef? pair, bool suspended)
     }
     internal bool Blocks(SyncAction action) => pair is not null &&
         string.Equals((action.Target == Side.A ? pair.A : pair.B).Provider,
-            SyncProviders.Dropbox, StringComparison.OrdinalIgnoreCase) &&
+            ProviderIds.Dropbox, StringComparison.OrdinalIgnoreCase) &&
         action.Kind is ActionKind.CopyNew or ActionKind.Update or ActionKind.KeepBoth &&
         Volatile.Read(ref _suspended) != 0;
 }

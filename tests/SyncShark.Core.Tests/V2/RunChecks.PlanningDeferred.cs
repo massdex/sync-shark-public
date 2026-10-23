@@ -16,7 +16,7 @@ internal static partial class RunChecks
         var folder = FixtureFolder("planning-replay");
         try
         {
-            using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             fx.A.Seed("Held/File", "original");
             fx.B.Seed("Held/File", "original");
@@ -56,7 +56,7 @@ internal static partial class RunChecks
         var folder = FixtureFolder("planning-gap-retry");
         try
         {
-            using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             fx.A.Seed("Folder/File", "original");
             fx.B.Seed("Folder/File", "original");
@@ -91,7 +91,7 @@ internal static partial class RunChecks
         var folder = FixtureFolder("planning-empty");
         try
         {
-            using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             var run = new SyncRun(store, fx.Executor, fx.Provider, Settings, TimeProvider.System);
             // BeginGap deliberately does nothing for an empty stored root.

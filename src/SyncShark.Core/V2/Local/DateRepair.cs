@@ -29,23 +29,34 @@ internal static partial class DateRepair
         return (start is { } first ? Utc(first) : 0, end is { } last ? Utc(last) : DateTime.MaxValue.Ticks);
     }
 
-    internal static bool ItemFailure(Exception error, Func<Exception, bool> isStateDamage) =>
-        !(isStateDamage ?? throw new ArgumentNullException(nameof(isStateDamage)))(error) && error is not OperationCanceledException &&
-        error is not OutOfMemoryException && error is not StateDamagedException && error is not SyncCliBusyException &&
-        error is not Microsoft.Data.Sqlite.SqliteException { SqliteErrorCode: 11 or 26 };
+    internal static bool ItemFailure(Exception error, Func<Exception, bool> isStateDamage,
+        Func<Exception, bool> isDirectStateDamage)
+    {
+        ArgumentNullException.ThrowIfNull(isStateDamage);
+        ArgumentNullException.ThrowIfNull(isDirectStateDamage);
+        return !isStateDamage(error) && error is not OperationCanceledException &&
+            error is not OutOfMemoryException && error is not StateDamagedException && error is not SyncCliBusyException &&
+            !isDirectStateDamage(error);
+    }
 
-    internal static async Task<DateRepairReport> RunAsync(SqliteStateStore store, PairDef pair,
+    internal static async Task<DateRepairReport> RunAsync(IStateStore store, PairDef pair,
         Func<string, CancellationToken, Task<ItemState?>> remote, string productRoot, bool dryRun,
-        IReadOnlyList<string> productOwned, CancellationToken ct, Func<Exception, bool> isStateDamage, DateOnly? localDate = null, string afterKey = "",
+        IReadOnlyList<string> productOwned, CancellationToken ct, IEnumerable<string> normalizedExclusions,
+        IEnumerable<(string Path, DateTimeOffset Occurred)> provenanceRows, bool requireLogs,
+        Func<Exception, bool> isStateDamage, Func<Exception, bool> isDirectStateDamage,
+        Func<Exception, bool> isBusy, DateOnly? localDate = null, string afterKey = "",
         Func<Func<Task>, Task>? withPageLock = null,
         Func<IReadOnlyList<string>, Action<string, Exception>, CancellationToken, Task<IReadOnlyDictionary<string, ItemState?>>>? remotePage = null,
         DateRepairBound? from = null, DateRepairBound? to = null, string? excludeList = null, bool reportMismatch = false,
         IReadOnlyList<DateProvenanceSource>? provenanceSources = null)
     {
         ArgumentNullException.ThrowIfNull(isStateDamage);
+        ArgumentNullException.ThrowIfNull(isDirectStateDamage);
+        ArgumentNullException.ThrowIfNull(isBusy);
+        var dates = (IDateRepairStore)store;
         _ = UtcRange(localDate, from, to, TimeZoneInfo.Local);
-        store.PrepareDateRepairExclusions(excludeList);
-        store.PrepareDateWriteEvidence(pair.PairId, provenanceSources);
+        dates.PrepareDateRepairExclusions(normalizedExclusions);
+        dates.PrepareDateWriteEvidence(pair.PairId, provenanceRows, requireLogs);
         var side = pair.A.Provider == SyncProviders.Local ? Side.A : Side.B;
         var localRoot = side == Side.A ? pair.A : pair.B;
         var cloudRoot = side == Side.A ? pair.B : pair.A;
@@ -85,10 +96,11 @@ internal static partial class DateRepair
                 var currentPair = store.Pair(pair.PairId);
                 if (System.Text.Json.JsonSerializer.Serialize(currentPair) != System.Text.Json.JsonSerializer.Serialize(pair))
                     throw new IOException("Pair settings changed. Restart dates repair using the current pair settings.");
-                var page = store.DateRepairPage(pair.PairId, after, side: side, localDate: localDate, from: from, to: to, mismatch: reportMismatch);
+                var (start, end) = UtcRange(localDate, from, to, TimeZoneInfo.Local);
+                var page = dates.DateRepairPage(pair.PairId, after, 128, side, start, end, reportMismatch);
                 if (page.Count == 0) { finished = true; return; }
-                try { store.PrepareDateRepair(pair.PairId); }
-                catch (Exception error) when (ItemFailure(error, isStateDamage))
+                try { dates.PrepareDateRepair(pair.PairId); }
+                catch (Exception error) when (ItemFailure(error, isStateDamage, isDirectStateDamage))
                 {
                     foreach (var baseline in page)
                     {
@@ -111,11 +123,11 @@ internal static partial class DateRepair
                     {
                         var local = store.Live(localRoot.RootId, [path]).SingleOrDefault();
                         locals[path] = local;
-                        if (reportMismatch || (local is not null && store.DateWriteSkipReason(side, local,
+                        if (reportMismatch || (local is not null && dates.DateWriteSkipReason(side, local,
                             (side == Side.A ? baseline.A : baseline.B).Hash) is null))
                             lookupPaths.Add((side == Side.A ? baseline.B : baseline.A).Path);
                     }
-                    catch (Exception error) when (ItemFailure(error, isStateDamage)) { localErrors[path] = error.Message; }
+                    catch (Exception error) when (ItemFailure(error, isStateDamage, isDirectStateDamage)) { localErrors[path] = error.Message; }
                 }
                 var paths = lookupPaths.ToArray();
                 var errors = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
@@ -125,7 +137,7 @@ internal static partial class DateRepair
                 else if (remotePage is not null)
                 {
                     try { metadata = await remotePage(paths, Failed, ct); }
-                    catch (Exception error) when (ItemFailure(error, isStateDamage))
+                    catch (Exception error) when (ItemFailure(error, isStateDamage, isDirectStateDamage))
                     {
                         foreach (var path in paths) Failed(path, error);
                         metadata = new Dictionary<string, ItemState?>();
@@ -138,7 +150,7 @@ internal static partial class DateRepair
                         { MaxDegreeOfParallelism = 4, CancellationToken = ct }, async (path, token) =>
                     {
                         try { rows[path] = await remote(path, token); }
-                        catch (Exception error) when (ItemFailure(error, isStateDamage)) { Failed(path, error); }
+                        catch (Exception error) when (ItemFailure(error, isStateDamage, isDirectStateDamage)) { Failed(path, error); }
                     });
                     metadata = rows;
                 }
@@ -160,13 +172,13 @@ internal static partial class DateRepair
                     {
                         if (localErrors.TryGetValue(local.Path, out var localError)) throw new IOException("Local inventory: " + localError);
                         if (!locals.ContainsKey(local.Path) || locals[local.Path] is null) throw new IOException("Local inventory item is missing.");
-                        if (store.DateRepairExcluded(local.Path) || store.DateRepairExcluded(cloud.Path))
+                        if (dates.DateRepairExcluded(local.Path) || dates.DateRepairExcluded(cloud.Path))
                             throw new IOException("Excluded by --exclude-list.");
                         if (!includes(local.Path)) throw new IOException("Excluded by pair selection.");
                         if (SyncIgnorePolicy.IsIgnored(local.Path, false, ignores)) throw new IOException("Ignored by rule.");
-                        if (store.DateRepairHeld(pair, baseline)) throw new IOException("Held or quarantined.");
-                        var provenance = store.DateWriteSkipReason(side, local, saved.Hash);
-                        evidence = store.DateLogCorrelated(local) ? "log" : provenance is null ? "restore-notice" : "none";
+                        if (dates.DateRepairHeld(pair, baseline)) throw new IOException("Held or quarantined.");
+                        var provenance = dates.DateWriteSkipReason(side, local, saved.Hash);
+                        evidence = dates.DateLogCorrelated(local) ? "log" : provenance is null ? "restore-notice" : "none";
                         if (!reportMismatch && provenance is not null)
                         {
                             if (provenance == "reliable Sync Shark local write history unavailable") Interlocked.Increment(ref missingHistory);
@@ -210,14 +222,14 @@ internal static partial class DateRepair
                             (local.Hash is not null && Content.SameHash(verifiedHash, local.Hash) != true))
                             throw new IOException("Locked file content differs from baseline or Dropbox.");
                         token.ThrowIfCancellationRequested();
-                        provenance = store.DateWriteSkipReason(side, local with { Mtime = old }, verifiedHash);
+                        provenance = dates.DateWriteSkipReason(side, local with { Mtime = old }, verifiedHash);
                         if (reportMismatch)
                         {
                             if ((old - current.Mtime).Duration() < TimeSpan.FromDays(1)) return;
                             if (provenance == "reliable Sync Shark local write history unavailable") Interlocked.Increment(ref missingHistory);
                             else if (provenance is not null) Interlocked.Increment(ref notWritten);
                             Interlocked.Increment(ref mismatches);
-                            evidence = store.DateLogCorrelated(local with { Mtime = old }) ? "log-correlated" : provenance is null ? "restore-notice" : "no evidence";
+                            evidence = dates.DateLogCorrelated(local with { Mtime = old }) ? "log-correlated" : provenance is null ? "restore-notice" : "no evidence";
                             lock (logGate) csv!.WriteLine(string.Join(",", Cell(local.Path), Cell(old.ToString("O")),
                                 Cell(current.Mtime.ToString("O")), Cell(evidence)));
                             Record(new { Path = local.Path, OldUtc = old, NewUtc = current.Mtime, Outcome = "mismatch", Evidence = evidence, Reason = provenance });
@@ -234,7 +246,7 @@ internal static partial class DateRepair
                         lock (logGate) logFile.Flush(true);
                         if (!dryRun)
                         {
-                            var observed = store.RepairDate(baseline, side, current.Mtime, time =>
+                            var observed = dates.RepairDate(baseline, side, current.Mtime, time =>
                             {
                                 if (File.GetLastWriteTimeUtc(file.SafeFileHandle) != time.UtcDateTime)
                                     File.SetLastWriteTimeUtc(file.SafeFileHandle, time.UtcDateTime);
@@ -246,7 +258,7 @@ internal static partial class DateRepair
                         }
                         lock (logGate) if (examples.Count < 10) examples.Add(example);
                     }
-                    catch (Exception error) when (ItemFailure(error, isStateDamage))
+                    catch (Exception error) when (ItemFailure(error, isStateDamage, isDirectStateDamage))
                     {
                         Interlocked.Increment(ref skipped);
                         Record(new { Path = local.Path, Outcome = "skipped", Evidence = evidence, Reason = error.Message });
@@ -261,7 +273,7 @@ internal static partial class DateRepair
                 if (withPageLock is null) await ProcessPage();
                 else await withPageLock(ProcessPage);
             }
-            catch (Microsoft.Data.Sqlite.SqliteException error) when (error.SqliteErrorCode is 5 or 6)
+            catch (Exception error) when (isBusy(error))
             {
                 Record(new { Outcome = "waiting", After = pageStart, Reason = "Store temporarily busy: " + error.Message });
                 logFile.Flush(true);

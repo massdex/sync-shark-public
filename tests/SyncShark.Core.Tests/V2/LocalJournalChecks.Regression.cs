@@ -32,7 +32,7 @@ internal static partial class LocalJournalChecks
         Directory.CreateDirectory(Path.Combine(root, "b"));
         LocalChecks.Seed(root, "a/one.txt", "aaa");
         LocalChecks.Require(CreateHardLink(Path.Combine(root, "b/two.txt"), Path.Combine(root, "a/one.txt"), IntPtr.Zero), "create real NTFS hard link");
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var inventory = LocalChecks.Inventory(root, store, TimeProvider.System);
         var snapshot = await SaveFull(inventory, store);
         var one = store.Live("root-local", ["a/one.txt"]).Single();
@@ -70,7 +70,7 @@ internal static partial class LocalJournalChecks
     {
         var root = Path.Combine(folder, "root"); LocalChecks.Seed(root, "one.txt", "aaa");
         LocalChecks.Require(CreateHardLink(Path.Combine(folder, "outside.txt"), Path.Combine(root, "one.txt"), IntPtr.Zero), "create outside-root alias");
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var inventory = LocalChecks.Inventory(root, store, TimeProvider.System);
         var snapshot = await SaveFull(inventory, store);
         var one = store.Live("root-local", ["one.txt"]).Single();
@@ -95,7 +95,7 @@ internal static partial class LocalJournalChecks
             var incoming = Path.Combine(home, "incoming"); LocalChecks.Seed(incoming, "one.txt", "same");
             var alias = bothInside ? Path.Combine(incoming, "two.txt") : Path.Combine(home, "outside.txt");
             LocalChecks.Require(CreateHardLink(alias, Path.Combine(incoming, "one.txt"), IntPtr.Zero), "create incoming aliases before checkpoint");
-            using var store = SqliteStateStore.Open(Path.Combine(home, "store"), StorageChecks.Fast, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(home, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var inventory = LocalChecks.Inventory(root, store, TimeProvider.System);
             var snapshot = await SaveFull(inventory, store);
             Directory.Move(incoming, Path.Combine(root, "incoming"));
@@ -110,7 +110,7 @@ internal static partial class LocalJournalChecks
     {
         var item = new ItemState("file.txt", ItemKind.File, "id:local:00000001:0000000000000001", null,
             new string('a', 64), 3, DateTimeOffset.UnixEpoch, ItemFlags.None);
-        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var gen = store.BeginGeneration("migrate", "full");
             store.WriteSnapshot(new Snapshot("migrate", Side.A, gen, "v8-cursor", [item], []));
@@ -121,7 +121,7 @@ internal static partial class LocalJournalChecks
             connection.Open(); using var command = connection.CreateCommand();
             command.CommandText = "DROP TABLE local_rehash; PRAGMA user_version=8;"; command.ExecuteNonQuery();
         }
-        using var migrated = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        using var migrated = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         LocalChecks.Require(migrated.Cursor("migrate") == "v8-cursor" && migrated.Live("migrate").Single() == item, "v8 migration retains row hash and root cursor");
         migrated.RequireRehash("migrate", item, "migration retry");
         LocalChecks.Require(migrated.RehashCandidates("migrate", 1).Single().ObjectId == item.ObjectId && migrated.CompleteRehash("migrate", item, new string('b', 64)), "v8 migration creates usable debt table and retry index");
@@ -132,7 +132,7 @@ internal static partial class LocalJournalChecks
         RehashMigration(Path.Combine(folder, "migration"));
         var root = Path.Combine(folder, "root"); LocalChecks.Seed(root, "held.txt", "aaa");
         var data = Path.Combine(folder, "store");
-        using (var store = SqliteStateStore.Open(data, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(data, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var inventory = LocalChecks.Inventory(root, store, TimeProvider.System);
             var snapshot = await SaveFull(inventory, store);
@@ -147,7 +147,7 @@ internal static partial class LocalJournalChecks
             await SaveFull(inventory, store);
             LocalChecks.Require((store.Live("root-local", ["held.txt"]).Single().Flags & ItemFlags.NeedsRehash) != 0, "ordinary full refresh preserves debt");
         }
-        using (var store = SqliteStateStore.Open(data, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(data, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var inventory = LocalChecks.Inventory(root, store, TimeProvider.System);
             LocalChecks.Require(NtfsUsnJournal.TryReadCheckpoint(root, out var empty), "empty batch checkpoint");
@@ -184,7 +184,7 @@ internal static partial class LocalJournalChecks
             LocalChecks.Require(protection.Summaries(pair.PairId).Single(n => n.ReasonKey == RehashProtection.Reason).Detail.Contains("test sharing violation"), "standing notice contains actual bounded failure reasons");
             LocalChecks.Require(store.RehashCandidates("queue", 128).Count == 128, "bounded page selected without attempting excluded/blocked items");
         }
-        using (var reopened = SqliteStateStore.Open(data, StorageChecks.Fast, TimeProvider.System))
+        using (var reopened = SqliteStateStore.Open(data, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             LocalChecks.Require(reopened.RehashCandidates("queue", 2).Select(i => i.ObjectId).SequenceEqual(["fake-128", "fake-129"]), "bounded retry fairness advances past skipped selections and survives restart");
             foreach (var row in reopened.RehashCandidates("queue", 128)) reopened.RequireRehash("queue", row, "failed again");
@@ -196,7 +196,7 @@ internal static partial class LocalJournalChecks
     {
         var root = Path.Combine(folder, "root"); LocalChecks.Seed(root, "old/child.txt", "child");
         LocalChecks.Seed(root, "other/keep.txt", "keep"); LocalChecks.Seed(root, "Case.txt", "case");
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var inventory = LocalChecks.Inventory(root, store, TimeProvider.System); var snapshot = await SaveFull(inventory, store);
         Directory.Move(Path.Combine(root, "old"), Path.Combine(root, "new")); LocalChecks.Seed(root, "old/replacement.txt", "replacement");
         var delta = await inventory.ChangesSinceAsync(snapshot.CursorAfter, store.BeginGeneration("root-local", "delta"), _ => true, default);

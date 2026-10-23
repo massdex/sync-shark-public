@@ -160,7 +160,7 @@ internal static partial class RunChecks
     {
         var folder = Path.Combine(Path.GetTempPath(), "counted-pause-" + Guid.NewGuid().ToString("N"));
         Fixture fx;
-        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             fx = Build(suppliedStore: store);
             await FirstSyncAsync(fx.Run(), fx);
@@ -175,7 +175,7 @@ internal static partial class RunChecks
                 "counted pause creates no bookkeeping retry or failure notice");
             await AutoSyncChecks.CountedPauseDoesNotHoldAsync(report);
         }
-        using (var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
+        using (var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             Require(reopened.SyncRetryAt(fx.Pair.PairId, "") is null &&
                 !reopened.OpenNotices(fx.Pair.PairId).Any(n => n.ReasonKey == "run-unavailable" || n.ReasonKey.StartsWith("autosync-failed")),
@@ -209,7 +209,7 @@ internal static partial class RunChecks
         try
         {
             Fixture fx;
-            using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
+            using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 fx = Build(suppliedStore: store);
                 var run = fx.Run();
@@ -221,7 +221,7 @@ internal static partial class RunChecks
                     store.OpenNotices(fx.Pair.PairId).Count(n => n.ReasonKey == "store-maintenance") == 1,
                     "maintenance failure cannot convert committed copy into failed or replayable effect");
             }
-            using (var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
+            using (var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 var run = new SyncRun(reopened, NewExecutor(reopened), fx.Provider, Settings, TimeProvider.System);
                 var report = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);

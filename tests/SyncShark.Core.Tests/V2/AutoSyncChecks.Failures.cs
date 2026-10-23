@@ -367,7 +367,7 @@ internal static partial class AutoSyncChecks
             gates[id] = new GatedInventory(a) { Block = block };
             provider.Add(pair.A, a).Add(pair.B, new FakeEndpoint(Side.B, pair.B.RootId)).AddInventory(pair.A, gates[id]);
         }
-        var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider, Settings,
+        var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), provider, Settings,
             TimeProvider.System);
         var clock = new ManualClock();
         string? pausedPair = null;

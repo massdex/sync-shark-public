@@ -100,7 +100,7 @@ public sealed class EngineComposition : IDisposable
         SqliteStateStore store;
         try
         {
-            store = SqliteStateStore.Open(host.ProductRoot, settings, time);
+            store = SqliteStateStore.Open(host.ProductRoot, settings, time, LocalItems.CaptureOptionalHash);
         }
         catch
         {
@@ -109,7 +109,7 @@ public sealed class EngineComposition : IDisposable
         }
         try
         {
-            var observed = new ObservedExecutor(new Executor(store, settings, limiter.Resources, isStateDamage: StorageFailureClassifier.IsStateDamage));
+            var observed = new ObservedExecutor(new Executor(store, settings, limiter.Resources, isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException));
             var endpoints = new ProductionEndpoints(store, settings, time, paths, installationId,
                 dropbox, host.ContentPausedForTest);
             var run = new SyncRun(store, observed, endpoints, settings, time, endpoints.ProductOwnedRelative);

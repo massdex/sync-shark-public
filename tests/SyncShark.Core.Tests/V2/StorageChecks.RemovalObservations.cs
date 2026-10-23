@@ -4,7 +4,7 @@ internal static partial class StorageChecks
 {
     private static void MissingPrepareMatchReadIsFilteredAndPaged(string root)
     {
-        using var store = SqliteStateStore.Open(Fresh(root, "missing-prepare-match-pages"), Fast, new TestClock());
+        using var store = SqliteStateStore.Open(Fresh(root, "missing-prepare-match-pages"), Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         var match = new PrepareMatch("a|m:1:1", "b|v:1");
         foreach (var kind in new[] { "sync", "first-sync", "post-preview", "decision", "reviewed-removal" })
@@ -29,7 +29,7 @@ internal static partial class StorageChecks
         var folder = Fresh(root, "sleeping-removal-observation");
         var deadline = DateTimeOffset.UtcNow.AddHours(1);
         var child = F("cache/new.txt", "id:new-child", "77");
-        using (var store = SqliteStateStore.Open(folder, Fast, new TestClock()))
+        using (var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             store.SavePair(Pair("p1") with { Excluded = ["cache"] });
             store.SaveSyncRetry("p1", new("cache", "reviewed-removal", 1, "retry", deadline));
@@ -41,7 +41,7 @@ internal static partial class StorageChecks
             Require(store.DueSyncRetries("p1", deadline.AddSeconds(-1), 256).Count == 0,
                 "retaining sleeping removal observations grants no early effect authority");
         }
-        using var reopened = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var reopened = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         var dirty = reopened.DeferredPlanningDisplayPage("p1");
         Require(dirty.Count == 1 && dirty[0].ObjectId == child.ObjectId && dirty[0].Path == child.Path,
             "the observed child has one durable entity-owned planning handoff after cursor commit and reopen");

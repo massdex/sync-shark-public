@@ -26,7 +26,7 @@ public sealed partial class LocalInventory : IInventorySource
     // Set before inventory reads; previews may persist recommendations only in their isolated store.
     internal bool ObserveOnly { get; set; }
     internal Func<string, long[]?>? CapacityQueryForTest { get; set; }
-    internal Action<SqliteStateStore, SqliteStateStore.JournalPending, SyncDiscoveryRoot>? CapacityQueueForTest { get; set; }
+    internal Action<IJournalStore, JournalPending, SyncDiscoveryRoot>? CapacityQueueForTest { get; set; }
     private void ObserveCapacity(string? cursor, bool overflow = false) =>
         JournalSizing.TryObserve(_known, _pairId!, _root.RootPath, _volume, _rootFileId, cursor,
             _clock.GetUtcNow(), overflow, ObserveOnly, CapacityQueryForTest, CapacityQueueForTest);
@@ -49,8 +49,8 @@ public sealed partial class LocalInventory : IInventorySource
         _history = history;
         _pairId = pairId;
         _known = known ?? throw new ArgumentNullException(nameof(known));
-        _expectedPairId = pairId is not null && _known is SqliteStateStore store &&
-            (store.HasOwnedPointers(root.RootId) || store.StorageRegistrations().Any(entry => entry.RootId == root.RootId))
+        _expectedPairId = pairId is not null &&
+            (_known.HasOwnedPointers(root.RootId) || _known.StorageRegistrations().Any(entry => entry.RootId == root.RootId))
             ? pairId : null;
         _productOwnedPaths = productOwnedPaths ?? throw new ArgumentNullException(nameof(productOwnedPaths));
         // The relative form the shared exclusion test needs; the scanner keeps the absolute set for enumeration.
@@ -176,7 +176,7 @@ public sealed partial class LocalInventory : IInventorySource
     /// <inheritdoc/>
     public async Task<Snapshot> FullAsync(long gen, Func<string, bool> include, IProgress<string> p, CancellationToken ct)
     {
-        var gate = (_known as SqliteStateStore)?.LocalWalkGate(_root.RootId);
+        var gate = (_known as ILocalWalkStore)?.LocalWalkGate(_root.RootId);
         if (gate is not null) await gate.WaitAsync(ct).ConfigureAwait(false);
         try { return await FullCoreAsync(gen, include, p, ct).ConfigureAwait(false); }
         finally { gate?.Release(); }
@@ -188,7 +188,7 @@ public sealed partial class LocalInventory : IInventorySource
         if (_pairId is not null && (WalkCheckpointForTest is null || CapacityQueryForTest is not null)) ObserveCapacity(null);
         PairPause.Check();
         var (checkpoint, journalDeleted) = ReadWalkCheckpointState();
-        var sql = _known as SqliteStateStore;
+        var sql = _known as ILocalWalkStore;
         if (checkpoint is not null && sql?.GapInventoryPending(rootId) == true &&
             NtfsUsnCheckpoint.TryParseCursor(_known.Cursor(rootId), out var savedJournal, out var savedNext) &&
             checkpoint.RequiresFullReconciliation(_known.Cursor(rootId)))
@@ -254,7 +254,7 @@ public sealed partial class LocalInventory : IInventorySource
     public async Task<Delta> ChangesSinceAsync(string cursor, long gen, Func<string, bool> include, CancellationToken ct)
     {
         var rootId = _root.RootId;
-        if (_known is SqliteStateStore sql && sql.HasLocalWalk(rootId))
+        if (_known is ILocalWalkStore sql && sql.HasLocalWalk(rootId))
             return Invalid(gen, rootId, cursor, "unfinished local full walk takes precedence");
         if (_pairId is not null && (WalkCheckpointForTest is null || CapacityQueryForTest is not null)) ObserveCapacity(cursor);
         if (!NtfsUsnCheckpoint.TryParseCursor(cursor, out var journalId, out var next)) return Invalid(gen, rootId, cursor, "saved cursor cannot be parsed");
@@ -809,7 +809,7 @@ public sealed partial class LocalInventory : IInventorySource
             // No safely decoded scope exists. Protect the root before abandoning unavailable history;
             // the normal full-walk publication supplies the fresh cursor, never this failed read.
             (_known as ILocalGapStore)?.BeginGap(rootId, through.Cursor, next, trustFileUsn: false, reason);
-            if (_known is SqliteStateStore failed) failed.RecordIndexFailure(rootId, reason);
+            _known.RecordIndexFailure(rootId, reason);
             return Invalid(gen, rootId, cursor, "permanent journal record failure: " + reason);
         }
         if (kind == NtfsUsnReadFailure.OverLimit)

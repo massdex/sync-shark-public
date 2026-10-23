@@ -23,7 +23,8 @@ public sealed partial class V2CliRuntime
                     var newScope = run.InventoryScope(updated);
                     if (run.CompatibleInventoryScope(previous, prepared.InventoryScope) != oldScope)
                         throw new PreparePublicationException("Inventory coverage changed while narrowing.");
-                    database.Narrow(previous, updated, oldScope, newScope);
+                    database.Narrow(previous, updated, oldScope, newScope,
+                        small => FirstSyncChoicesState.PrepareNarrowing(small, previous, updated, newScope));
                     return attempt == 0 ? [] : ["The pair changed while narrowing; the requested additions were merged into its latest review."];
                 }
                 catch (PreparePublicationException)

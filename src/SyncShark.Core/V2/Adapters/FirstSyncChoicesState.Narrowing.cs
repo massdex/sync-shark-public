@@ -4,14 +4,10 @@ using System.Text.Json;
 
 namespace Massdex.SyncShark.V2;
 
-internal sealed partial class PrepareDatabase
+internal static partial class FirstSyncChoicesState
 {
-    internal void Narrow(PairDef previous, PairDef updated, string oldScope, string newScope)
+    internal static PrepareNarrowing PrepareNarrowing(Prepared small, PairDef previous, PairDef updated, string newScope)
     {
-        var small = JsonSerializer.Deserialize<FirstSyncChoicesState.Prepared>(_header.MetadataJson, Json)
-            ?? throw new JsonException("Missing prepare metadata.");
-        if (!ValidSmall(small) || small.Digest != _header.Digest)
-            throw new JsonException("Invalid prepare metadata.");
         var priorRules = SyncIgnorePolicy.Normalize(PairInclude.IgnoreRules(previous))
             .Select(rule => $"{rule.Kind}:{rule.Value}").ToArray();
         var addedRules = SyncIgnorePolicy.Normalize(PairInclude.IgnoreRules(updated))
@@ -45,7 +41,7 @@ internal sealed partial class PrepareDatabase
             Warnings = (small.Warnings ?? []).Append("The saved review was narrowed by exclusions or ignore rules; protected paths are left untouched.").Distinct().ToArray(),
             InventoryCursors = [], InventoryScope = null
         };
-        _store.SavePairNarrowed(previous, updated, _header, Removed, ScopeRemoved, oldScope, newScope, digest,
+        return new(digest, Removed, ScopeRemoved,
             count => JsonSerializer.Serialize(retained with { DeleteVictimCount = count }, Json));
     }
 }

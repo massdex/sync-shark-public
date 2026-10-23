@@ -92,8 +92,7 @@ internal sealed class LocalGapWorker(ILocalGapStore store, ILocalGapIo io, Func<
         }
     }
 
-    internal static bool MetadataOnly(ItemState item) => item.Kind != ItemKind.File ||
-        (item.Flags & (ItemFlags.Ignored | ItemFlags.Link | ItemFlags.Placeholder | (ItemFlags)128)) != 0;
+    internal static bool MetadataOnly(ItemState item) => GapPredicates.MetadataOnly(item);
 
     internal bool Discover(RootDef root, LocalGapEpoch epoch, CancellationToken ct)
     {
@@ -248,9 +247,7 @@ internal sealed class LocalGapWorker(ILocalGapStore store, ILocalGapIo io, Func<
             item.Mtime.UtcDateTime.ToFileTimeUtc() == proof.MtimeFileTime;
     }
 
-    internal static bool SameJournal(string a, string b) =>
-        NtfsUsnCheckpoint.TryParseCursor(a, out var first, out _) &&
-        NtfsUsnCheckpoint.TryParseCursor(b, out var second, out _) && first == second;
+    internal static bool SameJournal(string a, string b) => GapPredicates.SameJournal(a, b);
 
     private static bool ProofFollows(string current, string previous) =>
         NtfsUsnCheckpoint.TryParseCursor(current, out var id, out var next) &&

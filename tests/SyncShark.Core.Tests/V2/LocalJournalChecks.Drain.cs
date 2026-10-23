@@ -48,7 +48,7 @@ internal static partial class LocalJournalChecks
             new RootDef("unused", SyncProviders.Dropbox, null, "/", "unused"), [], [], true);
         store.SavePair(pair);
         var provider = new FakeEndpointProvider().AddInventory(def, inventory);
-        var run = new SyncRun(store, new Executor(store, StorageChecks.Fast, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
+        var run = new SyncRun(store, new Executor(store, StorageChecks.Fast, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException),
             provider, StorageChecks.Fast, TimeProvider.System);
         var method = typeof(SyncRun).GetMethod("ScanSideAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
         var task = (Task)method.Invoke(run, [pair, Side.A,
@@ -67,7 +67,7 @@ internal static partial class LocalJournalChecks
         LocalChecks.Seed(root, "excluded.txt", "excluded");
         LocalChecks.Seed(root, "blocked.txt", "blocked");
         LocalChecks.Require(CreateHardLink(Path.Combine(root, "alias.txt"), Path.Combine(root, "files/000.txt"), IntPtr.Zero), "drain alias fixture");
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var inventory = LocalChecks.Inventory(root, store, TimeProvider.System);
         inventory.VerificationElapsedForTest = () => TimeSpan.Zero;
         // Publication needs a pair consumer; the durable planning queue is per pair, not global.
@@ -167,7 +167,7 @@ internal static partial class LocalJournalChecks
         var root = Path.Combine(folder, "root"); LocalChecks.Seed(root, "first.txt", "same");
         LocalChecks.Require(CreateHardLink(Path.Combine(root, "second.txt"), Path.Combine(root, "first.txt"), IntPtr.Zero), "restart aliases");
         var data = Path.Combine(folder, "store");
-        using (var store = SqliteStateStore.Open(data, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(data, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var inventory = LocalChecks.Inventory(root, store, TimeProvider.System);
         inventory.VerificationElapsedForTest = () => TimeSpan.Zero;
@@ -191,7 +191,7 @@ internal static partial class LocalJournalChecks
                 "verified rows are handed to the durable planning queue with every alias before process exit");
             // Simulate process exit immediately after drain, before planning/any execution acknowledgment.
         }
-        using (var store = SqliteStateStore.Open(data, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(data, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var inventory = LocalChecks.Inventory(root, store, TimeProvider.System);
         inventory.VerificationElapsedForTest = () => TimeSpan.Zero;
@@ -243,7 +243,7 @@ internal static partial class LocalJournalChecks
     private static async Task ProtectionScaleAsync(string folder)
     {
         var root = Path.Combine(folder, "root"); LocalChecks.Seed(root, "edit.txt", "one");
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var inventory = LocalChecks.Inventory(root, store, TimeProvider.System);
         inventory.VerificationElapsedForTest = () => TimeSpan.Zero;
         // This measurement needs SQLite state, not a usable USN journal. Keep all
@@ -261,7 +261,7 @@ internal static partial class LocalJournalChecks
         var root = Path.Combine(folder, "root"); LocalChecks.Seed(root, "survivor.txt", "same");
         var incoming = Path.Combine(folder, "incoming"); Directory.CreateDirectory(incoming);
         LocalChecks.Require(CreateHardLink(Path.Combine(incoming, "alias.txt"), Path.Combine(root, "survivor.txt"), IntPtr.Zero), "vanish alias fixture");
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var inventory = LocalChecks.Inventory(root, store, TimeProvider.System);
         inventory.VerificationElapsedForTest = () => TimeSpan.Zero;
         var snapshot = await SaveFull(inventory, store);

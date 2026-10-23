@@ -117,10 +117,10 @@ internal static partial class StorageChecks
     {
         var folder = Fresh(root, "fresh-reopen");
         // The production default commits durably (synchronous=FULL); the other checks use Fast (NORMAL).
-        using (var store = SqliteStateStore.Open(folder, V2Settings.Default, new TestClock()))
+        using (var store = SqliteStateStore.Open(folder, V2Settings.Default, new TestClock(), LocalItems.CaptureOptionalHash))
             Require(store.Cursor("x") is null && store.SynchronousMode() == 2,
                 "a fresh store has no cursor and commits with synchronous=FULL by default");
-        using (var store = SqliteStateStore.Open(folder, Fast, new TestClock()))
+        using (var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
             Require(store.Cursor("x") is null && store.SynchronousMode() == 1,
                 "a reopened store has no cursor (and its schema verifies); StoreDurableCommits=false is NORMAL");
     }
@@ -128,22 +128,22 @@ internal static partial class StorageChecks
     private static void OpenDamagedRoots(string root)
     {
         var version = Fresh(root, "wrong-version");
-        using (var store = SqliteStateStore.Open(version, Fast, new TestClock())) { }
+        using (var store = SqliteStateStore.Open(version, Fast, new TestClock(), LocalItems.CaptureOptionalHash)) { }
         StorageDamage.PokeUserVersion(DbPath(version), StoreSchema.Version + 1);
         ExpectThrows<StateDamagedException>(() =>
         {
-            using var store = SqliteStateStore.Open(version, Fast, new TestClock());
+            using var store = SqliteStateStore.Open(version, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         });
         Require(true, "a newer user_version is rejected as damage");
 
         // Pre-v3 schemas still require a fresh database; supported v3/v4 upgrades are additive.
         var older = Fresh(root, "older-version");
-        using (var store = SqliteStateStore.Open(older, Fast, new TestClock())) { }
+        using (var store = SqliteStateStore.Open(older, Fast, new TestClock(), LocalItems.CaptureOptionalHash)) { }
         StorageDamage.PokeUserVersion(DbPath(older), 2);
         Exception? outdated = null;
         try
         {
-            using var store = SqliteStateStore.Open(older, Fast, new TestClock());
+            using var store = SqliteStateStore.Open(older, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         }
         catch (Exception e)
         {
@@ -155,7 +155,7 @@ internal static partial class StorageChecks
 
         // The existing v3 upgrade remains supported alongside v4's additive failure metadata.
         var migrated = Fresh(root, "migrate-version");
-        using (var store = SqliteStateStore.Open(migrated, Fast, new TestClock()))
+        using (var store = SqliteStateStore.Open(migrated, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             store.SavePair(Pair("p1"));
             var gen = store.BeginGeneration("r1", "full");
@@ -172,7 +172,7 @@ internal static partial class StorageChecks
             command.ExecuteNonQuery();
         }
         var deletedAt = new DateTimeOffset(2026, 10, 12, 8, 0, 0, TimeSpan.Zero);
-        using (var store = SqliteStateStore.Open(migrated, Fast, new TestClock()))
+        using (var store = SqliteStateStore.Open(migrated, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             Require(store.Cursor("r1") == "v3-cursor" &&
                 store.Live("r1", ["preserved.txt"]).Single().ObjectId == "v3-id" && store.Pair("p1") is not null,
@@ -188,7 +188,7 @@ internal static partial class StorageChecks
                 read["b.txt"].ContentHash is null && !read.ContainsKey("c.txt"),
                 "stored deletion evidence round-trips its time and last-revision hash; an unprobed path is absent");
         }
-        using (var reopened = SqliteStateStore.Open(migrated, Fast, new TestClock()))
+        using (var reopened = SqliteStateStore.Open(migrated, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             var again = reopened.DeletionEvidenceRows("p1", "r1").Single(row => row.Path == "a.txt");
             Require(again.DeletedUtc == deletedAt && again.ContentHash == "hash-a",
@@ -204,7 +204,7 @@ internal static partial class StorageChecks
                 "ALTER TABLE deletion_evidence DROP COLUMN failure_json; PRAGMA user_version=4;";
             command.ExecuteNonQuery();
         }
-        using (var upgradedPreview = SqliteStateStore.Open(migrated, Fast, new TestClock()))
+        using (var upgradedPreview = SqliteStateStore.Open(migrated, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             Require(upgradedPreview.DeletionEvidenceRows("p1", "r1")
                     .All(row => row.BasisCursor is null && row.ContentHash is null),
@@ -214,7 +214,7 @@ internal static partial class StorageChecks
             upgradedPreview.StoreDeletionEvidence("p1", "r1", [new DeletionEvidenceRecord("failed.txt", null,
                 Failure: new(3, T0, 42, true))]);
         }
-        using (var reopened = SqliteStateStore.Open(migrated, Fast, new TestClock()))
+        using (var reopened = SqliteStateStore.Open(migrated, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             Require(reopened.DeletionEvidenceRows("p1", "r1").Single(row => row.Path == "failed.txt").Failure ==
                 new DeletionEvidenceFailure(3, T0, 42, true),
@@ -222,11 +222,11 @@ internal static partial class StorageChecks
         }
 
         var extra = Fresh(root, "extra-table");
-        using (var store = SqliteStateStore.Open(extra, Fast, new TestClock())) { }
+        using (var store = SqliteStateStore.Open(extra, Fast, new TestClock(), LocalItems.CaptureOptionalHash)) { }
         StorageDamage.AddTable(DbPath(extra), "extra");
         ExpectThrows<StateDamagedException>(() =>
         {
-            using var store = SqliteStateStore.Open(extra, Fast, new TestClock());
+            using var store = SqliteStateStore.Open(extra, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         });
         Require(true, "an extra table is rejected");
 
@@ -236,18 +236,18 @@ internal static partial class StorageChecks
         File.WriteAllBytes(dbPath, Enumerable.Repeat((byte)0x5A, 4096).ToArray());
         ExpectThrows<StateDamagedException>(() =>
         {
-            using var store = SqliteStateStore.Open(garbage, Fast, new TestClock());
+            using var store = SqliteStateStore.Open(garbage, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         });
         Require(true, "a garbage file is rejected");
 
         // The schema verifies, so the corruption is first met by Load, which must still be inside Open's guard.
         var load = Fresh(root, "load-corrupt");
-        using (var store = SqliteStateStore.Open(load, Fast, new TestClock())) store.SavePair(Pair("p1"));
+        using (var store = SqliteStateStore.Open(load, Fast, new TestClock(), LocalItems.CaptureOptionalHash)) store.SavePair(Pair("p1"));
         StorageDamage.CorruptTable(DbPath(load), "root");
         Exception? caught = null;
         try
         {
-            using var store = SqliteStateStore.Open(load, Fast, new TestClock());
+            using var store = SqliteStateStore.Open(load, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         }
         catch (Exception e)
         {
@@ -276,7 +276,7 @@ internal static partial class StorageChecks
     private static void SnapshotUnchangedWritesNothing(string root)
     {
         var folder = Fresh(root, "unchanged");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         var items = Enumerable.Range(0, 1000).Select(i => F($"f{i:D4}.txt", $"id:{i:D4}", i.ToString("x8"))).ToArray();
         var gen1 = store.BeginGeneration("root", "snapshot");
         store.WriteSnapshot(new Snapshot("root", Side.A, gen1, "c1", items, []));
@@ -350,7 +350,7 @@ internal static partial class StorageChecks
     private static void SnapshotHashCarryForward(string root)
     {
         var folder = Fresh(root, "carry");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         var gen = store.BeginGeneration("root", "snapshot");
         store.WriteSnapshot(new Snapshot("root", Side.A, gen, "c", [F("a.txt", "id:a", "11", 5)], []));
         store.WriteSnapshot(new Snapshot("root", Side.A, gen, "c", [NoHash("a.txt", "id:a", 5)], []));
@@ -362,7 +362,7 @@ internal static partial class StorageChecks
     private static void SnapshotDuplicatePathThrows(string root)
     {
         var folder = Fresh(root, "duplicate");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         var gen = store.BeginGeneration("root", "snapshot");
         ExpectThrows<ArgumentException>(() => store.WriteSnapshot(new Snapshot("root", Side.A, gen, "c",
             [F("a.txt", "id:a", "11"), F("a.txt", "id:b", "22")], [])));
@@ -397,7 +397,7 @@ internal static partial class StorageChecks
     private static void DeltaCursorInvalidThrows(string root)
     {
         var folder = Fresh(root, "cursor-invalid");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         store.BeginGeneration("root", "snapshot");
         var gen = store.BeginGeneration("root", "delta");
         ExpectThrows<InvalidOperationException>(() => store.WriteDelta(new Delta("root", Side.A, gen, "c", "c",
@@ -407,7 +407,7 @@ internal static partial class StorageChecks
     private static void DeltaReplayIdempotent(string root)
     {
         var folder = Fresh(root, "replay");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         var gen1 = store.BeginGeneration("root", "snapshot");
         store.WriteSnapshot(new Snapshot("root", Side.A, gen1, "c", [F("a", "id1", "11")], []));
         var changes = new[]
@@ -426,7 +426,7 @@ internal static partial class StorageChecks
     private static void DeltaProportionalWrites(string root)
     {
         var folder = Fresh(root, "proportional");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         var items = Enumerable.Range(0, 1000).Select(i => F($"f{i:D4}", $"id:{i:D4}", i.ToString("x8"))).ToArray();
         var gen = store.BeginGeneration("root", "snapshot");
         store.WriteSnapshot(new Snapshot("root", Side.A, gen, "c", items, []));
@@ -456,7 +456,7 @@ internal static partial class StorageChecks
     {
         var clock = new TestClock();
         var folder = Fresh(root, "tombstone-snapshot");
-        using var store = SqliteStateStore.Open(folder, Fast, clock);
+        using var store = SqliteStateStore.Open(folder, Fast, clock, LocalItems.CaptureOptionalHash);
         Track(store, "root", "id:a");
         var gen = store.BeginGeneration("root", "snapshot");
         store.WriteSnapshot(new Snapshot("root", Side.A, gen, "c", [F("a.txt", "id:a", "11")], []));
@@ -472,7 +472,7 @@ internal static partial class StorageChecks
     private static void Tombstone_DeltaDeleteAndMoveSuppression(string root)
     {
         var folder = Fresh(root, "tombstone-delta");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         Track(store, "root", "id1", "id2");
         var gen = store.BeginGeneration("root", "snapshot");
         store.WriteSnapshot(new Snapshot("root", Side.A, gen, "c",
@@ -491,7 +491,7 @@ internal static partial class StorageChecks
     private static void Tombstone_RootScopedResolution(string root)
     {
         var folder = Fresh(root, "tombstone-roots");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         SeedBaseline(store, "p1", "k1", F("a.txt", "id:a", "11"), F("b.txt", "id:b", "11"));
         Track(store, "other", "id:a");
@@ -510,7 +510,7 @@ internal static partial class StorageChecks
     {
         var clock = new TestClock();
         var folder = Fresh(root, "tombstone-prune");
-        using var store = SqliteStateStore.Open(folder, Fast, clock);
+        using var store = SqliteStateStore.Open(folder, Fast, clock, LocalItems.CaptureOptionalHash);
         Track(store, "root", "id:a");
         Remove(store, "root", "a.txt", "id:a");
         Require(store.Tombstones("root").Count == 1, "the tombstone exists before pruning");
@@ -524,7 +524,7 @@ internal static partial class StorageChecks
     private static void GenerationRules(string root)
     {
         var folder = Fresh(root, "generation");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         var first = store.BeginGeneration("root", "snapshot");
         Require(store.Cursor("root") is null, "the cursor only moves on complete");
         store.CompleteGeneration(first, "c1", true);
@@ -604,7 +604,7 @@ internal static partial class StorageChecks
     private static void ForgetCursor_ChangesOnlyTheCursor(string root)
     {
         var folder = Fresh(root, "forget-cursor-untouched");
-        using var store = SqliteStateStore.Open(folder, V2Settings.Default, new TestClock());
+        using var store = SqliteStateStore.Open(folder, V2Settings.Default, new TestClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         SeedBaseline(store, "p1", "k1", F("x.txt", "id:a", "11"), F("x.txt", "id:b", "11"));
         SeedBaseline(store, "p1", "k2", F("gone.txt", "id:t", "22"), F("gone.txt", "id:t2", "22"));
@@ -666,7 +666,7 @@ internal static partial class StorageChecks
     private static void PairRollbackDoesNotCacheRoot(string root)
     {
         var folder = Fresh(root, "rollback");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         ExpectThrows<SqliteException>(() => store.SavePair(Pair("p1") with { PairId = null! }));
         Require(store.Pair("p1") is null, "a failed save rolls back its pair and roots");
         var gen = store.BeginGeneration("ra", "snapshot");
@@ -776,7 +776,7 @@ internal static partial class StorageChecks
     private static void CommitHoldThrows(string root)
     {
         var folder = Fresh(root, "hold");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         var hold = new SyncAction("a-hold", 29, ActionKind.Hold, Side.B, "x", null, null, null, false, "k1");
         ExpectThrows<InvalidOperationException>(() =>
@@ -786,7 +786,7 @@ internal static partial class StorageChecks
     private static void CommitSizeMismatchThrows(string root)
     {
         var folder = Fresh(root, "size-mismatch");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         var action = new SyncAction("a-copy", 1, ActionKind.CopyNew, Side.B, "a.txt", null, F("a.txt", "id:a", "77", 4), null, false, "k1");
         ExpectThrows<InvalidOperationException>(() => store.CommitResult("p1", 1, action,
@@ -796,7 +796,7 @@ internal static partial class StorageChecks
     private static void CommitResultOtherPairThrows(string root)
     {
         var folder = Fresh(root, "other-pair");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         store.SavePair(Pair("p2"));
         var action = new SyncAction("a-shared", 2, ActionKind.Update, Side.B, "a.txt", null, null, null, false, "k1");
@@ -859,7 +859,7 @@ internal static partial class StorageChecks
     {
         var clock = new TestClock();
         var folder = Fresh(root, "prune");
-        using var store = SqliteStateStore.Open(folder, Fast, clock);
+        using var store = SqliteStateStore.Open(folder, Fast, clock, LocalItems.CaptureOptionalHash);
         var gen1 = store.BeginGeneration("root", "snapshot");
         store.WriteSnapshot(new Snapshot("root", Side.A, gen1, "c1",
             [F("keep.txt", "id:k", "77"), F("orphan/x.txt", "id:o", "77")], []));
@@ -929,7 +929,7 @@ internal static partial class StorageChecks
     private static SqliteStateStore OpenSqlite(string root, string name, TimeProvider clock)
     {
         var folder = Fresh(root, name);
-        return SqliteStateStore.Open(folder, Fast, clock);
+        return SqliteStateStore.Open(folder, Fast, clock, LocalItems.CaptureOptionalHash);
     }
 
     private static string Fresh(string root, string name)

@@ -16,7 +16,7 @@ internal static partial class LocalJournalChecks
         var rows = reasons.Select((reason, i) => new ItemState(reason, ItemKind.File,
             SyncLocalEndpointStore.ObjectId(1, (ulong)i + 10), null, new string('a', 64), 3,
             DateTimeOffset.UtcNow, ItemFlags.None)).ToArray();
-        using (var store = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.WriteSnapshot(new(root.RootId, Side.A, store.BeginGeneration(root.RootId, "full"), cursor, rows, []));
             var gaps = (ILocalGapStore)store;
@@ -38,7 +38,7 @@ internal static partial class LocalJournalChecks
                 "reason-update race fixture has a staged hash before diagnostics are persisted");
             gaps.SetGapDiscoveryReasons(root.RootId, epoch, [(candidate.ObjectId, "usn>=boundary")]);
         }
-        using (var reopened = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System))
+        using (var reopened = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
             LocalChecks.Require(((ILocalGapStore)reopened).HasGapProtection(root.RootId),
                 "diagnostic persistence preserves unfinished protection across restart");
         using var db = new SqliteConnection("Data Source=" + Path.Combine(product, "v2", "state.db") + ";Pooling=False");
@@ -59,7 +59,7 @@ internal static partial class LocalJournalChecks
         const string cursor = "0000000000000001:200";
         var item = new ItemState("probe-exception", ItemKind.File, SyncLocalEndpointStore.ObjectId(1, 10),
             null, new string('a', 64), 3, DateTimeOffset.UtcNow, ItemFlags.None);
-        using var store = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         store.WriteSnapshot(new(root.RootId, Side.A, store.BeginGeneration(root.RootId, "full"), cursor, [item], []));
         var gaps = (ILocalGapStore)store;
         gaps.BeginGap(root.RootId, cursor, 100, true);
@@ -84,7 +84,7 @@ internal static partial class LocalJournalChecks
         const string cursor = "0000000000000001:200";
         var item = new ItemState("offline-file", ItemKind.File, SyncLocalEndpointStore.ObjectId(1, 10),
             null, new string('a', 64), 3, DateTimeOffset.UtcNow, ItemFlags.None);
-        using var store = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         store.WriteSnapshot(new(root.RootId, Side.A, store.BeginGeneration(root.RootId, "full"), cursor,
             [item, item with { Path = "directory", ObjectId = SyncLocalEndpointStore.ObjectId(1, 11), Kind = ItemKind.Folder },
              item with { Path = "link", ObjectId = SyncLocalEndpointStore.ObjectId(1, 12), Flags = ItemFlags.Link }], []));
@@ -139,7 +139,7 @@ internal static partial class LocalJournalChecks
         var rows = Enumerable.Range(10, count).Select(n => new ItemState("file-" + n, ItemKind.File,
             SyncLocalEndpointStore.ObjectId(1, (ulong)n), null, new string('a', 64), 3,
             DateTimeOffset.UtcNow, ItemFlags.None)).OrderBy(x => x.ObjectId, StringComparer.Ordinal).ToArray();
-        using (var store = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.WriteSnapshot(new(root.RootId, Side.A, store.BeginGeneration(root.RootId, "full"), cursor, rows, []));
             var gaps = (ILocalGapStore)store;
@@ -159,7 +159,7 @@ internal static partial class LocalJournalChecks
             }
             finally { io.Release.Set(); await worker.DisposeAsync(); }
         }
-        using (var reopened = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System))
+        using (var reopened = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var gaps = (ILocalGapStore)reopened;
             gaps.PromoteGapDiscovery(root.RootId);

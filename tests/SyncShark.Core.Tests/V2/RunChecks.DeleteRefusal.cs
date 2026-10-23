@@ -22,7 +22,7 @@ internal static partial class RunChecks
         // Keep A deletes both the losing version and its proven copy. Neither is settled by refusal.
         foreach (var rule in new[] { 10, 11 })
         {
-            using var store = SqliteStateStore.Open(LocalChecks.FreshRoot("choice-delete-space-" + rule), Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(LocalChecks.FreshRoot("choice-delete-space-" + rule), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             fx.A.DropboxHashes = fx.B.DropboxHashes = true;
             var a = fx.A.Seed("a.txt", "left");
@@ -102,7 +102,7 @@ internal static partial class RunChecks
         var folder = FixtureFolder("reconcile-refused-retry");
         try
         {
-            using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             fx.A.Seed("held.txt", "reviewed bytes");
             fx.B.Seed("held.txt", "reviewed bytes");
@@ -184,7 +184,7 @@ internal static partial class RunChecks
 
     private static async Task QuarantineDeleteLowSpaceAsync(string root)
     {
-        using var store = SqliteStateStore.Open(Path.Combine(root, "delete-low-space"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "delete-low-space"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var selected = fx.B.Seed("blocked.txt", "reviewed cloud bytes");
         fx.Provider.AddWriter(fx.Pair.A, new QuarantineWriter(fx.A, "write", 225));

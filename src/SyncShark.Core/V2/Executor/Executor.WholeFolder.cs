@@ -18,7 +18,7 @@ public sealed partial class Executor
     private sealed record WholeFolderRecovery(string PairId, string ScanCursor, WholeFolderSnapshot[] Trees,
         string ProviderState);
 
-    internal static void RequestFolderRestoreAgain(IStateStore store, string pairId, Notice notice)
+    internal static void RequestFolderRestoreAgain(IStateStore store, string pairId, Notice notice, IFolderTreeDeleter endpoint)
     {
         var anchor = notice.FolderRecoveryAnchor is { } id ? store.IntentById(pairId, id) : null;
         if (anchor?.ProviderEffect?.Kind != WholeFolderGroupKind)
@@ -27,7 +27,7 @@ public sealed partial class Executor
             ?? throw new InvalidDataException("Missing folder recovery checkpoint.");
         if (recovery.PairId != pairId || !recovery.Trees.Any(tree => PairPath.Same(tree.Actions[^1].Path, notice.Path)))
             throw new SyncRunRefusedException("The notice no longer matches its recovery episode.");
-        recovery = recovery with { ProviderState = DropboxWriter.AuthorizeRestoreAgain(recovery.ProviderState, notice.Path) };
+        recovery = recovery with { ProviderState = endpoint.AuthorizeRestoreAgain(recovery.ProviderState, notice.Path) };
         store.RecordIntent(pairId, anchor with { ProviderEffect = anchor.ProviderEffect with { Id = JsonSerializer.Serialize(recovery) } });
     }
 

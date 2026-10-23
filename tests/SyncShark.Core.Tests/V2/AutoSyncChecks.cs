@@ -120,7 +120,7 @@ internal static partial class AutoSyncChecks
     private static async Task DurableResumeWithoutKickAsync()
     {
         var folder = Path.Combine(Path.GetTempPath(), "autosync-resume-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         store.SavePair(RigPair("p1", true));
         store.MarkFirstSyncDone("p1");
         store.SetPairPaused("p1", true);

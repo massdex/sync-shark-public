@@ -21,7 +21,7 @@ internal static partial class LocalJournalChecks
         var item = new ItemState("folder/file.txt", ItemKind.File, SyncLocalEndpointStore.ObjectId(1, 20), null,
             new string('a', 64), 3, DateTimeOffset.UtcNow, ItemFlags.None);
         const string cursor = "0000000000000001:200";
-        using var store = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         // pairA is saved first, so it owns the lowest pair number and the one physical notice.
         store.SavePair(pairA);
         store.SavePair(pairB);
@@ -109,7 +109,7 @@ internal static partial class LocalJournalChecks
             "a recorded root failure holds the root behind its future durable deadline");
 
         var settings = StorageChecks.Fast with { ProgressInterval = TimeSpan.Zero, MaxWorkers = 1 };
-        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
+        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException),
             new FakeEndpointProvider(), settings, TimeProvider.System);
         var beforeIgnore = (RootState(), GapState(), RehashState());
         var ignoreResult = await run.ApplyRetryNoticeChoiceAsync(pairB.PairId, projected[0].NoticeId!,
@@ -176,7 +176,7 @@ internal static partial class LocalJournalChecks
     // Owner decision: a summary episode is root + failure class, not the latest failed item.
     private static void IndexFailureClassSuppressionChecks(string folder)
     {
-        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var root = new RootDef("class-root", SyncProviders.Local, null, "/local", "id:class-root");
         var remote = new RootDef("class-remote", SyncProviders.Dropbox, "account", "/remote", "id:remote");
         var pair = new PairDef("class-pair", "Pair A", root, remote, [], [], true);
@@ -254,7 +254,7 @@ internal static partial class LocalJournalChecks
             Directory.CreateDirectory(product);
             string pairId, rootId, closedId;
             long closedBefore;
-            using (var created = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System))
+            using (var created = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 var (root, pair) = SaveIndexRoot(created, folder, "upgrade-root-" + fromVersion,
                     "upgrade-pair-" + fromVersion, ["upgrade/file.txt"]);
@@ -300,7 +300,7 @@ internal static partial class LocalJournalChecks
             var migrationStarted = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             foreach (var pass in new[] { "first open", "idempotent reopen" })
             {
-                using var upgraded = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System);
+                using var upgraded = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
                 LocalChecks.Require(upgraded.Pair(pairId) is not null &&
                     upgraded.Live(rootId, ["upgrade/file.txt"]).Single().Hash == new string('a', 64) &&
                     upgraded.OpenNotices(pairId).Any(notice => notice.ReasonKey == "upgrade-preservation") &&

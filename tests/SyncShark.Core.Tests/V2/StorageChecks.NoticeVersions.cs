@@ -20,7 +20,7 @@ internal static partial class StorageChecks
             string noticeId;
             string otherId;
             var recovery = new RecoveryRef(side, "retained/original", loser.VersionId, loser.Hash!, loser.Size);
-            using (var store = SqliteStateStore.Open(folder, Fast, new TestClock()))
+            using (var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
             {
                 store.SavePair(Pair("p1"));
                 store.SavePair(Pair("p2"));
@@ -38,7 +38,7 @@ internal static partial class StorageChecks
                 store.CommitResult("p1", 1, action,
                     new ActionResult(action.ActionId, Outcome.Failed, null, null, recovery, "retry"));
             }
-            using (var store = SqliteStateStore.Open(folder, Fast, new TestClock()))
+            using (var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
             {
                 var retained = store.NoticeById("p1", noticeId);
                 Require(retained is { Closed: false } && retained.Value.Notice.Detail == notice.Detail &&
@@ -58,7 +58,7 @@ internal static partial class StorageChecks
                     store.NoticeById("p1", noticeId)!.Value.Notice.RetainedVersion!.Winner == target,
                     "Done removes intent and persists actual target winner; notice replay cannot overwrite enrichment");
             }
-            using (var store = SqliteStateStore.Open(folder, Fast, new TestClock()))
+            using (var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
             {
                 Require(store.NoticeById("p1", noticeId)!.Value.Notice.RetainedVersion ==
                     (notice.RetainedVersion! with { Winner = target }), "committed target stamp survives SQLite reopen");
@@ -94,7 +94,7 @@ internal static partial class StorageChecks
                     "Done atomically resolves intent and notice despite suppressed baseline publication");
                 store.AddNotices([notice, nextNotice]);
             }
-            using (var store = SqliteStateStore.Open(folder, Fast, new TestClock()))
+            using (var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
             {
                 var closed = store.NoticeById("p1", noticeId);
                 var successor = store.OpenNotices("p1").Single(row => row.RetainedVersion?.ActionId == "restore-version");

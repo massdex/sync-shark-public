@@ -5,7 +5,7 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SqliteStateStore
 {
-    internal const string InterruptedDeleteRestoreKind = "interrupted-delete-restore";
+    internal const string InterruptedDeleteRestoreKind = InterruptedDelete.RestoreKind;
 
     // Same transaction as retiring the intent and baseline: a crash cannot lose the path's
     // scheduling debt, even with unchanged inventory cursors on the following run.

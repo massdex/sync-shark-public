@@ -69,7 +69,7 @@ internal static partial class DropboxChecks
         };
         var writer = new DropboxWriter(Root(), Side.B, h.Client, Path.Combine(_root, "spool"), isStateDamage: StorageFailureClassifier.IsStateDamage,
             V2Settings.Default with { DeleteBatchSize = 1, UploadBatchSize = 1, MkDirBatchSize = 1 });
-        return new TreeRig(h, store, new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
+        return new TreeRig(h, store, new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException),
             new FakeEndpoint(Side.A, "ra"), writer, delete, snapshot.CursorAfter);
     }
 
@@ -79,7 +79,7 @@ internal static partial class DropboxChecks
         var source = new RecordingWriter(rig.A);
         rig.A.DropboxHashes = true;
         var folder = Path.Combine(_root, "folder-dispatch-" + Guid.NewGuid().ToString("N"));
-        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(rig.Store.Pair("p1")!);
             var victims = FolderDelete.LiveDescendants(rig.Store, RootId, "big").Append(rig.Delete.ExpectedTarget!).ToArray();
@@ -107,7 +107,7 @@ internal static partial class DropboxChecks
             var delete = rig.Delete with { Rule = 6, ChoiceRemove = false,
                 ObjectKey = "baseline-" + rig.Delete.ExpectedTarget!.ObjectId };
             var results = new List<ActionResult>();
-            var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+            var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
             await foreach (var result in executor.ApplyAsync(rig.Plan() with { Actions = [delete] }, source, rig.B, default))
                 results.Add(result);
             Require(recreated && rig.H.Wire.WholeFolderDeletes == 0,
@@ -117,7 +117,7 @@ internal static partial class DropboxChecks
                 (await rig.B.ObserveAsync("big/f2.txt", default) is null) == !unknown,
                 "existing per-item fallback preserves recreated victim and deletes absent siblings");
         }
-        using var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         Require(reopened.SyncRetryAt("p1", "big/f0.txt") is not null,
             "prepare refusal retains per-item retry after cold reopen");
     }

@@ -14,7 +14,7 @@ internal static partial class StorageChecks
             ItemKind.File, "object-" + n.ToString("D4"), null, new string('a', 64), 3,
             DateTimeOffset.UnixEpoch.AddDays(1), ItemFlags.None)).ToArray();
         LocalGapEpoch original;
-        using (var store = SqliteStateStore.Open(product, Fast, new TestClock()))
+        using (var store = SqliteStateStore.Open(product, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             store.WriteSnapshot(new(root, Side.A, store.BeginGeneration(root, "full"), cursor, rows, []));
             var gaps = (ILocalGapStore)store;
@@ -52,7 +52,7 @@ internal static partial class StorageChecks
             // A one-tick observation change must not disappear through JSON date rounding.
             StoreSchema.Execute(db, null, "UPDATE file_state SET mtime=mtime+1 WHERE object_id=$o;", ("$o", rows[0].ObjectId));
         }
-        using (var store = SqliteStateStore.Open(product, Fast, new TestClock()))
+        using (var store = SqliteStateStore.Open(product, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             var gaps = (ILocalGapStore)store;
             Require(gaps.GapEpoch(root)!.DiscoveryDone && gaps.HasGapProtection(root),
@@ -109,7 +109,7 @@ internal static partial class StorageChecks
                 "metadata promotion uses indexed entity staging, never a whole-root managed list");
             StoreSchema.Execute(db, null, "DELETE FROM file_state WHERE object_id=$o;", ("$o", rows[2].ObjectId));
         }
-        using (var store = SqliteStateStore.Open(product, Fast, new TestClock()))
+        using (var store = SqliteStateStore.Open(product, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             ((ILocalGapStore)store).PromoteGapDiscovery(root);
             using var db = new SqliteConnection($"Data Source={DbPath(product)};Pooling=False");
@@ -127,7 +127,7 @@ internal static partial class StorageChecks
         var product = Fresh(folder, "gap-promotion-pages");
         const string root = "paged-root";
         const string cursor = "0000000000000001:200";
-        using var store = SqliteStateStore.Open(product, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(product, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         store.WriteSnapshot(new(root, Side.A, store.BeginGeneration(root, "full"), cursor, rows, []));
         var gaps = (ILocalGapStore)store;
         gaps.BeginGap(root, cursor, 100, true);

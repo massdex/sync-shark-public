@@ -19,7 +19,7 @@ internal static partial class LocalJournalChecks
         LocalChecks.Seed(root, "edit.txt", "one");
         LocalChecks.Seed(root, "delete.txt", "two");
         LocalChecks.Seed(root, "old/child.txt", "three");
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var def = LocalChecks.RootOf(root, "root-local");
         var inventory = LocalChecks.Inventory(root, store, TimeProvider.System);
         var gen = store.BeginGeneration(def.RootId, "full");

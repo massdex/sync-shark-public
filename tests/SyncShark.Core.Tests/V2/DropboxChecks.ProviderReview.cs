@@ -33,7 +33,7 @@ internal static partial class DropboxChecks
             notice.ReasonKey == ProviderRefusedPaths.RetainedNoticeKey);
         var staleDelete = new SyncAction("stale-retained-parent", 31, ActionKind.Delete, Side.B, "P", null,
             null, (await fx.B.ObserveAsync("P", CancellationToken.None))!, false, null);
-        var executor = new Executor(fx.Store, StorageChecks.Fast, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor = new Executor(fx.Store, StorageChecks.Fast, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         var guarded = new List<ActionResult>();
         await foreach (var outcome in executor.ApplyAsync(new Plan("p1", 100, [staleDelete], []),
                            fx.WriterA, fx.WriterB, CancellationToken.None)) guarded.Add(outcome);

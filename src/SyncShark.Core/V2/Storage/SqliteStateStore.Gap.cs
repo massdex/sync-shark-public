@@ -212,7 +212,7 @@ public sealed partial class SqliteStateStore : ILocalGapStore
         // An unfinished untrusted pass cannot become trusted just because the newest gap has a journal id.
         if (prior is not null && HasGapProtection(root))
         {
-            if (!prior.TrustFileUsn || !LocalGapWorker.SameJournal(prior.JournalCursor, journalCursor)) trustFileUsn = false;
+            if (!prior.TrustFileUsn || !GapPredicates.SameJournal(prior.JournalCursor, journalCursor)) trustFileUsn = false;
             if (trustFileUsn) boundary = Math.Min(boundary, prior.Boundary);
         }
         if (prior is not null && prior.JournalCursor == journalCursor && prior.Boundary == boundary &&
@@ -273,7 +273,7 @@ public sealed partial class SqliteStateStore : ILocalGapStore
         foreach (var (item, requiresHash, current) in observed)
         {
             var metadataReady = current is null || (SameGapItem(current, item) &&
-                (!requiresHash || LocalGapWorker.MetadataOnly(current)));
+                (!requiresHash || GapPredicates.MetadataOnly(current)));
             // Every discovered entity retains a protection row, including unchanged USN and
             // metadata-only items. Only the next run may publish their discharge.
             StoreSchema.Execute(_connection, tx,

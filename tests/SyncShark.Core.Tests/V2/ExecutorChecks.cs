@@ -10,6 +10,7 @@ internal static partial class ExecutorChecks
 
     public static async Task RunAsync()
     {
+        await EndpointSeamChecks.RunAsync();
         await DeleteSourceChecksAsync();
         await Order_PhasesAndLevels();
         await Order_InterleavesTargets();
@@ -120,7 +121,7 @@ internal static partial class ExecutorChecks
         var (store, a, b, _) = Rig();
         var journal = new List<string>();
         var recorded = new JournalStore(store, journal);
-        var executor = new Executor(recorded, Settings(1), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor = new Executor(recorded, Settings(1), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         var actions = new List<SyncAction>();
         foreach (var side in new[] { Side.A, Side.B })
         {
@@ -418,7 +419,7 @@ internal static partial class ExecutorChecks
         var b = new FakeEndpoint(Side.B, "rb");
         var record = new RecordingWriter(b);
         var admission = Admission();
-        var executor = new Executor(store, Settings(64), admission, isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor = new Executor(store, Settings(64), admission, isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         admission.ProviderThrottled(new(record.TransferResourceKey, SyncProviderOperation.Write), TimeSpan.FromMinutes(6));
         var action = Act(ActionKind.CopyNew, Side.B, "f0", source: a.Seed("f0", "v0"), key: "k0");
 
@@ -475,7 +476,7 @@ internal static partial class ExecutorChecks
         var a = new FakeEndpoint(Side.A, "ra");
         var b = new FakeEndpoint(Side.B, "rb");
         var record = new RecordingWriter(b, journal);
-        var executor = new Executor(store, Settings(64), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor = new Executor(store, Settings(64), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         var actions = Enumerable.Range(0, 5)
             .Select(i => Act(ActionKind.CopyNew, Side.B, "f" + i, source: a.Seed("f" + i, "v" + i), key: "k" + i))
             .ToArray();
@@ -500,7 +501,7 @@ internal static partial class ExecutorChecks
         var a = new FakeEndpoint(Side.A, "ra");
         var b = new FakeEndpoint(Side.B, "rb") { Latency = TimeSpan.FromMilliseconds(10) };
         var record = new RecordingWriter(b, journal);
-        var executor = new Executor(store, Settings(64), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor = new Executor(store, Settings(64), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         var actions = Enumerable.Range(0, 64)
             .Select(i => Act(ActionKind.CopyNew, Side.B, "f" + i, source: a.Seed("f" + i, "v" + i), key: "k" + i))
             .ToArray();
@@ -532,7 +533,7 @@ internal static partial class ExecutorChecks
         var a = new FakeEndpoint(Side.A, "ra");
         var b = new FakeEndpoint(Side.B, "rb") { Latency = TimeSpan.FromMilliseconds(10) };
         var record = new RecordingWriter(b, journal);
-        var executor = new Executor(store, Settings(64), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor = new Executor(store, Settings(64), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         var actions = Enumerable.Range(0, 16)
             .Select(i => Act(ActionKind.CopyNew, Side.B, "f" + i, source: a.Seed("f" + i, "v" + i), key: "k" + i))
             .ToArray();
@@ -594,7 +595,7 @@ internal static partial class ExecutorChecks
         var a = new FakeEndpoint(Side.A, "ra");
         var b = new FakeEndpoint(Side.B, "rb");
         var admission = Admission();
-        var executor = new Executor(store, Settings(Workers), admission, isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor = new Executor(store, Settings(Workers), admission, isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         var batcher = new BatchingWriter(b, admission, capacity: Workers, expected: Files);
         var actions = Enumerable.Range(0, Files)
             .Select(i => Act(ActionKind.CopyNew, Side.B, "f" + i, source: a.Seed("f" + i, new string('x', Bytes)), key: "k" + i))
@@ -624,7 +625,7 @@ internal static partial class ExecutorChecks
         var a = new FakeEndpoint(Side.A, "ra");
         var b = new FakeEndpoint(Side.B, "rb") { Latency = TimeSpan.FromMilliseconds(50) };
         var record = new RecordingWriter(b, journal);
-        var executor = new Executor(store, Settings(64), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor = new Executor(store, Settings(64), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         var actions = Enumerable.Range(0, 100)
             .Select(i => Act(ActionKind.CopyNew, Side.B, "f" + i, source: a.Seed("f" + i, "v" + i), key: "k" + i))
             .ToArray();
@@ -717,7 +718,7 @@ internal static partial class ExecutorChecks
         b.Seed("present", "present-content", versionId: "v1");
         var action = Act(ActionKind.CopyNew, Side.B, "present", source: source, key: "k1");
         store.RecordIntent("p1", action);
-        var executor = new Executor(store, Settings(1), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor = new Executor(store, Settings(1), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
 
         var results = await executor.ReconcileAsync([action], 1, new RecordingWriter(a), new RecordingWriter(b),
             CancellationToken.None);
@@ -737,7 +738,7 @@ internal static partial class ExecutorChecks
         var victim = b.Seed("x", "content", versionId: "v1");
         SeedBaseline(inner, "k1", a.Seed("x", "content", versionId: "v1"), victim);
         await RemoveSourceAsync(a, "x");
-        var executor = new Executor(store, Settings(64), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor = new Executor(store, Settings(64), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         var action = Act(ActionKind.Delete, Side.B, "x", expected: victim, rf: true, key: "k1");
 
         var interrupted = new List<ActionResult>();
@@ -965,7 +966,7 @@ internal static partial class ExecutorChecks
         store.SavePair(Pair());
         var a = new FakeEndpoint(Side.A, "ra");
         var b = new FakeEndpoint(Side.B, "rb");
-        return (store, a, b, new Executor(store, settings ?? Settings(64), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage));
+        return (store, a, b, new Executor(store, settings ?? Settings(64), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException));
     }
 
     private static SyncAction Act(ActionKind kind, Side target, string path, string? from = null,

@@ -55,55 +55,7 @@ public enum SyncAuthorityCloudRootRelation
     Unverified = 3
 }
 
-/// <summary>
-/// The kind of one provider-issued storage-object key. A native object key is the provider's own file or
-/// folder identity and it is the only key a provider API call is ever made with. A shared-namespace mount
-/// key is a second, route-issued key for one backing shared object: the provider mounts that backing object
-/// at a location inside an access route's namespace and issues a fresh location-scoped id, so the native ids
-/// of two routes differ while the mount key names the one object both routes can reach. A provider with no
-/// mount mapping issues no keys of that kind, and "ordinary file/folder IDs remain their native object keys".
-/// </summary>
-public enum SyncCloudObjectKeyKind
-{
-    /// <summary>The provider's own file or folder identity; the only key a provider API call uses.</summary>
-    NativeObject = 0,
 
-    /// <summary>A route-issued mount key naming a shared backing object reached from this route's namespace.</summary>
-    SharedNamespaceMount = 1
-}
-
-/// <summary>
-/// One provider-qualified storage-object key: the registered provider literal, the kind of key and the exact
-/// provider-issued value. Two keys name the same backing object only when the provider, the kind and the
-/// value all match, with the value compared ordinal and case-sensitively, so one identical literal id under
-/// two different providers never aliases and two case variants are never merged. The provider literal is
-/// normalised to its registered lowercase form so value equality and SyncCloudObjectKeys.SameObject agree.
-/// Keys are readback evidence only: they are never user-supplied CLI authority and they are never inferred
-/// from a display name, account label, e-mail or path.
-/// </summary>
-public readonly record struct SyncCloudObjectKey(string Provider, SyncCloudObjectKeyKind Kind, string Value)
-{
-    /// <summary>One native provider object key.</summary>
-    public static SyncCloudObjectKey Native(string provider, string value) =>
-        Create(provider, SyncCloudObjectKeyKind.NativeObject, value);
-
-    /// <summary>One route-issued shared-namespace mount key.</summary>
-    public static SyncCloudObjectKey SharedNamespaceMount(string provider, string value) =>
-        Create(provider, SyncCloudObjectKeyKind.SharedNamespaceMount, value);
-
-    public static SyncCloudObjectKey Create(string provider, SyncCloudObjectKeyKind kind, string value)
-    {
-        if (string.IsNullOrWhiteSpace(provider))
-            throw new InvalidDataException("A cloud object key requires a registered provider literal.");
-        if (string.IsNullOrWhiteSpace(value))
-            throw new InvalidDataException("A cloud object key requires a provider-issued value.");
-        return new SyncCloudObjectKey(provider.Trim().ToLowerInvariant(), kind, value);
-    }
-
-    public bool IsWellFormed => !string.IsNullOrWhiteSpace(Provider) && !string.IsNullOrWhiteSpace(Value);
-
-    public override string ToString() => Provider + ":" + Kind + ":" + Value;
-}
 
 /// <summary>
 /// The one shared comparison and key production of provider-issued object keys. Provider qualification is

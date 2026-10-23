@@ -30,6 +30,10 @@ internal static class LocalWalkChecks
         await TransientCheckpointKeepsCursorAsync();
         await SameRootWaitsAsync();
         BatchAndCompactRows();
+        await CapabilityFallbackAsync();
+        await TimedFlushAsync();
+        CapabilityGateIdentity();
+        MarkerAndIdentityValidation();
     }
 
     private static string Fresh(string name)
@@ -57,7 +61,7 @@ internal static class LocalWalkChecks
         var root = Fresh("pause");
         LocalChecks.Seed(root, "old.txt", "before");
         LocalChecks.Seed(root, "d/inside.txt", "nested");
-        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System);
+        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var inventory = Inventory(root, sql, Start);
         inventory.DirectoryCompletedForTest = path =>
         {
@@ -107,7 +111,7 @@ internal static class LocalWalkChecks
         LocalChecks.Seed(root, "top.txt", "root");
         LocalChecks.Seed(root, "d/a.txt", "a");
         LocalChecks.Seed(root, "d/b.txt", "b");
-        using (var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System))
+        using (var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var inventory = Inventory(root, sql, Start);
             try
@@ -122,7 +126,7 @@ internal static class LocalWalkChecks
                 "a crash inside a directory cannot commit its partial rows or advance its frontier");
         }
         // New connection + scanner: no in-process state survives this simulated abrupt interruption.
-        using var reopened = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var resumed = Inventory(root, reopened, Later);
         var walked = new List<string>();
         resumed.DirectoryCompletedForTest = walked.Add;
@@ -138,7 +142,7 @@ internal static class LocalWalkChecks
         var root = Fresh("selection");
         LocalChecks.Seed(root, "z/file.txt", "previously excluded");
         LocalChecks.Seed(root, "a/file.txt", "included");
-        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System);
+        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var inventory = Inventory(root, sql, Start);
         inventory.DirectoryCompletedForTest = _ => throw new SimulatedCrash();
         try { await inventory.FullAsync(1, path => !path.StartsWith("z", StringComparison.Ordinal), null!, CancellationToken.None); }
@@ -153,7 +157,7 @@ internal static class LocalWalkChecks
     {
         var root = Fresh("incomplete");
         LocalChecks.Seed(root, "d/file.txt", "content");
-        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System);
+        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var inventory = Inventory(root, sql, Start);
         inventory.DirectoryCompletedForTest = _ => throw new SimulatedCrash();
         try { await inventory.FullAsync(1, _ => true, null!, CancellationToken.None); }
@@ -171,7 +175,7 @@ internal static class LocalWalkChecks
     {
         var root = Fresh("replaced");
         LocalChecks.Seed(root, "d/old.txt", "original");
-        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System);
+        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var first = await Inventory(root, sql, Start).FullAsync(sql.BeginGeneration("root-local", "full"), _ => true, null!, default);
         sql.WriteSnapshot(first);
         var old = sql.Live("root-local").Single(i => i.Path == "d/old.txt");
@@ -207,7 +211,7 @@ internal static class LocalWalkChecks
     {
         var root = Fresh("version-" + version);
         LocalChecks.Seed(root, "d/old.txt", "old");
-        using (var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System))
+        using (var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var inventory = Inventory(root, sql, Start);
             inventory.DirectoryCompletedForTest = _ => throw new SimulatedCrash();
@@ -231,7 +235,7 @@ internal static class LocalWalkChecks
         }
         Directory.Move(Path.Combine(root, "d"), root + "-moved");
         LocalChecks.Seed(root, "d/new.txt", "new");
-        using var reopened = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var snapshot = await Inventory(root, reopened, Later).FullAsync(2, _ => true, null!, default);
         LocalChecks.Require(snapshot.CursorAfter == Start.Cursor, "both versions retain completed pages and original cursor");
         LocalChecks.Require(version == 2
@@ -244,7 +248,7 @@ internal static class LocalWalkChecks
     {
         var root = Fresh("corrupt-" + kind);
         LocalChecks.Seed(root, "d/file.txt", "payload");
-        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System);
+        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var inventory = Inventory(root, sql, Start);
         inventory.DirectoryCompletedForTest = path =>
         {
@@ -282,7 +286,7 @@ internal static class LocalWalkChecks
     {
         var root = Fresh("blocked-retry");
         LocalChecks.Seed(root, "d/file.txt", "payload");
-        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System);
+        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var inventory = Inventory(root, sql, Start);
         inventory.DirectoryCompletedForTest = path =>
         {
@@ -305,7 +309,7 @@ internal static class LocalWalkChecks
     {
         var root = Fresh("ordinary-blocks");
         LocalChecks.Seed(root, "d/file.txt", "payload");
-        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System);
+        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var inventory = Inventory(root, sql, Start);
         inventory.DirectoryCompletedForTest = _ => throw new SimulatedCrash();
         try { await inventory.FullAsync(1, _ => true, null!, CancellationToken.None); }
@@ -341,7 +345,7 @@ internal static class LocalWalkChecks
     {
         var root = Fresh("flush-" + paused);
         LocalChecks.Seed(root, "d/file.txt", "payload");
-        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System);
+        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         using var connection = new SqliteConnection($"Data Source={Path.Combine(root + "-state", "v2", "state.db")};Pooling=False");
         connection.Open();
         using var command = connection.CreateCommand();
@@ -372,7 +376,7 @@ internal static class LocalWalkChecks
     {
         var root = Fresh("no-journal");
         LocalChecks.Seed(root, "d/file.txt", "payload");
-        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System);
+        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var inventory = Inventory(root, sql, Start);
         inventory.WalkCheckpointForTest = () => (null, false);
         inventory.DirectoryCompletedForTest = _ =>
@@ -386,7 +390,7 @@ internal static class LocalWalkChecks
     {
         var root = Fresh("transient-checkpoint");
         LocalChecks.Seed(root, "file.txt", "payload");
-        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System);
+        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var gen = sql.BeginGeneration("root-local", "full");
         sql.CompleteGeneration(gen, Start.Cursor, true);
         var inventory = Inventory(root, sql, Start);
@@ -399,7 +403,7 @@ internal static class LocalWalkChecks
     private static async Task SameRootWaitsAsync()
     {
         var root = Fresh("admission");
-        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System);
+        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var gate = sql.LocalWalkGate("root-local");
         await gate.WaitAsync();
         var waiting = Inventory(root, sql, Start).FullAsync(1, _ => true, null!, CancellationToken.None);
@@ -412,7 +416,7 @@ internal static class LocalWalkChecks
     private static void BatchAndCompactRows()
     {
         var root = Fresh("batch");
-        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System);
+        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         sql.BeginLocalWalk(LocalChecks.RootOf(root, "root-local"), "options", Start);
         var walk = new LocalWalkCheckpoint(sql, "root-local", root);
         var entry = new PilotLocalEntry("file.txt", PilotEntryKind.File, Path.Combine(root, "file.txt"), 1,
@@ -439,7 +443,7 @@ internal static class LocalWalkChecks
     {
         var root = Fresh("binding");
         var def = LocalChecks.RootOf(root, "root-local");
-        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System);
+        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         LocalChecks.Require(sql.BeginLocalWalk(def, "options", Start) == Start.Cursor, "fresh start cursor");
         sql.SaveLocalWalkPage(def.RootId, 0, "sentinel");
         LocalChecks.Require(sql.BeginLocalWalk(def, "options", Later) == Start.Cursor &&
@@ -450,5 +454,75 @@ internal static class LocalWalkChecks
         sql.SaveLocalWalkPage(def.RootId, 0, "sentinel");
         sql.BeginLocalWalk(def with { RootObjectId = "replacement" }, "options", Later);
         LocalChecks.Require(sql.LocalWalkPage(def.RootId, 0) is null, "replacement root cannot inherit old observations");
+    }
+    private static async Task CapabilityFallbackAsync()
+    {
+        var root = Fresh("no-capability");
+        LocalChecks.Seed(root, "file.txt", "payload");
+        IStateStore store = new InMemoryStateStore();
+        LocalChecks.Require(store is not ILocalWalkStore, "fixture deliberately has no durable walk capability");
+        var inventory = Inventory(root, store, Start);
+        var first = await inventory.FullAsync(1, _ => true, null!, default);
+        var second = await inventory.FullAsync(2, _ => true, null!, default);
+        LocalChecks.Require(first.Items.Count == 1 && second.Items.Count == 1 &&
+            first.CursorAfter == Start.Cursor && second.CursorAfter == Start.Cursor,
+            "non-capable store completes fresh walks without manufacturing durable pages");
+    }
+
+    private static void CapabilityGateIdentity()
+    {
+        var root = Fresh("gate-identity");
+        using var first = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
+        using var second = SqliteStateStore.Open(root + "-other", StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
+        ILocalWalkStore capability = first;
+        LocalChecks.Require(ReferenceEquals(capability.LocalWalkGate("a"), first.LocalWalkGate("a")) &&
+            !ReferenceEquals(capability.LocalWalkGate("a"), capability.LocalWalkGate("b")) &&
+            !ReferenceEquals(capability.LocalWalkGate("a"), ((ILocalWalkStore)second).LocalWalkGate("a")),
+            "capability retains same-store root gate identity without coupling independent roots or stores");
+    }
+
+    private static async Task TimedFlushAsync()
+    {
+        var root = Fresh("timed-flush");
+        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
+        sql.BeginLocalWalk(LocalChecks.RootOf(root, "root-local"), "options", Start);
+        var walk = new LocalWalkCheckpoint((ILocalWalkStore)sql, "root-local", root);
+        var page = new LocalWalkPage(root, [], [], [], [], 0, 0);
+        walk.Save(page);
+        LocalChecks.Require(sql.LocalWalkPageCount("root-local") == 0, "empty page initially buffered");
+        await Task.Delay(TimeSpan.FromSeconds(5.1));
+        walk.Save(page);
+        LocalChecks.Require(sql.LocalWalkPageCount("root-local") == 2, "five-second threshold flushes below entry/page limits");
+    }
+    private static void MarkerAndIdentityValidation()
+    {
+        var root = Fresh("markers");
+        using var sql = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
+        ILocalWalkStore capability = sql;
+        capability.BeginLocalWalk(LocalChecks.RootOf(root, "root-local"), "options", Start);
+        var page = new LocalWalkPage(root, [], [], [], [], 0, 0);
+        var walk = new LocalWalkCheckpoint(capability, "root-local", root);
+        walk.Save(page);
+        walk.Flush();
+        using var connection = new SqliteConnection($"Data Source={Path.Combine(root + "-state", "v2", "state.db")};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM local_walk_page WHERE ordinal=-1";
+        command.ExecuteNonQuery();
+        LocalChecks.Require(capability.LocalWalkPageCount("root-local") == 1, "missing count marker retains legacy contiguous-page fallback");
+        command.CommandText = "INSERT INTO local_walk_page VALUES('root-local',-1,'invalid')";
+        command.ExecuteNonQuery();
+        try { capability.LocalWalkPageCount("root-local"); throw new InvalidOperationException("invalid marker accepted"); }
+        catch (LocalWalkReplayInvalidException) { }
+        command.CommandText = "UPDATE local_walk_page SET payload='1' WHERE ordinal=-1";
+        command.ExecuteNonQuery();
+        var payload = JsonNode.Parse(capability.LocalWalkPage("root-local", 0)!)!;
+        payload["AddedDirectories"] = new JsonArray("child");
+        payload["AddedDirectoryIdentities"] = new JsonArray();
+        command.CommandText = "UPDATE local_walk_page SET payload=$p WHERE ordinal=0";
+        command.Parameters.AddWithValue("$p", payload.ToJsonString());
+        command.ExecuteNonQuery();
+        try { new LocalWalkCheckpoint(capability, "root-local", root).Read(); throw new InvalidOperationException("mismatched identities accepted"); }
+        catch (LocalWalkReplayInvalidException) { }
     }
 }

@@ -23,7 +23,7 @@ internal static class DecisionHoldChecks
         a.Seed("c.txt", "copy me");
         var provider = new FakeEndpointProvider().Add(pair.A, a).Add(pair.B, b)
             .AddWriter(pair.A, new CountingWriter(a)).AddWriter(pair.B, new CountingWriter(b));
-        var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider, Settings,
+        var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), provider, Settings,
             TimeProvider.System);
 
         var plan = await run.PreviewFirstSyncAsync(pair.PairId, new RecordingProgress(), CancellationToken.None);

@@ -3,24 +3,24 @@ using System.Runtime.CompilerServices;
 namespace Massdex.SyncShark.V2;
 
 /// <summary>Receipt-driven settlement; retries never repeat uploads.</summary>
-internal sealed class FilesOnDemandSettlement(SqliteStateStore store,
+internal sealed class FilesOnDemandSettlement(IStateStore store,
     Func<StorageSettlement, CancellationToken, Task<StorageObserved>> convert,
     Action<StorageSettlement, Exception> reportFailure,
     Func<StorageSettlement, bool>? eligible = null,
     Action<StorageSettlement>? completed = null)
 {
     private sealed class ItemGate { internal readonly SemaphoreSlim Semaphore = new(1, 1); internal int Users; }
-    private static readonly ConditionalWeakTable<SqliteStateStore, Dictionary<(string, string), ItemGate>> Gates = new();
+    private static readonly ConditionalWeakTable<IStateStore, Dictionary<(string, string), ItemGate>> Gates = new();
 
     // Shared by background settlement, pointer refresh and explicit Retry, but never hydration.
     // Entries exist only for active/waiting work, not for every indexed item.
-    internal static async Task SerializeAsync(SqliteStateStore store, StorageSettlement job,
+    internal static async Task SerializeAsync(IStateStore store, StorageSettlement job,
         Func<Task> work, CancellationToken ct)
     {
         await SerializeAsync(store, job.RootId, job.ObjectId, work, ct).ConfigureAwait(false);
     }
 
-    internal static async Task SerializeAsync(SqliteStateStore store, string rootId, string objectId,
+    internal static async Task SerializeAsync(IStateStore store, string rootId, string objectId,
         Func<Task> work, CancellationToken ct)
     {
         var gates = Gates.GetOrCreateValue(store);

@@ -36,7 +36,7 @@ internal static partial class DropboxChecks
         var ordinary = a.Seed("ordinary.txt", "retry me");
         // Another real per-entry rejection must not be mistaken for a forbidden name.
         h.Wire.NameWriteErrors["ordinary.txt"] = "insufficient_space";
-        using (var store = SqliteStateStore.Open(root, settings, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(root, settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(pair);
             var run = MakeRun(store);
@@ -64,7 +64,7 @@ internal static partial class DropboxChecks
         // Reopen the real SQLite store; a local rescan and a content change must preserve the mark.
         originals[0] = a.Seed(originals[0].Path, "new content, same name");
         h.Wire.NameWriteErrors.Remove("ordinary.txt");
-        using (var store = SqliteStateStore.Open(root, settings, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(root, settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             // Real Dropbox replays our own successful writes after the pre-apply cursor.
             // This wire scripts feeds explicitly: apply 1 created only the folder, not any file.
@@ -129,14 +129,14 @@ internal static partial class DropboxChecks
             var provider = new FakeEndpointProvider().Add(pair.A, a).AddWriter(pair.A, writerA)
                 .AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, store, "p1"))
                 .AddWriter(pair.B, h.Writer());
-            return new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider,
+            return new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), provider,
                 settings, TimeProvider.System);
         }
     }
 
     private static void ProviderNamesStaleSourceBatch(string root)
     {
-        using var store = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(root, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var localRoot = new RootDef("ra", SyncProviders.Local, null, "C:\\synthetic", "id:local");
         store.SavePair(new PairDef("p1", "names", localRoot, Root(), [], [], true));
         var a = new FakeEndpoint(Side.A, "ra");

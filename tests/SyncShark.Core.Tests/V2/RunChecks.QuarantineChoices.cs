@@ -4,7 +4,7 @@ internal static partial class RunChecks
 {
     private static async Task QuarantineKeepExclusionAsync(string root)
     {
-        using var store = SqliteStateStore.Open(Path.Combine(root, "keep-exclusion"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "keep-exclusion"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var local = fx.A.Seed("kept.txt", "current file");
         await FirstSyncAsync(fx.Run(), fx);
@@ -58,7 +58,7 @@ internal static partial class RunChecks
         Console.WriteLine("Native keep-exclusion fixture (retained): " + owned);
         var full = Path.Combine(localPath, "kept.txt");
         await File.WriteAllTextAsync(full, "reviewed bytes 0001");
-        using var store = SqliteStateStore.Open(Path.Combine(root, "keep-native"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "keep-native"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var nativeRoot = LocalChecks.RootOf(localPath, "ra");
         store.SavePair(fx.Pair with { A = nativeRoot });
@@ -115,7 +115,7 @@ internal static partial class RunChecks
     {
         foreach (var closed in new[] { false, true })
         {
-            using var store = SqliteStateStore.Open(Path.Combine(root, "legacy-hash-" + closed), Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(root, "legacy-hash-" + closed), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             var local = fx.A.Seed("legacy.txt", "review these bytes");
             var path = AttendedElevatedAction.ValidatePath(fx.Pair.A.RootPath, local.Path);
@@ -151,7 +151,7 @@ internal static partial class RunChecks
 
     private static void QuarantineHashFailureBatch(string root)
     {
-        using var store = SqliteStateStore.Open(Path.Combine(root, "hash-failure-batch"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "hash-failure-batch"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         store.SavePair(fx.Pair with { A = fx.Pair.A with { RootPath = Path.Combine(root, "missing-hash-root"),
             RootObjectId = "id:local:00000001:0000000000000001" } });
@@ -182,7 +182,7 @@ internal static partial class RunChecks
 
     private static async Task QuarantineDeleteChoiceAuthorityAsync(string root)
     {
-        using var store = SqliteStateStore.Open(Path.Combine(root, "delete-choice-authority"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "delete-choice-authority"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var selected = fx.B.Seed("blocked.txt", "reviewed cloud bytes");
         fx.Provider.AddWriter(fx.Pair.A, new QuarantineWriter(fx.A, "write", 225));
@@ -239,7 +239,7 @@ internal static partial class RunChecks
         Require(true, "CLI exclusion and read-only admin verification require explicit --yes and accept notice generation0");
         foreach (var choice in new[] { NoticeChoices.QuarantineExclude, NoticeChoices.QuarantineDeleteDropbox, NoticeChoices.DefenderExclude, "replacement", "already-deleted" })
         {
-            using var store = SqliteStateStore.Open(Path.Combine(root, "choice-" + choice), Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(root, "choice-" + choice), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             var original = fx.B.Seed("blocked.txt", "old cloud bytes");
             var writer = new QuarantineWriter(fx.A, "write", 225);
@@ -339,7 +339,7 @@ internal static partial class RunChecks
         await QuarantineGrantResumeAsync(root);
         foreach (var kind in new[] { ItemKind.File, ItemKind.Folder })
         {
-            using var store = SqliteStateStore.Open(Path.Combine(root, "grant-guard-" + kind), Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(root, "grant-guard-" + kind), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             fx.B.Seed("blocked", "new entity", kind);
             if (kind == ItemKind.Folder) fx.B.Seed("blocked/child", "held subtree");
@@ -396,7 +396,7 @@ internal static partial class RunChecks
 
     private static async Task QuarantineGrantObservationAsync(string root)
     {
-        using (var readStore = SqliteStateStore.Open(Path.Combine(root, "grant-read-only"), Settings, TimeProvider.System))
+        using (var readStore = SqliteStateStore.Open(Path.Combine(root, "grant-read-only"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var readFx = Build(suppliedStore: readStore);
             var current = readFx.A.Seed("observed", "local bytes");
@@ -410,7 +410,7 @@ internal static partial class RunChecks
         }
         foreach (var kind in new[] { ItemKind.File, ItemKind.Folder })
         {
-            using var store = SqliteStateStore.Open(Path.Combine(root, "grant-observed-" + kind), Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(root, "grant-observed-" + kind), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             var local = fx.A.Seed("blocked", "identical", kind);
             var cloud = fx.B.Seed("blocked", "identical", kind);
@@ -458,7 +458,7 @@ internal static partial class RunChecks
 
     private static async Task QuarantineGrantResumeAsync(string root)
     {
-        using var store = SqliteStateStore.Open(Path.Combine(root, "grant-resume"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "grant-resume"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var source = fx.B.Seed("blocked", "verified bytes");
         var path = AttendedElevatedAction.ValidatePath(fx.Pair.A.RootPath, source.Path);
@@ -513,7 +513,7 @@ internal static partial class RunChecks
             var data = Path.Combine(root, "grant-migration-" + prior + "-" + interrupted);
             string path;
             string ignoredId = "", legacyId = "";
-            using (var store = SqliteStateStore.Open(data, Settings, TimeProvider.System))
+            using (var store = SqliteStateStore.Open(data, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 var fx = Build(suppliedStore: store);
                 path = AttendedElevatedAction.ValidatePath(fx.Pair.A.RootPath, "legacy");
@@ -539,7 +539,7 @@ internal static partial class RunChecks
                     "UPDATE notice SET closed_at=0 WHERE state='closed'; PRAGMA user_version=" + prior + ";";
                 cmd.ExecuteNonQuery(); // synthetic isolated prior-version fixture, never a live rollback
             }
-            using (var store = SqliteStateStore.Open(data, Settings, TimeProvider.System))
+            using (var store = SqliteStateStore.Open(data, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 var action = new SyncAction("new-folder", 30, ActionKind.MkDir, Side.A, "legacy", null, null, null, false, null);
                 Require(store.DefenderGrantConflict("p1", action) is not null, "schema " + prior + " to12 preserves legacy granted path before notice pruning");
@@ -577,7 +577,7 @@ internal static partial class RunChecks
 
     private static async Task QuarantineScanReplacementAsync(string root)
     {
-        using var store = SqliteStateStore.Open(Path.Combine(root, "scan-replacement"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "scan-replacement"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var old = fx.A.Seed("blocked.txt", "old local");
         await FirstSyncAsync(fx.Run(), fx);
@@ -617,7 +617,7 @@ internal static partial class RunChecks
 
     private static async Task QuarantineRenameAsync(string root)
     {
-        using var store = SqliteStateStore.Open(Path.Combine(root, "rename-hold"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "rename-hold"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var original = fx.A.Seed("blocked.txt", "retained rename bytes");
         var run = fx.Run();

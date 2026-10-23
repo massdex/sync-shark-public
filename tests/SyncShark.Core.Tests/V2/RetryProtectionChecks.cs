@@ -6,6 +6,7 @@ internal static class RetryProtectionChecks
 {
     internal static void Run()
     {
+        LowerPredicateChecks.Run();
         var active = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Parent/active" };
         var paths = new[] { "Parent/active", "Parent/held", "Other", "" };
         var protection = RetryProtection.Create(paths, active, (_, _) => throw new Exception("Unexpected SQL fallback"));

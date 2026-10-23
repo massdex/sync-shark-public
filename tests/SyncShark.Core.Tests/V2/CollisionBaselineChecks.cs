@@ -41,7 +41,7 @@ internal static class CollisionBaselineChecks
 
         // Cold restart before any successor commit: both baselines are still authoritative and singly claimed.
         rig.Store.Dispose();
-        using var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         rig.Store = store;
         RequireSingleClaims(store, "cold reopen before Adopt");
         var retried = await PlanNowAsync(store, rig, store.BeginGeneration(rig.Pair.A.RootId, "test"),
@@ -49,7 +49,7 @@ internal static class CollisionBaselineChecks
         var retryAdopt = retried.Actions.Single(action => action.Kind == ActionKind.Adopt);
         Require(retryAdopt.ObsoleteBaselineKey == "k2", "the cold-reopened plan retains the same obsolete authority");
 
-        var results = await ApplyAsync(new Executor(store, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), retried, rig.WriterA, rig.WriterB);
+        var results = await ApplyAsync(new Executor(store, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), retried, rig.WriterA, rig.WriterB);
         Require(results.Count(result => result.Outcome == Outcome.Done) == 2 &&
             results.All(result => result.Outcome == Outcome.Done),
             "Adopt and its vacating Delete both commit");
@@ -104,8 +104,8 @@ internal static class CollisionBaselineChecks
         RequireSingleClaims(rig.Store, "physical Update before result");
 
         rig.Store.Dispose();
-        using var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System);
-        var executor = new Executor(store, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        using var store = SqliteStateStore.Open(rig.Root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
+        var executor = new Executor(store, Settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         var results = await executor.ReconcileAsync(store.UnresolvedIntents(PairId),
             store.BeginGeneration(rig.Pair.A.RootId, "test"), rig.WriterA, rig.WriterB, CancellationToken.None);
         var reconciled = results.Single();
@@ -144,7 +144,7 @@ internal static class CollisionBaselineChecks
         var provider = new FakeEndpointProvider().Add(pair.A, a).Add(pair.B, b)
             .AddWriter(pair.A, writerA).AddWriter(pair.B, writerB);
         var rig = new Rig(root, pair, a, b, writerA, writerB, provider);
-        rig.Store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+        rig.Store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         return rig;
     }
 

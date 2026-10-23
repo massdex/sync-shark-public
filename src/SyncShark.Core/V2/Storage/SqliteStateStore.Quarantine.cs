@@ -12,7 +12,7 @@ public sealed partial class SqliteStateStore
         {
             var scopes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var path in coveredPaths.OrderBy(p => p.Length))
-                if (!LocalInventory.UnderAny(path, scopes)) scopes.Add(path);
+                if (!PairPath.CoveredBy(path, scopes)) scopes.Add(path);
             coveredPaths = scopes.ToArray();
         }
         foreach (var binding in roots)
@@ -337,7 +337,7 @@ public sealed partial class SqliteStateStore
         if (notice.Quarantine is not { } hold) return notice;
         ItemState? Capture(ItemState? item, RootDef root)
         {
-            if (root.Provider != SyncProviders.Local || item is not { Kind: ItemKind.File, Hash: null } ||
+            if (root.Provider != ProviderIds.Local || item is not { Kind: ItemKind.File, Hash: null } ||
                 (item.Flags & (ItemFlags.Unreadable | ItemFlags.Locked | ItemFlags.Link | ItemFlags.Placeholder)) != 0) return item;
             // A published review is evidence, not a request to read its held bytes again on every pass.
             var previousTarget = previous?.Target == Side.A ? pair.A : pair.B;
@@ -347,7 +347,7 @@ public sealed partial class SqliteStateStore
                 return item with { Hash = recorded.Hash };
             if (ct.IsCancellationRequested) return item;
             if (DefenderCaptureForTest is { } capture) return capture(item);
-            return LocalItems.CaptureOptionalHash(root, item, ct);
+            return _captureOptionalHash(root, item, ct);
         }
         return notice with { Quarantine = hold with
         {
@@ -376,9 +376,9 @@ public sealed partial class SqliteStateStore
         var pair = PairRecord(pairId);
         if (pair is null || action.Kind is not (ActionKind.CopyNew or ActionKind.Update or ActionKind.Move or ActionKind.MkDir or ActionKind.KeepBoth or ActionKind.Adopt)) return null;
         var targetRoot = action.Target == Side.A ? pair.A : pair.B;
-        var sourceLocal = targetRoot.Provider != SyncProviders.Local;
+        var sourceLocal = targetRoot.Provider != ProviderIds.Local;
         var root = sourceLocal ? (action.Target == Side.A ? pair.B : pair.A) : targetRoot;
-        if (root.Provider != SyncProviders.Local || sourceLocal && action.Source is null) return null;
+        if (root.Provider != ProviderIds.Local || sourceLocal && action.Source is null) return null;
         var path = Path.GetFullPath(Path.Combine(root.RootPath, (sourceLocal ? action.Source!.Path : action.Path).Replace('/', Path.DirectorySeparatorChar)));
         var folder = action.Kind == ActionKind.MkDir || action.Source?.Kind == ItemKind.Folder;
         // Indexed exact ancestor checks protect descendants; a range check protects an enclosing folder move/create.
@@ -393,7 +393,7 @@ public sealed partial class SqliteStateStore
                 var source = reader.IsDBNull(2) ? null : reader.GetString(2);
                 var local = reader.IsDBNull(3) ? null : reader.GetString(3);
                 var explicitMissing = action.QuarantineStage && action.ExpectedTarget is null &&
-                    string.Equals(reader.GetString(5), AttendedElevatedAction.DownloadStagePath(path), StringComparison.OrdinalIgnoreCase);
+                    string.Equals(reader.GetString(5), ArtifactPaths.DownloadStagePath(path), StringComparison.OrdinalIgnoreCase);
                 var same = string.Equals(path, at, StringComparison.OrdinalIgnoreCase) && !folder &&
                     (sourceLocal || action.Kind == ActionKind.Move ? action.Source?.ObjectId == local && local is not null :
                         source is not null && action.Source?.ObjectId == source &&
@@ -439,7 +439,7 @@ public sealed partial class SqliteStateStore
         if (bindings.Length == 0) return [];
         var first = bindings[0];
         var root = first.Side == Side.A ? first.Pair.A : first.Pair.B;
-        if (root.Provider != SyncProviders.Local) return [];
+        if (root.Provider != ProviderIds.Local) return [];
         var prefix = RowCodec.Key(Path.GetFullPath(root.RootPath).TrimEnd('\\', '/') + Path.DirectorySeparatorChar);
         var after = prefix;
         var afterId = "";
@@ -504,7 +504,7 @@ public sealed partial class SqliteStateStore
     {
         var root = action.Target == Side.A ? pair.A : pair.B;
         var written = action.Target == Side.A ? result.NewA : result.NewB;
-        if (root.Provider != SyncProviders.Local || action.Kind is not (ActionKind.CopyNew or ActionKind.Update) ||
+        if (root.Provider != ProviderIds.Local || action.Kind is not (ActionKind.CopyNew or ActionKind.Update) ||
             written is not { Kind: ItemKind.File } || action.Source is null) return;
         var path = Path.GetFullPath(Path.Combine(root.RootPath, action.Path.Replace('/', Path.DirectorySeparatorChar)));
         StoreSchema.Execute(_connection, tx,

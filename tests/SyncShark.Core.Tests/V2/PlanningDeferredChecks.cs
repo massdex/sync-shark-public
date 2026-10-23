@@ -12,7 +12,7 @@ internal static class PlanningDeferredChecks
             1, DateTimeOffset.UnixEpoch, ItemFlags.None);
         var cloud = local with { ObjectId = "cloud-file", Hash = new string('b', 64) };
         var added = cloud with { Path = "New/File", ObjectId = "cloud-new" };
-        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(pair);
             var initialIds = new List<string>();
@@ -44,7 +44,7 @@ internal static class PlanningDeferredChecks
             store.WriteDelta(new(pair.B.RootId, Side.B, advanced, "cursor", "advanced", [], false, []));
             store.CompleteGeneration(advanced, "advanced", true);
         }
-        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var deferred = store.AdmitDeferredPlanning(pair.PairId, DateTime.UtcNow.Ticks, rotate: false);
             LocalChecks.Require(store.Cursor(pair.B.RootId) == "advanced" && deferred.Count == 1,
@@ -138,7 +138,7 @@ internal static class PlanningDeferredChecks
         }
 
         // Review 4 finding 3: retirement through the empty-path branch is structural, not an alias guess.
-        using (var store = SqliteStateStore.Open(Path.Combine(folder, "moved-empty-path"), StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(Path.Combine(folder, "moved-empty-path"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(pair);
             Snapshot(store, pair.A, Side.A, [local]);
@@ -160,7 +160,7 @@ internal static class PlanningDeferredChecks
         }
 
         var migratedFolder = Path.Combine(folder, "migrated-v21");
-        using (var old = SqliteStateStore.Open(migratedFolder, StorageChecks.Fast, TimeProvider.System))
+        using (var old = SqliteStateStore.Open(migratedFolder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             old.SavePair(pair);
             Snapshot(old, pair.A, Side.A, [local]);
@@ -170,7 +170,7 @@ internal static class PlanningDeferredChecks
             connection.Open();
             StoreSchema.Execute(connection, null, "DROP TABLE planning_deferred; PRAGMA user_version=21;");
         }
-        using (var migrated = SqliteStateStore.Open(migratedFolder, StorageChecks.Fast, TimeProvider.System))
+        using (var migrated = SqliteStateStore.Open(migratedFolder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             migrated.DeferPlanning(pair.PairId, new[] { (pair.A.RootId, local) });
             LocalChecks.Require(migrated.AdmitDeferredPlanning(pair.PairId, DateTime.UtcNow.Ticks, rotate: false).Single().Reason.Length > 0,
@@ -191,7 +191,7 @@ internal static class PlanningDeferredChecks
         }
         for (var open = 0; open < 2; open++)
         {
-            using var migrated = SqliteStateStore.Open(migratedFolder, StorageChecks.Fast, TimeProvider.System);
+            using var migrated = SqliteStateStore.Open(migratedFolder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
             LocalChecks.Require(migrated.CountDeferredPlanning(pair.PairId) == 1, "v22 index migration preserves queued entities on repeated opens");
             migrated.DeferPlanning(pair.PairId, new[] { (pair.A.RootId, local) });
             using var connection = new SqliteConnection($"Data Source={SqliteStateStore.DatabasePath(migratedFolder)};Pooling=False");
@@ -202,7 +202,7 @@ internal static class PlanningDeferredChecks
                 "unshipped deferral scheduling column is removed");
         }
 
-        using (var store = SqliteStateStore.Open(Path.Combine(folder, "hidden-delete"), StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(Path.Combine(folder, "hidden-delete"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(pair);
             var baselineCloud = cloud with { Hash = local.Hash };

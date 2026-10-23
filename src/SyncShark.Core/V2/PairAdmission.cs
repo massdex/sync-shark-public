@@ -96,7 +96,7 @@ public static class PairAdmission
         string.Equals(x.AccountId, y.AccountId, StringComparison.Ordinal);
 
     private static bool IsLocal(string provider) =>
-        string.Equals(provider, SyncProviders.Local, StringComparison.OrdinalIgnoreCase);
+        string.Equals(provider, ProviderIds.Local, StringComparison.OrdinalIgnoreCase);
 
     // The canonical root in PairPath form ('/' separators, no leading or trailing '/'), or null when unusable.
     private static string? Key(RootDef root)

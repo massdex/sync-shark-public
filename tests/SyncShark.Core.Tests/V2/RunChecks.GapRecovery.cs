@@ -49,7 +49,7 @@ internal static partial class RunChecks
         var directory = Path.Combine(folder, "root");
         Directory.CreateDirectory(directory);
         LocalChecks.Seed(directory, "file.txt", "old");
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var root = LocalChecks.RootOf(directory, "ra");
         var pair = fx.Pair with { A = root };
@@ -220,7 +220,7 @@ internal static partial class RunChecks
         var directory = Path.Combine(folder, "root");
         Directory.CreateDirectory(directory);
         LocalChecks.Seed(directory, "held.txt", "keep");
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var root = LocalChecks.RootOf(directory, "ra");
         var pair = fx.Pair with { A = root };
@@ -295,7 +295,7 @@ internal static partial class RunChecks
         AddDirectoryRule(locked, deny);
         try
         {
-            using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             var root = LocalChecks.RootOf(directory, "ra");
             var pair = fx.Pair with { A = root };
@@ -367,7 +367,7 @@ internal static partial class RunChecks
         Directory.CreateDirectory(directory);
         LocalChecks.Seed(directory, "keep.txt", "keep");
         LocalChecks.Seed(directory, "d/child.txt", "child");
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var root = LocalChecks.RootOf(directory, "ra");
         var pair = fx.Pair with { A = root };
@@ -453,7 +453,7 @@ internal static partial class RunChecks
         AddDirectoryRule(locked, deny);
         try
         {
-            using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             var root = LocalChecks.RootOf(directory, "ra");
             var pair = fx.Pair with { A = root };
@@ -582,7 +582,7 @@ internal static partial class RunChecks
             AccessControlType.Deny);
         try
         {
-            using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             var root = LocalChecks.RootOf(directory, "ra");
             var pair = fx.Pair with { A = root };
@@ -740,7 +740,7 @@ internal static partial class RunChecks
         AddDirectoryRule(locked, deny);
         try
         {
-            using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             var root = LocalChecks.RootOf(directory, "ra");
             var pair = fx.Pair with { A = root };
@@ -781,7 +781,7 @@ internal static partial class RunChecks
         var directory = Path.Combine(folder, "root");
         Directory.CreateDirectory(directory);
         LocalChecks.Seed(directory, "sub/file.txt", "content");
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var root = LocalChecks.RootOf(directory, "ra");
         var pair = fx.Pair with { A = root };
@@ -821,7 +821,7 @@ internal static partial class RunChecks
         Directory.CreateDirectory(dirA);
         Directory.CreateDirectory(dirB);
         LocalChecks.Seed(dirA, "seed.txt", "seed");
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store, record: true, localLocal: true);
         var rootA = LocalChecks.RootOf(dirA, "ra");
         var rootB = LocalChecks.RootOf(dirB, "rb");
@@ -971,7 +971,7 @@ internal static partial class RunChecks
         var directory = Path.Combine(folder, "root");
         Directory.CreateDirectory(directory);
         LocalChecks.Seed(directory, "sub/file.txt", "content");
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var root = LocalChecks.RootOf(directory, "ra");
         var pair = fx.Pair with { A = root };

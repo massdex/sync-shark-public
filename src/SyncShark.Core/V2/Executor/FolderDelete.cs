@@ -18,9 +18,7 @@ internal static class FolderDelete
     internal const int WholeFolderMinimum = 50;
 
     /// <summary>True when the executor expands the Delete over the folder's live contents instead of deleting it alone.</summary>
-    internal static bool Expands(SyncAction action) =>
-        action.Kind == ActionKind.Delete && action.ExpectedTarget?.Kind == ItemKind.Folder &&
-        !action.DescendantsPlanned;
+    internal static bool Expands(SyncAction action) => FolderExpansion.Expands(action);
 
     /// <summary>The live items strictly under the folder on its side, as the executor expands the Delete over them.</summary>
     internal static IReadOnlyList<ItemState> LiveDescendants(IStateStore store, string rootId, string folderPath) =>
@@ -38,7 +36,7 @@ internal static class FolderDelete
     }
 
     /// <summary>The stable identity of one deleted item: its side ("A" or "B") and path, matched ignoring case.</summary>
-    internal static string VictimKey(Side side, string path) => (side == Side.A ? "A" : "B") + ":" + path;
+    internal static string VictimKey(Side side, string path) => DeleteVictimKey.Of(side, path);
 
     /// <summary>
     /// Every item the plan would delete on either side, each collapsed folder Delete expanded over its live

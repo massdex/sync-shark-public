@@ -8,7 +8,7 @@ internal static partial class LocalJournalChecks
     // Creates or reuses a test-owned 1M SQLite fixture; no journal or physical file writes.
     private static async Task ProtectionIndexAsync(string folder)
     {
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
         { DataSource = Path.Combine(folder, "store", "v2", "state.db") }.ToString());
         connection.Open();
@@ -167,7 +167,7 @@ internal static partial class LocalJournalChecks
         var endpointA = new FakeEndpoint(Side.A, pair.A.RootId);
         var endpointB = new FakeEndpoint(Side.B, pair.B.RootId);
         var provider = new FakeEndpointProvider().Add(pair.A, endpointA).Add(pair.B, endpointB);
-        var run = new SyncRun(store, new Executor(store, StorageChecks.Fast, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
+        var run = new SyncRun(store, new Executor(store, StorageChecks.Fast, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException),
             provider, StorageChecks.Fast, TimeProvider.System);
         var guard = typeof(SyncRun).GetMethod("ActionPredicates", hidden)!.Invoke(run, [pair, links, null]);
         var actions = rows.Select((row, n) => new SyncAction("protection-" + n, 1, ActionKind.CopyNew,

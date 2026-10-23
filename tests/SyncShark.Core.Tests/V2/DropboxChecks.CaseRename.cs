@@ -9,7 +9,7 @@ internal static partial class DropboxChecks
         Directory.CreateDirectory(local);
         await File.WriteAllTextAsync(Path.Combine(local, "Doc.txt"), "content");
         using var h = new Harness();
-        using var store = SqliteStateStore.Open(Path.Combine(directory, "state"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(directory, "state"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var root = LocalChecks.RootOf(local, "case-local-root");
         var pair = new PairDef("case-local-pair", "Case local", root, Root(), [], [], true);
         store.SavePair(pair);
@@ -25,7 +25,7 @@ internal static partial class DropboxChecks
         var plan = Planner.Decide(pair.PairId, 2,
             [new PlanRow(basis, original, source, new Evidence(false, false, false, false))], options);
         Require(plan.Actions.Single().Kind == ActionKind.Move, "Dropbox case change plans a local Move");
-        var executor = new Executor(store, StorageChecks.Fast, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor = new Executor(store, StorageChecks.Fast, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         await foreach (var result in executor.ApplyAsync(plan, writer, remote, CancellationToken.None))
             Require(result.Outcome == Outcome.Done, "native NTFS case rename completes");
         var observed = (await writer.ObserveAsync("doc.txt", CancellationToken.None))!;
@@ -80,7 +80,7 @@ internal static partial class DropboxChecks
             using var h = new Harness();
             var directory = Path.Combine(_root, "case-rename-" + scenario + "-" + stopBeforeLeg);
             Directory.CreateDirectory(directory);
-            using var store = SqliteStateStore.Open(Path.Combine(directory, "state"), StorageChecks.Fast, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(directory, "state"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var rootA = new RootDef("case-a", "Fake", "account", "/A", "id-a");
             var pair = new PairDef("case-pair", "Case pair", rootA, Root(), [], [], true);
             store.SavePair(pair);
@@ -131,7 +131,7 @@ internal static partial class DropboxChecks
                 if (scenario == "edited") h.Wire.EditFile(temporary, "new content");
                 if (scenario == "occupied") h.Wire.SeedFile("doc.txt", "other identity");
             }
-            var executor = new Executor(store, StorageChecks.Fast, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+            var executor = new Executor(store, StorageChecks.Fast, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
             var reconciled = await executor.ReconcileAsync(store.UnresolvedIntents(pair.PairId), 2, a, writer, CancellationToken.None);
             if (scenario is "moved" or "deleted")
             {

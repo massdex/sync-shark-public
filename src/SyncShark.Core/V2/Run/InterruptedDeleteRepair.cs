@@ -71,7 +71,7 @@ internal static class InterruptedDeleteRepair
             .Concat(store.InterruptedDeleteRepairsAt(pairId, paths).SelectMany(retry => retry.ProposedActions ?? []));
 
     internal static IReadOnlyList<PlanRow> Protect(IReadOnlyList<PlanRow> rows, IEnumerable<SyncRetry> retries) =>
-        ProtectProposals(rows, retries.Where(retry => retry.Kind == SqliteStateStore.InterruptedDeleteRestoreKind)
+        ProtectProposals(rows, retries.Where(retry => retry.Kind == InterruptedDelete.RestoreKind)
             .SelectMany(retry => retry.ProposedActions ?? []));
 
     private static IReadOnlyList<PlanRow> ProtectProposals(IReadOnlyList<PlanRow> rows, IEnumerable<SyncAction> proposals)

@@ -16,7 +16,7 @@ internal static class HydrationNoticeWriterChecks
         if (Directory.Exists(root)) throw new InvalidOperationException("Use a fresh disposable database directory.");
         Directory.CreateDirectory(root);
         var local = new RootDef("local", SyncProviders.Local, null, root, "root-object");
-        using var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System);
+        using var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
         store.EnableStorage();
         store.SavePair(new PairDef("pair", "Pair A", local,
             new RootDef("remote", SyncProviders.Dropbox, "fixture-account", "/Remote", "remote-root"), [], [], true));
@@ -238,7 +238,7 @@ internal static class HydrationNoticeWriterChecks
             lost.Report(pair, receipt.RelativePath, new IOException("lost before delivery"), _ => item);
             // Deliberately abandon the callback, just as abrupt termination before delivery would.
         }
-        using (var restarted = SqliteStateStore.Open(pair.A.RootPath, V2Settings.Default, TimeProvider.System))
+        using (var restarted = SqliteStateStore.Open(pair.A.RootPath, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var pending = restarted.StorageSettlementPage().Single(job => job.ObjectId == "pending-object");
             var notice = new StorageNotice(pending.RootId, pending.ObjectId, pair.B.RootId, "settlement");

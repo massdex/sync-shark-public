@@ -5,7 +5,7 @@ internal static partial class RunChecks
     private static async Task RemovalReviewPagesAsync()
     {
         var root = Path.Combine(Path.GetTempPath(), "removal-pages-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.Seed("folder", "", ItemKind.Folder);
         for (var i = 0; i < 260; i++) fx.A.Seed($"folder/{i:D3}.txt", "content");
@@ -30,7 +30,7 @@ internal static partial class RunChecks
         foreach (var mode in new[] { "confirm", "changed-target", "changed-other", "ignored", "cancel" })
         {
             var root = Path.Combine(Path.GetTempPath(), "removal-review-" + Guid.NewGuid().ToString("N"));
-            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             fx.A.Seed("folder", "", ItemKind.Folder);
             fx.A.Seed("folder/file.txt", "reviewed bytes");

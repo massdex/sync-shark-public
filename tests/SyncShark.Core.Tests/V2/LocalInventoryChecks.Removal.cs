@@ -9,7 +9,7 @@ internal static partial class LocalInventoryChecks
             var directory = LocalChecks.FreshRoot("removal-proof-" + side);
             LocalChecks.Seed(directory, "reviewed/nested/child.txt", "previously unindexed bytes");
             using var store = SqliteStateStore.Open(Path.Combine(LocalChecks.FreshRoot("removal-db-" + side), "state"),
-                V2Settings.Default, TimeProvider.System);
+                V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var root = LocalChecks.RootOf(directory, "local-review");
             var other = root with { RootId = "other" };
             var pair = new PairDef("removal-pair", "Pair A", side == Side.A ? root : other,

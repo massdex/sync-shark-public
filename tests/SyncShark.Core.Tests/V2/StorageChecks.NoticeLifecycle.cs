@@ -11,7 +11,7 @@ internal static partial class StorageChecks
         var clock = new TestClock();
         var notice = new Notice("p1", 40, NoticeKind.Info, "Parent/file.txt", "Unavailable; retry after reconnecting.", "sync-retry");
         string id;
-        using (var store = SqliteStateStore.Open(folder, Fast, clock))
+        using (var store = SqliteStateStore.Open(folder, Fast, clock, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(Pair("p1"));
             store.AddNotices([notice]);
@@ -28,7 +28,7 @@ internal static partial class StorageChecks
             Require(store.NoticeById("p1", id) is { Closed: false } && store.OpenNotices("p1").Count == 0,
                 "Ignore survives an outage longer than history retention without resurfacing");
         }
-        using (var store = SqliteStateStore.Open(folder, Fast, clock))
+        using (var store = SqliteStateStore.Open(folder, Fast, clock, LocalItems.CaptureOptionalHash))
         {
             store.AddNotices([notice]);
             Require(store.OpenNotices("p1").Count == 0, "Ignore episode survives cold reopen");
@@ -63,7 +63,7 @@ internal static partial class StorageChecks
             Require(store.NoticeById("p1", unreadableId) is { Closed: true }, "successful scan closes unreadable notice with retry debt");
         }
 
-        using (var store = SqliteStateStore.Open(folder, Fast, clock))
+        using (var store = SqliteStateStore.Open(folder, Fast, clock, LocalItems.CaptureOptionalHash))
         {
             var frozen = new SyncAction("rrs-fixture", 40, ActionKind.CopyNew, Side.B,
                 "Parent/restore.txt", null, null, null, false, null) { SuppressReconciledBaseline = true };

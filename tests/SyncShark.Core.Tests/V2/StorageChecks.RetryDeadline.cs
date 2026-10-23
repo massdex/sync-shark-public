@@ -8,8 +8,8 @@ internal static partial class StorageChecks
         // Deliberately non-millisecond aligned, with a non-UTC offset in persisted JSON.
         var deadline = new DateTimeOffset(2026, 1, 1, 12, 0, 0, TimeSpan.FromHours(2)).AddTicks(4321);
         using (var memory = new InMemoryStateStore()) Check(memory, seed: true, "memory");
-        using (var sql = SqliteStateStore.Open(directory, Fast, new TestClock())) Check(sql, seed: true, "sqlite");
-        using (var reopened = SqliteStateStore.Open(directory, Fast, new TestClock())) Check(reopened, seed: false, "reopened");
+        using (var sql = SqliteStateStore.Open(directory, Fast, new TestClock(), LocalItems.CaptureOptionalHash)) Check(sql, seed: true, "sqlite");
+        using (var reopened = SqliteStateStore.Open(directory, Fast, new TestClock(), LocalItems.CaptureOptionalHash)) Check(reopened, seed: false, "reopened");
         using (var control = SqliteStateStore.OpenPauseControl(directory)) Check(control, seed: false, "pause-control");
 
         void Check(IStateStore store, bool seed, string adapter)

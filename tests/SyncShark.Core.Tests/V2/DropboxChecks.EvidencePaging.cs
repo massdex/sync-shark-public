@@ -7,7 +7,7 @@ internal static partial class DropboxChecks
     private static async Task EvidenceHistoryPagingAsync()
     {
         using var h = new Harness();
-        using var sqlite = SqliteStateStore.Open(Path.Combine(_root, "evidence-paging"), StorageChecks.Fast, TimeProvider.System);
+        using var sqlite = SqliteStateStore.Open(Path.Combine(_root, "evidence-paging"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pair = new PairDef("p1", "Pair A", new RootDef("ra", SyncProviders.Local, null,
             "C:\\offline-evidence", "id:ra"), Root(), [], [], true);
         sqlite.SavePair(pair);

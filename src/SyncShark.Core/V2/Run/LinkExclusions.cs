@@ -18,27 +18,21 @@ internal sealed class LinkExclusions
     internal const int StubRule = 37;
 
     /// <summary>The links summary notice's stable reason key; the detail carries the count and top folders.</summary>
-    internal static readonly NoticeReason Reason = new("links-excluded",
+    internal static readonly NoticeReason Reason = new(NoticeVocabulary.LinksExcluded,
         "links (junctions, symlinks) are not followed; they and the same paths on the other side are not synced");
 
     /// <summary>The stubs summary notice's stable reason key; the detail carries the count and top folders.</summary>
-    internal static readonly NoticeReason StubReason = new("stubs-left-alone",
+    internal static readonly NoticeReason StubReason = new(NoticeVocabulary.StubsLeftAlone,
         "online-only placeholders left alone; they and the same paths on the other side are not synced");
 
     private const int TopFolders = 5;
-    // Which kind of protected path sits strictly under a container path, so a held intent can be retired under the
-    // notice that already explains it instead of being counted as background verification.
-    private const byte LinkKind = 1;
-    private const byte StubKind = 2;
-    private const byte PendingKind = 4;
     private readonly HashSet<string> _links;
     private readonly HashSet<string> _nonLocalLinks;
     private readonly HashSet<string> _stubs;
     private readonly HashSet<string> _pending;
     private readonly RehashProtection? _rehash;
     private readonly Func<string, bool, bool>? _retryProtection;
-    private readonly HashSet<string> _all;
-    private readonly Dictionary<string, byte> _containers;
+    private readonly PendingPathIndex _paths;
 
     private LinkExclusions(IEnumerable<string> links, IEnumerable<string> stubs, IEnumerable<string>? pending = null,
         IEnumerable<string>? nonLocalLinks = null, RehashProtection? rehash = null,
@@ -51,22 +45,11 @@ internal sealed class LinkExclusions
         _rehash = rehash;
         _retryProtection = retryProtection;
         HeldCount = heldCount;
-        _all = new HashSet<string>(_links.Concat(_stubs).Concat(_pending), StringComparer.OrdinalIgnoreCase);
-        _containers = new Dictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
-        AddContainers(_links, LinkKind);
-        AddContainers(_stubs, StubKind);
-        AddContainers(_pending, PendingKind);
+        _paths = new PendingPathIndex(_links, _stubs, _pending);
     }
 
     /// <summary>Verification holds counted after the run's intent classification; the combined summary shows both.</summary>
     internal int HeldCount { get; }
-
-    private void AddContainers(IEnumerable<string> paths, byte kind)
-    {
-        foreach (var path in paths)
-            for (var cut = path.LastIndexOf('/'); cut > 0; cut = path.LastIndexOf('/', cut - 1))
-                _containers[path[..cut]] = (byte)(_containers.GetValueOrDefault(path[..cut]) | kind);
-    }
 
     /// <summary>A bounded consumer's immutable overflow answers; ordinary snapshots are shared.</summary>
     internal bool RequiresBatch => _rehash?.RequiresBatch == true;
@@ -86,8 +69,7 @@ internal sealed class LinkExclusions
     // A genuine whole-root decision is durable authority, unlike an empty-path display summary.
     // Preserve it even while its retry sleeps or is not in this run's bounded due page.
     internal static bool HasRootDecisionHold(IStateStore store, string pairId) =>
-        store.Pair(pairId) is not null &&
-        store.SyncRetryAt(pairId, string.Empty) is { Kind: "decision" or "deletion-evidence" } or { Held: not null };
+        DecisionHolds.HasRootDecisionHold(store, pairId);
 
     /// <summary>
     /// The links (and, when <paramref name="stubsLeftAlone"/>, the stubs) both sides of the pair hold in the store.
@@ -139,7 +121,7 @@ internal sealed class LinkExclusions
     internal LinkExclusions WithRetryProtection(Func<string, bool, bool> protection) =>
         new(_links, _stubs, _pending, _nonLocalLinks, _rehash, protection, HeldCount);
 
-    internal int Count => (int)Math.Min(int.MaxValue, _all.Count + (_rehash?.Count ?? 0) + (_retryProtection is null ? 0 : 1));
+    internal int Count => (int)Math.Min(int.MaxValue, _paths.Count + (_rehash?.Count ?? 0) + (_retryProtection is null ? 0 : 1));
 
     /// <summary>The recorded link paths (the baselines under them are forgotten, see SyncRun).</summary>
     internal IReadOnlyCollection<string> Links => _links;
@@ -150,34 +132,34 @@ internal sealed class LinkExclusions
     internal bool Covers(string path)
     {
         if (_retryProtection?.Invoke(path, false) == true || _rehash?.Touches(path, descendants: false) == true) return true;
-        return PairPath.CoveredBy(path, _all);
+        return _paths.Covers(path);
     }
 
     /// <summary>True when a protected path lies strictly under the path (or the path is the whole pair).</summary>
     internal bool Contains(string path) => _retryProtection?.Invoke(path, true) == true ||
         _rehash?.Touches(path, descendants: true) == true ||
-        _all.Count > 0 && (path.Length == 0 || _containers.ContainsKey(path));
+        _paths.Contains(path);
 
     /// <summary>Whether this exact path (or an ancestor) is a recorded link, with no other protection kind.</summary>
     internal bool CoversLink(string path) => Covers(_links, path);
 
     /// <summary>Whether a link lies strictly under this path (for a move or delete that would carry it).</summary>
     internal bool ContainsLink(string path) =>
-        path.Length == 0 ? _links.Count > 0 : (_containers.GetValueOrDefault(path) & LinkKind) != 0;
+        _paths.ContainsLink(path);
 
     /// <summary>Whether this exact path (or an ancestor) is a left-alone online-only placeholder.</summary>
     internal bool CoversStub(string path) => Covers(_stubs, path);
 
     /// <summary>Whether a left-alone placeholder lies strictly under this path.</summary>
     internal bool ContainsStub(string path) =>
-        path.Length == 0 ? _stubs.Count > 0 : (_containers.GetValueOrDefault(path) & StubKind) != 0;
+        _paths.ContainsStub(path);
 
     /// <summary>Whether this exact path (or an ancestor) waits on quarantine, Defender or a pair-wide decision.</summary>
     internal bool CoversPending(string path) => Covers(_pending, path);
 
     /// <summary>Whether a pending-evidence path lies strictly under this path.</summary>
     internal bool ContainsPending(string path) =>
-        path.Length == 0 ? _pending.Count > 0 : (_containers.GetValueOrDefault(path) & PendingKind) != 0;
+        _paths.ContainsPending(path);
 
     private static bool Covers(HashSet<string> paths, string path) => PairPath.CoveredBy(path, paths);
 
@@ -187,7 +169,7 @@ internal sealed class LinkExclusions
 
     /// <summary>Inventory must still observe hash-debt paths so verification can retry.</summary>
     internal Func<string, bool> NarrowInventory(Func<string, bool> include) =>
-        _all.Count == 0 ? include : path => include(path) && !InventoryCovers(path);
+        _paths.Count == 0 ? include : path => include(path) && !InventoryCovers(path);
 
     // Hash debt protects effects, not inventory: it must be observed again even without new journal records.
     private bool InventoryCovers(string path) =>

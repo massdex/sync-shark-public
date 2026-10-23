@@ -36,7 +36,7 @@ internal static partial class DropboxChecks
             group["ProviderState"] = provider.ToJsonString();
             rig.Store.RecordIntent("p1", anchor with { ProviderEffect = anchor.ProviderEffect with { Id = group.ToJsonString() } });
             rig.H.Wire.FailFeedAfterFolderDelete = true;
-            var executor = new Executor(rig.Store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+            var executor = new Executor(rig.Store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
             for (var attempt = 0; attempt < 2; attempt++)
             {
                 var pending = await executor.ReconcileAsync(rig.Store.UnresolvedIntents("p1"), 2 + attempt,
@@ -85,7 +85,7 @@ internal static partial class DropboxChecks
         var metadata = rig.H.Wire.Calls.Count(call => call == "/2/files/get_metadata");
         rig.H.Wire.FailFeedAfterFolderDelete = false;
         // A fresh executor has no in-memory group or provider state to rely on.
-        var executor = new Executor(rig.Store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor = new Executor(rig.Store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         var results = await executor.ReconcileAsync(intents, 2, rig.A, rig.B, CancellationToken.None);
         Require(results.All(result => result.Outcome == Outcome.Done) && rig.Store.UnresolvedIntents("p1").Count == 0,
             "a failed post-check resumes from the durable group and resolves all victims");
@@ -116,7 +116,7 @@ internal static partial class DropboxChecks
             var provider = new FakeEndpointProvider().Add(pair.A, rig.A)
                 .AddInventory(pair.B, rig.H.Inventory).AddWriter(pair.B, rig.B);
             var settings = V2Settings.Default with { ProgressInterval = TimeSpan.Zero, MaxWorkers = 1 };
-            var run = new SyncRun(rig.Store, new Executor(rig.Store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
+            var run = new SyncRun(rig.Store, new Executor(rig.Store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException),
                 provider, settings, TimeProvider.System);
             for (var attempt = 0; attempt < 2; attempt++)
             {
@@ -167,7 +167,7 @@ internal static partial class DropboxChecks
         var provider = new FakeEndpointProvider().Add(pair.A, rig.A)
             .AddInventory(pair.B, rig.H.Inventory).AddWriter(pair.B, rig.B);
         var settings = V2Settings.Default with { ProgressInterval = TimeSpan.Zero, MaxWorkers = 1 };
-        var run = new SyncRun(rig.Store, new Executor(rig.Store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
+        var run = new SyncRun(rig.Store, new Executor(rig.Store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException),
             provider, settings, TimeProvider.System);
         for (var attempt = 0; attempt < 2; attempt++)
         {
@@ -187,7 +187,7 @@ internal static partial class DropboxChecks
         rig.H.Wire.FailFeedAfterFolderDelete = true;
         await rig.ApplyAsync(rig.Plan());
         rig.H.Wire.FailFeedAfterFolderDelete = false;
-        var executor = new Executor(rig.Store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor = new Executor(rig.Store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         var results = await executor.ReconcileAsync(rig.Store.UnresolvedIntents("p1"), 2, rig.A, rig.B, CancellationToken.None);
         Require(rig.H.Wire.Restores.SequenceEqual(["big/sub/late.txt"]) &&
             await rig.B.ObserveAsync("big/sub/late.txt", CancellationToken.None) is { Kind: ItemKind.File } &&
@@ -214,7 +214,7 @@ internal static partial class DropboxChecks
         Require(intents.Count == 61 && intents.Any(action => action.ProviderEffect?.Kind == "whole-folder-group"),
             "partial member commits retain the entire frozen group on its anchor");
         rig.H.Wire.FailFeedAfterFolderDelete = false;
-        var executor = new Executor(rig.Store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor = new Executor(rig.Store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         var results = await executor.ReconcileAsync(intents, 3, rig.A, rig.B, CancellationToken.None);
         Require(results.Single(result => result.ActionId == "del-big:big/f0.txt").Outcome == Outcome.Skipped &&
             (await rig.B.ObserveAsync("big/f0.txt", CancellationToken.None))?.VersionId == latest,
@@ -241,7 +241,7 @@ internal static partial class DropboxChecks
         rig.Store.RecordIntent("p1", anchor with { ProviderEffect = anchor.ProviderEffect with { Id = group.ToJsonString() } });
         rig.H.Wire.DeleteBatchPendingChecks = 1;
         rig.H.Wire.FailFeedAfterFolderDelete = false;
-        var executor = new Executor(rig.Store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor = new Executor(rig.Store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         var pending = await executor.ReconcileAsync(rig.Store.UnresolvedIntents("p1"), 2, rig.A, rig.B, CancellationToken.None);
         Require(pending.All(result => result.Outcome == Outcome.Uncertain), "a still-running job never resolves from absence");
         var complete = await executor.ReconcileAsync(rig.Store.UnresolvedIntents("p1"), 3, rig.A, rig.B, CancellationToken.None);
@@ -265,7 +265,7 @@ internal static partial class DropboxChecks
         rig.Store.RecordIntent("p1", anchor with { ProviderEffect = anchor.ProviderEffect with { Id = group.ToJsonString() } });
         rig.H.Wire.FailFeedAfterFolderDelete = false;
         rig.H.Wire.SeedChangePage("unknown-grace", [], false, "unknown-grace-end");
-        var executor = new Executor(rig.Store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor = new Executor(rig.Store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         var pending = await executor.ReconcileAsync(rig.Store.UnresolvedIntents("p1"), 2, rig.A, rig.B, CancellationToken.None);
         Require(pending.All(result => result.Outcome == Outcome.Uncertain),
             "no-job missing deletion evidence remains uncertain during the minimum two-hour grace");
@@ -295,7 +295,7 @@ internal static partial class DropboxChecks
         });
         rig.H.Wire.FailFeedAfterFolderDelete = false;
         var metadata = rig.H.Wire.Calls.Count(call => call == "/2/files/get_metadata");
-        var executor = new Executor(rig.Store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor = new Executor(rig.Store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         var results = await executor.ReconcileAsync(rig.Store.UnresolvedIntents("p1"), 2, rig.A, rig.B, CancellationToken.None);
         Require(results.All(result => result.Outcome == Outcome.Done) &&
             rig.Store.UnresolvedIntents("p1").Count == 0 && rig.H.Wire.WholeFolderDeletes == 1 &&

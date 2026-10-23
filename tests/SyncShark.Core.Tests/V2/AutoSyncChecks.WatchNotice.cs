@@ -10,7 +10,7 @@ internal static partial class AutoSyncChecks
         var pair = RigPair("p1", true);
         string id;
         FailureRetryOwner.State retained;
-        using (var store = SqliteStateStore.Open(root, Settings, clock))
+        using (var store = SqliteStateStore.Open(root, Settings, clock, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(pair);
             store.MarkFirstSyncDone(pair.PairId);
@@ -32,14 +32,14 @@ internal static partial class AutoSyncChecks
 
                 var provider = new FakeEndpointProvider().Add(pair.A, new FakeEndpoint(Side.A, pair.A.RootId))
                     .Add(pair.B, new FakeEndpoint(Side.B, pair.B.RootId));
-                var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider, Settings, clock);
+                var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), provider, Settings, clock);
                 await run.IncrementalAsync(pair.PairId, new RecordingProgress(), default);
                 Require(store.NoticeById(pair.PairId, id) is { Closed: false }, "ordinary run success never closes a dead-watch notice");
                 store.CloseNotice(id, NoticeChoices.Ignore);
             }
             finally { await auto.StopAsync().WaitAsync(TimeSpan.FromSeconds(3)); }
         }
-        using (var store = SqliteStateStore.Open(root, Settings, clock))
+        using (var store = SqliteStateStore.Open(root, Settings, clock, LocalItems.CaptureOptionalHash))
         {
             var ignored = store.NoticeById(pair.PairId, id);
             Require(ignored is { Closed: false } && ignored.Value.Notice.FailureRetry == retained,

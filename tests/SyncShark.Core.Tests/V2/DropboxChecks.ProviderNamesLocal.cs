@@ -14,7 +14,7 @@ internal static partial class DropboxChecks
         var beforeId = LocalChecks.ObjectIdOf(Path.GetDirectoryName(file)!);
         var settings = StorageChecks.Fast with { MaxWorkers = 1, ProgressInterval = TimeSpan.Zero };
         using var h = new Harness();
-        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var localRoot = LocalChecks.RootOf(local, "root-local");
         var pair = new PairDef("provider-names-local", "real local name", localRoot, Root(), [], [], true);
         store.SavePair(pair);
@@ -27,7 +27,7 @@ internal static partial class DropboxChecks
             .AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, store, "provider-names-local"))
             .AddWriter(pair.B, h.Writer());
         h.Wire.NameWriteErrors["folder/refused.txt"] = "disallowed_name";
-        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider, settings,
+        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), provider, settings,
             TimeProvider.System);
         var plan = await run.PreviewFirstSyncAsync("provider-names-local", new RecordingProgress(), CancellationToken.None);
         var report = await run.ApplyAsync("provider-names-local", plan, new RecordingProgress(), CancellationToken.None);

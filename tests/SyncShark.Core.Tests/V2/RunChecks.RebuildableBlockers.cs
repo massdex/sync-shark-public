@@ -153,7 +153,7 @@ internal static partial class RunChecks
     private static void RebuildableKeptRuleSuppression(string root)
     {
         var folder = Path.Combine(root, "keep");
-        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var notice = new Notice(fx.Pair.PairId, 40, NoticeKind.Info, "typo", "rule", NoticeChoices.RebuildableRuleKey,
             RebuildableRule: new NoticeRebuildableRule("js-packages", "typo"));
@@ -177,7 +177,7 @@ internal static partial class RunChecks
     private static void LegacyMovedRepairChecks(string root)
     {
         var folder = Path.Combine(root, "legacy-moved");
-        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var item = fx.A.Seed("moved/new-name.txt", "content");
         var canonical = ShortId.Make("n", fx.Pair.PairId, "31", "provider-name-refused", "A", item.ObjectId);
@@ -215,7 +215,7 @@ internal static partial class RunChecks
         // Both rows already open: the canonical row and the legacy row for the same object. The migration must
         // keep exactly one notice and carry the pending destination.
         var bothFolder = Path.Combine(root, "legacy-both");
-        using var bothStore = SqliteStateStore.Open(bothFolder, Settings, TimeProvider.System);
+        using var bothStore = SqliteStateStore.Open(bothFolder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var both = Build(suppliedStore: bothStore);
         var bothItem = both.A.Seed("current/name.txt", "content");
         var bothNotice = new Notice(both.Pair.PairId, 31, NoticeKind.Info, bothItem.Path, "blocked",
@@ -240,7 +240,7 @@ internal static partial class RunChecks
     private static void LegacyIdentityProbeWindowChecks(string root)
     {
         var folder = Path.Combine(root, "legacy-window");
-        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var item = fx.A.Seed("moved/new-name.txt", "content");
         var canonical = ShortId.Make("n", fx.Pair.PairId, "31", "provider-name-refused", "A", item.ObjectId);
@@ -300,7 +300,7 @@ internal static partial class RunChecks
     private static void LegacyFoldRunsOnceChecks(string root)
     {
         var folder = Path.Combine(root, "legacy-once");
-        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var item = fx.A.Seed("once/name.txt", "content");
         var legacy = ShortId.Make("n", fx.Pair.PairId, "31", RowCodec.Key("older/name.txt"),
@@ -351,7 +351,7 @@ internal static partial class RunChecks
         Directory.CreateDirectory(folder);
         try
         {
-            using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             await ExportFormatAndNameChecksAsync(store);
         }
         finally
@@ -391,7 +391,7 @@ internal static partial class RunChecks
             if (nameFolder is not null)
             {
                 Directory.CreateDirectory(nameFolder);
-                nameStore = SqliteStateStore.Open(nameFolder, Settings, TimeProvider.System);
+                nameStore = SqliteStateStore.Open(nameFolder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             }
             var nameFx = Build(suppliedStore: nameStore);
             var paper = nameFx.B.Seed("Folder/Document.paper", "cloud-native") with

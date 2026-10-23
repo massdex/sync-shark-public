@@ -13,7 +13,7 @@ internal static partial class RunChecks
         var folder = FixtureFolder("gap-promotion-handoff");
         try
         {
-            using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             fx.A.Seed("Held/File", "original");
             fx.B.Seed("Held/File", "original");

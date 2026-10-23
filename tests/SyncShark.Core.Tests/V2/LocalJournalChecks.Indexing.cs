@@ -22,7 +22,7 @@ internal static partial class LocalJournalChecks
     private static async Task IndexIndependentOfCompletedSyncAsync(string folder)
     {
         Directory.CreateDirectory(folder);
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var local = new RootDef("index-sync-root", SyncProviders.Local, null, Path.Combine(folder, "root"),
             "id:index-sync-root");
         var remote = new RootDef("index-sync-remote", SyncProviders.Dropbox, "acc", "/remote",
@@ -56,7 +56,7 @@ internal static partial class LocalJournalChecks
             .AddWriter(local, new CountingWriter(a))
             .AddWriter(remote, new CountingWriter(b));
         var settings = StorageChecks.Fast with { ProgressInterval = TimeSpan.Zero, MaxWorkers = 1 };
-        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider,
+        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), provider,
             settings, TimeProvider.System);
 
         var io = new GapCheckIo(DateTimeOffset.UtcNow, "0000000000000001:200");
@@ -123,7 +123,7 @@ internal static partial class LocalJournalChecks
     private static async Task IndexPerRootStopAndResumeAsync(string folder)
     {
         Directory.CreateDirectory(folder);
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var (rootA, pairA) = SaveIndexRoot(store, folder, "index-stop-a", "index-pair-a",
             ["a/one.txt", "a/two.txt", "a/three.txt"]);
         var (rootB, pairB) = SaveIndexRoot(store, folder, "index-stop-b", "index-pair-b",
@@ -226,7 +226,7 @@ internal static partial class LocalJournalChecks
     private static async Task IndexDirectRunCancellationAsync(string folder)
     {
         Directory.CreateDirectory(folder);
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var (root, pair) = SaveIndexRoot(store, folder, "index-direct-root", "index-direct-pair",
             ["direct/one.txt", "direct/two.txt", "direct/three.txt"]);
         LocalChecks.Require(store.RehashCandidates(root.RootId, 128).Count == 3 &&
@@ -296,7 +296,7 @@ internal static partial class LocalJournalChecks
     private static async Task IndexPausedOutcomeAsync(string folder)
     {
         Directory.CreateDirectory(folder);
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var (root, pair) = SaveIndexRoot(store, folder, "index-paused-root", "index-paused-pair",
             ["paused/one.txt"]);
         store.SetPairPaused(pair.PairId, true);
@@ -320,7 +320,7 @@ internal static partial class LocalJournalChecks
     private static async Task IndexFailureDoesNotWakeAsync(string folder)
     {
         Directory.CreateDirectory(folder);
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var (root, _) = SaveIndexRoot(store, folder, "index-failure-root", "index-failure-pair",
             ["failure/one.txt"]);
         var io = new GapCheckIo(DateTimeOffset.UtcNow, "0000000000000001:200");

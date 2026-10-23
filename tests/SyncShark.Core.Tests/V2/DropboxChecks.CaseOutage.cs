@@ -19,7 +19,7 @@ internal static partial class DropboxChecks
         var source = (await localWriter.ObserveAsync("doc.txt", CancellationToken.None))!;
         var action = new SyncAction("outage-case-intent", 20, ActionKind.Move, Side.B, "doc.txt", "Doc.txt", source, original, false, "case-key");
         var state = Path.Combine(directory, "state");
-        using (var store = SqliteStateStore.Open(state, settings, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(state, settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(pair); store.MarkFirstSyncDone(pair.PairId);
             store.RecordIntent(pair.PairId, action);
@@ -39,7 +39,7 @@ internal static partial class DropboxChecks
             }
             finally { ProviderEffectContext.Current.Value = previous; }
         }
-        using var reopened = SqliteStateStore.Open(state, settings, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(state, settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var endpoints = new FakeEndpointProvider().AddWriter(pair.A, localWriter).AddWriter(pair.B, writer)
             .AddInventory(pair.A, new LocalInventory(pair.A, Side.A, reopened, new HashSet<string>(), settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage))
             .AddInventory(pair.B, new DropboxInventory(pair.B, Side.B, h.Client, reopened, pair.PairId));
@@ -52,7 +52,7 @@ internal static partial class DropboxChecks
         h.Client.ReadRetryTime = clock;
         h.Client.ReadRetryDelay = (delay, ct) => { ct.ThrowIfCancellationRequested(); clock.Advance(delay); return Task.CompletedTask; };
         h.Wire.UnavailableMetadataIdentity = original.ObjectId;
-        var run = new SyncRun(reopened, new Executor(reopened, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), endpoints, settings, TimeProvider.System);
+        var run = new SyncRun(reopened, new Executor(reopened, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), endpoints, settings, TimeProvider.System);
         await run.IncrementalAsync(pair.PairId, new RecordingProgress(), CancellationToken.None);
         Require(reopened.UnresolvedIntents(pair.PairId).Single().ActionId == action.ActionId,
             "cold-reopen lookup outage retains the interrupted intent");

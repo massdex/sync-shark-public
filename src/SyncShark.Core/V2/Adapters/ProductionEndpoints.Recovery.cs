@@ -40,10 +40,10 @@ public sealed partial class ProductionEndpoints
         public Task<ItemState> DescribeRecoveryAsync(RecoveryRecord recovery, CancellationToken ct)
         {
             if (checkedSide.Client is { } client)
-                return RecoveryRecordPreviews.DescribeDropboxAsync(client, pairId, side, recovery, ct);
+                return DropboxWriter.DescribeRecoveryDropboxPreviewAsync(client, pairId, side, recovery, ct);
             if (checkedSide.RecoveryUnavailable is { } unavailable)
                 throw new IOException("Recovery location unavailable: " + unavailable);
-            return Task.FromResult(RecoveryRecordPreviews.DescribeLocal(pairId, side, checkedSide.Recovery!, recovery, ct));
+            return Task.FromResult(LocalWriter.DescribeRecoveryLocalPreview(pairId, side, checkedSide.Recovery!, recovery, ct));
         }
 
         private static NotSupportedException ReadOnly() => new("Recovery preview cannot change files or open retained content. Run an explicitly confirmed restore instead.");

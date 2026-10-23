@@ -9,7 +9,7 @@ internal static partial class RunChecks
         Directory.CreateDirectory(files);
         var path = Path.Combine(files, "held.txt");
         await File.WriteAllTextAsync(path, "aaa");
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "state"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "state"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var local = LocalChecks.RootOf(files, "ra");
         store.SavePair(fx.Pair with { A = local });
@@ -50,7 +50,7 @@ internal static partial class RunChecks
         var localPath = Path.Combine(owned, "files");
         Directory.CreateDirectory(localPath);
         await File.WriteAllTextAsync(Path.Combine(localPath, "held.txt"), "preserve these bytes");
-        using var store = SqliteStateStore.Open(Path.Combine(owned, "state"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(owned, "state"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var local = LocalChecks.RootOf(localPath, "ra");
         store.SavePair(fx.Pair with { A = local });

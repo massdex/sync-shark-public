@@ -26,7 +26,7 @@ internal static partial class DropboxChecks
         var settings = V2Settings.Default with { ProgressInterval = TimeSpan.Zero, MaxWorkers = 1 };
         var provider = new FakeEndpointProvider().Add(pair.A, local)
             .AddInventory(pair.B, h.Inventory).AddWriter(pair.B, h.Writer());
-        var run = new SyncRun(h.Known, new Executor(h.Known, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
+        var run = new SyncRun(h.Known, new Executor(h.Known, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException),
             provider, settings, TimeProvider.System);
         var runtime = new V2CliRuntime(null, h.Known, run, new EndpointRootProbe(provider),
             Path.Combine(_root, "delta-folder-prepare"));
@@ -66,7 +66,7 @@ internal static partial class DropboxChecks
         var settings = V2Settings.Default with { ProgressInterval = TimeSpan.Zero, MaxWorkers = 1 };
         var provider = new FakeEndpointProvider().Add(pair.A, local)
             .AddInventory(pair.B, h.Inventory).AddWriter(pair.B, h.Writer());
-        var run = new SyncRun(h.Known, new Executor(h.Known, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
+        var run = new SyncRun(h.Known, new Executor(h.Known, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException),
             provider, settings, TimeProvider.System);
         var runtime = new V2CliRuntime(null, h.Known, run, new EndpointRootProbe(provider),
             Path.Combine(_root, "delta-pending-prepare"));

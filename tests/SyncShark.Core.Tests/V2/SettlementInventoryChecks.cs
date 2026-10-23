@@ -17,7 +17,7 @@ internal static class SettlementInventoryChecks
         File.WriteAllText(file, "data");
         var attributes = File.GetAttributes(file);
         var settings = V2Settings.Default with { ReplaceOnlineOnlyStubs = replace };
-        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pair = new PairDef("pair", "Pair A", RootOf(localPath),
             new("remote", SyncProviders.Dropbox, "account", "/Remote", "remote-root"), [], [], true);
         store.SavePair(pair);
@@ -58,7 +58,7 @@ internal static class SettlementInventoryChecks
                 store.ByObject(pair.A.RootId, local.ObjectId)?.Flags == ItemFlags.OwnedPointer &&
                 store.StoragePointerFor(pair.A.RootId, local.ObjectId, pair.B.RootId) is not null,
                 "conversion atomically publishes the entity ownership mark, receipt and queue acknowledgement");
-            using (var reopened = SqliteStateStore.Open(Path.Combine(root, "state"), settings, TimeProvider.System))
+            using (var reopened = SqliteStateStore.Open(Path.Combine(root, "state"), settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
                 Require(reopened.HasOwnedPointers(pair.A.RootId) && reopened.StorageSettlementPage().Count == 0,
                     "ownership and acknowledgement survive reopening without registration");
             // Model the durable/native registration handshake without registering a real root.

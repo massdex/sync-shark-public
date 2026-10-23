@@ -22,7 +22,7 @@ internal sealed record SyncLocalControlNamespaceAllocationPlan(
 public static class SyncControlNamespace
 {
     public const string RemoteContainerPath = SyncDropboxArtifactPaths.RecoveryContainerPath;
-    internal const string LocalPrefix = ".syncshark-control-";
+    internal const string LocalPrefix = V2.ArtifactPaths.LocalPrefix;
     internal const string MarkerName = ".syncshark-owner.json";
     private static readonly JsonSerializerOptions JsonOptions = new()
     {

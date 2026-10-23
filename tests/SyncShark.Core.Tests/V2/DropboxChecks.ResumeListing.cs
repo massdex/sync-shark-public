@@ -28,7 +28,7 @@ internal static partial class DropboxChecks
         var baseline = GC.GetTotalMemory(true);
         long peak = baseline;
         const int pages = 500, pageSize = 2000;
-        using (var sql = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System))
+        using (var sql = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var checkpoint = new ListingCheckpoint(sql, Root(), "p1", "scale");
             for (var page = 0; page < pages; page++)
@@ -43,7 +43,7 @@ internal static partial class DropboxChecks
                 if (page % 100 == 0 || page == pages - 1) peak = Math.Max(peak, GC.GetTotalMemory(true));
             }
         }
-        using (var sql = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System))
+        using (var sql = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var checkpoint = new ListingCheckpoint(sql, Root(), "p1", "scale");
             var rows = 0;
@@ -72,7 +72,7 @@ internal static partial class DropboxChecks
         using var h = new Harness();
         h.Wire.DeletedPageSize = 2;
         for (var i = 0; i < 7; i++) h.Wire.SeedFile($"file-{i}.txt", "data");
-        using (var sql = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System))
+        using (var sql = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             sql.SavePair(new PairDef("p1", "Listing fixture", new RootDef("ra", "Local", null, state, "local"), Root(), [], [], true));
             var inventory = new DropboxInventory(Root(), Side.B, h.Client, sql, "p1");
@@ -90,9 +90,9 @@ internal static partial class DropboxChecks
                 "partial pages are neither a complete inventory nor a complete observation");
         }
         // Open twice at the same schema version. Both the checkpoint and the pause survive.
-        using (var sql = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System))
+        using (var sql = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
             Require(sql.PairPaused("p1"), "pause survives reopening");
-        using (var sql = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System))
+        using (var sql = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             sql.SetPairPaused("p1", false);
             if (expire) h.Wire.Script("/2/files/list_folder/continue", HttpStatusCode.Conflict, 1);
@@ -112,7 +112,7 @@ internal static partial class DropboxChecks
         using var h = new Harness();
         h.Wire.DeletedPageSize = 2;
         for (var i = 0; i < 7; i++) h.Wire.SeedFile($"file-{i}.txt", "data");
-        using (var sql = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System))
+        using (var sql = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             sql.SavePair(new PairDef("p1", "Reset fixture", new RootDef("ra", "Local", null, state, "local"), Root(), [], [], true));
             var inventory = new DropboxInventory(Root(), Side.B, h.Client, sql, "p1");
@@ -131,7 +131,7 @@ internal static partial class DropboxChecks
             }
             catch (PairPausedException) { }
         }
-        using var reopened = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         reopened.SetPairPaused("p1", false);
         var resumed = new DropboxInventory(Root(), Side.B, h.Client, reopened, "p1");
         Require((await resumed.ChangesSinceAsync("bad-cursor", 3, _ => true, CancellationToken.None)).CursorInvalid,
@@ -154,7 +154,7 @@ internal static partial class DropboxChecks
         h.Wire.SeedFile("tree/moved.txt", "old");
         h.Wire.SeedFile("tree/removed.txt", "old");
         h.Wire.SeedFile("tree/unchanged.txt", "same");
-        using (var sql = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System))
+        using (var sql = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var checkpoint = new ListingCheckpoint(sql, Root(), "p1", "full");
             try
@@ -178,7 +178,7 @@ internal static partial class DropboxChecks
             h.Wire.ChangeFile("moved.txt", "old"),
             h.Wire.ChangeDeleted(h.Wire.RootPath + "/tree/removed.txt"),
             h.Wire.ChangeFile("stay.txt", "updated")], false, "after-pause");
-        using var reopened = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         reopened.SetPairPaused("p1", false);
         var saved = new ListingCheckpoint(reopened, Root(), "p1", "full");
         var result = await h.Client.ListEntriesWithDeletedPathsAsync(null, CancellationToken.None, checkpoint: saved);
@@ -199,7 +199,7 @@ internal static partial class DropboxChecks
         using var h = new Harness();
         h.Wire.SeedChangePage("delta-start", [h.Wire.ChangeFile("first.txt", "first")], true, "delta-middle");
         h.Wire.SeedChangePage("delta-middle", [h.Wire.ChangeFile("second.txt", "second")], false, "delta-end");
-        using (var sql = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System))
+        using (var sql = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             h.Wire.AfterContinueResponse = cursor => { if (cursor == "delta-start") sql.SetPairPaused("p1", true); };
             sql.SavePair(new PairDef("p1", "Listing fixture", new RootDef("ra", "Local", null, state, "local"), Root(), [], [], true));
@@ -213,7 +213,7 @@ internal static partial class DropboxChecks
             Require(sql.Live(RootId).Count == 0, "paused delta did not publish partial inventory");
         }
         h.Wire.AfterContinueResponse = null;
-        using var reopened = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         reopened.SetPairPaused("p1", false);
         var resumed = new DropboxInventory(Root(), Side.B, h.Client, reopened, "p1");
         var delta = await resumed.ChangesSinceAsync("delta-start", 2, _ => true, CancellationToken.None);

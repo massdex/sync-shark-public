@@ -86,8 +86,18 @@ public sealed partial class SyncRun
             foreach (var path in paths)
                 SaveFailedRetry(pair, path, "Deletion was not reviewed. Review the item or Ignore it; nothing was deleted.",
                     _store.SyncRetryAt(pair.PairId, path));
+            var alreadySkipped = plan.SkippedActions.Select(action => action.ActionId).ToHashSet(StringComparer.Ordinal);
+            var heldPaths = held.SkippedActions.Where(action => !alreadySkipped.Contains(action.ActionId))
+                .Select(action => action.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var path in heldPaths.Except(paths, StringComparer.OrdinalIgnoreCase))
+                if (_store.SyncRetryAt(pair.PairId, path)?.Kind != "decision")
+                    _store.SaveSyncRetry(pair.PairId, new(path, "post-preview", 0, "", DateTimeOffset.MinValue));
+            heldPaths.UnionWith(paths);
             RefuseUnreviewedDeletes(pair, held, reviewed); // Keep the absolute deletion assertion on the executable remainder.
-            return held;
+            // The child authority retry also explains a skipped parent folder. Preserve the parent's work above,
+            // without adding a misleading area-exclusion notice for either path.
+            return held with { Notices = held.Notices.Where(notice =>
+                notice.ReasonKey != PlanNotices.OutsidePairArea.Key || !heldPaths.Contains(notice.Path)).ToArray() };
         }
     }
 
@@ -210,5 +220,5 @@ public sealed partial class SyncRun
         !ct.IsCancellationRequested &&
         error is not (PairPausedException or EndpointAccessException or StateDamagedException or SyncRunRefusedException) &&
         (error is not OperationCanceledException || ProviderTransientFailure.IsTransient(error, ct)) &&
-        error is not Microsoft.Data.Sqlite.SqliteException;
+        !StorageFailureClassifier.IsStoreException(error);
 }

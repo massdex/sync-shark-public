@@ -8,7 +8,7 @@ internal static partial class RunChecks
         Directory.CreateDirectory(root);
         LocalChecks.Seed(root, "old.txt", "before pause");
         LocalChecks.Seed(root, "d/moved.txt", "moved during pause");
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var local = LocalChecks.RootOf(root, "ra");
         var pair = fx.Pair with { A = local };
@@ -62,7 +62,7 @@ internal static partial class RunChecks
     internal static async Task LocalPrepareCursorAsync(string folder)
     {
         string retained;
-        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var fx = Build(suppliedStore: store);
             fx.A.Seed("matched.txt", "same");
@@ -90,7 +90,7 @@ internal static partial class RunChecks
             Require(applied.Failed == 0 && store.Cursor(fx.Pair.A.RootId) == retained,
                 "successful first sync promotes the local position to its root row");
         }
-        using var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         Require(reopened.Cursor("ra") == retained, "local root checkpoint survives SQLite reopen");
     }
 }

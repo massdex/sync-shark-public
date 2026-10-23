@@ -28,4 +28,6 @@ public interface IEndpointProvider
 
     /// <summary>Opens this pair's endpoints before the run touches either side; a refusal here has no effect.</summary>
     Task PrepareAsync(PairDef pair, CancellationToken ct) => Task.CompletedTask;
+
+    Task PreparePlanOnlyAsync(PairDef pair, CancellationToken ct) => PrepareAsync(pair, ct);
 }

@@ -51,7 +51,7 @@ internal static partial class DropboxChecks
 
         // Persist through the real commit path, then compare the next fresh remote observation.
         using var store = SqliteStateStore.Open(Path.Combine(root, "mtime-" + route + "-" + overrideResponse),
-            V2Settings.Default, TimeProvider.System);
+            V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
         store.SavePair(new PairDef("p1", "mtime", new RootDef("ra", "Local", null, root, "local"), Root(), [], [], true));
         var gen = store.BeginGeneration(RootId, "snapshot");
         store.CommitResult("p1", gen, action, new ActionResult(action.ActionId, Outcome.Done, source, uploaded, null, null));

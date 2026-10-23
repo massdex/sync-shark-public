@@ -29,7 +29,7 @@ internal static partial class StorageChecks
     {
         var clock = new TestClock();
         var folder = Fresh(root, "pair-removal-archive");
-        using var store = SqliteStateStore.Open(folder, Fast, clock);
+        using var store = SqliteStateStore.Open(folder, Fast, clock, LocalItems.CaptureOptionalHash);
         var removed = DisabledPair("p1");
         var kept = OtherPair("p2");
         store.SavePair(removed);
@@ -153,7 +153,7 @@ internal static partial class StorageChecks
     {
         var clock = new TestClock();
         var folder = Fresh(root, "pair-removal-trigger");
-        using var store = SqliteStateStore.Open(folder, Fast, clock);
+        using var store = SqliteStateStore.Open(folder, Fast, clock, LocalItems.CaptureOptionalHash);
         var pair = DisabledPair("p1");
         store.SavePair(pair);
         var payload = SeedRemovalRows(store, folder, pair);
@@ -188,7 +188,7 @@ internal static partial class StorageChecks
     {
         var clock = new TestClock();
         var folder = Fresh(root, "pair-removal-callback");
-        using var store = SqliteStateStore.Open(folder, Fast, clock);
+        using var store = SqliteStateStore.Open(folder, Fast, clock, LocalItems.CaptureOptionalHash);
         var pair = DisabledPair("p1");
         store.SavePair(pair);
         var payload = SeedRemovalRows(store, folder, pair);
@@ -210,7 +210,7 @@ internal static partial class StorageChecks
     {
         var clock = new TestClock();
         var folder = Fresh(root, "pair-removal-refusals");
-        using var store = SqliteStateStore.Open(folder, Fast, clock);
+        using var store = SqliteStateStore.Open(folder, Fast, clock, LocalItems.CaptureOptionalHash);
         var enabled = DisabledPair("p1") with { Enabled = true };
         store.SavePair(enabled);
 
@@ -237,7 +237,7 @@ internal static partial class StorageChecks
     {
         var clock = new TestClock();
         var folder = Fresh(root, "pair-removal-nested");
-        using var store = SqliteStateStore.Open(folder, Fast, clock);
+        using var store = SqliteStateStore.Open(folder, Fast, clock, LocalItems.CaptureOptionalHash);
         var outer = new PairDef("outer", "outer",
             new RootDef("outer-a", SyncProviders.Local, null, "C:\\outer", "id:outer-a"),
             new RootDef("outer-b", SyncProviders.Dropbox, "acc", "/outer", "id:outer-b"),
@@ -270,7 +270,7 @@ internal static partial class StorageChecks
     private static void PairRemoval_UnfinishedRequiresExplicitConsent(string root)
     {
         var folder = Fresh(root, "pair-removal-unfinished");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         var pair = DisabledPair("p1");
         store.SavePair(pair);
         SeedRemovalRows(store, folder, pair);
@@ -303,7 +303,7 @@ internal static partial class StorageChecks
     private static void PairRemoval_SharedRootAndArchiveFailure(string root)
     {
         var folder = Fresh(root, "pair-removal-shared");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         var removed = DisabledPair("p1");
         var kept = OtherPair("p2") with { A = removed.A };
         store.SavePair(removed);

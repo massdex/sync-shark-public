@@ -51,7 +51,7 @@ internal static partial class DropboxChecks
         var product = Path.Combine(_root, "crash-" + hydrate);
         var localPath = Path.Combine(product, "local"); Directory.CreateDirectory(localPath);
         var settings = StorageChecks.Fast with { MaxWorkers = 1, ProgressInterval = TimeSpan.Zero };
-        using var store = SqliteStateStore.Open(Path.Combine(product, "state"), settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(product, "state"), settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pair = new PairDef("crash", "production inventory crash", LocalChecks.RootOf(localPath, "local"), Root(), hydrate ? ["nested"] : [], [], true);
         store.SavePair(pair); store.MarkFirstSyncDone(pair.PairId);
         var localWriter = await LocalWriter.OpenAsync(pair.A, Side.A, pair.PairId, LocalChecks.InstallationId,
@@ -61,7 +61,7 @@ internal static partial class DropboxChecks
             .AddInventory(pair.B, new DropboxInventory(pair.B, Side.B, h.Client, store, pair.PairId))
             .AddWriter(pair.B, h.Writer());
         var fault = new CrashAfterScanProvider(endpoints, store, RootId);
-        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), fault, settings, TimeProvider.System);
+        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), fault, settings, TimeProvider.System);
         h.Wire.LatestCursor = "crash-c0"; h.Wire.SeedChangePage("crash-c0", [], false, "crash-c0");
         await run.IncrementalAsync(pair.PairId, new RecordingProgress(), CancellationToken.None);
         if (hydrate) store.SavePairIncluded(pair, pair with { Excluded = [] });
@@ -88,7 +88,7 @@ internal static partial class DropboxChecks
         var local = new FakeEndpoint(Side.A, "ra") { DropboxHashes = true };
         local.Seed("gone.txt", "same"); h.Wire.SeedFile("gone.txt", "same");
         h.Wire.LatestCursor = "pending-c0"; h.Wire.SeedChangePage("pending-c0", [], false, "pending-c0");
-        using var store = SqliteStateStore.Open(Path.Combine(product, "state"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(product, "state"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         store.SavePair(pair);
         var (runtime, run) = PrepareCursorRuntime(h, local, pair, store, product);
         await runtime.PrepareFirstSyncAsync(pair.PairId, _ => { }, CancellationToken.None);
@@ -116,7 +116,7 @@ internal static partial class DropboxChecks
             var local = new FakeEndpoint(Side.A, "ra") { DropboxHashes = true };
             h.Wire.SeedFolder("nested"); h.Wire.SeedFile("nested/file.txt", "discovered");
             h.Wire.LatestCursor = "fallback-c0"; h.Wire.SeedChangePage("fallback-c0", [], false, "fallback-c0");
-            using var store = SqliteStateStore.Open(Path.Combine(product, "state"), StorageChecks.Fast, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(product, "state"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
             store.SavePair(pair); var (runtime, _) = PrepareCursorRuntime(h, local, pair, store, product);
             await runtime.PrepareFirstSyncAsync(pair.PairId, _ => { }, CancellationToken.None);
             var narrowObservation = store.ReadInventoryObservation(pair.B)!;
@@ -182,7 +182,7 @@ internal static partial class DropboxChecks
         h.Wire.SeedFolder("nested"); h.Wire.SeedDeletedEntry("nested/gone.txt");
         h.Wire.RevisionContentHash = item.Hash; h.Wire.RevisionDeletedTime = "2026-10-12T08:00:00Z";
         h.Wire.LatestCursor = "include-c0"; h.Wire.SeedChangePage("include-c0", [], false, "include-c0");
-        using var store = SqliteStateStore.Open(Path.Combine(product, "state"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(product, "state"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         store.SavePair(pair); var (runtime, run) = PrepareCursorRuntime(h, local, pair, store, product);
         await runtime.PrepareFirstSyncAsync(pair.PairId, _ => { }, CancellationToken.None);
         await runtime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { }, CancellationToken.None);

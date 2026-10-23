@@ -7,7 +7,7 @@ internal static class DateRepairReviewChecks
         Directory.CreateDirectory(root);
         var files = Path.Combine(root, "files");
         Directory.CreateDirectory(files);
-        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pair = new PairDef("review", "review", LocalChecks.RootOf(files, "a"),
             new RootDef("b", SyncProviders.Dropbox, "account", "/test", "id:root"), [], [], true);
         store.SavePair(pair);
@@ -46,7 +46,7 @@ internal static class DateRepairReviewChecks
             return Task.FromResult<ItemState?>(remote[path]);
         }
         var date = new DateOnly(2026, 10, 18);
-        var dry = await DateRepair.RunAsync(store, pair, Observe, root, true, [], CancellationToken.None, StorageFailureClassifier.IsStateDamage, date);
+        var dry = await DateRepair.RunAsync(store, pair, Observe, root, true, [], CancellationToken.None, [], [], false, StorageFailureClassifier.IsStateDamage, StorageFailureClassifier.IsDirectStateDamage, StorageFailureClassifier.IsBusy, date);
         LocalChecks.Require(dry.Examined == 132 && dry.Eligible == 130 && dry.Skipped == 2 && calls == 132,
             "SQL candidates only; read-only and implausible dates skipped in dry run");
         var pages = 0;
@@ -55,7 +55,15 @@ internal static class DateRepairReviewChecks
             pages++;
             await work();
         }
-        var done = await DateRepair.RunAsync(store, pair, Observe, root, false, [], CancellationToken.None, StorageFailureClassifier.IsStateDamage, date, withPageLock: Gate);
+        store.BeforeDateRepairCommitForTest = _ =>
+        {
+            var audit = Directory.EnumerateFiles(Path.Combine(root, "v2", "logs"), "dates-repair-*.jsonl")
+                .Single(path => path != dry.ReportFile);
+            LocalChecks.Require(File.ReadAllText(audit).Contains("\"Outcome\":\"page-intent\""),
+                "page intent is flushed before repair reaches the filesystem setter");
+        };
+        var done = await DateRepair.RunAsync(store, pair, Observe, root, false, [], CancellationToken.None, [], [], false, StorageFailureClassifier.IsStateDamage, StorageFailureClassifier.IsDirectStateDamage, StorageFailureClassifier.IsBusy, date, withPageLock: Gate);
+        store.BeforeDateRepairCommitForTest = null;
         LocalChecks.Require(pages == 3 && done.Eligible == dry.Eligible && done.Skipped == dry.Skipped,
             "gate released each 128-row page; real and dry-run counts agree");
         LocalChecks.Require(store.Baselines(pair.PairId, ["000"]).Single().A.Mtime == target,
@@ -96,20 +104,31 @@ internal static class DateRepairReviewChecks
             options);
         LocalChecks.Require(plan.Actions.Count == 0, "next sync planner emits no actions even if a scan omits cached hash");
         var offline = await DateRepair.RunAsync(store, pair, (_, _) => throw new HttpRequestException("offline"), root, true,
-            [], CancellationToken.None, StorageFailureClassifier.IsStateDamage, date, "129");
+            [], CancellationToken.None, [], [], false, StorageFailureClassifier.IsStateDamage, StorageFailureClassifier.IsDirectStateDamage, StorageFailureClassifier.IsBusy, date, "129");
         LocalChecks.Require(offline.Skipped == 2 && File.ReadAllText(offline.ReportFile).Contains("Dropbox lookup: offline"),
             "per-item network failures are reported and the page completes");
+        var attempts = 0;
+        var busyRetry = await DateRepair.RunAsync(store, pair, Observe, root, true, [], CancellationToken.None,
+            [], [], false, StorageFailureClassifier.IsStateDamage, StorageFailureClassifier.IsDirectStateDamage,
+            StorageFailureClassifier.IsBusy, date, "130", withPageLock: async work =>
+            {
+                if (++attempts == 1) throw new Microsoft.Data.Sqlite.SqliteException("page busy", 5);
+                await work();
+            });
+        LocalChecks.Require(attempts == 3 && busyRetry.Examined == 1 &&
+            File.ReadAllText(busyRetry.ReportFile).Contains("\"Outcome\":\"waiting\",\"After\":\"130\""),
+            "page busy retry preserves the original cursor and finishes the independent candidate");
         var failed = false;
         try
         {
-            await DateRepair.RunAsync(store, pair, Observe, root, true, [], CancellationToken.None, StorageFailureClassifier.IsStateDamage, date, "129",
+            await DateRepair.RunAsync(store, pair, Observe, root, true, [], CancellationToken.None, [], [], false, StorageFailureClassifier.IsStateDamage, StorageFailureClassifier.IsDirectStateDamage, StorageFailureClassifier.IsBusy, date, "129",
                 withPageLock: _ => throw new SyncCliBusyException("exclusive run lock unavailable"));
         }
         catch (SyncCliBusyException) { failed = true; }
         LocalChecks.Require(failed && Directory.EnumerateFiles(Path.Combine(root, "v2", "logs"))
             .Any(path => File.ReadAllText(path).Contains("\"Outcome\":\"aborted\",\"After\":\"129\"")),
             "unavailable exclusive gate records a clear resumable cursor");
-        var resumed = await DateRepair.RunAsync(store, pair, Observe, root, true, [], CancellationToken.None, StorageFailureClassifier.IsStateDamage, date, "130");
+        var resumed = await DateRepair.RunAsync(store, pair, Observe, root, true, [], CancellationToken.None, [], [], false, StorageFailureClassifier.IsStateDamage, StorageFailureClassifier.IsDirectStateDamage, StorageFailureClassifier.IsBusy, date, "130");
         LocalChecks.Require(resumed.Examined == 1 && resumed.Skipped == 1, "resume cursor skips prior completed candidates");
         var originalError = new IOException("original failure");
         try

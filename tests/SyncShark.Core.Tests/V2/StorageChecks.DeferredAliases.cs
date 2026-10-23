@@ -10,7 +10,7 @@ internal static partial class StorageChecks
         var pair = Pair("p1");
         var aliases = Enumerable.Range(0, 2100).Select(n => new ItemState($"Aliases/{n:D5}", ItemKind.File,
             "shared-identity", null, new string('a', 64), 1, T0, ItemFlags.None)).ToArray();
-        using (var store = SqliteStateStore.Open(folder, Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(folder, Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(pair);
             var gen = store.BeginGeneration(pair.A.RootId, "fixture");
@@ -27,7 +27,7 @@ internal static partial class StorageChecks
         var observed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         for (var run = 0; run < 4; run++)
         {
-            using var store = SqliteStateStore.Open(folder, Fast, TimeProvider.System);
+            using var store = SqliteStateStore.Open(folder, Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var preview = store.AdmitDeferredPlanning(pair.PairId, DateTime.UtcNow.Ticks, rotate: false);
             var repeat = store.AdmitDeferredPlanning(pair.PairId, DateTime.UtcNow.Ticks, rotate: false);
             Require(preview.SelectMany(x => x.Paths).SequenceEqual(repeat.SelectMany(x => x.Paths)),
@@ -37,7 +37,7 @@ internal static partial class StorageChecks
             observed.UnionWith(page.SelectMany(x => x.Paths));
             store.AcknowledgeDeferredPlanning(pair.PairId, page, _ => true);
         }
-        using (var store = SqliteStateStore.Open(folder, Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(folder, Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             Require(observed.Count == 2100 && store.CountDeferredPlanning(pair.PairId) == 0,
                 "cold-reopened bounded slices reach every alias and retire only the full settled cycle");

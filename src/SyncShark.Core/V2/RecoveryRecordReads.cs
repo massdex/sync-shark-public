@@ -51,4 +51,11 @@ internal static class RecoveryRecordReads
         (string.IsNullOrEmpty(recovery.VersionId)
             ? described.VersionId is null
             : string.Equals(described.VersionId, recovery.VersionId, StringComparison.Ordinal));
+
+    internal static bool IsExactLocalLocation(string location, string expectedPath)
+    {
+        if (!Path.IsPathFullyQualified(location)) return false;
+        try { return string.Equals(Path.GetFullPath(location), expectedPath, StringComparison.OrdinalIgnoreCase); }
+        catch (ArgumentException) { return false; }
+    }
 }

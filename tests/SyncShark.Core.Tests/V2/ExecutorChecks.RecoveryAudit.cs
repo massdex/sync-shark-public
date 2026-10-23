@@ -51,7 +51,7 @@ internal static partial class ExecutorChecks
         var action = Act(ActionKind.Delete, Side.B, victim.Path, expected: victim, rf: true, key: "delete-key", rule: 6);
         var folder = Path.Combine(root, "delete-job-" + Guid.NewGuid().ToString("N"));
         var previous = ProviderEffectContext.Current.Value;
-        using (var store = SqliteStateStore.Open(folder, settings, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(folder, settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(Pair());
             var adopt = Act(ActionKind.Adopt, Side.B, victim.Path, source: original, expected: victim, key: "delete-key");
@@ -73,10 +73,10 @@ internal static partial class ExecutorChecks
             }
             finally { ProviderEffectContext.Current.Value = previous; }
         }
-        using var reopened = SqliteStateStore.Open(folder, settings, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(folder, settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pending = reopened.UnresolvedIntents("p1");
         Require(pending.Count == 1 && pending[0].ProviderEffect?.Kind == "delete-job", "restart retains the exact job checkpoint");
-        var results = await new Executor(reopened, settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage).ReconcileAsync(pending, 1,
+        var results = await new Executor(reopened, settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException).ReconcileAsync(pending, 1,
             source, writer, default);
         Require(results.Single().Outcome == Outcome.Done && reopened.UnresolvedIntents("p1").Count == 0,
             "saved job resolves its original deletion after store reopen");
@@ -100,20 +100,20 @@ internal static partial class ExecutorChecks
             UploadBatchMaxAge = TimeSpan.FromMinutes(1), StoreDurableCommits = false };
         var writer = new DropboxWriter(Pair().B, Side.B, UploadSafetyClient(http, new FixedTokenSource()), "unused", isStateDamage: StorageFailureClassifier.IsStateDamage, settings);
         var folder = Path.Combine(root, "lost-ack-" + Guid.NewGuid().ToString("N"));
-        using (var store = SqliteStateStore.Open(folder, settings, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(folder, settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(Pair());
-            var results = await Apply(new Executor(store, settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), Plan(actions), source, writer)
+            var results = await Apply(new Executor(store, settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), Plan(actions), source, writer)
                 .WaitAsync(TimeSpan.FromSeconds(20));
             Require(results.Count == count && wire.BatchSizes.SequenceEqual(new[] { count }), "one full 1000-entry uncertain finish");
             Require(results.Count(r => r.Outcome == Outcome.Done) == landed, "positive observations retain applied effects");
             Require(store.UnresolvedIntents("p1").Count == count - landed, "only unknown effects remain pending");
         }
-        using (var reopened = SqliteStateStore.Open(folder, settings, TimeProvider.System))
+        using (var reopened = SqliteStateStore.Open(folder, settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var pending = reopened.UnresolvedIntents("p1");
             Require(pending.All(a => a.ProviderEffect?.Kind == "upload-commit"), "commit checkpoints survive reopening");
-            var executor = new Executor(reopened, settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+            var executor = new Executor(reopened, settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
             var results = await executor.ReconcileAsync(pending, 1, source, writer, default);
             Require(results.All(r => r.Outcome == Outcome.Uncertain), "absence alone never immediately replays an unknown finish");
             Require(wire.Finishes == 1 && wire.Starts == count, "restart sends no duplicate mutation");

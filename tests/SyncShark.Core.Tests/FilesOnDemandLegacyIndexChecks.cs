@@ -32,7 +32,7 @@ internal static class FilesOnDemandLegacyIndexChecks
             Require(IndexSql(connection, "fs_nonpointer") is string nonpointer && nonpointer.Contains("~512", StringComparison.Ordinal),
                 "fixture starts with the legacy non-pointer index");
         }
-        using (var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             Require(store.IsStorageEnabled, "legacy opted-in store stays enabled");
             Require(Flags(store, "obj-pointer") == 1024, "legacy pointer bit moves to 1024");
@@ -66,7 +66,7 @@ internal static class FilesOnDemandLegacyIndexChecks
                 "SELECT 1 FROM file_state INDEXED BY fs_nonpointer WHERE root_no=1 AND (flags & ~1024)!=0;")
                 .Any(line => line.Contains("fs_nonpointer", StringComparison.Ordinal)), "1024 non-pointer query has a plan");
         }
-        using (var reopened = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System))
+        using (var reopened = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             Require(Flags(reopened, "obj-pointer") == 1024 && Flags(reopened, "obj-plain") == 0,
                 "reopening a migrated store changes nothing");
@@ -85,7 +85,7 @@ internal static class FilesOnDemandLegacyIndexChecks
                   (1,1,'BOTH','both',0,'obj-both',6,0,1536);
                 """);
         }
-        using (var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             Require(Flags(store, "obj-modern-pointer") == 1024, "modern owned pointer stays 1024");
             Require(Flags(store, "obj-export") == 512, "modern RequiresExport stays 512 without legacy index evidence");

@@ -8,10 +8,86 @@ internal static class RecoveryReaderChecks
 {
     public static async Task RunAsync()
     {
+        await RecoveryPreviewContractAsync().ConfigureAwait(false);
         await DropboxRecoveryRecordReadAsync().ConfigureAwait(false);
         await LocalRecoveryRecordReadAsync().ConfigureAwait(false);
         await ReadOnlyLocalObservationAsync().ConfigureAwait(false);
+        await InterruptedEnvelopePreviewAsync().ConfigureAwait(false);
         await RecoveryAdapterChecks.RunAsync().ConfigureAwait(false);
+    }
+
+    private static async Task RecoveryPreviewContractAsync()
+    {
+        var path = Path.GetFullPath(Path.Combine("archive", "item.recovery"));
+        Require(RecoveryRecordReads.IsExactLocalLocation(path, path), "exact absolute archive accepted");
+        Require(RecoveryRecordReads.IsExactLocalLocation(path.ToUpperInvariant(), path), "archive comparison remains case insensitive");
+        Require(!RecoveryRecordReads.IsExactLocalLocation("item.recovery", path) &&
+            !RecoveryRecordReads.IsExactLocalLocation(path + ".other", path), "relative and different archive paths refused");
+        var row = Record("preview", "preview-action", Side.A, "file.txt", path, null, "hash", 1);
+        var described = new ItemState(row.Path, ItemKind.File, "object", null, row.Hash, row.Size, row.Created, ItemFlags.None);
+        var fallback = new DefaultRecoveryReader(described);
+        await using var opened = await ((IRecoveryRecordReader)fallback).OpenRecoveryRecordAsync(row, described, default);
+        Require(fallback.Opens == 1, "described-open default delegates to the existing ordinary open");
+
+        using var wire = new DropboxWire();
+        using var http = new HttpClient(wire);
+        var client = new DropboxPilotClient(http, new FixedTokenSource(), "/Pilot", Binding(), DropboxWire.RootId);
+        foreach (var invalid in new[] { row with { Side = Side.B },
+            row with { Side = Side.B, VersionId = "rev", Location = "other.txt" },
+            row with { Side = Side.B, VersionId = "rev" },
+            row with { Side = Side.B, VersionId = "rev", Location = row.Path, PairId = "other-pair" },
+            row with { VersionId = "rev", Location = row.Path } })
+            await Expect<InvalidDataException>(() => DropboxWriter.DescribeRecoveryDropboxPreviewAsync(
+                client, LocalChecks.PairId, Side.B, invalid, default));
+        Require(wire.Calls.Count == 0, "malformed and wrong-owner cloud previews fail before provider requests");
+        foreach (var invalid in new[] { row with { PairId = "other-pair" }, row with { Side = Side.B },
+            row with { VersionId = "rev" } })
+            await Expect<InvalidDataException>(() => Task.FromResult(LocalWriter.DescribeRecoveryLocalPreview(
+                LocalChecks.PairId, Side.A, "unused-root", invalid, default)));
+    }
+
+    private sealed class DefaultRecoveryReader(ItemState described) : IRecoveryRecordReader
+    {
+        internal int Opens { get; private set; }
+        public Task<ItemState> DescribeRecoveryAsync(RecoveryRecord recovery, CancellationToken ct) => Task.FromResult(described);
+        public Task<Stream> OpenRecoveryRecordAsync(RecoveryRecord recovery, CancellationToken ct)
+        {
+            Opens++;
+            return Task.FromResult<Stream>(new MemoryStream());
+        }
+    }
+
+    private static async Task InterruptedEnvelopePreviewAsync()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var directory = Path.GetFullPath(LocalChecks.FreshRoot("recovery-preview-interruption"));
+        var start = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false };
+        if (string.Equals(Path.GetFileNameWithoutExtension(Environment.ProcessPath), "dotnet", StringComparison.OrdinalIgnoreCase))
+            start.ArgumentList.Add(typeof(RecoveryReaderChecks).Assembly.Location);
+        start.ArgumentList.Add("--v2-notice-archive-crash");
+        start.ArgumentList.Add(directory);
+        using var child = System.Diagnostics.Process.Start(start)!;
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        await child.WaitForExitAsync(deadline.Token);
+        Require(child.ExitCode == 73, "fixture interrupted the real archive envelope");
+        var victim = System.Text.Json.JsonSerializer.Deserialize<ItemState>(
+            await File.ReadAllTextAsync(Path.Combine(directory, "loser.json")))!;
+        var archive = await File.ReadAllTextAsync(Path.Combine(directory, "archive-path.txt"));
+        var recoveryRoot = Path.Combine(directory, "recovery");
+        var record = Record("interrupted", "original", Side.A, victim.Path, archive, null, victim.Hash!, victim.Size)
+            with { PairId = "pair00001" };
+        bool HasEnvelope() => File.Exists(SyncLocalFileAuthority.RecoverySidecarPath(archive)) ||
+            File.Exists(SyncLocalFileAuthority.RecoverySidecarPath(archive + ".part"));
+        Require(HasEnvelope(), "interrupted archive retains its access envelope");
+        try { LocalWriter.DescribeRecoveryLocalPreview(record.PairId, Side.A, recoveryRoot, record, default); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        Require(HasEnvelope(), "read-only preview never repairs or consumes the interrupted envelope");
+        var writer = await LocalWriter.OpenAsync(LocalChecks.RootOf(Path.Combine(directory, "local"), "ra"),
+            Side.A, record.PairId, LocalChecks.InstallationId, recoveryRoot, default,
+            isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var described = await ((IRecoveryRecordReader)writer).DescribeRecoveryAsync(record, default);
+        Require(!HasEnvelope() && described.Hash == record.Hash && File.Exists(archive),
+            "confirmed reader repairs its envelope and retains the archive");
     }
 
     private static async Task ReadOnlyLocalObservationAsync()
@@ -69,7 +145,7 @@ internal static class RecoveryReaderChecks
         Require(described == new ItemState(victim.Path, ItemKind.File, victim.ObjectId, reference.VersionId,
                 reference.Hash, reference.Size, modified, ItemFlags.None),
             "Dropbox describes the exact retained revision at the recorded path");
-        Require((await RecoveryRecordPreviews.DescribeDropboxAsync(client, LocalChecks.PairId, Side.B, record,
+        Require((await DropboxWriter.DescribeRecoveryDropboxPreviewAsync(client, LocalChecks.PairId, Side.B, record,
                 CancellationToken.None)) == described,
             "Dropbox preview helper describes without a writable writer");
         int RevisionCalls()
@@ -148,7 +224,7 @@ internal static class RecoveryReaderChecks
             described.Hash == reference.Hash && described.Size == reference.Size && described.VersionId is null &&
             described.ObjectId.StartsWith("id:local:", StringComparison.Ordinal),
             "local describes the exact retained archive with its own NTFS identity");
-        Require(RecoveryRecordPreviews.DescribeLocal(LocalChecks.PairId, Side.A, setup.Recovery, record,
+        Require(LocalWriter.DescribeRecoveryLocalPreview(LocalChecks.PairId, Side.A, setup.Recovery, record,
                 CancellationToken.None) == described,
             "local preview helper describes without opening a writable writer");
         await using (var bytes = await reader.OpenRecoveryRecordAsync(record, described, CancellationToken.None))

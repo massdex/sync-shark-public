@@ -24,7 +24,7 @@ internal static class StorageChecksScale
         var watch = Stopwatch.StartNew();
         var folder = Fresh(root, "size");
         var dbPath = Path.Combine(folder, "v2", "state.db");
-        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, new MutableClock());
+        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, new MutableClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         var schemaBytes = store.LiveBytes();
         var aItems = new ItemState[paired];
@@ -75,7 +75,7 @@ internal static class StorageChecksScale
     {
         const int count = 50_000;
         var folder = Fresh(root, "throughput");
-        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, new MutableClock());
+        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, new MutableClock(), LocalItems.CaptureOptionalHash);
         var items = new ItemState[count];
         for (var i = 0; i < count; i++)
             items[i] = new ItemState(ItemPath(i), ItemKind.File, "id:local:0000abcd:" + i.ToString("x16"),

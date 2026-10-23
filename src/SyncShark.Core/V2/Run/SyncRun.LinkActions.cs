@@ -86,7 +86,7 @@ public sealed partial class SyncRun
     private static string RefreshedLinkDetail(RootDef root, Notice prior, NoticeRepair repair)
     {
         if (!prior.Detail.StartsWith("Copy in progress", StringComparison.Ordinal)) return prior.Detail;
-        var stage = repair.Destination is { } destination && LocalItems.IsArtifactPath(destination) ? destination : null;
+        var stage = repair.Destination is { } destination && ArtifactPaths.IsArtifactPath(destination) ? destination : null;
         var exists = stage is not null && root.Provider == SyncProviders.Local &&
             Directory.Exists(LocalItems.FullPath(root.RootPath, stage));
         return "The previous copy attempt was interrupted; no copy is running. " +
@@ -121,7 +121,7 @@ public sealed partial class SyncRun
             if (choice == NoticeChoices.RemoveLinkStaging)
             {
                 var retained = new List<string>(repair.RetainedStaging ?? Array.Empty<string>());
-                if (repair.Destination is { } current && LocalItems.IsArtifactPath(current)) retained.Add(current);
+                if (repair.Destination is { } current && ArtifactPaths.IsArtifactPath(current)) retained.Add(current);
                 var paths = retained.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
                 if (paths.Length == 0)
                     return "No incomplete staging is recorded. A published copy is not staging and must not be removed by this option. " +
@@ -140,7 +140,7 @@ public sealed partial class SyncRun
                     "Create a separate pair for the regular target folder (for a file, select its parent folder). Choose a non-overlapping cloud destination and review nested-pair rules. No pair was created." + Environment.NewLine +
                     "CLI hint: SyncShark.exe --cli pairs create --account <exact-account-id> --path <new-remote-path> --local <target-folder> --yes";
             }
-            if (repair.Destination is { } existing && !LocalItems.IsArtifactPath(existing) && choice != NoticeChoices.CopyLinkAgain)
+            if (repair.Destination is { } existing && !ArtifactPaths.IsArtifactPath(existing) && choice != NoticeChoices.CopyLinkAgain)
                 return "A copy was published at " + existing + ". Choose Copy again to create another; the previous copy is never overwritten.";
             if (!pair.Enabled) throw new IOException("Enable the pair before copying, or sync the target separately.");
             RefuseLayout(pair);
@@ -152,7 +152,7 @@ public sealed partial class SyncRun
             {
                 if (!LinkContentCopy.Under(path, root.RootPath)) return true;
                 var relative = Path.GetRelativePath(root.RootPath, path).Replace('\\', '/');
-                return LocalItems.IsArtifactPath(relative) || !included(relative) ||
+                return ArtifactPaths.IsArtifactPath(relative) || !included(relative) ||
                     _store.ProtectionBatch(root.RootId, ItemFlags.Link | ItemFlags.Placeholder | ItemFlags.NeedsRehash, [relative]).Any(p => p.Covered);
             }
             var confirm = choice == NoticeChoices.CopyLinkOutsideRoot || input?.Name is not null;

@@ -2,7 +2,7 @@ namespace Massdex.SyncShark;
 
 public static class SyncLocalRecovery
 {
-    internal const string RecoveryFolderPrefix = ".syncshark-recovery-";
+    internal const string RecoveryFolderPrefix = V2.ArtifactPaths.RecoveryFolderPrefix;
     private const string RecoverySuffix = ".recovery";
     // Bounded stripes coordinate distinct leases for the same physical parent; only the
     // brief directory initialization is serialized, never Recovery copies or file deletes.
@@ -14,8 +14,7 @@ public static class SyncLocalRecovery
     internal static Action<string>? BeforeCreateForTest { get; set; }
     internal static Action? RecoveryCreatedBeforeBindingForTest { get; set; }
 
-    public static bool IsRecoveryFolderName(string name) =>
-        name.StartsWith(RecoveryFolderPrefix, StringComparison.OrdinalIgnoreCase) && name.Length > RecoveryFolderPrefix.Length;
+    public static bool IsRecoveryFolderName(string name) => V2.ArtifactPaths.IsRecoveryFolderName(name);
 
     internal static string BuildRecoveryRootPath(PilotDirectoryLease rootLease, string pairId)
     {

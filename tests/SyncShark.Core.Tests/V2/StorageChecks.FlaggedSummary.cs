@@ -6,7 +6,7 @@ internal static partial class StorageChecks
     public static void RunFlaggedSummaryChecks(string root)
     {
         var dataRoot = Fresh(root, "flagged-summary");
-        using var store = SqliteStateStore.Open(dataRoot, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(dataRoot, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         var refused = F("refused", "id:refused", "11") with { Flags = ItemFlags.ProviderNameRefused };
         var folder = F("folder", "id:folder", "22") with
@@ -62,14 +62,14 @@ internal static partial class StorageChecks
             command.CommandText = "DROP INDEX fs_refused;";
             command.ExecuteNonQuery();
         }
-        using var upgraded = SqliteStateStore.Open(dataRoot, Fast, new TestClock());
+        using var upgraded = SqliteStateStore.Open(dataRoot, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         Require(upgraded.Live("ra").Count == 5 && upgraded.LiveFlaggedSummary("ra", ItemFlags.ProviderNameRefused, 20).Count == 2,
             "additive refusal index migration preserves all rows and flags");
         Console.WriteLine("PASS Storage_FlaggedSummary");
     }
     public static void RunRefusalNoticeChecks(string root)
     {
-        using var store = SqliteStateStore.Open(Fresh(root, "refusal-notices"), Fast, new TestClock());
+        using var store = SqliteStateStore.Open(Fresh(root, "refusal-notices"), Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         var decision = new Notice("p1", 5, NoticeKind.UserDecision, "conflict", "original explanation", "tie");
         store.AddNotices([decision]);

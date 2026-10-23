@@ -13,7 +13,7 @@ internal sealed record InventoryCoverage(RootDef Root, string[] Prefixes, string
             .Select(candidate => PairAdmission.NestedPath(root, candidate)).OfType<string>();
         return new(root, Canonical(pair.Excluded.Concat(owned).Concat(nested)),
             pair.IgnoreRules.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray(),
-            pair.A.Provider == SyncProviders.Local || pair.B.Provider == SyncProviders.Local);
+            pair.A.Provider == ProviderIds.Local || pair.B.Provider == ProviderIds.Local);
     }
 
     private static string[] Canonical(IEnumerable<string> values) => values

@@ -16,7 +16,7 @@ internal static partial class DropboxChecks
         var settings = V2Settings.Default with { ProgressInterval = TimeSpan.Zero, MaxWorkers = 1 };
         var provider = new FakeEndpointProvider().Add(pair.A, local)
             .AddInventory(pair.B, h.Inventory).AddWriter(pair.B, h.Writer());
-        var run = new SyncRun(h.Known, new Executor(h.Known, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
+        var run = new SyncRun(h.Known, new Executor(h.Known, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException),
             provider, settings, TimeProvider.System);
         var preview = await run.PreviewFirstSyncAsync("p1", new Progress<RunProgress>(), CancellationToken.None);
         Require((await run.ApplyAsync("p1", preview, new Progress<RunProgress>(), CancellationToken.None)).Failed == 0,
@@ -57,6 +57,15 @@ internal static partial class DropboxChecks
         var delaysBefore = delays.Count;
         var probesBefore = h.Wire.Calls.Count(call => call == "/2/files/list_revisions");
         var first = await run.IncrementalAsync("p1", new Progress<RunProgress>(), CancellationToken.None);
+        var diagnosticRetries = h.Known.ReadSyncRetries("p1").ToArray();
+        Console.WriteLine($"evidence bound mode={mode}; failed={first.Failed}; cursor={h.Known.Cursor(RootId)}; " +
+            $"retry-count={diagnosticRetries.Length}; local-writes={localWritesBeforeHold}->{local.WriteCalls}; " +
+            $"cloud-writes={cloudWritesBeforeHold}->{CloudWrites()}; probes={probesBefore}->{h.Wire.Calls.Count(call => call == "/2/files/list_revisions")}; " +
+            $"local-exists={await local.ObserveAsync("held.txt", default) is not null}; remote-exists={await h.Writer().ObserveAsync("held.txt", default) is not null}");
+        Console.WriteLine("evidence bound retries: " + System.Text.Json.JsonSerializer.Serialize(diagnosticRetries));
+        Console.WriteLine("evidence bound evidence rows: " + System.Text.Json.JsonSerializer.Serialize(h.Known.DeletionEvidenceRows("p1", RootId)));
+        Console.WriteLine("evidence bound notices: " + System.Text.Json.JsonSerializer.Serialize(h.Known.OpenNotices("p1")
+            .Select(notice => new { Notice = notice, Options = NoticeOptions.Options(notice) })));
         if (mode != "permanent")
             Require(delays.Count > delaysBefore &&
                 h.Wire.Calls.Count(call => call == "/2/files/list_revisions") > probesBefore + 1,
@@ -89,9 +98,11 @@ internal static partial class DropboxChecks
             local.WriteCalls == localWritesBeforeHold && CloudWrites() == cloudWritesBeforeHold,
             "released history evidence forbids every delete and upload until the user chooses");
         var decision = h.Known.OpenNotices("p1").Single(n => n.Path == "held.txt" && n.ReasonKey == "deletion-review");
-        Require(NoticeOptions.Options(decision).Select(option => option.Choice).SequenceEqual(
-            new[] { NoticeChoices.DeleteReviewed, NoticeChoices.KeepRestore, NoticeChoices.Ignore }),
-            "unreviewed history evidence offers exactly delete / keep-restore / ignore");
+        Console.WriteLine("evidence bound decision options: " + System.Text.Json.JsonSerializer.Serialize(NoticeOptions.Options(decision)));
+        Require(decision.Rule == NoticeChoices.DeletionReviewRule &&
+            NoticeOptions.Options(decision).Select(option => option.Choice).SequenceEqual(
+                new[] { NoticeChoices.DeleteReviewed, NoticeChoices.KeepRestore, NoticeChoices.Ignore, NoticeChoices.Exclude }),
+            "unreviewed history evidence offers exactly delete with Recovery / keep-restore / ignore / stop syncing");
         var proposed = h.Known.SyncRetryAt("p1", "held.txt");
         Require(proposed is { Kind: "decision", ProposedActions: { Count: > 0 }, ReviewedActions: null, Held: not null } &&
             h.Known.ReadSyncRetries("p1").Count() == 1,

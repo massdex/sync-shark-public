@@ -3,9 +3,9 @@ namespace Massdex.SyncShark.V2;
 /// <summary>Resolves an uncertain or previously interrupted effect by observing the endpoint (executor.md section 6).</summary>
 internal static class EffectResolver
 {
-    internal const string NotApplied = "Not applied; re-planned this run";
-    internal const string RestoreAbandoned = "Restore attempt abandoned; any created item stays in place and Recovery remains available.";
-    internal const string Superseded = "Superseded by a later change";
+    internal const string NotApplied = EffectReasons.NotApplied;
+    internal const string RestoreAbandoned = EffectReasons.RestoreAbandoned;
+    internal const string Superseded = EffectReasons.Superseded;
 
     /// <summary>
     /// The resolved result. When the endpoint cannot be observed it is Uncertain (stays unresolved) and its reason

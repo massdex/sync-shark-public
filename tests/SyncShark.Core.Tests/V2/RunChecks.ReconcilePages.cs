@@ -5,7 +5,7 @@ internal static partial class RunChecks
     private static async Task Reconcile_AllPagesAsync()
     {
         var folder = Path.Combine(Path.GetTempPath(), "reconcile-pages-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         store.MarkFirstSyncDone(fx.Pair.PairId);
         const int count = 600;
@@ -48,7 +48,7 @@ internal static partial class RunChecks
         var folder = Path.Combine(Path.GetTempPath(), "pending-pages-" + Guid.NewGuid().ToString("N"));
         try
         {
-            using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+            using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             store.MarkFirstSyncDone(fx.Pair.PairId);
             var writer = new ExcludedDeleteJobWriter(fx.WriterB) { Completed = true, PendingJobId = "pending-job" };
@@ -82,7 +82,7 @@ internal static partial class RunChecks
         var folder = Path.Combine(Path.GetTempPath(), "folder-pages-" + Guid.NewGuid().ToString("N"));
         try
         {
-            using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+            using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             store.MarkFirstSyncDone(fx.Pair.PairId);
             var writer = new ExcludedDeleteJobWriter(fx.WriterB) { Completed = completed };

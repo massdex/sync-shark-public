@@ -11,7 +11,7 @@ internal static class RecoveryQueryChecks
             throw new InvalidOperationException("Use a fresh Recovery query fixture root.");
         Directory.CreateDirectory(root);
         var clock = new ManualClock();
-        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), StorageChecks.Fast, clock);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), StorageChecks.Fast, clock, LocalItems.CaptureOptionalHash);
         var pair = Pair("pair-a");
         var other = Pair("pair-b");
         store.SavePair(pair);
@@ -395,7 +395,7 @@ internal static class RecoveryQueryChecks
         var migrateState = Path.Combine(LocalChecks.FreshRoot("recovery-migrate-" + Guid.NewGuid().ToString("N")), "state");
         var migratePair = Pair("pair-migrate");
         string migrateRow;
-        using (var first = SqliteStateStore.Open(migrateState, StorageChecks.Fast, new ManualClock()))
+        using (var first = SqliteStateStore.Open(migrateState, StorageChecks.Fast, new ManualClock(), LocalItems.CaptureOptionalHash))
         {
             first.SavePair(migratePair);
             first.AddNotices([FrozenPending(migratePair.PairId, "Root/original", "migrate-recovery")]);
@@ -418,7 +418,7 @@ internal static class RecoveryQueryChecks
                 command.ExecuteNonQuery();
             }
         }
-        using (var reopened = SqliteStateStore.Open(migrateState, StorageChecks.Fast, new ManualClock()))
+        using (var reopened = SqliteStateStore.Open(migrateState, StorageChecks.Fast, new ManualClock(), LocalItems.CaptureOptionalHash))
         {
             LocalChecks.Require(reopened.RecoveryRestoreProtected(migratePair.PairId, "Root/moved") &&
                 !reopened.RecoveryRestoreProtected(migratePair.PairId, "Root/original") &&

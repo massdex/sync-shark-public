@@ -8,7 +8,7 @@ internal static partial class StorageChecks
     // into the base test build for an apples-to-apples benchmark of the actual base writer.
     public static async Task SnapshotProductionMillionAsync(string root)
     {
-        using var store = SqliteStateStore.Open(Fresh(root, "snapshot-production-million"), Fast, new TestClock());
+        using var store = SqliteStateStore.Open(Fresh(root, "snapshot-production-million"), Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         var gen = store.BeginGeneration("root", "full");
         var items = Enumerable.Range(0, 1_000_000)
             .Select(i => F($"d{i / 10:D6}/f{i:D7}", "id:" + i, "aabb")).ToArray();

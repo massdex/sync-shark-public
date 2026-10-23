@@ -40,14 +40,13 @@ internal sealed class SyncPointTable
     }
 
     internal IReadOnlyList<Baseline> DateRepairPage(string pairId, long pairNo, long localRootNo, long cloudRootNo,
-        string after, int limit, Side side, DateOnly? localDate, DateRepairBound? from, DateRepairBound? to, bool mismatch)
+        string after, int limit, Side side, long start, long end, bool mismatch)
     {
         var local = side == Side.A ? "a" : "b";
         var cloud = side == Side.A ? "b" : "a";
         string Dir(string s) => s == "a" ? "sp.a_dir" : "COALESCE(sp.b_dir,sp.a_dir)";
         string Name(string s) => s == "a" ? "sp.a_name" : "COALESCE(sp.b_name,sp.a_name)";
         string Key(string s) => s == "a" ? "sp.a_name_key" : "COALESCE(sp.b_name_key,sp.a_name_key)";
-        var (start, end) = DateRepair.UtcRange(localDate, from, to, TimeZoneInfo.Local);
         var gap = $"lf.mtime-COALESCE(cf.mtime,sp.{cloud}_mtime)";
         if (mismatch) gap = $"abs({gap})";
         // Indexed path joins: the baseline supplies correspondence, not the current local download date.

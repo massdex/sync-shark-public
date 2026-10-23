@@ -8,18 +8,16 @@ public sealed partial class SqliteStateStore
     // from a baseline, generation, prepare, Recovery archive (the predecessor), or a pending intent.
     // The retained-version-restored notice is emitted in CommitResults only after a successful restore;
     // its Winner records the actual published identity/hash/mtime. Closed notices remain useful evidence.
-    internal void PrepareDateWriteEvidence(string pairId, IReadOnlyList<DateProvenanceSource>? sources = null) => InStore(() =>
+    internal void PrepareDateWriteEvidence(string pairId, IEnumerable<(string Path, DateTimeOffset Occurred)> rows, bool requireLogs) => InStore(() =>
     {
-        _dateLogRequired = sources is { Count: > 0 };
+        _dateLogRequired = requireLogs;
         StoreSchema.Execute(_connection, null,
             "CREATE TEMP TABLE IF NOT EXISTS date_log_evidence(path TEXT,written INTEGER,PRIMARY KEY(path,written)) WITHOUT ROWID; DELETE FROM date_log_evidence;");
         using (var transaction = _connection.BeginTransaction())
         {
-            foreach (var source in sources ?? [])
-                foreach (var line in File.ReadLines(source.File))
-                    if (DateProvenanceLog.TryParse(line, source.Prefix, out var path, out var occurred))
-                        StoreSchema.Execute(_connection, transaction, "INSERT OR IGNORE INTO date_log_evidence VALUES($path,$time);",
-                            ("$path", RowCodec.Key(path)), ("$time", occurred.UtcTicks));
+            foreach (var (path, occurred) in rows)
+                StoreSchema.Execute(_connection, transaction, "INSERT OR IGNORE INTO date_log_evidence VALUES($path,$time);",
+                    ("$path", RowCodec.Key(path)), ("$time", occurred.UtcTicks));
             transaction.Commit();
         }
         StoreSchema.Execute(_connection, null,

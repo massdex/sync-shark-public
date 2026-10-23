@@ -14,7 +14,7 @@ internal static partial class RunCliChecks
             var passed = false;
             try
             {
-                using var store = SqliteStateStore.Open(Path.Combine(directory, "state"), Settings, TimeProvider.System);
+                using var store = SqliteStateStore.Open(Path.Combine(directory, "state"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
                 var fx = Build(store: store);
                 var target = side == Side.A ? fx.A : fx.B;
                 var writer = side == Side.A ? fx.WriterA : fx.WriterB;
@@ -49,7 +49,7 @@ internal static partial class RunCliChecks
                 store.SaveSyncRetry(fx.Pair.PairId, new SyncRetry(folder.Path, "reviewed-removal", 1, "retry", due)
                     { ReviewedActions = [action] });
                 var clock = new ReviewedRemovalRetryClock { Now = due.AddTicks(-1) };
-                var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), fx.Provider, Settings, clock);
+                var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), fx.Provider, Settings, clock);
                 if (change == "new") target.Seed("reviewed/new.tmp", "unreviewed");
                 if (change == "changed") target.Seed(child.Path, "changed and longer bytes");
                 if (change == "missing")

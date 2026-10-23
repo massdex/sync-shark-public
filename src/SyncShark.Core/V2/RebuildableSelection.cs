@@ -16,12 +16,12 @@ public sealed record RebuildableSelection(Side Cloud, IReadOnlyList<string> Fold
         foreach (var side in new[] { Side.A, Side.B })
         {
             var provider = side == Side.A ? pair.A.Provider : pair.B.Provider;
-            if (string.Equals(provider, SyncProviders.Local, StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(provider, ProviderIds.Local, StringComparison.OrdinalIgnoreCase))
             {
                 if (local is not null) return null;
                 local = side;
             }
-            else if (string.Equals(provider, SyncProviders.Dropbox, StringComparison.OrdinalIgnoreCase))
+            else if (string.Equals(provider, ProviderIds.Dropbox, StringComparison.OrdinalIgnoreCase))
             {
                 if (cloud is not null) return null;
                 cloud = side;

@@ -54,7 +54,7 @@ public sealed partial class SqliteStateStore
         {
             var source = review ? "sync_retry WHERE " + DeleteReviewWhere : "pending_effect WHERE " + UncertainDeleteWhere;
             var summary = review ? DeleteReviewSummary : UncertainDeleteSummary;
-            var reason = review ? "deletion-review" : "interrupted-delete-unverified";
+            var reason = review ? "deletion-review" : InterruptedDelete.UnverifiedReason;
             var count = (long)StoreSchema.Scalar(_connection, transaction,
                 exact ? "SELECT COUNT(*) FROM " + source : "SELECT COUNT(*) FROM (SELECT 1 FROM " + source + " LIMIT 21);", ("$p", pairNo))!;
             if (count > 20)

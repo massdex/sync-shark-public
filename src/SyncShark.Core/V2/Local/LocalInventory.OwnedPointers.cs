@@ -8,8 +8,8 @@ public sealed partial class LocalInventory
 
     private void CompletePointerVerification(ItemState item)
     {
-        if (_expectedPairId is not { } pairId || _known is not SqliteStateStore store ||
-            store.Pair(pairId) is not { } pair) return;
+        var store = _known;
+        if (_expectedPairId is not { } pairId || store.Pair(pairId) is not { } pair) return;
         var remote = pair.A.RootId == _root.RootId ? pair.B : pair.A;
         StorageNotices.Complete(store, pairId, new(_root.RootId, item.ObjectId, remote.RootId, "pointer-verify"));
     }
@@ -21,7 +21,8 @@ public sealed partial class LocalInventory
         if (item is null) return null;
         if (item.Flags.HasFlag(ItemFlags.OwnedPointer)) return item.Path;
         // A conversion may already have changed the native object but not its cached flags.
-        if (_known is not SqliteStateStore store || store.Pair(_expectedPairId) is not { } pair) return null;
+        var store = _known;
+        if (store.Pair(_expectedPairId) is not { } pair) return null;
         var remote = pair.A.RootId == _root.RootId ? pair.B : pair.A;
         return store.StoragePointerFor(_root.RootId, item.ObjectId, remote.RootId) is not null ||
             store.StorageSettlementFor(_root.RootId, item.ObjectId, remote.RootId) is not null ? item.Path : null;
@@ -37,8 +38,8 @@ public sealed partial class LocalInventory
 
     private Func<string, WindowsCloudPlaceholderInfo, long, OwnedPointerObservation>? OwnedPointerClassifier()
     {
-        if (_expectedPairId is not { } pairId || _known is not SqliteStateStore store ||
-            store.Pair(pairId) is not { } pair) return null;
+        var store = _known;
+        if (_expectedPairId is not { } pairId || store.Pair(pairId) is not { } pair) return null;
         var remoteRoot = pair.A.RootId == _root.RootId ? pair.B : pair.A;
         var recorded = store.StorageRegistrations().FirstOrDefault(entry => entry.RootId == _root.RootId);
         // One native registration read per scan, not per file; no item collection is retained.

@@ -50,7 +50,7 @@ internal static partial class ExecutorChecks
         var writer = new DropboxWriter(new RootDef("rb", "Dropbox", "acc", "/Pilot", DropboxWire.RootId),
             Side.B, client, "unused", isStateDamage: StorageFailureClassifier.IsStateDamage, settings);
         var clock = System.Diagnostics.Stopwatch.StartNew();
-        var work = Apply(new Executor(store, settings, admission, isStateDamage: StorageFailureClassifier.IsStateDamage), Plan(actions), source, writer);
+        var work = Apply(new Executor(store, settings, admission, isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), Plan(actions), source, writer);
         if (!latency)
         {
             await wire.FirstCommit.Task.WaitAsync(HeldEffectTimeout);
@@ -90,7 +90,7 @@ internal static partial class ExecutorChecks
         var writer = new DropboxWriter(new RootDef("rb", "Dropbox", "acc", "/Pilot", DropboxWire.RootId),
             Side.B, client, "unused", isStateDamage: StorageFailureClassifier.IsStateDamage, settings);
         using var store = new InMemoryStateStore(); store.SavePair(Pair());
-        var results = await Apply(new Executor(store, settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), Plan(actions), source, writer).WaitAsync(HeldEffectTimeout);
+        var results = await Apply(new Executor(store, settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), Plan(actions), source, writer).WaitAsync(HeldEffectTimeout);
         var intents = store.UnresolvedIntents(Pair().PairId);
         Require(results.All(r => r.Outcome == Outcome.Uncertain) && intents.Count == 4,
             "lost finish acknowledgement stays uncertain despite an absent observation");

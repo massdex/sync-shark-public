@@ -7,7 +7,7 @@ internal static class ProtectionBatchChecks
 {
     internal static void Run(string folder)
     {
-        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast with { StoreBatchRows = 1 }, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast with { StoreBatchRows = 1 }, TimeProvider.System, LocalItems.CaptureOptionalHash);
         const string root = "gap-root";
         var paths = new[] { "Parent/Child/Deep/held", "Parent/clear", "Parent-Other/held", "Case/held", "case/other", "￿/held", "pending/leaf", "visited/leaf", "Parent/shallow" };
         var items = paths.Select((path, n) => new ItemState(path, ItemKind.File, SyncLocalEndpointStore.ObjectId(1, (ulong)n + 10), null,

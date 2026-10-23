@@ -33,7 +33,7 @@ internal sealed class StoreCommitter
     internal bool DeleteRestorePending(SyncAction action) => DeleteRestorePending(_store, _pairId, action);
 
     internal static bool DeleteRestorePending(IStateStore store, string pairId, SyncAction action) =>
-        store.SyncRetryAt(pairId, action.Path)?.Kind == SqliteStateStore.InterruptedDeleteRestoreKind;
+        store.SyncRetryAt(pairId, action.Path)?.Kind == InterruptedDelete.RestoreKind;
 
     internal ItemState? DeleteSource(SyncAction action) => DeleteSource(_store, _pairId, action);
 
@@ -54,10 +54,10 @@ internal sealed class StoreCommitter
     internal async Task<ActionResult?> RunPointerUpdateAsync(SyncAction action,
         Func<Task<ActionResult?>> run, CancellationToken ct)
     {
-        if (_store is not SqliteStateStore store || store.Pair(_pairId) is not { } pair)
+        if (_store is not IStoragePointerCommit store || _store.Pair(_pairId) is not { } pair)
             return await run().ConfigureAwait(false);
         ActionResult? result = null;
-        await FilesOnDemandSettlement.SerializeAsync(store, pair.A.RootId, action.ExpectedTarget!.ObjectId, async () =>
+        await FilesOnDemandSettlement.SerializeAsync(_store, pair.A.RootId, action.ExpectedTarget!.ObjectId, async () =>
         {
             if (store.StoragePointerUpdateIsStale(pair, action))
             {
@@ -80,7 +80,7 @@ internal sealed class StoreCommitter
                     // decides for the storage lanes. A binding, host, volume, backlog or unknown cause survives
                     // an unrelated pointer success. Never hide an unavailable pointer met by this same apply.
                     if (!_pointerPairReported)
-                        StorageNotices.CompleteSuccess(store, pair, requested: false, pairCauseReportedThisTurn: false);
+                        StorageNotices.CompleteSuccess(_store, pair, requested: false, pairCauseReportedThisTurn: false);
                 }
                 finally { _storeGate.Release(); }
             }
@@ -98,9 +98,7 @@ internal sealed class StoreCommitter
             SavePointerRetry(pair, action, error.Message);
             if (!_pointerPairReported)
             {
-                if (_store is not SqliteStateStore store)
-                    throw new InvalidOperationException("Pointer notices require the durable storage store.");
-                StorageNotices.Report(store, pair, string.Empty,
+                StorageNotices.Report(_store, pair, string.Empty,
                     new StorageNotice(pair.A.RootId, string.Empty, pair.B.RootId, "pointer"), error);
                 _pointerPairReported = true;
             }

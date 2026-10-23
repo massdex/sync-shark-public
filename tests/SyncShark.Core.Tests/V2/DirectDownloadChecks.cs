@@ -189,7 +189,7 @@ internal static class DirectDownloadChecks
             Planned(LocalChecks.Bytes("downloaded")), victim, true, null);
         var result = await RunAsync(setup.Writer, source, action, store).ConfigureAwait(false);
         LocalChecks.Require(result is { Outcome: Outcome.Uncertain }, "the checkpoint awaits safe reconciliation");
-        var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         var settled = (await executor.ReconcileAsync(store.UnresolvedIntents(PairId), 1, setup.Writer, source,
             CancellationToken.None)).Single();
         LocalChecks.Require(settled.Outcome == Outcome.Skipped && settled.Reason!.Contains(EffectResolver.Superseded) &&
@@ -362,7 +362,7 @@ internal static class DirectDownloadChecks
         using var store = new InMemoryStateStore();
         RegisterPair(store, setup.Root);
         store.RecordIntent(PairId, action);
-        var result = (await new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage)
+        var result = (await new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException)
             .ReconcileAsync([action], 1, relocated, new Source(bytes), CancellationToken.None)).Single();
         LocalChecks.Require(result.Outcome == Outcome.Skipped && store.UnresolvedIntents(PairId).Count == 0 &&
             store.OpenNotices(PairId).Any(n => n.Detail.Contains(setup.Recovery)),
@@ -398,7 +398,7 @@ internal static class DirectDownloadChecks
         using var store = new InMemoryStateStore();
         RegisterPair(store, root);
         store.RecordIntent(PairId, action);
-        var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         var results = await executor.ReconcileAsync([action], 1, writer, new Source(Array.Empty<byte>()),
             CancellationToken.None).ConfigureAwait(false);
         return results.Single();

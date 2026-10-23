@@ -7,7 +7,9 @@ public sealed partial class SqliteStateStore
     IReadOnlyList<StorageNotice> IStateStore.OpenStoragePairCauses(string pairId, string rootId, string remoteBinding) =>
         OpenStoragePairCauses(pairId, rootId, remoteBinding);
 
-    /// <summary>Open pair-cause rows for exactly the two storage pair families; never item notices.</summary>
+    /// <summary>Live pair-level causes of the two storage families, including an Ignore awaiting its episode's
+    /// success. Callers evaluate every scope, so an unrelated success can never retire a binding/volume
+    /// suppression. Only pair-level rows are read, never the per-item notice population.</summary>
     internal IReadOnlyList<StorageNotice> OpenStoragePairCauses(string pairId, string rootId, string remoteBinding) => InStore(() =>
     {
         var pair = RequirePair(pairId);
@@ -16,19 +18,23 @@ public sealed partial class SqliteStateStore
             StorageNotices.Prefix(new StorageNotice(rootId, "", remoteBinding, "availability")),
             StorageNotices.Prefix(new StorageNotice(rootId, "", remoteBinding, StorageNotices.HydrationPairOperation))
         };
-        var result = new List<StorageNotice>(2);
+        var result = new List<StorageNotice>(4);
         foreach (var prefix in prefixes)
         {
-            // Each statement pins pair_no and its own reason range so LIMIT 1 is a true index bound even
+            // Each statement pins pair_no and its own reason range so the scan stays a true index bound even
             // when the pair has no pair-family row and the table holds a large item-notice population.
-            var detail = StoreSchema.Scalar(_connection, null, $"""
+            using var command = StoreSchema.Command(_connection, null, $"""
                 SELECT detail FROM notice INDEXED BY nt_pair_reason
                   WHERE pair_no=$p AND reason_key>=$lo AND reason_key<$hi AND {NoticeTable.ActionableSql("state")}
-                    AND COALESCE(choice,'')<>'ignore' LIMIT 1;
-                """, ("$p", pair), ("$lo", prefix), ("$hi", prefix + "￿")) as string;
-            if (detail is not null &&
-                NoticeDetailCodec.Decode(new Notice(pairId, 0, NoticeKind.Info, "", detail, "")).Storage is { } storage)
-                result.Add(storage);
+                  ORDER BY (COALESCE(choice,'')='ignore'), created;
+                """);
+            command.Parameters.AddWithValue("$p", pair);
+            command.Parameters.AddWithValue("$lo", prefix);
+            command.Parameters.AddWithValue("$hi", prefix + "￿");
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+                if (NoticeDetailCodec.Decode(new Notice(pairId, 0, NoticeKind.Info, "", reader.GetString(0), "")).Storage is { } storage)
+                    result.Add(storage);
         }
         return (IReadOnlyList<StorageNotice>)result;
     });
@@ -49,7 +55,7 @@ public sealed partial class SqliteStateStore
         if (notice.Storage is null || notice.ReasonKey is null || !notice.ReasonKey.StartsWith(familyPrefix, StringComparison.Ordinal))
             throw new ArgumentException("A storage notice must belong to its supplied family.", nameof(notice));
         var args = new (string, object?)[] { ("$p", pair), ("$reason", notice.ReasonKey), ("$lo", familyPrefix), ("$hi", familyPrefix + "￿") };
-        if (StoreSchema.Scalar(_connection, tx, "SELECT 1 FROM notice WHERE pair_no=$p AND reason_key=$reason AND choice='ignore' LIMIT 1;", args) is not null)
+        if (StoreSchema.Scalar(_connection, tx, "SELECT 1 FROM notice WHERE pair_no=$p AND reason_key=$reason AND choice='ignore' AND " + NoticeTable.ActionableSql("state") + " LIMIT 1;", args) is not null)
         {
             _notices.CloseWhere(tx, "resolved",
                 "pair_no=$p AND reason_key>=$lo AND reason_key<$hi AND " + NoticeTable.ActionableSql("state") + " AND COALESCE(choice,'')<>'ignore';", args);

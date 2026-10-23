@@ -1324,7 +1324,7 @@ public sealed partial class SyncRun : ISyncRun
 
     private IReadOnlySet<string> ActiveFirstSyncRetries(PairDef pair) =>
         _store.DueSyncRetries(pair.PairId, _time.GetUtcNow(), 256)
-            .Where(retry => RetryProtectionPredicate.Includes(retry) && retry.Held is null &&
+            .Where(retry => RetryProtectionDomain.Includes(retry) && retry.Held is null &&
                 !retry.ReprobeEvidence && retry.PendingNotice is null &&
                 retry.Kind is not ("decision" or "deletion-evidence" or "scan") &&
                 retry.ReadRoots is not { Count: > 0 } &&
@@ -1340,7 +1340,7 @@ public sealed partial class SyncRun : ISyncRun
         var links = LeftAlone(pair).WithPending(PendingDecisions(pair.PairId, decisions))
             .WithPending(OutstandingFootprints(pair.PairId))
             .WithPending(_store.ReadSyncRetries(pair.PairId)
-                .Where(retry => RetryProtectionPredicate.Includes(retry))
+                .Where(retry => RetryProtectionDomain.Includes(retry))
                 .Where(retry => retry.Kind == "scan" || retry.ReadRoots is { Count: > 0 } ||
                     retry.PendingNotice is not null)
                 .Select(retry => retry.Path));

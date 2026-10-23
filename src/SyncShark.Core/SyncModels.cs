@@ -115,13 +115,6 @@ public sealed record SyncPair(
     }
 }
 
-public enum SyncCloudFileAvailability
-{
-    NotManaged,
-    OnlineOnly,
-    PartiallyHydrated,
-    AvailableOffline
-}
 
 public sealed record SyncCloudFileState(
     string RelativePath,

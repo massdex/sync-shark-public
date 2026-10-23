@@ -7,7 +7,7 @@ internal static partial class RunChecks
     public static void NameMappingScale()
     {
         var root = Path.Combine(Path.GetTempPath(), "mapping-scale-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(root, Settings with { StoreDurableCommits = false }, TimeProvider.System);
+        using var store = SqliteStateStore.Open(root, Settings with { StoreDurableCommits = false }, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pair = Pair("mapping-scale", "C:\\local", "/cloud");
         store.SavePair(pair);
         MappingSnapshot(store, pair.B, Side.B, MappingItem("folder:", "folder", ItemKind.Folder),

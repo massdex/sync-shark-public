@@ -26,6 +26,9 @@ public sealed partial class DropboxWriter
         Dictionary<string, int>? RestoreAttempts = null);
 
     // Explicit user authority only: retain the exact submitted revision, not a fresh latest revision.
+    string IFolderTreeDeleter.AuthorizeRestoreAgain(string providerState, string folderPath) =>
+        AuthorizeRestoreAgain(providerState, folderPath);
+
     internal static string AuthorizeRestoreAgain(string state, string folderPath)
     {
         var recovery = JsonSerializer.Deserialize<FolderRecovery>(state)

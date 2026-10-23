@@ -11,7 +11,7 @@ internal static partial class RunChecks
         {
             using var store = SqliteStateStore.Open(
                 Path.Combine(Path.GetTempPath(), "held-boundary-" + Guid.NewGuid().ToString("N")),
-                Settings, TimeProvider.System);
+                Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             store.MarkFirstSyncDone(fx.Pair.PairId);
             IReadOnlyList<string> owned = boundary == "product-owned" ? new[] { "product-data" } : Array.Empty<string>();
@@ -100,7 +100,7 @@ internal static partial class RunChecks
     {
         using var store = SqliteStateStore.Open(
             Path.Combine(Path.GetTempPath(), "held-summary-" + Guid.NewGuid().ToString("N")),
-            Settings, TimeProvider.System);
+            Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         store.MarkFirstSyncDone(fx.Pair.PairId);
         var one = fx.A.Seed("hold/one.txt", "one");
@@ -149,8 +149,9 @@ internal static partial class RunChecks
         Require(store.OpenNotices(fx.Pair.PairId).All(notice => notice.ReasonKey != "held-intents"),
             "the legacy held-intents summary is closed, not duplicated");
         Require(NoticeChoices.IsRetryNotice(summary[0]) &&
-            NoticeOptions.Options(summary[0]).Select(option => option.Choice).SequenceEqual([NoticeChoices.ShowRemaining]),
-            "the combined summary offers Show remaining only");
+            NoticeOptions.Options(summary[0]).Select(option => option.Choice).SequenceEqual(
+                [NoticeChoices.ShowRemaining, NoticeChoices.RetryNow, NoticeChoices.Ignore]),
+            "the combined summary pages, retries and suppresses without ending sync");
         Require(first.PendingVerification == 2 && first.Held == first.PendingVerification && first.Uncertain == 0 &&
             first.Failures.Count == 0,
             "temporary holds are reported as held and pending, never as unconfirmed or failed effects");
@@ -160,6 +161,20 @@ internal static partial class RunChecks
             "held intents perform no endpoint effect");
         Require(store.Baselines(fx.Pair.PairId).Count == baselinesBefore,
             "held intents add no synced baseline");
+
+        await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, summary[0].NoticeId!,
+            NoticeChoices.RetryNow, CancellationToken.None);
+        Require(store.SyncRetryAt(fx.Pair.PairId, string.Empty) is null &&
+            store.CountHeldIntents(fx.Pair.PairId) == 2 &&
+            store.OpenNotices(fx.Pair.PairId).Count(notice => notice.ReasonKey == RehashProtection.Reason) == 1,
+            "summary Retry wakes verification without inventing a root item, clearing debt or duplicating its notice");
+
+        store.AddNotices([new Notice(fx.Pair.PairId, 40, NoticeKind.Info, "", "A pair failure.", "unknown-pair-failure")]);
+        var unknownPair = store.OpenNotices(fx.Pair.PairId).Single(notice => notice.ReasonKey == "unknown-pair-failure");
+        await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, unknownPair.NoticeId!, NoticeChoices.RetryNow, CancellationToken.None);
+        Require(store.SyncRetryAt(fx.Pair.PairId, string.Empty) is null,
+            "unknown pair-level Retry never invents a root item");
+        store.CloseNotice(unknownPair.NoticeId!, "resolved");
 
         // Show remaining is backed by the keyset page; offsets and invalid cursors are explained without changing holds.
         var shown = await run.ApplyRetryNoticeChoiceAsync(fx.Pair.PairId, summary[0].NoticeId!,
@@ -219,7 +234,7 @@ internal static partial class RunChecks
     {
         using var store = SqliteStateStore.Open(
             Path.Combine(Path.GetTempPath(), "held-retry-" + Guid.NewGuid().ToString("N")),
-            Settings, TimeProvider.System);
+            Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         store.MarkFirstSyncDone(fx.Pair.PairId);
         var source = fx.A.Seed("hold/retry.txt", "retry content");
@@ -269,7 +284,7 @@ internal static partial class RunChecks
     {
         using var store = SqliteStateStore.Open(
             Path.Combine(Path.GetTempPath(), "held-unpark-" + Guid.NewGuid().ToString("N")),
-            Settings, TimeProvider.System);
+            Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         store.MarkFirstSyncDone(fx.Pair.PairId);
         var source = fx.A.Seed("hold/outside.txt", "outside content");
@@ -316,7 +331,7 @@ internal static partial class RunChecks
             var label = kind == ItemFlags.Link ? "link" : "stub";
             using var store = SqliteStateStore.Open(
                 Path.Combine(Path.GetTempPath(), "held-" + label + "-" + Guid.NewGuid().ToString("N")),
-                Settings, TimeProvider.System);
+                Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             store.MarkFirstSyncDone(fx.Pair.PairId);
             var item = fx.A.Seed("protected/item.txt", "target content");
@@ -362,7 +377,7 @@ internal static partial class RunChecks
         {
             using var store = SqliteStateStore.Open(
                 Path.Combine(Path.GetTempPath(), "held-pending-" + mode + "-" + Guid.NewGuid().ToString("N")),
-                Settings, TimeProvider.System);
+                Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             store.MarkFirstSyncDone(fx.Pair.PairId);
             var source = fx.A.Seed("hold/pending.txt", "pending content");
@@ -454,7 +469,7 @@ internal static partial class RunChecks
     {
         using var store = SqliteStateStore.Open(
             Path.Combine(Path.GetTempPath(), "held-quarantine-choice-" + Guid.NewGuid().ToString("N")),
-            Settings, TimeProvider.System);
+            Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         store.MarkFirstSyncDone(fx.Pair.PairId);
         var source = fx.A.Seed("hold/choice.txt", "choice content");
@@ -498,7 +513,7 @@ internal static partial class RunChecks
     {
         using var store = SqliteStateStore.Open(
             Path.Combine(Path.GetTempPath(), "held-apply-summary-" + Guid.NewGuid().ToString("N")),
-            Settings, TimeProvider.System);
+            Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var one = fx.A.Seed("hold/one.txt", "one");
         var two = fx.A.Seed("hold/two.txt", "two");
@@ -543,7 +558,7 @@ internal static partial class RunChecks
     {
         using var store = SqliteStateStore.Open(
             Path.Combine(Path.GetTempPath(), "held-pending-notice-" + Guid.NewGuid().ToString("N")),
-            Settings, TimeProvider.System);
+            Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var attention = new Notice(fx.Pair.PairId, 40, NoticeKind.UserDecision, string.Empty,
             "deletion review pending", "deletion-review");
@@ -573,7 +588,7 @@ internal static partial class RunChecks
             var label = kind == ItemFlags.Link ? "link" : "stub";
             using var store = SqliteStateStore.Open(
                 Path.Combine(Path.GetTempPath(), "held-" + label + "-delete-" + Guid.NewGuid().ToString("N")),
-                Settings, TimeProvider.System);
+                Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             store.MarkFirstSyncDone(fx.Pair.PairId);
             // A link protects a whole folder delete; only files count as placeholders, so the stub case deletes a file.

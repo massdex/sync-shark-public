@@ -20,7 +20,7 @@ internal static partial class DropboxChecks
             Root(), [], [], true);
         h.Wire.LatestCursor = "old-pending";
         h.Wire.SeedChangePage("old-pending", [], false, "old-pending");
-        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(pair);
             var (runtime, _) = PrepareCursorRuntime(h, local, pair, store, productRoot);
@@ -64,7 +64,7 @@ internal static partial class DropboxChecks
         var lists = h.Wire.ListRequests.Count;
         var feeds = h.Wire.ContinueCursors.Count;
         var calls = h.Wire.Calls.Count;
-        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var (runtime, _) = PrepareCursorRuntime(h, local, pair, store, productRoot);
             var applied = await runtime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { },
@@ -101,7 +101,7 @@ internal static partial class DropboxChecks
             Root(), [], [], true);
         h.Wire.LatestCursor = "delete-prepare";
         h.Wire.SeedChangePage("delete-prepare", [], false, "delete-prepare");
-        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(pair);
             var (runtime, _) = PrepareCursorRuntime(h, local, pair, store, productRoot);
@@ -125,7 +125,7 @@ internal static partial class DropboxChecks
         if (released) h.Wire.Script("/2/files/list_revisions", HttpStatusCode.BadRequest, 20);
         // A non-transport lookup failure is pending evidence without entering the client's five-minute read retry.
         else h.Wire.OnRevisionAsync = _ => Task.FromException(new InvalidOperationException("offline revision read failed"));
-        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var (runtime, run) = PrepareCursorRuntime(h, local, pair, store, productRoot);
             var prepared = FirstSyncChoicesState.Load(productRoot, pair.PairId, store)!;
@@ -298,14 +298,14 @@ internal static partial class DropboxChecks
             Root(), [], [], true);
         h.Wire.LatestCursor = "deferred-prepare";
         h.Wire.SeedChangePage("deferred-prepare", [], false, "deferred-prepare");
-        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(pair);
             var (runtime, _) = PrepareCursorRuntime(h, local, pair, store, productRoot);
             await runtime.PrepareFirstSyncAsync(pair.PairId, _ => { }, CancellationToken.None);
         }
         h.Wire.SeedChangePage("deferred-prepare", [], false, "deferred-refreshed");
-        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var (runtime, run) = PrepareCursorRuntime(h, local, pair, store, productRoot);
             var applied = await runtime.ApplyFirstSyncAsync(pair.PairId, null, true, null, _ => { },
@@ -329,7 +329,7 @@ internal static partial class DropboxChecks
                 store.UnresolvedIntents(pair.PairId).All(action => action.Path != "held.txt" && action.FromPath != "held.txt"),
                 "terminal Unknown retains no executable held-path action, only evidence recheck input");
         }
-        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
             Require(store.FirstSyncDone(pair.PairId) && store.Cursor(RootId) == "deferred-refreshed" &&
                 store.SyncRetryAt(pair.PairId, "held.txt")?.Held?.Path == "held.txt",
                 "completion, safe cursor and held evidence input survive SQLite reopen");

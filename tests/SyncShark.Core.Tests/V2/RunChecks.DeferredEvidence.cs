@@ -8,6 +8,7 @@ internal static partial class RunChecks
         await DeferredEvidence_ResolvesUploadAndIdenticalDeleteAsync();
         await DeferredEvidence_UsesFreshLocalMtimeAsync();
         await DeferredEvidence_FailureRemainsPendingAsync();
+        await DeferredEvidence_ReviewWithdrawalHoldsOnlyItemAsync();
         await DeferredEvidence_OutsideHeldDeleteRefusedAsync();
         await DeferredEvidence_ReviewedFolderFreshAdmissionAsync();
         await DeferredEvidence_MissingReviewRefusedAsync();
@@ -122,6 +123,46 @@ internal static partial class RunChecks
         Require(fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0,
             "failed evidence neither guesses upload nor deletes");
         Console.WriteLine("PASS DeferredEvidence_FailureRemainsPending");
+    }
+
+    private static async Task DeferredEvidence_ReviewWithdrawalHoldsOnlyItemAsync()
+    {
+        var fx = Build();
+        using var deadline = new CancellationTokenSource(GateTimeout);
+        var ct = deadline.Token;
+        var at = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
+        var local = fx.A.Seed("held.txt", "retained", mtime: at);
+        fx.B.Seed("ordinary.txt", "independent");
+        var evidence = new DeferredInventory(fx.B)
+        {
+            Block = true, Deleted = at.AddDays(1),
+            HistoryHashes = new Dictionary<string, string?> { [local.Path] = local.Hash }
+        };
+        fx.Provider.AddInventory(fx.Pair.B, evidence);
+        var run = fx.Run();
+        var plan = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), ct);
+        var reviewed = ReviewedHeld(plan);
+        var applying = run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), ct, reviewed);
+        try
+        {
+            await evidence.Started.Task.WaitAsync(ct);
+            // Defensive final-gate test: production retains this set unchanged. The blocked probe
+            // makes the synthetic withdrawal deterministic, before resolution reads the authority.
+            reviewed.Clear();
+        }
+        finally { evidence.Release.TrySetResult(); }
+        var report = await applying;
+        Require(report.Outcome == RunOutcomes.Partial && fx.Store.FirstSyncDone(fx.Pair.PairId),
+            "late unreviewed evidence does not refuse the pair's completion");
+        Require(fx.WriterA.Deletes == 0 && await fx.A.ObserveAsync("held.txt", ct) is not null &&
+            await fx.A.ObserveAsync("ordinary.txt", ct) is not null,
+            "late authority hold preserves the victim while independent work completes");
+        Require(fx.Store.SyncRetryAt(fx.Pair.PairId, "held.txt") is not null &&
+            fx.Store.UnresolvedNotices(fx.Pair.PairId).Count(notice => notice.Path == "held.txt") == 1,
+            "late authority hold retains one retry and exactly one notice");
+        Require(fx.Store.BaselinesAt(fx.Pair.PairId, Side.A, ["held.txt"]).Count == 0,
+            "the held victim is not marked synced");
+        Console.WriteLine("PASS DeferredEvidence_ReviewWithdrawalHoldsOnlyItem");
     }
 
     private static async Task DeferredEvidence_OutsideHeldDeleteRefusedAsync()
@@ -323,7 +364,7 @@ internal static partial class RunChecks
         static async Task<int> RunFoldersAsync(int[] ids, bool parallel)
         {
             var storagePath = Path.Combine(Path.GetTempPath(), "held-folders-" + Guid.NewGuid().ToString("N"));
-            using var store = SqliteStateStore.Open(storagePath, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(storagePath, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(record: true, suppliedStore: store);
             using var competingRefresh = new ManualResetEventSlim();
             var refreshes = 0;

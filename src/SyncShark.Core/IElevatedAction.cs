@@ -30,12 +30,7 @@ public sealed class AttendedElevatedAction : IElevatedAction
         return path;
     }
 
-    public static string DownloadStagePath(string targetPath)
-    {
-        var full = Path.GetFullPath(targetPath);
-        var hash = Convert.ToHexString(SHA256.HashData(Encoding.Unicode.GetBytes(full.ToUpperInvariant()))).ToLowerInvariant();
-        return Path.Combine(Path.GetDirectoryName(full)!, SyncLocalTransfer.ArtifactPrefix + hash + ".partial");
-    }
+    public static string DownloadStagePath(string targetPath) => V2.ArtifactPaths.DownloadStagePath(targetPath);
 
     // Only base64 DATA enters the fixed program. Encoding the whole program is not a quoting defence.
     internal static string Command(string verb, IReadOnlyList<string> args)

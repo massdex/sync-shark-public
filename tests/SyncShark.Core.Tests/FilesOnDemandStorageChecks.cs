@@ -23,7 +23,7 @@ internal static class FilesOnDemandStorageChecks
         await StoreWorkChecksAsync(Path.Combine(root, "store-work"));
         var remote = new PilotRemoteEntry("Folder/file.txt", PilotEntryKind.File, "id:file", "revision-1", 4, new string('a', 64));
         var local = new RootDef("local", SyncProviders.Local, null, root, "root-object");
-        using (var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             foreach (var verb in new[] { "online-only", "offline", "inherit", "list" })
             {
@@ -88,7 +88,7 @@ internal static class FilesOnDemandStorageChecks
                 new ActionResult(upload.ActionId, Outcome.Uncertain, null, null, null, "response lost"));
             Require(store.StorageSettlementPage().Count == 0, "uncertain upload cannot authorize conversion");
             var executor = new Executor(store, V2Settings.Default,
-                new SyncTransferResourceController(new SyncTransferSettings()), isStateDamage: StorageFailureClassifier.IsStateDamage);
+                new SyncTransferResourceController(new SyncTransferSettings()), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
             var reconciled = await executor.ReconcileAsync([upload], generation, endpoint, endpoint, CancellationToken.None);
             Require(reconciled.Single().Outcome == Outcome.Done && endpoint.UploadCalls == 1,
                 "lost response reconciles remote identity without a second upload");
@@ -101,7 +101,7 @@ internal static class FilesOnDemandStorageChecks
                 StorageNotices.Report(store, store.Pair("pair")!, remote.RelativePath, metadata, new IOException("synthetic conversion failure"));
             Require(store.OpenNotices("pair").Count(n => n.Storage is not null) == 1, "storage failure deduplicates by item operation cause");
         }
-        using (var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             Require(store.StorageSettlementPage().Count == 1, "receipt survives restart before conversion");
             var savedNotice = store.OpenNotices("pair").Single(n => n.Storage is not null);
@@ -169,7 +169,7 @@ internal static class FilesOnDemandStorageChecks
     }
     private static Task StoreWorkChecksAsync(string root)
     {
-        using var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System);
+        using var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var localRoot = new RootDef("device", SyncProviders.Local, null, root, "device-root");
         var cloudRoot = new RootDef("cloud", SyncProviders.Dropbox, "account", "/Remote", "cloud-root");
         var pair = new PairDef("work", "Pair A", localRoot, cloudRoot, [], [], true);

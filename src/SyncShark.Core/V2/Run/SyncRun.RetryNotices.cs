@@ -278,7 +278,12 @@ public sealed partial class SyncRun
             {
                 if (choice == NoticeChoices.RestoreAgain)
                 {
-                    Executor.RequestFolderRestoreAgain(_store, pairId, notice);
+                    var cloud = new[] { pair.A, pair.B }.FirstOrDefault(root => root.Provider == ProviderIds.Dropbox)
+                        ?? throw new SyncRunRefusedException("This pair has no Dropbox endpoint.");
+                    await _endpoints.PrepareAsync(pair, token);
+                    var endpoint = _endpoints.Writer(cloud) as IFolderTreeDeleter
+                        ?? throw new NotSupportedException("This endpoint cannot authorize a folder restore.");
+                    Executor.RequestFolderRestoreAgain(_store, pairId, notice, endpoint);
                     return "Restore again requested for the same submitted revisions. The notice stays until recovery is verified; occupied paths remain protected.";
                 }
                 if (choice == NoticeChoices.Ignore) _store.CloseNotice(noticeId, choice);
@@ -375,6 +380,10 @@ public sealed partial class SyncRun
             }
             if (choice == NoticeChoices.RetryNow)
             {
+                // A pair-level Retry wakes the ordinary run; it is not an item at the pair root.
+                // Never manufacture an empty-path retry or grant deletion authority from a notice button.
+                if (notice.Path.Length == 0)
+                    return NoticeChoices.Result(choice, notice);
                 if (notice.ReasonKey == PlanNotices.CannotRead.Key)
                 {
                     var unreadable = _store.SyncRetryAt(pairId, notice.Path) ??
@@ -395,7 +404,9 @@ public sealed partial class SyncRun
                 lock (_noticeChoiceGate)
                 {
                     pair = _store.Pair(pairId) ?? throw new SyncRunRefusedException("The pair is no longer available.");
-                    var paths = CreateExclusions.Validate(pair.Excluded.Concat([notice.Path, notice.Repair?.Destination ?? notice.Path]).ToArray());
+                    IReadOnlyList<string> paths;
+                    try { paths = ExclusionPaths.Validate(pair.Excluded.Concat([notice.Path, notice.Repair?.Destination ?? notice.Path]).ToArray()); }
+                    catch (ExclusionPathValidationException error) { throw new SyncCliUsageException(error.Message); }
                     if (saveNarrowerPair is not null) saveNarrowerPair(pair, pair with { Excluded = paths });
                     else _store.SavePair(pair with { Excluded = paths });
                 }

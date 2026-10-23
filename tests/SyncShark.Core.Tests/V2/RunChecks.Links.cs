@@ -7,7 +7,7 @@ internal static partial class RunChecks
         var folder = Path.Combine(Path.GetTempPath(), "link-pages-" + Guid.NewGuid().ToString("N"));
         try
         {
-            using (var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System))
+            using (var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 var fx = Build(suppliedStore: store);
                 var items = Enumerable.Range(0, 57).Select(i => fx.A.Seed($"link-{i:D3}", "target") with { Flags = ItemFlags.Link }).ToArray();
@@ -50,7 +50,7 @@ internal static partial class RunChecks
         var folder = Path.Combine(Path.GetTempPath(), "link-cursor-" + Guid.NewGuid().ToString("N"));
         try
         {
-            using (var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System))
+            using (var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 var fx = Build(suppliedStore: store);
                 var items = new[] { "a/one", "b/two" }.Select(path => fx.A.Seed(path, "target") with { Flags = ItemFlags.Link }).ToArray();
@@ -175,7 +175,7 @@ internal static partial class RunChecks
         var folder = Path.Combine(Path.GetTempPath(), "link-action-" + Guid.NewGuid().ToString("N"));
         try
         {
-            using (var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System))
+            using (var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 var fx = Build(suppliedStore: store);
                 var pair = fx.Pair with { A = definition with { RootId = fx.Pair.A.RootId } };
@@ -232,7 +232,7 @@ internal static partial class RunChecks
         {
             LocalChecks.Seed(root, "excluded/target/data.txt", "content");
             LocalChecks.CreateJunction(link, target);
-            using (var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System))
+            using (var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 var fx = Build(suppliedStore: store);
                 var pair = fx.Pair with { A = LocalChecks.RootOf(root, fx.Pair.A.RootId), Excluded = ["excluded"] };

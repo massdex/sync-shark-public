@@ -11,7 +11,7 @@ internal static partial class RunChecks
         Fixture fx;
         RootDef root;
         var checkpoint = new NtfsUsnCheckpoint(1, 0, 100, 0);
-        using (var store = SqliteStateStore.Open(data, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(data, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             fx = Build(suppliedStore: store);
             fx.A.DropboxHashes = fx.B.DropboxHashes = true;
@@ -37,7 +37,7 @@ internal static partial class RunChecks
                 (store.SyncRetryAt(fx.Pair.PairId, "") is not null) == interrupt,
                 "SQLite root run retry preserves counted effects and settles inventory_pending unless interrupted");
         }
-        using (var reopened = SqliteStateStore.Open(data, StorageChecks.Fast, TimeProvider.System))
+        using (var reopened = SqliteStateStore.Open(data, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var walks = 0;
             fx.Provider.AddInventory(root, DurableInventory(root, reopened, checkpoint, () => walks++));

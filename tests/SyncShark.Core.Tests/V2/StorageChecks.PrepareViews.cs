@@ -5,11 +5,136 @@ namespace Massdex.SyncShark.V2;
 
 internal static partial class StorageChecks
 {
+    private static void PrepareJsonClosureChecks(string root)
+    {
+        var folder = Fresh(root, "prepare-json-closure");
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
+        var pair = Pair("p1");
+        store.SavePair(pair);
+        const string oldJson = """
+            {"digest":"old-review","paths":{"file":"A"},"oneSided":[],"deleteVictims":[],
+             "deleteVictimCount":0,"rebuildables":[],"heldDeletions":[],
+             "matched":[{"p":"file","a":"local-stamp","b":"remote-stamp"}],
+             "carriedIgnoredDeletes":[{"path":"folder","side":"A","files":1,"folders":2,"bytes":3,"reviewedSignature":"unchanged-signature"}]}
+            """;
+        var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+        using var input = new MemoryStream(Encoding.UTF8.GetBytes(oldJson));
+        var prepared = PrepareDatabase.Import(store, "p1", input);
+        Require(input.CanRead && prepared.Database is IPrepareDatabase && prepared.Matched.Single() ==
+            new StoredMatch("file", "local-stamp", "remote-stamp"),
+            "old JSON imports compact match fields through the lower contract without owning the stream");
+        Require(prepared.RebuildableChoices is null && prepared.Warnings is null &&
+            prepared.InventoryCursors.Count == 0 && prepared.InventoryScope is null &&
+            prepared.NarrowedChoicesDigest is null && prepared.NarrowedIgnoreRules.Count == 0 && !prepared.NeedsReprepare,
+            "omitted fields retain their null defaults and initialized lists");
+        using var serialized = JsonDocument.Parse(JsonSerializer.Serialize(prepared, options));
+        var payload = serialized.RootElement;
+        Require(payload.GetProperty("digest").GetString() == "old-review" &&
+            !payload.TryGetProperty("database", out _) && !payload.TryGetProperty("Database", out _) &&
+            payload.GetProperty("matched")[0].EnumerateObject().Select(p => p.Name).SequenceEqual(new[] { "p", "a", "b" }) &&
+            payload.GetProperty("carriedIgnoredDeletes")[0].GetProperty("reviewedSignature").GetString() == "unchanged-signature",
+            "camelCase payload, p/a/b fields, ignored Database and ReviewedSignature stay exact");
+        Require(prepared.Database!.Budget("A:folder")?.ReviewedSignature == "unchanged-signature",
+            "lazy budget lookup retains the reviewed signature");
+        var previous = store.ReadPrepare("p1");
+        foreach (var bad in new[]
+        {
+            oldJson.Replace("\"digest\":\"old-review\"", "\"digest\":\"old-review\",\"digest\":\"duplicate\""),
+            oldJson.Replace("\"p\":\"file\"", "\"p\":null"),
+            oldJson.Replace("{\"p\":\"file\",\"a\":\"local-stamp\",\"b\":\"remote-stamp\"}",
+                "{\"p\":\"file\",\"a\":\"a\",\"b\":\"b\"},{\"p\":\"FILE\",\"a\":\"a\",\"b\":\"b\"}")
+        })
+        {
+            using var failedInput = new MemoryStream(Encoding.UTF8.GetBytes(bad));
+            ExpectThrows<JsonException>(() => PrepareDatabase.Import(store, "p1", failedInput));
+            Require(failedInput.CanRead && store.ReadPrepare("p1") == previous && prepared.Matched.Count == 1,
+                "malformed and duplicate imports preserve published authority and leave caller streams open");
+        }
+        var calls = 0;
+        var invalid = store.WritePrepare("p1", writer => writer.Commit("{}", "invalid"));
+        ExpectThrows<JsonException>(() => new PrepareDatabase(store, invalid).Narrow(pair, pair, "old", "new", small =>
+        {
+            calls++;
+            throw new InvalidOperationException("Invalid header must not reach Edge.");
+        }));
+        Require(calls == 0, "Storage validates its own metadata before invoking the Edge callback");
+        ExpectThrows<PreparePublicationException>(() => prepared.Database.Narrow(pair, pair, "old", "new", small =>
+        {
+            calls++;
+            throw new InvalidOperationException("Stale header must not reach Edge.");
+        }));
+        Require(calls == 0 && !prepared.Database.MatchLookup.ContainsKey("file") && !prepared.Matched.Any(),
+            "stale narrowing is refused and old lazy views cannot read a replacement generation");
+        foreach (var suffix in new[] { "", ",\"matched\":null,\"carriedIgnoredDeletes\":null,\"warnings\":null,\"rebuildableChoices\":null,\"inventoryCursors\":null" })
+        {
+            using var defaultsInput = new MemoryStream(Encoding.UTF8.GetBytes(
+                "{\"digest\":\"defaults\",\"paths\":{},\"oneSided\":[],\"deleteVictims\":[],\"rebuildables\":[],\"heldDeletions\":[]" + suffix + "}"));
+            var defaults = PrepareDatabase.Import(store, "p1", defaultsInput);
+            Require(defaults.Matched.Count == 0 && defaults.CarriedIgnoredDeletes.Count == 0 &&
+                defaults.InventoryCursors.Count == 0 && defaults.Warnings is null && defaults.RebuildableChoices is null,
+                "old JSON omitted and explicit-null optional collections retain their original import defaults");
+        }
+        var file = Path.Combine(folder, "page.json");
+        WritePrepareFixture(file, 257, "a", "b");
+        var paged = ImportPrepareFile(store, "p1", file);
+        var header = store.ReadPrepare("p1")!;
+        Require(store.ReadPrepareRows(header.Generation, "matched", digest: header.Digest).Count == 256 &&
+            paged.Matched[255].Path == "d/255" && paged.Matched[256].Path == "d/256" && paged.Matched.Count() == 257,
+            "lazy views cross the unchanged 256-row boundary without dropping or duplicating rows");
+        var current = store.ReadPrepare("p1")!;
+        Prepared? observed = null;
+        ExpectThrows<InvalidOperationException>(() => new PrepareDatabase(store, current).Narrow(pair, pair, "old", "new", small =>
+        {
+            observed = small;
+            throw new InvalidOperationException("Callback probe.");
+        }));
+        Require(observed is not null && observed.Digest == current.Digest && observed.Matched.Count == 0 && store.ReadPrepare("p1") == current,
+            "Edge receives validated Storage metadata, not caller materialized or stale metadata");
+    }
+
+    private static void PrepareEdgeStreamOwnershipChecks(string root)
+    {
+        var folder = Fresh(root, "prepare-edge-stream");
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
+        store.SavePair(Pair("p1"));
+        Directory.CreateDirectory(Path.Combine(folder, "v2"));
+        var file = Path.Combine(folder, "v2", "first-sync-p1.choices.json");
+        File.WriteAllText(file, "{}");
+        var priorOpen = FirstSyncChoicesState.OpenReadForTest;
+        try
+        {
+            foreach (var publicationFailure in new[] { false, true })
+            {
+                MemoryStream? opened = null;
+                FirstSyncChoicesState.OpenReadForTest = _ =>
+                {
+                    opened = new PrepareReadCallbackStream(Encoding.UTF8.GetBytes(publicationFailure
+                        ? "{\"digest\":\"old\",\"paths\":{},\"oneSided\":[],\"deleteVictims\":[],\"rebuildables\":[],\"heldDeletions\":[]}"
+                        : "{\"matched\":42}"), () =>
+                        {
+                            if (publicationFailure)
+                                store.ArchiveAndRemovePair("p1", Path.Combine(folder, "archive"));
+                        });
+                    return opened;
+                };
+                Exception? failure = null;
+                try { _ = FirstSyncChoicesState.Load(folder, "p1", store); }
+                catch (Exception error) { failure = error; }
+                var expected = publicationFailure
+                    ? "The first-sync prepare could not be published: Pair p1 was removed during prepare. Review the pair and run prepare again."
+                    : "The retained first-sync prepare could not be parsed: Expected prepare array. â€” run prepare again.";
+                Require(failure is SyncCliReviewException && failure.Message == expected && opened is { CanRead: false },
+                    "Edge retains exact error wording and disposes the stream on parse/publication failure");
+            }
+        }
+        finally { FirstSyncChoicesState.OpenReadForTest = priorOpen; }
+    }
+
     private static void PrepareNativeViewsParity(string root)
     {
         var folder = Fresh(root, "prepare-native-views");
         var legacyFolder = Fresh(root, "prepare-native-views-legacy");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         var choices = new FirstSyncChoices.Parsed(new Dictionary<string, Side?>(), [], []);
         HeldDeletion[] held = [new("HeldFolder", Side.A, "Rule"), new("elsewhere", Side.B, "Rule")];
@@ -65,14 +190,14 @@ internal static partial class StorageChecks
     private static void PrepareLegacyMissingMatches(string root)
     {
         var folder = Fresh(root, "prepare-legacy-missing");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         var file = Path.Combine(folder, "old.json");
         foreach (var suffix in new[] { "", ",\"matched\":null" })
         {
             File.WriteAllText(file, "{\"digest\":\"old\",\"paths\":{},\"oneSided\":[],\"deleteVictims\":[]," +
                 "\"deleteVictimCount\":0,\"rebuildables\":[],\"heldDeletions\":[]" + suffix + "}");
-            var prepared = PrepareDatabase.Import(store, "p1", file);
+            var prepared = ImportPrepareFile(store, "p1", file);
             Require(prepared.Matched.Count == 0 && prepared.Database!.MatchLookup.Count == 0,
                 "legacy missing/explicit-null matched array imports as an empty view");
         }
@@ -96,6 +221,20 @@ internal static partial class StorageChecks
             Require(document?.RootElement.GetString() == value &&
                 reader.Token().Token == JsonTokenType.EndObject && reader.Token().Token == JsonTokenType.None,
                 "incremental reader preserves >64KiB escaped Unicode value across chunk boundaries");
+        }
+    }
+
+    private sealed class PrepareReadCallbackStream(byte[] bytes, Action onRead) : MemoryStream(bytes, writable: false)
+    {
+        private bool _read;
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if (!_read)
+            {
+                _read = true;
+                onRead();
+            }
+            return base.Read(buffer, offset, count);
         }
     }
 

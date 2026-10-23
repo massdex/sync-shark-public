@@ -7,7 +7,7 @@ internal static partial class StorageChecks
     private static void Move_RemovalAndInsertionAtomic(string root)
     {
         var folder = Fresh(root, "move-atomic");
-        using var store = SqliteStateStore.Open(folder, Fast with { StoreBatchRows = 1 }, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast with { StoreBatchRows = 1 }, new TestClock(), LocalItems.CaptureOptionalHash);
         var gen = store.BeginGeneration("root", "snapshot");
         store.WriteSnapshot(new Snapshot("root", Side.A, gen, "c", [F("a", "id1", "11")], []));
         var delta = store.BeginGeneration("root", "delta");
@@ -39,7 +39,7 @@ internal static partial class StorageChecks
     private static void Tombstone_ReplacementKeepsDisplacedEvidence(string root)
     {
         var folder = Fresh(root, "tombstone-replace");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         Track(store, "root", "id1", "id2", "id3", "id4");
         var gen = store.BeginGeneration("root", "snapshot");
         store.WriteSnapshot(new Snapshot("root", Side.A, gen, "c", [F("p.txt", "id1", "11")], []));
@@ -64,7 +64,7 @@ internal static partial class StorageChecks
     private static void Tombstone_PathReuseKeepsUnresolved(string root)
     {
         var folder = Fresh(root, "tombstone-reuse");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         Track(store, "root", "id1", "id2");
         var gen = store.BeginGeneration("root", "snapshot");
         store.WriteSnapshot(new Snapshot("root", Side.A, gen, "c", [F("p.txt", "id1", "11")], []));

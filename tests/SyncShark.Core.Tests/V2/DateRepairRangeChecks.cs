@@ -2,8 +2,16 @@ namespace Massdex.SyncShark.V2;
 
 internal static class DateRepairRangeChecks
 {
+    private static IReadOnlyList<Baseline> Page(SqliteStateStore store, string pairId,
+        DateOnly? localDate = null, DateRepairBound? from = null, DateRepairBound? to = null)
+    {
+        var (start, end) = DateRepair.UtcRange(localDate, from, to, TimeZoneInfo.Local);
+        return ((IDateRepairStore)store).DateRepairPage(pairId, "", 128, Side.A, start, end, false);
+    }
+
     internal static async Task RunAsync(string root)
     {
+        await DateRepairSeamChecks.RunAsync(root);
         var zone = TimeZoneInfo.CreateCustomTimeZone("test UTC+3", TimeSpan.FromHours(3), "UTC+3", "UTC+3");
         var day = new DateOnly(2026, 10, 18);
         var (start, end) = DateRepair.UtcRange(day, null, null, zone);
@@ -31,7 +39,7 @@ internal static class DateRepairRangeChecks
         Directory.CreateDirectory(root);
         var files = Path.Combine(root, "files");
         Directory.CreateDirectory(files);
-        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pair = new PairDef("range", "range", LocalChecks.RootOf(files, "a"),
             new RootDef("b", SyncProviders.Dropbox, "account", "/test", "id:root"), ["excluded"], ["FileName:ignored"], true);
         store.SavePair(pair);
@@ -69,12 +77,12 @@ internal static class DateRepairRangeChecks
         LocalChecks.Require(!store.DateRepairHeld(pair, store.Baselines(pair.PairId, ["fix"]).Single()) &&
             store.DateRepairHeld(pair, store.Baselines(pair.PairId, ["held/child"]).Single()),
             "empty notice is not a hold, real ancestor is");
-        LocalChecks.Require(store.DateRepairPage(pair.PairId, "", localDate: day).Count == 8 &&
-            store.DateRepairPage(pair.PairId, "", localDate: day.AddDays(-1)).Count == 0,
+        LocalChecks.Require(Page(store, pair.PairId, localDate: day).Count == 8 &&
+            Page(store, pair.PairId, localDate: day.AddDays(-1)).Count == 0,
             "candidate selection uses live mtime instead of already-correct stale baseline mtime");
-        LocalChecks.Require(store.DateRepairPage(pair.PairId, "", from: DateRepairBound.Parse("2026-10-18T11:00"),
+        LocalChecks.Require(Page(store, pair.PairId, from: DateRepairBound.Parse("2026-10-18T11:00"),
             to: DateRepairBound.Parse("2026-10-18T12:00")).Count == 0 &&
-            store.DateRepairPage(pair.PairId, "", from: DateRepairBound.Parse("2026-10-18T12:00"),
+            Page(store, pair.PairId, from: DateRepairBound.Parse("2026-10-18T12:00"),
             to: DateRepairBound.Parse("2026-10-18T12:01")).Count == 8,
             "SQL minute selection includes from and excludes timed to");
         File.WriteAllText(Path.Combine(files, "bad-hash"), "edit");
@@ -86,7 +94,7 @@ internal static class DateRepairRangeChecks
             if (path == "remote-failed") throw new HttpRequestException("single lookup failure");
             return Task.FromResult<ItemState?>(cloud[path]);
         }
-        var dry = await DateRepair.RunAsync(store, pair, Observe, root, true, [], CancellationToken.None, StorageFailureClassifier.IsStateDamage,
+        var dry = await DateRepair.RunAsync(store, pair, Observe, root, true, [], CancellationToken.None, DateRepairInputs.Exclusions(list), [], false, StorageFailureClassifier.IsStateDamage, StorageFailureClassifier.IsDirectStateDamage, StorageFailureClassifier.IsBusy,
             from: DateRepairBound.Parse("2026-10-18T11:00"), to: DateRepairBound.Parse("2026-10-18T13:00"), excludeList: list);
         var log = File.ReadAllText(dry.ReportFile);
         LocalChecks.Require(dry.Eligible == 2 && dry.Skipped == 6 &&
@@ -104,7 +112,7 @@ internal static class DateRepairRangeChecks
             try
             {
                 report = await DateRepair.RunAsync(store, pair, Observe, root, false, [], CancellationToken.None,
-                    StorageFailureClassifier.IsStateDamage, from: day, to: day, excludeList: list);
+                    DateRepairInputs.Exclusions(list), [], false, StorageFailureClassifier.IsStateDamage, StorageFailureClassifier.IsDirectStateDamage, StorageFailureClassifier.IsBusy, from: day, to: day, excludeList: list);
             }
             catch (Exception error) { observed = error; }
             finally { store.BeforeDateRepairCommitForTest = null; }
@@ -119,7 +127,7 @@ internal static class DateRepairRangeChecks
         {
             if (baseline.ObjectKey == "db-busy") throw new Microsoft.Data.Sqlite.SqliteException("single item busy", 5);
         };
-        var done = await DateRepair.RunAsync(store, pair, Observe, root, false, [], CancellationToken.None, StorageFailureClassifier.IsStateDamage, from: day, to: day, excludeList: list);
+        var done = await DateRepair.RunAsync(store, pair, Observe, root, false, [], CancellationToken.None, DateRepairInputs.Exclusions(list), [], false, StorageFailureClassifier.IsStateDamage, StorageFailureClassifier.IsDirectStateDamage, StorageFailureClassifier.IsBusy, from: day, to: day, excludeList: list);
         store.BeforeDateRepairCommitForTest = null;
         LocalChecks.Require(done.Skipped == 7 && File.ReadAllText(done.ReportFile).Contains("single item busy"),
             "a transient database failure skips its item and independent repairs finish");
@@ -130,8 +138,8 @@ internal static class DateRepairRangeChecks
             "repair reconciles null hash, re-downloaded identity and date without changing content");
         LocalChecks.Require(!store.OpenNotices(pair.PairId).Any(n => n.ReasonKey == "local-download-date"),
             "successful repair closes its date-only retry notice");
-        LocalChecks.Require(!DateRepair.ItemFailure(new Microsoft.Data.Sqlite.SqliteException("corrupt", 11), StorageFailureClassifier.IsStateDamage) &&
-            DateRepair.ItemFailure(new Microsoft.Data.Sqlite.SqliteException("busy", 5), StorageFailureClassifier.IsStateDamage),
+        LocalChecks.Require(!DateRepair.ItemFailure(new Microsoft.Data.Sqlite.SqliteException("corrupt", 11), StorageFailureClassifier.IsStateDamage, StorageFailureClassifier.IsDirectStateDamage) &&
+            DateRepair.ItemFailure(new Microsoft.Data.Sqlite.SqliteException("busy", 5), StorageFailureClassifier.IsStateDamage, StorageFailureClassifier.IsDirectStateDamage),
             "corruption stops, transient item busy skips");
     }
 }

@@ -32,7 +32,7 @@ internal static partial class FilesOnDemandCompatibilityChecks
         var beforeNoticeColumns = Columns("notice");
         var beforeRecoveryColumns = Columns("recovery");
         var beforeGapColumns = Columns("local_gap");
-        using (var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             Require(store.ByObject("fixture-root", "fixture-item")?.Size == 17, "populated final26 fixture survives open");
             Require(!store.HasStorageWork() && !store.HasOwnedPointers("fixture-root") && store.StorageRegistrations().Count == 0 &&
@@ -143,7 +143,7 @@ internal static partial class FilesOnDemandCompatibilityChecks
             StoreSchema.Execute(enabled, null, "UPDATE file_state SET flags=1024 WHERE object_id='fixture-item';");
             Require(store.LiveFlagged("fixture-root", ItemFlags.NeedsRehash).Count == 0 && store.LiveFlagged("fixture-root", ItemFlags.OwnedPointer).Count == 1, "pure pointers use owned route");
         }
-        using (var confirmed = SqliteStateStore.Open(Path.Combine(root, "confirmed"), V2Settings.Default, TimeProvider.System))
+        using (var confirmed = SqliteStateStore.Open(Path.Combine(root, "confirmed"), V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var result = confirmed.EnableStorageWithBackup(null);
             Require(!result.Enabled && !confirmed.IsStorageEnabled, "missing configured directory requires a choice");
@@ -156,7 +156,7 @@ internal static partial class FilesOnDemandCompatibilityChecks
         Require(parsed.Flag("--confirm-without-backup") && parsed.Value("--backup-directory") == Path.Combine(root, "Recovery"),
             "CLI transports backup selection and explicit confirmation");
         var optedIn = Schema();
-        using (var reopened = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System))
+        using (var reopened = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash))
             Require(optedIn.SequenceEqual(Schema()), "enabled replay preserves schema definitions");
     }
 

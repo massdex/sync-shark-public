@@ -4,7 +4,7 @@ internal static partial class StorageChecks
 {
     private static void ContentProofAttemptHasOneOwner(string root)
     {
-        using var store = SqliteStateStore.Open(Fresh(root, "content-proof-attempt"), Fast, new TestClock());
+        using var store = SqliteStateStore.Open(Fresh(root, "content-proof-attempt"), Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         var first = FailureRetryOwner.SaveFailedRetry(store, "p1", "item.txt", "Hash: side A unavailable", null, T0);
         var second = FailureRetryOwner.SaveFailedRetry(store, "p1", "item.txt", "Hash: side B unavailable",
@@ -32,7 +32,7 @@ internal static partial class StorageChecks
         var directory = Fresh(root, "content-proof-summary");
         var causes = new[] { "Hash: unreadable", "Hash deferred after repeated transport failures: unavailable",
             "Content proof is unavailable, paused, changed, or deferred to indexing; the item remains unsynced." };
-        using (var store = SqliteStateStore.Open(directory, Fast, new TestClock()))
+        using (var store = SqliteStateStore.Open(directory, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             store.SavePair(Pair("p1"));
             for (var i = 0; i < 50; i++)
@@ -50,7 +50,7 @@ internal static partial class StorageChecks
             store.SaveSyncRetry("p1", new("explicit-other.txt", "sync", 1, causes[0], T0.AddHours(1))
                 { FailureKind = FailureRetryOwner.FailureKind.Other });
         }
-        using var reopened = SqliteStateStore.Open(directory, Fast, new TestClock());
+        using var reopened = SqliteStateStore.Open(directory, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         var before = reopened.ReadSyncRetries("p1").ToArray();
         var fresh = Enumerable.Range(45, 10).Select(i => $"bad-{i:D2}.txt").Reverse().ToArray();
         var summary = SyncRun.SummarizeContentUnconfirmed(fresh, reopened.ReadSyncRetries("p1"));

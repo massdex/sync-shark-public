@@ -29,13 +29,21 @@ internal static partial class StorageChecks
         PrepareNativeViewsParity(root);
         PrepareLegacyMissingMatches(root);
         PrepareReaderChunkBoundaries();
+        PrepareJsonClosureChecks(root);
+        PrepareEdgeStreamOwnershipChecks(root);
         PrepareStreamingRetainedMemory(root);
+    }
+
+    private static Prepared ImportPrepareFile(SqliteStateStore store, string pairId, string file)
+    {
+        using var stream = FirstSyncChoicesState.OpenRecord(file);
+        return PrepareDatabase.Import(store, pairId, stream);
     }
 
     private static void PrepareV5Migration(string root, bool flagged)
     {
         var folder = Fresh(root, "prepare-v5-" + flagged);
-        using (var store = SqliteStateStore.Open(folder, Fast, new TestClock()))
+        using (var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             store.SavePair(Pair("p1"));
             var generation = store.BeginGeneration("ra", "full");
@@ -51,7 +59,7 @@ internal static partial class StorageChecks
                 "PRAGMA user_version=5;";
             command.ExecuteNonQuery();
         }
-        using (var store = SqliteStateStore.Open(folder, Fast, new TestClock()))
+        using (var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             Require(store.FirstSyncDone("p1") && store.Cursor("ra") == "preserve-cursor",
                 "v5 migration preserves pair and root state with optional flagged index=" + flagged);
@@ -66,14 +74,14 @@ internal static partial class StorageChecks
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='fs_flagged';")! == 1,
                 "combined heldperf/v6 upgrade preserves or creates its required flagged index");
         }
-        using var reopened = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var reopened = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         Require(reopened.ReadPrepare("p1")?.Digest == "v6-digest", "v6 prepare survives reopen");
     }
 
     private static void PrepareAtomicReplacement(string root)
     {
         var folder = Fresh(root, "prepare-atomic");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         var previous = store.WritePrepare("p1", writer =>
         {
@@ -130,7 +138,7 @@ internal static partial class StorageChecks
     private static void PreparePairRemovalArchive(string root)
     {
         var folder = Fresh(root, "prepare-pair-removal");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         foreach (var id in new[] { "p1", "p2", "p3" })
         {
             store.SavePair(Pair(id) with { Enabled = false });
@@ -172,13 +180,13 @@ internal static partial class StorageChecks
     private static void PrepareImportAndPlannerParity(string root)
     {
         var folder = Fresh(root, "prepare-planner-parity");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         var local = new ItemState("d/x", ItemKind.File, "local:x", "v1", "aabbccdd", 12, T0, ItemFlags.None);
         var a = Content.SideStamp(local);
         var file = Path.Combine(folder, "legacy.json");
         WritePrepareFixture(file, 1, a, "remote:x|v:1");
-        var prepared = PrepareDatabase.Import(store, "p1", file);
+        var prepared = ImportPrepareFile(store, "p1", file);
         var sql = prepared.Database!.MatchLookup;
         var memory = new Dictionary<string, PrepareMatch>(StringComparer.OrdinalIgnoreCase)
         {
@@ -203,7 +211,7 @@ internal static partial class StorageChecks
         }
         var old = store.ReadPrepare("p1");
         File.WriteAllText(file, "{\"matched\":[{\"p\":\"new\",\"a\":\"a\",\"b\":\"b\"}],\"deleteVictims\":[");
-        ExpectThrows<JsonException>(() => PrepareDatabase.Import(store, "p1", file));
+        ExpectThrows<JsonException>(() => ImportPrepareFile(store, "p1", file));
         Require(store.ReadPrepare("p1") == old && sql["D/X"] == memory["D/X"],
             "malformed legacy JSON rolls back imported rows without losing the previous reviewed prepare");
     }
@@ -234,15 +242,15 @@ internal static partial class StorageChecks
     {
         const int count = 200_000;
         var folder = Fresh(root, "prepare-streaming-memory");
-        using var store = SqliteStateStore.Open(folder, Fast with { StoreCacheMb = 1 }, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast with { StoreCacheMb = 1 }, new TestClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         var file = Path.Combine(folder, "legacy-large.json");
         // Warm serializer/parser/type caches outside the retained-memory sample.
         WritePrepareFixture(file, 1, "a-stamp", "b-stamp");
-        _ = PrepareDatabase.Import(store, "p1", file).Database!.MatchLookup["d/x"];
+        _ = ImportPrepareFile(store, "p1", file).Database!.MatchLookup["d/x"];
         WritePrepareFixture(file, count, "a-stamp", "b-stamp");
         var before = GC.GetTotalMemory(forceFullCollection: true);
-        var prepared = PrepareDatabase.Import(store, "p1", file);
+        var prepared = ImportPrepareFile(store, "p1", file);
         var lookup = prepared.Database!.MatchLookup;
         Require(lookup.Count == count && lookup["D/199999"].A == "a-stamp" && !lookup.ContainsKey("missing"),
             "200k streamed matches support indexed membership without materialization");

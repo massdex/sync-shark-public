@@ -30,7 +30,7 @@ internal static class InterruptedDeleteChecks
         var action = new SyncAction("expired-no-id", 6, ActionKind.Delete, target, "File", null,
             null, target == Side.A ? sa : sb, false, "linked")
             { ProviderEffect = new("delete-job", "expired", DateTimeOffset.UnixEpoch) };
-        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(pair);
             Seed(store, pair, sa, sb);
@@ -48,7 +48,7 @@ internal static class InterruptedDeleteChecks
             Require(store.Baselines(pair.PairId).Count == 1 && store.UnresolvedIntents(pair.PairId).Count == 0,
                 "review settlement keeps baseline and retires finished-unknown intent atomically");
         }
-        using var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         Require(reopened.Baselines(pair.PairId).Count == 1 &&
             reopened.SyncRetryAt(pair.PairId, "File") is { Kind: "decision", MissingDeleteIdentityReview: true,
                 ReviewedActions: null, ProposedActions.Count: 1 },
@@ -69,7 +69,7 @@ internal static class InterruptedDeleteChecks
         var delete = new SyncAction("interrupted", 6, ActionKind.Delete, target, "File", null, null,
             target == Side.A ? sa : sb, false, "linked");
         var victim = target == Side.A ? a : b;
-        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(pair);
             Seed(store, pair, sa, sb);
@@ -81,7 +81,7 @@ internal static class InterruptedDeleteChecks
             store.RecordIntent(pair.PairId, delete);
             await victim.DeleteAsync(delete, default); // effect landed, process lost its acknowledgement
             Snapshot(store, target == Side.A ? "a" : "b", target, []);
-            var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+            var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
             var result = (await executor.ReconcileAsync([delete], 2, a, b, default)).Single();
             Require(result.Outcome == Outcome.Skipped && result.ForgetUnsafeDeleteBaseline,
                 "landed unsafe delete is not applied to sync history");
@@ -93,7 +93,7 @@ internal static class InterruptedDeleteChecks
                 "attributed stale deletion evidence is removed");
         }
         // Crash here: no changes to either endpoint or either persisted inventory cursor.
-        using var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         // Even a stale caller reattaching the old match must not turn repair debt into deletion authority.
         var retained = reopened.SyncRetryAt(pair.PairId, "File")!;
         reopened.SaveSyncRetry(pair.PairId, retained with { Match = new PrepareMatch(sa.ObjectId, sb.ObjectId) });
@@ -127,7 +127,7 @@ internal static class InterruptedDeleteChecks
         Require(firstSyncPlan.Actions.All(action => action.Kind != ActionKind.Delete) &&
             firstSyncPlan.Actions.Any(action => action.Kind == ActionKind.CopyNew && action.Target == target),
             "first-sync tombstone and retained match also restore rather than delete");
-        var executor2 = new Executor(reopened, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor2 = new Executor(reopened, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         await foreach (var result in executor2.ApplyAsync(plan, a, b, default))
             Require(result.Outcome == Outcome.Done, "restoration executes successfully: " + result.Reason);
         Require(await a.ObserveAsync("File", default) is not null && await b.ObserveAsync("File", default) is not null,
@@ -140,7 +140,7 @@ internal static class InterruptedDeleteChecks
 
     private static void ExistingSchemaIndex(string folder)
     {
-        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System)) store.SavePair(Pair());
+        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash)) store.SavePair(Pair());
         using (var connection = new Microsoft.Data.Sqlite.SqliteConnection(
             $"Data Source={Path.Combine(folder, "v2", "state.db")};Pooling=False"))
         {
@@ -148,7 +148,7 @@ internal static class InterruptedDeleteChecks
             // Simulate an already-current store created before the additive index was shipped.
             StoreSchema.Execute(connection, null, "DROP INDEX sync_retry_kind;");
         }
-        using var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         reopened.RefreshInterruptedDeleteNotice(Pair().PairId); // forced indexed COUNT requires the migration
         Require(reopened.InterruptedDeleteRepairsAt(Pair().PairId, ["File"]).Count == 0,
             "already-current schema gains repair index without resetting durable state");
@@ -156,7 +156,7 @@ internal static class InterruptedDeleteChecks
 
     private static void RepairPages(string folder, Side target)
     {
-        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pair = Pair();
         store.SavePair(pair);
         var endpoint = new FakeEndpoint(target == Side.A ? Side.B : Side.A, "source");
@@ -197,7 +197,7 @@ internal static class InterruptedDeleteChecks
 
     private static async Task ObservationCasesAsync(string folder, Side target)
     {
-        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pair = Pair();
         store.SavePair(pair);
         var a = new FakeEndpoint(Side.A, "a");
@@ -280,7 +280,7 @@ internal static class InterruptedDeleteChecks
             "expired job with trusted original source now absent settles normally");
         source.Seed("File", "replacement");
         store.RecordIntent(pair.PairId, action);
-        var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         var changed = (await executor.ReconcileAsync([action], 2, a, b, default)).Single();
         Require(changed.Outcome == Outcome.Uncertain && store.Baselines(pair.PairId).Count == 1,
             "same-path different identity cannot invalidate history or authorize reverse deletion");

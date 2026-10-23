@@ -9,7 +9,7 @@ internal static partial class RunChecks
         foreach (var mode in new[] { "swap", "copy", "changed", "missing", "pending", "after-effect", "legacy-after-effect", "name-refused", "round-trip", "pruned" })
         {
             var root = LocalChecks.FreshRoot("notice-restore-" + mode);
-            using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             fx.A.DropboxHashes = true;
             fx.B.DropboxHashes = true;
@@ -156,7 +156,7 @@ internal static partial class RunChecks
         foreach (var mappedLink in new[] { false, true })
         {
             var root = LocalChecks.FreshRoot("restore-linked-exclusion");
-            using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(root, "state"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             fx.A.DropboxHashes = fx.B.DropboxHashes = true;
             var at = DateTimeOffset.UtcNow.AddMinutes(-10);

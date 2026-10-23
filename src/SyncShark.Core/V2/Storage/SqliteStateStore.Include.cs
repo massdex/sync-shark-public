@@ -148,7 +148,7 @@ public sealed partial class SqliteStateStore
             var clearParameters = new List<(string Name, object? Value)>
             {
                 ("$p", pairNo), ("$raw", path), ("$ignore", NoticeChoices.Ignore),
-                ("$quota", DropboxQuota.NoticeKey), ("$stubs", LinkExclusions.StubReason.Key)
+                ("$quota", DropboxQuota.NoticeKey), ("$stubs", NoticeVocabulary.StubsLeftAlone)
             };
             for (var index = 0; index < included.Excluded.Count; index++)
             {

@@ -43,8 +43,8 @@ public sealed partial class SqliteStateStore
 
     public IReadOnlyList<ItemState> RehashCandidates(string rootId, int limit, long through) => RehashCandidates(rootId, limit, through, null);
 
-    private static readonly string VerificationNeededSql = VerificationBudget.NeededSql("f");
-    private static readonly string VerificationEligibleSql = VerificationBudget.EligibleSql("f");
+    private static readonly string VerificationNeededSql = VerificationSql.NeededSql("f");
+    private static readonly string VerificationEligibleSql = VerificationSql.EligibleSql("f");
 
     private const string NotGapOwnedSql = "NOT EXISTS(SELECT 1 FROM local_gap_item g WHERE g.root_no=q.root_no AND g.object_id=q.object_id)";
 
@@ -195,7 +195,7 @@ public sealed partial class SqliteStateStore
                         while (reader.Read())
                         {
                             any = true;
-                            if (!VerificationBudget.CanAcknowledge(reader.IsDBNull(3) ? null : "verified", (ItemFlags)reader.GetInt64(2)) ||
+                            if (!VerificationPolicy.CanAcknowledge(reader.IsDBNull(3) ? null : "verified", (ItemFlags)reader.GetInt64(2)) ||
                                 !settled(RowCodec.Join(reader.GetString(0), reader.GetString(1)))) { all = false; break; }
                         }
                     }
@@ -222,7 +222,7 @@ public sealed partial class SqliteStateStore
         if (root is null) return false;
         // CAS mismatch never writes. A retired/rotated queue may already have published the same proof.
         var rows = _reads.AtKey(root.Value, expected.Path, null);
-        return rows.Count == 1 && VerificationBudget.AlreadyVerified(rows[0].Item, expected, hash);
+        return rows.Count == 1 && VerificationPolicy.AlreadyVerified(rows[0].Item, expected, hash);
     });
 
     public bool CompleteRehash(string rootId, ItemState expected, string hash) => InIndexingStore(() =>

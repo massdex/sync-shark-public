@@ -6,6 +6,7 @@ internal static partial class LocalJournalChecks
 {
     private static async Task VerificationContractAsync(string folder)
     {
+        VerificationTruthTable();
         var elapsed = TimeSpan.Zero;
         var budget = new VerificationBudget(() => elapsed);
         LocalChecks.Require(budget.Admit(VerificationBudget.MaximumBytes + 1) && !budget.CanStart,
@@ -18,6 +19,12 @@ internal static partial class LocalJournalChecks
         budget = new VerificationBudget(() => elapsed);
         LocalChecks.Require(budget.Admit(VerificationBudget.MaximumBytes - 1) && !budget.Admit(2),
             "remaining byte admission cannot overshoot except first file");
+        budget = new VerificationBudget(() => TimeSpan.Zero);
+        for (var i = 0; i < 512; i++) LocalChecks.Require(budget.Admit(0), "512 item admission boundary");
+        LocalChecks.Require(!budget.CanStart && !budget.Admit(0), "513th item is refused");
+        budget = new VerificationBudget(() => TimeSpan.Zero);
+        LocalChecks.Require(budget.Admit(long.MaxValue) && !budget.Admit(long.MaxValue) && !budget.CanStart,
+            "maximum-sized first item saturates without overflow or another admission");
         LocalChecks.Require(NtfsUsnJournal.CanProveContents(FileAttributes.ReparsePoint, 0x9000001a) &&
             !NtfsUsnJournal.CanProveContents(FileAttributes.ReparsePoint | FileAttributes.Offline, 0x9000001a) &&
             !NtfsUsnJournal.CanProveContents(FileAttributes.ReparsePoint | (FileAttributes)0x400000, 0x9000001a) &&
@@ -42,7 +49,7 @@ internal static partial class LocalJournalChecks
         LocalChecks.Require(NtfsUsnJournal.ClassifyReadFailure(new IOException("temporarily unavailable")) == NtfsUsnReadFailure.Transient,
             "ordinary IO outage remains transient");
 
-        using (var cloudStore = SqliteStateStore.Open(Path.Combine(folder, "cloud-store"), StorageChecks.Fast, TimeProvider.System))
+        using (var cloudStore = SqliteStateStore.Open(Path.Combine(folder, "cloud-store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var stamp = DateTimeOffset.UtcNow;
             var cloudRoot = new RootDef("cloud-local", SyncProviders.Local, null, folder, SyncLocalEndpointStore.ObjectId(1, 1));
@@ -83,7 +90,7 @@ internal static partial class LocalJournalChecks
 
         var root = Path.Combine(folder, "root");
         LocalChecks.Seed(root, "file.txt", "content");
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var inventory = LocalChecks.Inventory(root, store, TimeProvider.System);
         inventory.WalkCheckpointForTest = () => (new(1, 0, 100, 0), false);
         var def = LocalChecks.RootOf(root, "root-local");
@@ -210,5 +217,42 @@ internal static partial class LocalJournalChecks
         LocalChecks.Require(failed.CursorInvalid && ((ILocalGapStore)store).GapEpoch(def.RootId) is { TrustFileUsn: false } &&
             store.Cursor(def.RootId) == "0000000000000001:200" && failed.IncompleteReasons[""] .Contains("unsupported record fixture"),
             "permanent history failure protects root, keeps cause and advances to protected full fallback");
+    }
+    private static void VerificationTruthTable()
+    {
+        LocalChecks.Require((int)VerificationPolicy.BlockedFlags == 153 &&
+            (int)VerificationPolicy.WriteEvidenceBlocked == 1055 &&
+            (int)VerificationPolicy.SettlementBlocked == 415, "verification masks retain distinct authority");
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=:memory:");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT " + VerificationSql.NeededSql("f") + ", " + VerificationSql.EligibleSql("f") +
+            " FROM (SELECT $kind AS kind, $hash AS hash, $flags AS flags) f";
+        var kindParameter = command.Parameters.AddWithValue("$kind", 0);
+        var hashParameter = command.Parameters.AddWithValue("$hash", DBNull.Value);
+        var flagsParameter = command.Parameters.AddWithValue("$flags", 0);
+        foreach (var kind in Enum.GetValues<ItemKind>())
+        foreach (var hash in new string?[] { null, new string('a', 64) })
+        for (var mask = 0; mask < 2048; mask++)
+        {
+            var flags = (ItemFlags)mask;
+            var item = new ItemState("file.txt", kind, "object", null, hash, 1, DateTimeOffset.UnixEpoch, flags);
+            kindParameter.Value = (int)kind;
+            hashParameter.Value = (object?)hash ?? DBNull.Value;
+            flagsParameter.Value = mask;
+            using var row = command.ExecuteReader();
+            LocalChecks.Require(row.Read(), "SQL truth table returns one row");
+            var needed = row.GetInt64(0) != 0;
+            var eligible = row.GetInt64(1) != 0;
+            LocalChecks.Require(needed == VerificationPolicy.NeedsVerification(item) &&
+                VerificationPolicy.Eligible(item) == (kind == ItemKind.File && needed && eligible),
+                "domain eligibility equals file AND NeededSql AND EligibleSql for every relevant flag combination");
+            LocalChecks.Require(VerificationPolicy.CanAcknowledge(hash, flags) == (hash is not null && (mask & 415) == 0),
+                "settlement requires non-null proof and its own mask");
+            var prior = item with { Flags = ItemFlags.NeedsRehash };
+            LocalChecks.Require(VerificationPolicy.NeedsWriteProof(item, prior, false) ==
+                (kind == ItemKind.File && (mask & 1055) == 0), "write proof uses its independent mask");
+            LocalChecks.Require(!VerificationPolicy.NeedsWriteProof(item, null, true), "missing prior never fabricates write proof");
+        }
     }
 }

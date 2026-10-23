@@ -135,7 +135,7 @@ internal static partial class RunChecks
             "one actionable invalid-folder notice suppresses all descendant notices");
 
         var root = Path.Combine(Path.GetTempPath(), "blocker-check-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store, displayRoot: true);
         var pair = fx.Pair.PairId;
         store.AddNotices([new(pair, 30, NoticeKind.Info, "changing.txt", "content not confirmed", "content-unconfirmed")]);

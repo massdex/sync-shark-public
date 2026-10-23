@@ -11,7 +11,7 @@ internal static class FilesOnDemandSettlementChecks
             remote with { Revision = "rev-2" }, remote with { ContentHash = new string('b', 64) },
             remote with { Size = 5 }, remote with { Kind = PilotEntryKind.Directory } })
             Require(!StorageSettlementService.SameRemote(remote, changed), "changed or missing remote retains local bytes");
-        using var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System);
+        using var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var localRoot = new RootDef("local", SyncProviders.Local, null, root, "id:local:00000001:0000000000000001");
         var remoteRoot = new RootDef("remote", SyncProviders.Dropbox, "account", "/Remote", "remote-root");
         var pair = new PairDef("pair", "Pair A", localRoot, remoteRoot, [], [], true);
@@ -23,6 +23,49 @@ internal static class FilesOnDemandSettlementChecks
         store.SetStoragePolicy(localRoot.RootId, localRoot.RootObjectId, "online-only");
         store.QueueStorageSettlement(localRoot.RootId, local.ObjectId, remoteRoot.RootId, remote);
         var job = store.StorageSettlementFor(localRoot.RootId, local.ObjectId, remoteRoot.RootId)!;
+        using (IStateStore absent = new InMemoryStateStore())
+        {
+            Require(!absent.HasOwnedPointers(localRoot.RootId) && absent.StorageRegistrations().Count == 0 &&
+                absent.StoragePointerFor(job.RootId, job.ObjectId, job.RemoteBinding) is null &&
+                absent.StorageSettlementFor(job.RootId, job.ObjectId, job.RemoteBinding) is null &&
+                absent.StorageSettlementPage().Count == 0 && !absent.IsCurrentStorageSettlement(job),
+                "non-capable store reports absence without manufacturing a receipt");
+            foreach (Action mutation in new Action[]
+            {
+                () => absent.QueueVerifiedPointerAcknowledgment(job.RootId, job.ObjectId, job.RemoteBinding, remote),
+                () => absent.RequestPointerVerification(pair.PairId, job.RootId, job.ObjectId, local.Path, remote),
+                () => absent.CompleteStorageSettlement(job, new("OnlineOnly", false, true))
+            })
+            {
+                var unsupported = false;
+                try { mutation(); }
+                catch (NotSupportedException) { unsupported = true; }
+                Require(unsupported, "unsupported pointer mutation never silently succeeds");
+            }
+        }
+        IStateStore contract = store;
+        Require(contract.StorageSettlementFor(localRoot.RootId, local.ObjectId, remoteRoot.RootId) == job &&
+            contract.IsCurrentStorageSettlement(job), "settlement interface preserves exact receipt");
+        Require(RemoteEntries.ToEntry(local) == DropboxItems.ToEntry(local), "lower conversion preserves remote fields");
+        var gateEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var gateRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var gateOwner = FilesOnDemandSettlement.SerializeAsync(contract, job, async () =>
+        {
+            gateEntered.SetResult();
+            await gateRelease.Task;
+        }, CancellationToken.None);
+        await gateEntered.Task;
+        var sameEntered = false;
+        var sameEntity = FilesOnDemandSettlement.SerializeAsync(store, job.RootId, job.ObjectId,
+            () => { sameEntered = true; return Task.CompletedTask; }, CancellationToken.None);
+        var independentEntered = false;
+        await FilesOnDemandSettlement.SerializeAsync(contract, job.RootId, "independent-object",
+            () => { independentEntered = true; return Task.CompletedTask; }, CancellationToken.None);
+        Require(independentEntered && !sameEntered, "independent entities proceed while pointer and settlement share the actual store gate");
+        gateRelease.SetResult();
+        await Task.WhenAll(gateOwner, sameEntity);
+        Require(sameEntered, "same entity resumes after gate release");
+
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var calls = 0;
@@ -43,6 +86,13 @@ internal static class FilesOnDemandSettlementChecks
         await Task.WhenAll(firstRun, secondRun);
         Require(calls == 1 && errors == 0, "Retry and loop serialize, recheck receipt, and complete once");
         Require(store.StorageSettlementFor(localRoot.RootId, local.ObjectId, remoteRoot.RootId) is null, "completed job retired");
+
+        var staleCallbacks = 0;
+        await new FilesOnDemandSettlement(contract,
+            (_, _) => throw new InvalidOperationException("stale job converted"),
+            (_, _) => throw new InvalidOperationException("stale job reported"),
+            completed: _ => staleCallbacks++).RunItemAsync(job, CancellationToken.None);
+        Require(staleCallbacks == 0, "stale completion never invokes callback");
 
         store.QueueStorageSettlement(localRoot.RootId, local.ObjectId, remoteRoot.RootId, remote);
         using (var connections = new CloudFilesLifetime((_, _, _) => throw new InvalidOperationException("paused settlement opened provider"), _ => false, store))

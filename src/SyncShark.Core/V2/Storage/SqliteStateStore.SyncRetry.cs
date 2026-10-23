@@ -203,7 +203,7 @@ public sealed partial class SqliteStateStore
         CloseRetryNotices(transaction, pairId, path);
         _notices.CloseWhere(transaction, "resolved",
             "notice_id=$id;",
-            ("$id", DeleteSourceGuard.NoticeId(pairId, path)));
+            ("$id", DeleteSourceNotice.NoticeId(pairId, path)));
         _notices.CloseWhere(transaction, "resolved",
             "notice_id=$id;",
             ("$id", ShortId.Make("n", pairId, NoticeChoices.DeletionReviewRule.ToString(System.Globalization.CultureInfo.InvariantCulture), RowCodec.Key(path), "deletion-review")));

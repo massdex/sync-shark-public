@@ -42,7 +42,7 @@ internal static class DropboxNameMapping
         var mapped = Map(item.Path);
         if (mapped == item.Path || LocalPath(item) is not null) return item;
         // Legacy Unreadable conflates name and downloadability. No hash means we cannot safely clear it.
-        var transferable = PilotPath.IsWindowsTransferPath(mapped) &&
+        var transferable = PathRules.IsWindowsTransferPath(mapped) &&
             (item.Kind == ItemKind.Folder || !string.IsNullOrEmpty(item.Hash));
         return item with
         {

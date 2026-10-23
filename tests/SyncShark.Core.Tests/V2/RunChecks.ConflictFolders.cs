@@ -7,7 +7,7 @@ internal static partial class RunChecks
         Action<FakeEndpoint> occupant, string folderPath = "new")
     {
         var root = LocalChecks.FreshRoot("folder-replace-" + name);
-        var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+        var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.DropboxHashes = fx.B.DropboxHashes = true;
         // The occupant is local (A), where Recovery is a readable archive; the incoming folder comes from Dropbox (B).
@@ -412,7 +412,7 @@ internal static partial class RunChecks
     private static void ChoiceSchemaPresenceCheck()
     {
         var root = LocalChecks.FreshRoot("choice-presence-upgrade");
-        using (var store = SqliteStateStore.Open(root, Settings, TimeProvider.System)) { _ = Build(suppliedStore: store); }
+        using (var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash)) { _ = Build(suppliedStore: store); }
         using (var connection = new Microsoft.Data.Sqlite.SqliteConnection(
             new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = SqliteStateStore.DatabasePath(root), Pooling = false }.ToString()))
         {
@@ -423,7 +423,7 @@ internal static partial class RunChecks
         }
         for (var open = 0; open < 2; open++)
         {
-            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             Require(!store.HasChoiceSnapshot("missing") && store.ConflictMergeBytes("missing") is null && store.Pairs().Count == 1,
                 "presence upgrade repairs choice storage at the existing schema version and preserves pair data on repeated opens");
         }
@@ -435,7 +435,7 @@ internal static partial class RunChecks
     private static void ChoiceSnapshotScaleCheck()
     {
         var root = LocalChecks.FreshRoot("choice-snapshot-scale");
-        using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var rootId = fx.Pair.A.RootId;
         var time = DateTimeOffset.UnixEpoch.AddYears(50);

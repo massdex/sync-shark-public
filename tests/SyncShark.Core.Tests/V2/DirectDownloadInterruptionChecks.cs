@@ -28,7 +28,7 @@ internal static class DirectDownloadInterruptionChecks
             try { await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30)); }
             catch { if (!child.HasExited) { child.Kill(); await child.WaitForExitAsync(); } throw; }
             LocalChecks.Require(child.ExitCode == 73, phase + " reached crash point: " + await stdout + await stderr);
-            using var store = SqliteStateStore.Open(Path.Combine(fixture, "state"), StorageChecks.Fast, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(fixture, "state"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var action = store.UnresolvedIntents(LocalChecks.PairId).Single();
             LocalChecks.Require(action.ProviderEffect?.Kind == SyncDirectDownloadCheckpoint.Kind,
                 phase + " production executor persisted checkpoint before crash");
@@ -57,7 +57,7 @@ internal static class DirectDownloadInterruptionChecks
                 File.Move(Path.Combine(fixture, "local", "file.bin"), Path.Combine(fixture, "original-retained.bin"));
             var writer = await LocalChecks.OpenWriter(localPath,
                 Path.Combine(fixture, phase == "moved-root" ? "new-recovery" : "recovery"), CancellationToken.None);
-            var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+            var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
             var result = (await executor.ReconcileAsync([action], 1, writer, new Source(false), CancellationToken.None)).Single();
             var completes = phase is "preserved" or "published" or "missing-recovery" or "new-published";
             LocalChecks.Require(result.Outcome == (completes ? Outcome.Done : Outcome.Skipped),
@@ -115,7 +115,7 @@ internal static class DirectDownloadInterruptionChecks
         var victim = (await writer.ObserveAsync("file.bin", CancellationToken.None))!;
         var source = new ItemState("file.bin", ItemKind.File, "id:dropbox:download", "revision",
             LocalChecks.BlockHash(New), New.Length, DateTimeOffset.UnixEpoch, ItemFlags.None);
-        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var localRoot = LocalChecks.RootOf(local, "root-local");
         store.SavePair(new PairDef(LocalChecks.PairId, "download crash", localRoot,
             localRoot with { RootId = "root-cloud", Provider = SyncProviders.Dropbox }, [], [], true));
@@ -130,7 +130,7 @@ internal static class DirectDownloadInterruptionChecks
         if (phase is "preserved" or "moved-root" or "absent-recovery" or "moved-pair" or "changed-stage") SyncLocalRecovery.SourceRemovedBeforeRecoveryCloseForTest = _ => Environment.Exit(73);
         if (phase is "published" or "missing-recovery" or "new-published") SyncLocalEndpointStore.PublishedBeforeCloseForTest = () => Environment.Exit(73);
         if (phase == "rollback") SyncLocalRecovery.SourceRemovedBeforeRecoveryCloseForTest = _ => throw new OperationCanceledException();
-        var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         await foreach (var _ in executor.ApplyAsync(new Plan(LocalChecks.PairId, gen, [action], []), writer,
             new Source(phase is "downloading" or "new-downloading"), CancellationToken.None)) { }
         if (phase == "rollback") Environment.Exit(73);

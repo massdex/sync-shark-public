@@ -8,7 +8,7 @@ internal static partial class StorageChecks
     private static void PrepareBatchConcurrency(string root)
     {
         var folder = Fresh(root, "prepare-batch-concurrency");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         store.SavePair(Pair("p2"));
         var old = store.WritePrepare("p1", w =>
@@ -41,7 +41,7 @@ internal static partial class StorageChecks
                         store.PrepareCursor(writer.Generation, "ra") is null,
                         "public row lookups expose only the published generation, not flushed in-flight rows");
                     store.MarkFirstSyncDone("p2");
-                    using var secondStore = SqliteStateStore.Open(folder, Fast, new TestClock());
+                    using var secondStore = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
                     Require(secondStore.ReadPrepare("p1") == old,
                         "a second Open preserves the old published header during an active write");
                     using var connection = new SqliteConnection($"Data Source={DbPath(folder)};Pooling=False;Default Timeout=2");
@@ -71,7 +71,7 @@ internal static partial class StorageChecks
     private static void PrepareFlushedFailureCleanup(string root)
     {
         var folder = Fresh(root, "prepare-flushed-failure");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         var old = store.WritePrepare("p1", writer =>
         {
@@ -103,7 +103,7 @@ internal static partial class StorageChecks
     private static void PrepareLargeClear(string root)
     {
         var folder = Fresh(root, "prepare-large-clear");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         store.SavePair(Pair("p2"));
         var other = store.WritePrepare("p2", w =>
@@ -128,7 +128,7 @@ internal static partial class StorageChecks
     {
         var folder = Fresh(root, "prepare-cursor-accessors");
         PrepareHeader previous;
-        using (var store = SqliteStateStore.Open(folder, Fast, new TestClock()))
+        using (var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             store.SavePair(Pair("p1"));
             var generation = store.BeginGeneration("ra", "full");
@@ -154,7 +154,7 @@ internal static partial class StorageChecks
                 store.ReadPrepareCursor("p1", "ra") == "updated-a",
                 "a null prepare cursor clears only the selected root slot");
         }
-        using var reopened = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var reopened = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         Require(reopened.ReadPrepareCursor("p1", "ra") == "updated-a" &&
             reopened.ReadPrepareCursor("p1", "rb") is null && reopened.Cursor("ra") == "accepted-a",
             "published prepare cursor updates survive reopen independently of accepted cursors");
@@ -180,7 +180,7 @@ internal static partial class StorageChecks
     {
         var folder = Fresh(root, "prepare-open-sweep");
         PrepareHeader old;
-        using (var store = SqliteStateStore.Open(folder, Fast, new TestClock()))
+        using (var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             store.SavePair(Pair("p1"));
             old = store.WritePrepare("p1", w =>
@@ -201,7 +201,7 @@ internal static partial class StorageChecks
                 INSERT INTO prepare_cursor(generation,root_id,cursor) VALUES('abandoned','ra','wrong');
                 """);
         }
-        using var reopened = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var reopened = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         Require(reopened.ReadPrepare("p1") == old &&
             reopened.FindPrepareRow(old.Generation, "matched", "keep") is not null &&
             reopened.PrepareCursor(old.Generation, "ra") == "keep-cursor",
@@ -216,7 +216,7 @@ internal static partial class StorageChecks
     private static void PrepareImportSqliteFailureExplained(string root)
     {
         var folder = Fresh(root, "prepare-import-sqlite-error");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         Directory.CreateDirectory(Path.Combine(folder, "v2"));
         var file = Path.Combine(folder, "v2", "first-sync-p1.choices.json");
@@ -241,7 +241,7 @@ internal static partial class StorageChecks
     private static void PrepareMalformedLegacyExplained(string root)
     {
         var folder = Fresh(root, "prepare-malformed-legacy");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         Directory.CreateDirectory(Path.Combine(folder, "v2"));
         var file = Path.Combine(folder, "v2", "first-sync-p1.choices.json");
@@ -249,7 +249,7 @@ internal static partial class StorageChecks
         {
             File.WriteAllText(file, malformed);
             JsonException? parseFailure = null;
-            try { _ = PrepareDatabase.Import(store, "p1", file); }
+            try { _ = ImportPrepareFile(store, "p1", file); }
             catch (JsonException error) { parseFailure = error; }
             Exception? failure = null;
             try { _ = FirstSyncChoicesState.Load(folder, "p1", store); }
@@ -266,17 +266,17 @@ internal static partial class StorageChecks
     private static void PrepareRemovedPairExplained(string root)
     {
         var folder = Fresh(root, "prepare-removed-pair-error");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1") with { Enabled = false });
         IEnumerable<string> RemoveDuringWrite()
         {
             store.ArchiveAndRemovePair("p1", Path.Combine(folder, "archive"));
             yield return "A:gone";
         }
-        var small = new FirstSyncChoicesState.Prepared("digest", new Dictionary<string, string>(),
+        var small = new Prepared("digest", new Dictionary<string, string>(),
             [], [], 0, [], [], []);
         Exception? failure = null;
-        try { PrepareDatabase.Save(store, "p1", small, RemoveDuringWrite(), [], [], []); }
+        try { FirstSyncChoicesState.SavePrepared(store, "p1", small, RemoveDuringWrite(), [], [], []); }
         catch (Exception error) { failure = error; }
         Require(failure is SyncCliReviewException &&
             failure.Message.Contains("run prepare again", StringComparison.Ordinal) &&
@@ -289,7 +289,7 @@ internal static partial class StorageChecks
     private static void PreparePublicationCounts(string root)
     {
         var folder = Fresh(root, "prepare-publication-counts");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         var old = store.WritePrepare("p1", writer =>
         {
@@ -334,7 +334,7 @@ internal static partial class StorageChecks
     private static void PrepareRowViewOrdinalGaps(string root)
     {
         var folder = Fresh(root, "prepare-row-view-gaps");
-        using var store = SqliteStateStore.Open(folder, Fast, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         var choices = new FirstSyncChoices.Parsed(new Dictionary<string, Side?>(), [], []);
         var expected = Enumerable.Range(0, 300).Select(i => "A:path/" + i).ToArray();

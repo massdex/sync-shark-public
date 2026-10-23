@@ -5,7 +5,7 @@ internal static partial class RunChecks
     private static void NoticeFoldParityChecks()
     {
         using var memory = new InMemoryStateStore();
-        using var sqlite = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "notice-fold-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System);
+        using var sqlite = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "notice-fold-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         foreach (var store in new IStateStore[] { memory, sqlite })
         {
             var fx = Build(suppliedStore: store);
@@ -30,7 +30,7 @@ internal static partial class RunChecks
     private static void NoticeFoldSpecificityChecks()
     {
         using var memory = new InMemoryStateStore();
-        using var sqlite = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "notice-specificity-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System);
+        using var sqlite = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "notice-specificity-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         foreach (var store in new IStateStore[] { memory, sqlite })
         {
             var fx = Build(suppliedStore: store);
@@ -85,7 +85,7 @@ internal static partial class RunChecks
             catch (SyncRunRefusedException) { }
         }
         var folder = Path.Combine(Path.GetTempPath(), "blocker-actions-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store, displayRoot: true);
         var run = fx.Run();
         var pairId = fx.Pair.PairId;

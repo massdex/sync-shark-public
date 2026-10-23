@@ -11,8 +11,7 @@ internal static class ProviderTransientFailure
     internal static bool IsTransient(Exception error, CancellationToken callerToken = default) =>
         !callerToken.IsCancellationRequested && (error switch
     {
-        SyncCliException or V2.EndpointAccessException => false,
-        DropboxApiException api => api.StatusCode is { } status && RetryStatus(status),
+        V2.EndpointAccessException => false,
         HttpRequestException http => http.HttpRequestError != HttpRequestError.SecureConnectionError &&
             !HasAuthenticationCause(http) && (http.StatusCode is null || RetryStatus(http.StatusCode.Value)),
         SocketException => true,

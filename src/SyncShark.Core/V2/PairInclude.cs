@@ -36,7 +36,7 @@ internal static class PairInclude
             .Concat(NestedRoots(root, pair.PairId, allPairs)).ToArray();
         return path =>
         {
-            if (LocalItems.IsArtifactPath(path)) return false;
+            if (ArtifactPaths.IsArtifactPath(path)) return false;
             foreach (var protectedPath in protectedPaths)
             {
                 if (PairPath.IsSelfOrUnder(path, protectedPath)) return false;
@@ -51,13 +51,13 @@ internal static class PairInclude
         IReadOnlyList<PairDef> allPairs, IReadOnlyList<string> productOwned)
     {
         path = Normalize(path);
-        if (LocalItems.IsArtifactPath(path))
+        if (ArtifactPaths.IsArtifactPath(path))
         {
             var segments = path.Split('/');
             for (var n = 1; n <= segments.Length; n++)
             {
                 var prefix = string.Join("/", segments.Take(n));
-                if (LocalItems.IsArtifactPath(prefix)) return prefix;
+                if (ArtifactPaths.IsArtifactPath(prefix)) return prefix;
             }
         }
         var root = side == Side.A ? pair.A : pair.B;
@@ -87,5 +87,5 @@ internal static class PairInclude
     private static string Normalize(string path) => path.Replace('\\', '/').Trim('/');
 
     private static bool IsLocal(RootDef root) =>
-        string.Equals(root.Provider, SyncProviders.Local, StringComparison.OrdinalIgnoreCase);
+        string.Equals(root.Provider, ProviderIds.Local, StringComparison.OrdinalIgnoreCase);
 }

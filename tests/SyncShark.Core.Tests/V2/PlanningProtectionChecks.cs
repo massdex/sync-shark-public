@@ -26,7 +26,7 @@ internal static class PlanningProtectionChecks
 
     private static void CheckDamageBoundaries(string folder)
     {
-        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pair = new PairDef("pair", "Pair A", new("left", SyncProviders.Local, null, "/left", "left"),
             new("right", SyncProviders.Local, null, "/right", "right"), [], [], true);
         store.SavePair(pair);
@@ -92,7 +92,7 @@ internal static class PlanningProtectionChecks
 
     private static void CheckProtectionComposition(string folder)
     {
-        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pair = new PairDef("pair", "Pair A", new("left", SyncProviders.Local, null, "/left", "left"),
             new("right", SyncProviders.Local, null, "/right", "right"), [], [], true);
         store.SavePair(pair);
@@ -103,7 +103,7 @@ internal static class PlanningProtectionChecks
         var item = new ItemState("Effect", ItemKind.File, "item", null, new string('a', 64), 1,
             DateTimeOffset.UnixEpoch, ItemFlags.None);
         store.RecordIntent(pair.PairId, new("effect", 18, ActionKind.CopyNew, Side.B, item.Path, null, item, null, false, null));
-        var run = new SyncRun(store, new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
+        var run = new SyncRun(store, new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException),
             new FakeEndpointProvider(), V2Settings.Default, TimeProvider.System);
         var builder = typeof(SyncRun).GetMethod("Protection", System.Reflection.BindingFlags.Instance |
             System.Reflection.BindingFlags.NonPublic)!;
@@ -135,7 +135,7 @@ internal static class PlanningProtectionChecks
 
     private static void CheckLinkedClosure(string folder, int length)
     {
-        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pair = new PairDef("pair", "Pair A", new("left", SyncProviders.Local, null, "/left", "left"),
             new("right", SyncProviders.Local, null, "/right", "right"), [], [], true);
         store.SavePair(pair);
@@ -179,7 +179,7 @@ internal static class PlanningProtectionChecks
     {
         try
         {
-            using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+            using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var pair = new PairDef("pair", "Pair A", new("local", SyncProviders.Local, null, "/local", "local"),
                 new("cloud", SyncProviders.Dropbox, null, "/cloud", "cloud"), [], [], true);
             store.SavePair(pair);
@@ -220,7 +220,7 @@ internal static class PlanningProtectionChecks
 
     private static void CheckRetryGate(string folder)
     {
-        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pair = new PairDef("pair", "Pair A", new("local", SyncProviders.Local, null, "/local", "local"),
             new("cloud", SyncProviders.Dropbox, null, "/cloud", "cloud"), [], [], true);
         store.SavePair(pair);
@@ -332,7 +332,7 @@ internal static class PlanningProtectionChecks
 
     private static void Check(string folder, string scenario)
     {
-        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pair = new PairDef("pair", "Pair A", new("local", SyncProviders.Local, null, "/local", "local"),
             new("cloud", SyncProviders.Dropbox, null, "/cloud", "cloud"), [], [], true);
         store.SavePair(pair);

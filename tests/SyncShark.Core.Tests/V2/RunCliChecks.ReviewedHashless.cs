@@ -10,7 +10,7 @@ internal static partial class RunCliChecks
             var directory = TempRoot();
             try
             {
-                using var store = SqliteStateStore.Open(Path.Combine(directory, "state"), Settings, TimeProvider.System);
+                using var store = SqliteStateStore.Open(Path.Combine(directory, "state"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
                 var fx = Build(store: store);
                 var target = side == Side.A ? fx.A : fx.B;
                 var root = side == Side.A ? fx.Pair.A : fx.Pair.B;
@@ -23,7 +23,7 @@ internal static partial class RunCliChecks
                     { ReviewedActions = [action] };
                 store.SaveSyncRetry(fx.Pair.PairId, retry);
                 if (unavailable) target.Unhashable.Add(item.Path);
-                var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), fx.Provider, Settings, TimeProvider.System);
+                var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), fx.Provider, Settings, TimeProvider.System);
                 var replay = typeof(SyncRun).GetMethod("ApplyReviewedRetriesAsync",
                     System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
                 var plan = await (Task<Plan>)replay.Invoke(run,

@@ -17,8 +17,7 @@ internal sealed class PlanOnlyEndpoints(IEndpointProvider inner) : IEndpointProv
     public IEndpointWriter Writer(RootDef root) => new Reader(inner.Writer(root), () => Interlocked.Increment(ref _denied));
     internal Task<bool> HasUploadSpaceAsync(RootDef root, long need, CancellationToken ct) =>
         inner.Writer(root) is DropboxWriter writer ? writer.HasUploadSpaceAsync(need, ct) : Task.FromResult(false);
-    public Task PrepareAsync(PairDef pair, CancellationToken ct) => inner is ProductionEndpoints production
-        ? production.OpenPlanOnlyAsync(pair, ct) : inner.PrepareAsync(pair, ct);
+    public Task PrepareAsync(PairDef pair, CancellationToken ct) => inner.PreparePlanOnlyAsync(pair, ct);
 
     private sealed class Reader(IEndpointWriter inner, Action denied) : IEndpointWriter, IProviderEffectReconciler, ISourceAbsenceProbe, IRecoveryAvailability, IRecoveryRecordReader, ILocalFreeSpaceAdmission
     {

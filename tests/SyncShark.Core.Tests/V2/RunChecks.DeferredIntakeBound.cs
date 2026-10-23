@@ -34,7 +34,7 @@ internal static partial class RunChecks
         try
         {
             var pair = IntakePair();
-            using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             store.SavePair(pair);
             const int backlog = 10_000;
             store.DeferPlanning(pair.PairId, IntakeBacklog(pair, 0, backlog));
@@ -92,7 +92,7 @@ internal static partial class RunChecks
             var pair = IntakePair();
             const int backlog = 600;
             HashSet<string> firstPage;
-            using (var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System))
+            using (var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 store.SavePair(pair);
                 store.DeferPlanning(pair.PairId, IntakeBacklog(pair, 0, backlog));
@@ -103,7 +103,7 @@ internal static partial class RunChecks
                     "the held first page fills the bounded intake exactly");
             }
 
-            using (var reopened = SqliteStateStore.Open(folder, Settings, TimeProvider.System))
+            using (var reopened = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 var versions = DeferredVersions(folder);
                 var second = reopened.AdmitDeferredPlanning(pair.PairId, versions.Values.Max() + 1);
@@ -144,7 +144,7 @@ internal static partial class RunChecks
         try
         {
             var pair = IntakePair();
-            using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             store.SavePair(pair);
             var aliases = Enumerable.Range(0, 1025).Select(n => new ItemState($"Alias/{n:D5}", ItemKind.File,
                 "aliased-object", null, new string('a', 64), 1, DateTimeOffset.UnixEpoch, ItemFlags.None)).ToArray();
@@ -190,7 +190,7 @@ internal static partial class RunChecks
         var folder = FixtureFolder("deferred-intake-preview");
         try
         {
-            using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             fx.A.Seed("Anchor", "same");
             fx.B.Seed("Anchor", "same");
@@ -218,7 +218,7 @@ internal static partial class RunChecks
         var folder = FixtureFolder("deferred-intake-run");
         try
         {
-            using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             const int backlog = 300;
             fx.A.Seed("Anchor", "same");

@@ -1,7 +1,10 @@
 namespace Massdex.SyncShark.V2;
 
-public sealed partial class SqliteStateStore
+public sealed partial class SqliteStateStore : IStoragePointerCommit
 {
+    bool IStoragePointerCommit.StoragePointerUpdateIsStale(PairDef pair, SyncAction action) =>
+        StoragePointerUpdateIsStale(pair, action);
+
     // Called under the shared entity gate before recording an intent or observing the provider.
     // Compare opaque revisions for equality only; never order provider revision strings.
     internal bool StoragePointerUpdateIsStale(PairDef pair, SyncAction action) => InStore(() =>

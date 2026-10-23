@@ -148,7 +148,25 @@ public static class NoticeChoices
     public static bool IsRecoveryRestoreNotice(Notice notice) =>
         notice.ReasonKey is "recovery-restore-pending" or "recovery-restore-ready";
 
-    public static bool IsRetryNotice(Notice notice) => IsRecoveryRestoreNotice(notice) || notice.RetainedVersion is null && (notice.FreeSpace is not null || notice.Repair is not null || notice.RebuildableRule is not null || notice.ReasonKey is ExecutionReasons.ConflictCopyBlocked or "folder-delete-unrestored" or "held-intents" or "permanent-boundary" or "plan-bound-exceeded" or "deletion-history-unavailable" or "deletion-evidence-pending" or "links-excluded" or "link-item" or "stubs-left-alone" or "online-only-item" or "unreadable" or ItemBlocked or "dropbox-storage-full" or "export-required" or NoticeVocabulary.RehashReason or PointerObservationSummary || IsPairRetryNotice(notice) || IsIndexFailure(notice) || notice.ReasonKey is NoticeVocabulary.DeleteReviewSummary or NoticeVocabulary.UncertainDeleteSummary or NoticeVocabulary.BlockedDeleteSummary or NoticeVocabulary.DeleteSourceReasonKey or "sync-retry" or "content-unconfirmed" or "interrupted-delete-unverified" or "deletion-review" or "planning-degraded" or "recovery-unavailable" || IsRemovalAttention(notice) || IsRemovalReview(notice));
+    public static bool IsRetryNotice(Notice notice) => IsRecoveryRestoreNotice(notice) || notice.RetainedVersion is null && (notice.FreeSpace is not null || notice.Repair is not null || notice.RebuildableRule is not null || notice.ReasonKey is ExecutionReasons.ConflictCopyBlocked or "folder-delete-unrestored" or "held-intents" or "permanent-boundary" or "plan-bound-exceeded" or "deletion-history-unavailable" or "deletion-evidence-pending" or "links-excluded" or "link-item" or "stubs-left-alone" or "online-only-item" or "unreadable" or ItemBlocked or "dropbox-storage-full" or "export-required" or NoticeVocabulary.RehashReason or PointerObservationSummary || IsPairRetryNotice(notice) || IsIndexFailure(notice) || notice.ReasonKey is NoticeVocabulary.DeleteReviewSummary or NoticeVocabulary.UncertainDeleteSummary or NoticeVocabulary.BlockedDeleteSummary or NoticeVocabulary.DeleteSourceReasonKey or "sync-retry" or "content-unconfirmed" or InterruptedDelete.UnverifiedReason or "deletion-review" or "planning-degraded" or "recovery-unavailable" || IsRemovalAttention(notice) || IsRemovalReview(notice) || IsGenericFailure(notice));
+
+    /// <summary>A failure with no structured payload and no more specific owner. A new or unknown reason still
+    /// gets the generic why/retry/ignore notice instead of rendering with no choices, and the retry/ignore
+    /// dispatchers can act on it. Decision notices keep their own empty catalogue.</summary>
+    public static bool IsGenericFailure(Notice notice)
+    {
+        var reason = notice.ReasonKey;
+        return notice.Kind != NoticeKind.UserDecision && notice.Storage is null && notice.Quarantine is null &&
+            notice.DefenderHistory is null && notice.RetainedVersion is null && notice.ConflictVersions is null &&
+            notice.ConflictOperation is null && notice.Repair is null && notice.RebuildableRule is null &&
+            notice.FreeSpace is null && reason != "permanent-boundary" &&
+            reason != PlanNotices.CloudFilesBindingNeedsReview.Key &&
+            reason != PlanNotices.OutsidePairArea.Key && reason != PlanNotices.PairExcluded.Key &&
+            reason != PlanNotices.StubWithoutCounterpart.Key && reason != "name-mapping-collision" &&
+            !PlanNotices.AwaitsAcknowledgement(notice) &&
+            !NoticeVocabulary.IsJournalNotice(notice) && !IsRecoveryRestoreNotice(notice) &&
+            !IsRemovalReview(notice) && !IsRemovalAttention(notice) && !IsPairRetryNotice(notice) && !IsIndexFailure(notice);
+    }
 
     /// <summary>The combined background-verification summary (M3), including the legacy held-intents summary.</summary>
     internal static bool IsVerificationSummary(Notice notice) =>
@@ -269,15 +287,18 @@ public static class NoticeChoices
             ? [(RetryNow, "Retry with the same plan bound", false), (ApprovePlanSize, "Approve this plan size", false),
                (Ignore, "Ignore this cause", false), (RepairHelp, "Review preview / provenance and the plan bound", false)]
             : (notice.ReasonKey is NoticeVocabulary.BlockedDeleteSummary or NoticeVocabulary.UncertainDeleteSummary or NoticeVocabulary.DeleteReviewSummary)
-            ? [(ShowRemaining, "Show remaining blocked deletions (50 per page)", false)]
+            ? [(ShowRemaining, "Show remaining blocked deletions (50 per page)", false),
+               (RetryNow, "Retry now", false), (Ignore, "Ignore this cause; keep the blocked work protected", false)]
             : IsRecoveryRestoreNotice(notice)
             ? RecoveryRestoreOptions(notice)
             : notice.ReasonKey == "folder-delete-unrestored"
             ? FolderRestoreOptions(notice)
             : notice.ReasonKey == "held-intents"
-            ? [(ShowRemaining, "Show remaining changes (50 per page)", false)]
+            ? [(ShowRemaining, "Show remaining changes (50 per page)", false), (RetryNow, "Retry now", false),
+               (Ignore, "Ignore this cause", false)]
             : notice.ReasonKey == NoticeVocabulary.RehashReason
-            ? [(ShowRemaining, "Show remaining changes (50 per page)", false)]
+            ? [(ShowRemaining, "Show remaining changes (50 per page)", false), (RetryNow, "Retry now", false),
+               (Ignore, "Ignore this cause", false)]
             : notice.ReasonKey == "permanent-boundary"
             ? [(Ignore, "Ignore this information (keep boundary protected)", false)]
             : notice.Storage is not null
@@ -375,6 +396,8 @@ public static class NoticeChoices
             : IsRetryNotice(notice)
             ? [(RepairHelp, "Why / repair guidance", false), (RetryNow, "Retry this item", false),
                (Ignore, "Ignore this cause", false)]
+            // Unknown failures enter through IsGenericFailure in IsRetryNotice; known information and
+            // decisions retain their existing catalogue instead of acquiring undispatchable Retry buttons.
             : [];
 
     // Security exception: quarantine Retry is explicit only. Automatically re-reading quarantined

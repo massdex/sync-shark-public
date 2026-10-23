@@ -89,7 +89,7 @@ internal static partial class DropboxChecks
         }
         h.Wire.SeedFile("download.txt", "download survives quota");
         h.Wire.QuotaFull = true;
-        using var store = SqliteStateStore.Open(root, settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(root, settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         store.SavePair(pair);
         var observedStore = new RecordingStore(store)
         {
@@ -105,7 +105,7 @@ internal static partial class DropboxChecks
         // start must order before the refusal observation and its persisted notice (not at the fake wire).
         var previousBeforeUpload = SyncUploadSource.BeforeUploadObserved;
         SyncUploadSource.BeforeUploadObserved = () => events.Enqueue("start");
-        var run = new SyncRun(store, new Executor(observedStore, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider, settings, TimeProvider.System);
+        var run = new SyncRun(store, new Executor(observedStore, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), provider, settings, TimeProvider.System);
         var plan = await run.PreviewFirstSyncAsync("p1", new RecordingProgress(), default);
         var report = await run.ApplyAsync("p1", plan, new RecordingProgress(), default);
         Require(report.Downloaded == 1 && await a.ObserveAsync("download.txt", default) is not null,

@@ -161,12 +161,12 @@ public sealed partial class SqliteStateStore
             return;
         }
         if (action.Kind is not (ActionKind.CopyNew or ActionKind.Update or ActionKind.KeepBoth)) return;
-        var localSide = pair.A.Provider == SyncProviders.Local ? Side.A : Side.B;
+        var localSide = pair.A.Provider == ProviderIds.Local ? Side.A : Side.B;
         var localRoot = localSide == Side.A ? pair.A : pair.B;
         var remoteRoot = localSide == Side.A ? pair.B : pair.A;
         var local = localSide == action.Target ? (localSide == Side.A ? result.NewA : result.NewB) : action.Source;
         var remote = localSide == action.Target ? action.Source : (localSide == Side.A ? result.NewB : result.NewA);
-        if (localRoot.Provider != SyncProviders.Local || remoteRoot.Provider != SyncProviders.Dropbox ||
+        if (localRoot.Provider != ProviderIds.Local || remoteRoot.Provider != ProviderIds.Dropbox ||
             local is not { Kind: ItemKind.File, Hash: not null } ||
             remote is not { Kind: ItemKind.File, VersionId: not null, Hash: not null } ||
             !string.Equals(local.Path, remote.Path, StringComparison.OrdinalIgnoreCase) ||

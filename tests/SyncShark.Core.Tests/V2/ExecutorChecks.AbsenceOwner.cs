@@ -2,6 +2,54 @@ namespace Massdex.SyncShark.V2;
 
 internal static partial class ExecutorChecks
 {
+    private static async Task DeleteRevalidationContractAsync()
+    {
+        var action = Act(ActionKind.Delete, Side.A, "item");
+        var previous = ProviderEffectContext.Current.Value;
+        try
+        {
+            foreach (var absent in new bool?[] { true, false, null })
+            {
+                var calls = new List<string>();
+                var result = new ActionResult(action.ActionId, Outcome.Skipped, null, null, null, "held")
+                    { DeleteSourceUnconfirmed = true };
+                ProviderEffectContext.Current.Value = new ProviderEffectContext(_ => Task.CompletedTask)
+                {
+                    Action = action,
+                    RevalidateDelete = () => { calls.Add("check"); return Task.FromResult(new AbsenceObservation(absent, "proof")); },
+                    RefuseDelete = observation =>
+                    {
+                        Require(observation.Absent == absent, "refusal receives exact absence evidence");
+                        calls.Add("refuse");
+                        return Task.FromResult<ActionResult?>(result);
+                    }
+                };
+                var refused = false;
+                try { await DeleteRevalidation.RevalidateCurrentAsync(action); }
+                catch (DeleteSourceUnconfirmedException) { refused = true; calls.Add("throw"); }
+                Require(refused == (absent != true), "only affirmative absence permits dispatch");
+                Require(calls.SequenceEqual(absent == true ? new[] { "check" } : new[] { "check", "refuse", "throw" }),
+                    "revalidation precedes refusal and refusal precedes throw");
+            }
+            foreach (var mode in new[] { "missing", "mismatch", "no-action", "no-check" })
+            {
+                ProviderEffectContext.Current.Value = mode == "missing" ? null : new ProviderEffectContext(_ => Task.CompletedTask)
+                {
+                    Action = mode == "no-action" ? null : mode == "mismatch" ? action with { ActionId = "other" } : action,
+                    RevalidateDelete = mode == "no-check" ? null : () => throw new InvalidOperationException("Wrong context checked"),
+                    RefuseDelete = mode == "no-check" ? null : _ => throw new InvalidOperationException("Wrong context refused")
+                };
+                var refused = false;
+                try { await DeleteRevalidation.RevalidateCurrentAsync(action); }
+                catch (DeleteSourceUnconfirmedException) { refused = true; }
+                Require(refused, "missing or mismatched context never authorizes delete");
+            }
+            await DeleteRevalidation.RevalidateCurrentAsync(null);
+            await DeleteRevalidation.RevalidateCurrentAsync(action with { Kind = ActionKind.Adopt });
+        }
+        finally { ProviderEffectContext.Current.Value = previous; }
+    }
+
     private static async Task AbsenceOwnerSqliteAsync()
     {
         foreach (var scenario in new[] { "unknown", "restore", "access", "state" })
@@ -13,7 +61,7 @@ internal static partial class ExecutorChecks
             var original = a.Seed("item", "same");
             var victim = b.Seed("item", "same");
             var action = Act(ActionKind.Delete, Side.B, "item", expected: victim, rf: true, key: "key");
-            using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
+            using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 store.SavePair(Pair());
                 var adopt = Act(ActionKind.Adopt, Side.B, "item", source: original, expected: victim, key: "key", rule: 12);
@@ -27,7 +75,7 @@ internal static partial class ExecutorChecks
                 var halted = false;
                 try
                 {
-                    var results = await Apply(new Executor(store, Settings(2), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), Plan(action), source, target);
+                    var results = await Apply(new Executor(store, Settings(2), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), Plan(action), source, target);
                     Require(results.Single().DeleteSourceUnconfirmed, "unknown or pending restoration blocks delete");
                 }
                 catch (EndpointAccessException) when (scenario == "access") { halted = true; }
@@ -38,11 +86,11 @@ internal static partial class ExecutorChecks
                 {
                     store.RecordIntent("p1", action);
                     await RemoveSourceAsync(b, "item");
-                    var result = await new Executor(store, Settings(2), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage).ReconcileAsync([action], 2, a, b, default);
+                    var result = await new Executor(store, Settings(2), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException).ReconcileAsync([action], 2, a, b, default);
                     Require(result.Single().Outcome == Outcome.Uncertain, "crash reconcile shares pending-restore guard");
                 }
             }
-            using var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+            using var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
             Require(reopened.Baselines("p1").Count == 1, "blocked absence preserves correspondence across reopen");
             if (scenario is "access" or "state")
                 Require(reopened.SyncRetryAt("p1", "item") is null, "authority loss writes no per-item retry debt");
@@ -76,6 +124,7 @@ internal static partial class ExecutorChecks
 
     private static async Task LocalDispatchAbsenceSqliteAsync()
     {
+        await DeleteRevalidationContractAsync();
         await LocalMissingDispatchProofAsync();
         foreach (var window in new[] { "intent", "archive" })
         {
@@ -89,7 +138,7 @@ internal static partial class ExecutorChecks
                 "native local and fake remote seed equal known content before baseline adoption");
             var source = new RecordingWriter(b);
             var folder = Path.Combine(Path.GetDirectoryName(setup.Root)!, "state");
-            using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
+            using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 store.SavePair(Pair());
                 var adopt = Act(ActionKind.Adopt, Side.B, "item", source: victim, expected: original, key: "key", rule: 12);
@@ -101,13 +150,13 @@ internal static partial class ExecutorChecks
                 try
                 {
                     if (window == "archive") SyncLocalRecovery.RecoveryCreatedBeforeBindingForTest = () => source.AbsenceUnknown = true;
-                    var results = await Apply(new Executor(recording, Settings(2), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), Plan(action), setup.Writer, source);
+                    var results = await Apply(new Executor(recording, Settings(2), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), Plan(action), setup.Writer, source);
                     Require(results.Single().DeleteSourceUnconfirmed && File.Exists(Path.Combine(setup.Root, "item")),
                         "source becoming unknown during intent/archive wait cannot remove local survivor");
                 }
                 finally { SyncLocalRecovery.RecoveryCreatedBeforeBindingForTest = null; }
             }
-            using var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+            using var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
             Require(reopened.Baselines("p1").Count == 1 && reopened.SyncRetryAt("p1", "item") is not null,
                 "local dispatch refusal retains SQLite correspondence and retry after reopen");
         }

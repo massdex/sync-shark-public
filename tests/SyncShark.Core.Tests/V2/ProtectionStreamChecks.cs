@@ -6,7 +6,7 @@ internal static class ProtectionStreamChecks
 {
     internal static void Run(string folder)
     {
-        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         ItemState File(string path, int id, ItemFlags flags = ItemFlags.None) =>
             new(path, ItemKind.File, $"object-{id:D3}", null, new string('a', 64), 1, DateTimeOffset.UnixEpoch, flags);
         var items = new[] { File("Parent/below", 1), File("Parent/pending", 2), File("Parent/above", 8),

@@ -7,7 +7,7 @@ internal static partial class RunCliChecks
         var root = TempRoot();
         try
         {
-            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(store: store);
             await FirstSyncAsync(fx);
             var source = fx.A.Seed("pair-retry.txt", "pair retry content");

@@ -123,6 +123,8 @@ public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatc
     /// </summary>
     public Task<PairEndpoints> OpenAsync(PairDef pair, CancellationToken ct) => OpenAsync(pair, null, ct);
 
+    public Task PreparePlanOnlyAsync(PairDef pair, CancellationToken ct) => OpenPlanOnlyAsync(pair, ct);
+
     internal Task<PairEndpoints> OpenPlanOnlyAsync(PairDef pair, CancellationToken ct) => OpenAsync(pair, null, ct, readOnlyOpen: true);
 
     private async Task<PairEndpoints> OpenAsync(PairDef pair, EndpointContinuation? continuation, CancellationToken ct, bool readOnlyOpen = false)

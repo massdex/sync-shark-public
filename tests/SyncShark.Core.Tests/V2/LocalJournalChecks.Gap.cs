@@ -22,7 +22,7 @@ internal static partial class LocalJournalChecks
         const string cursor = "0000000000000001:200";
         LocalGapResult stale;
         long watermark;
-        using (var store = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.WriteSnapshot(new Snapshot(root.RootId, Side.A, store.BeginGeneration(root.RootId, "full"), cursor, [.. rows, alias], []));
             GapPerFileProofChecks(store, root, rows, stamp, oldHash, newHash);
@@ -100,7 +100,7 @@ internal static partial class LocalJournalChecks
             LocalChecks.Require(!gaps.GapEpoch(root.RootId)!.TrustFileUsn,
                 "new trustworthy gap cannot erase unfinished untrusted verification");
         }
-        using (var reopened = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System))
+        using (var reopened = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var gaps = (ILocalGapStore)reopened;
             LocalChecks.Require(gaps.HasGapProtection(root.RootId) && gaps.GapResultWatermark(root.RootId) >= watermark &&
@@ -192,13 +192,13 @@ internal static partial class LocalJournalChecks
         const string cursor = "0000000000000001:100";
         var rows = Enumerable.Range(1, 2).Select(n => new ItemState("folder/" + n, ItemKind.File,
             SyncLocalEndpointStore.ObjectId(1, (ulong)n + 10), null, new string('a', 64), 3, stamp, ItemFlags.None)).ToArray();
-        using (var store = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var gen = store.BeginGeneration(root.RootId, "full");
             store.WriteSnapshot(new(root.RootId, Side.A, gen, cursor, rows, []));
             store.CompleteGeneration(gen, cursor, true);
         }
-        using var reopened = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var saved = reopened.Cursor(root.RootId);
         LocalChecks.Require(saved == cursor && NtfsUsnCheckpoint.TryParseCursor(saved, out _, out _),
             "current-schema restart retains a readable next-unprocessed journal cursor");
@@ -235,14 +235,14 @@ internal static partial class LocalJournalChecks
         const string root = "schema-root";
         var row = new ItemState("file", ItemKind.File, SyncLocalEndpointStore.ObjectId(1, 10), null,
             new string('a', 64), 1, DateTimeOffset.UtcNow, ItemFlags.None);
-        using (var created = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System))
+        using (var created = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             created.WriteSnapshot(new(root, Side.A, created.BeginGeneration(root, "full"), "0000000000000001:200", [row], []));
             var gaps = (ILocalGapStore)created;
             gaps.BeginGap(root, "0000000000000001:200", 100, true);
             gaps.GapDiscovered(root, gaps.GapEpoch(root)!, row, true);
         }
-        using (var reopened = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System))
+        using (var reopened = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var gaps = (ILocalGapStore)reopened;
             gaps.RetryGapFailures(root);
@@ -263,7 +263,7 @@ internal static partial class LocalJournalChecks
                 "ALTER TABLE local_gap_item DROP COLUMN defer_reason; ALTER TABLE local_gap_item DROP COLUMN discovery_reason; " +
                 "CREATE INDEX IF NOT EXISTS gap_retry ON local_gap_item(root_no,epoch,last_attempt,object_id) WHERE hash IS NULL;");
         }
-        using (var upgraded = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System))
+        using (var upgraded = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var gaps = (ILocalGapStore)upgraded;
             gaps.RetryGapFailures(root);
@@ -280,13 +280,13 @@ internal static partial class LocalJournalChecks
                 "ALTER TABLE local_gap_item DROP COLUMN defer_reason; " +
                 "CREATE INDEX gap_ready ON local_gap_item(root_no,epoch,last_attempt,object_id) WHERE hash IS NULL AND failure_count<3;");
         }
-        using (var immediateUpgrade = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System))
+        using (var immediateUpgrade = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var gaps = (ILocalGapStore)immediateUpgrade;
             LocalChecks.Require(gaps.GapHashPage(root, gaps.GapEpoch(root)!, 128).Count == 1,
                 "immediate previous branch schema upgrades its ready predicate and retry columns at the same version");
         }
-        using var verifiedAgain = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System);
+        using var verifiedAgain = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         LocalChecks.Require(((ILocalGapStore)verifiedAgain).HasGapProtection(root), "upgraded store reopens idempotently");
     }
 

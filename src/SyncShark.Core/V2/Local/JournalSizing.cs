@@ -10,41 +10,21 @@ public static class JournalSizing
     public const string Enlarge = NoticeVocabulary.JournalEnlarge;
     public const string NotNow = NoticeVocabulary.JournalNotNow;
     public const string Never = NoticeVocabulary.JournalNever;
-    public const long Minimum = 1024L * 1024 * 1024;
-    public const long Maximum = 8 * Minimum;
+    public const long Minimum = JournalPolicy.Minimum;
+    public const long Maximum = JournalPolicy.Maximum;
     public static bool IsChoice(string choice) => NoticeVocabulary.IsJournalChoice(choice);
 
-    public static JournalSizingState Observe(JournalSizingState? previous, ulong journal, long next, DateTimeOffset now)
-    {
-        if (previous is null) return new(journal, next, now);
-        var hours = (now - previous.Observed).TotalHours;
-        // Multiple roots and preview/apply reopen the same volume. Do not turn these into run gaps.
-        if (hours < 1.0 / 60) return previous;
-        var comparable = previous.JournalId == journal && next >= previous.NextUsn;
-        var rate = comparable ? (next - previous.NextUsn) / hours : 0;
-        return previous with { JournalId = journal, NextUsn = next, Observed = now,
-            BytesPerHour = comparable ? Math.Max(rate, previous.BytesPerHour * 0.9) : 0,
-            LongestGapHours = Math.Max(hours, previous.LongestGapHours * Math.Pow(0.9, hours / 24)) };
-    }
+    public static JournalSizingState Observe(JournalSizingState? previous, ulong journal, long next, DateTimeOffset now) =>
+        JournalPolicy.Observe(previous, journal, next, now);
 
-    public static long Target(JournalSizingState state, long current, long free, bool gap, long allocation = SyncSharkJournalNative.Delta)
-    {
-        // Match the privileged helper: capacity includes allocation overhead. Otherwise
-        // the final growth step would request a maximum the helper can never satisfy.
-        var cap = Math.Max(0, Math.Min(Maximum, Math.Max(0, free) / 20) - Math.Max(allocation, SyncSharkJournalNative.Delta));
-        if (state.Never || current >= cap) return current;
-        var window = Math.Max(7 * 24, 3 * state.LongestGapHours);
-        var needed = state.BytesPerHour * window;
-        if (!gap && current >= Minimum && current >= needed) return current;
-        var desired = Math.Max(Minimum, Math.Max(2 * needed, gap ? 2.0 * current : 0));
-        return Math.Max(current, (long)Math.Min(cap, desired));
-    }
+    public static long Target(JournalSizingState state, long current, long free, bool gap, long allocation = JournalPolicy.Delta) =>
+        JournalPolicy.Target(state, current, free, gap, allocation);
 
     /// <summary>No elevation, task wait or journal mutation on the inventory path. Failure leaves scanning intact.</summary>
     internal static void TryObserve(IStateStore store, string pairId, string root, uint expectedSerial, ulong rootFileId, string? cursor, DateTimeOffset now, bool overflow = false, bool observeOnly = false,
-        Func<string, long[]?>? query = null, Action<SqliteStateStore, SqliteStateStore.JournalPending, SyncDiscoveryRoot>? queue = null)
+        Func<string, long[]?>? query = null, Action<IJournalStore, JournalPending, SyncDiscoveryRoot>? queue = null)
     {
-        if (store is not SqliteStateStore sqlite || !OperatingSystem.IsWindows()) return;
+        if (store is not IJournalStore sqlite || !OperatingSystem.IsWindows()) return;
         try
         {
             var volume = Path.GetPathRoot(Path.GetFullPath(root))?.TrimEnd('\\').ToUpperInvariant();
@@ -63,7 +43,7 @@ public static class JournalSizing
         { System.Diagnostics.Trace.TraceWarning("Journal capacity observation unavailable: {0}", error.GetType().Name); }
     }
 
-    private static void QueueSilent(SqliteStateStore store, SqliteStateStore.JournalPending pending, SyncDiscoveryRoot root)
+    private static void QueueSilent(IJournalStore store, JournalPending pending, SyncDiscoveryRoot root)
     {
         if (!SyncDiscoveryClient.IsInstalled) return;
         _ = Task.Run(() => MaintainAsync(store, pending, root, SyncDiscoveryClient.TryGrowJournalAsync,
@@ -71,7 +51,7 @@ public static class JournalSizing
     }
 
     // Injectable OS boundary: deterministic checks never touch a real journal or worker.
-    internal static async Task MaintainAsync(SqliteStateStore store, SqliteStateStore.JournalPending pending,
+    internal static async Task MaintainAsync(IJournalStore store, JournalPending pending,
         SyncDiscoveryRoot root, Func<SyncDiscoveryRoot, long, Task<uint?>> grow, Func<string, long[]?> query)
     {
         using var admission = StoreAdmission.WithCancellation(CancellationToken.None);
@@ -125,7 +105,7 @@ public static class JournalSizing
     internal static async Task ApplyCoreAsync(IStateStore store, Notice notice, string choice, IElevatedAction elevated,
         CancellationToken ct, Func<string, long[]?> query)
     {
-        if (store is not SqliteStateStore sqlite || !IsNotice(notice) || !IsChoice(choice))
+        if (store is not IJournalStore sqlite || !IsNotice(notice) || !IsChoice(choice))
             throw new InvalidOperationException("Refresh the journal notice and choose an offered action.");
         var request = sqlite.JournalRequest(notice);
         if (!Active.TryAdd(request.Serial, 0)) throw new InvalidOperationException("A journal choice for this volume is already in progress. Sync continues.");

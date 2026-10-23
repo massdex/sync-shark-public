@@ -7,7 +7,7 @@ internal static partial class RunChecks
     private static async Task DeferredBlockerChecksAsync()
     {
         var folder = Path.Combine(Path.GetTempPath(), "deferred-blockers-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var items = Enumerable.Range(0, 57).Select(i => fx.A.Seed($"stub-{i:D3}.txt", "cloud content") with { Flags = ItemFlags.Placeholder }).ToArray();
         MappingSnapshot(store, fx.Pair.A, Side.A, items);
@@ -108,7 +108,7 @@ internal static partial class RunChecks
     private static void LegacyRepairNoticeChecks()
     {
         var folder = Path.Combine(Path.GetTempPath(), "legacy-notices-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var item = fx.A.Seed("legacy.txt", "content");
         var original = new Notice(fx.Pair.PairId, 31, NoticeKind.Info, item.Path, "blocked", "provider-name-refused",
@@ -140,7 +140,7 @@ internal static partial class RunChecks
         await ExportBlockerChecksAsync(null);
         var folder = Path.Combine(Path.GetTempPath(), "export-blockers-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
-        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         await ExportBlockerChecksAsync(store);
     }
 

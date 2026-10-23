@@ -37,8 +37,10 @@ internal static partial class StorageChecks
             FairStoreGate.CurrentCancellation == originalAdmission,
             "both admission entry points restore the original token");
 
+        InjectedCaptureChecks(Path.Combine(root, "injected-capture"));
+
         Directory.CreateDirectory(root);
-        using var store = SqliteStateStore.Open(root, Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(root, Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pair = Pair("p1");
         store.SavePair(pair with { A = pair.A with { Provider = SyncProviders.Local } });
         var gate = (FairStoreGate)typeof(SqliteStateStore).GetField("_gate", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(store)!;
@@ -224,4 +226,41 @@ internal static partial class StorageChecks
         Require(operations.Summarize().Oldest is null, "hold tracking ends on release");
         Console.WriteLine("PASS store gate checks");
     }
+    private static void InjectedCaptureChecks(string root)
+    {
+        var refusedNull = false;
+        try { using var invalid = SqliteStateStore.Open(root, Fast, TimeProvider.System, null!); }
+        catch (ArgumentNullException) { refusedNull = true; }
+        Require(refusedNull && !Directory.Exists(root), "missing hash callback is rejected before creating state");
+        FairStoreGate? gate = null;
+        var captures = 0;
+        Action? race = null;
+        using var store = SqliteStateStore.Open(root, Fast, TimeProvider.System, (_, captured, ct) =>
+        {
+            Require(gate is not null && !gate.IsHeldByCurrentThread, "injected hash capture stays outside gate");
+            captures++;
+            race?.Invoke();
+            return captured with { Hash = new string('d', 64) };
+        });
+        gate = (FairStoreGate)typeof(SqliteStateStore).GetField("_gate", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(store)!;
+        var pair = Pair("capture-pair");
+        pair = pair with { A = pair.A with { Provider = SyncProviders.Local } };
+        store.SavePair(pair);
+        var item = new ItemState("capture.txt", ItemKind.File, "capture-object", null, null, 3, T0, ItemFlags.None);
+        var notice = new Notice(pair.PairId, 30, NoticeKind.UserDecision, item.Path, "Antivirus hold", QuarantineFailure.NoticeKey,
+            Quarantine: new(Side.A, null, item));
+        store.AddNotices([notice]);
+        Require(captures == 1 && store.OpenNotices(pair.PairId).Single().Quarantine!.ExpectedTarget!.Hash == new string('d', 64),
+            "injected capture publishes matching evidence");
+        store.AddNotices([notice]);
+        Require(captures == 1, "matching prior evidence avoids another injected capture");
+        var changed = item with { Path = "raced.txt", ObjectId = "raced-object" };
+        var generation = store.BeginGeneration(pair.A.RootId, "full");
+        store.WriteSnapshot(new(pair.A.RootId, Side.A, generation, "before", [changed], []));
+        race = () => store.WriteSnapshot(new(pair.A.RootId, Side.A, generation, "after", [changed with { Size = 4 }], []));
+        store.AddNotices([notice with { Path = changed.Path, Quarantine = new(Side.A, null, changed) }]);
+        Require(store.OpenNotices(pair.PairId).Single(n => n.Path == changed.Path).Quarantine!.ExpectedTarget!.Hash is null,
+            "transactional revalidation rejects raced injected evidence");
+    }
+
 }

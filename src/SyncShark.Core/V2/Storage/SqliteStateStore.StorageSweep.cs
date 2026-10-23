@@ -20,8 +20,8 @@ public sealed partial class SqliteStateStore
             rootId = reader.GetString(0); objectId = reader.GetString(1); afterDirKey = reader.GetString(2);
             afterDir = reader.GetInt64(3); afterKey = reader.GetString(4); afterName = reader.GetString(5); revision = reader.GetInt64(6); priorScope = reader.GetString(7);
         }
-        var pairs = Pairs().Where(p => (p.A.RootId == rootId && p.A.Provider == SyncProviders.Local && p.B.Provider == SyncProviders.Dropbox) ||
-            (p.B.RootId == rootId && p.B.Provider == SyncProviders.Local && p.A.Provider == SyncProviders.Dropbox)).ToArray();
+        var pairs = Pairs().Where(p => (p.A.RootId == rootId && p.A.Provider == ProviderIds.Local && p.B.Provider == ProviderIds.Dropbox) ||
+            (p.B.RootId == rootId && p.B.Provider == ProviderIds.Local && p.A.Provider == ProviderIds.Dropbox)).ToArray();
         var root = pairs.Select(p => p.A.RootId == rootId ? p.A : p.B).FirstOrDefault();
         var item = objectId.Length == 0 || objectId == root?.RootObjectId ? null : ByObject(rootId, objectId);
         var scope = item?.Path ?? "";

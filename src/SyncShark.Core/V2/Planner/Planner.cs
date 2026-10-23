@@ -90,7 +90,7 @@ public static partial class Planner
                 !(entry.Action.Target == Side.A ? ctx.OccA : ctx.OccB).ContainsKey(entry.Action.Path) &&
                 PairPath.Same(entry.Action.Path, entry.Action.Source!.Path) && !ctx.Mapping.Protects(entry.Action);
             ctx.DeferredPlanning.AddRange(original.Where(entry => !Safe(entry)).Select(entry => entry.Action));
-            var held = LinkExclusions.None.WithPending(ctx.DeferredPlanning.Select(action => action.Path));
+            var held = new PendingPathIndex(ctx.DeferredPlanning.Select(action => action.Path));
             ctx.Draft = original.Where(entry => Safe(entry) && !held.Covers(entry.Action.Path) && !held.Contains(entry.Action.Path)).ToList();
             var kept = ctx.Draft.Select(entry => entry.Action).ToHashSet();
             ctx.DeferredPlanning.Clear();
@@ -113,7 +113,7 @@ public static partial class Planner
             .Select(entry => entry.Row).ToHashSet();
         foreach (var row in pointerReads)
             HoldPlanningFailure(ctx, row, new InvalidOperationException(PointerReadPending));
-        var failures = LinkExclusions.None.WithPending(ctx.FailedPaths);
+        var failures = new PendingPathIndex(ctx.FailedPaths);
         bool touches(string path) => failures.Covers(path) || failures.Contains(path);
         ctx.Draft = ctx.Draft.Where(entry => !touches(entry.Action.Path) &&
             (entry.Action.FromPath is null || !touches(entry.Action.FromPath)) &&
@@ -186,10 +186,10 @@ public static partial class Planner
                 if (item is null) continue;
                 var path = DropboxNameMapping.MatchPath(item);
                 var parentEnd = path.LastIndexOf('/');
-                if (parentEnd >= 0 && !PilotPath.IsWindowsTransferPath(path[..parentEnd])) return;
+                if (parentEnd >= 0 && !PathRules.IsWindowsTransferPath(path[..parentEnd])) return;
             }
             var invalidName = new[] { (Item: row.A, Side: Side.A), (Item: row.B, Side: Side.B) }
-                .FirstOrDefault(entry => entry.Item is not null && !entry.Item.Flags.HasFlag(ItemFlags.RequiresExport) && !PilotPath.IsWindowsTransferPath(DropboxNameMapping.MatchPath(entry.Item)));
+                .FirstOrDefault(entry => entry.Item is not null && !entry.Item.Flags.HasFlag(ItemFlags.RequiresExport) && !PathRules.IsWindowsTransferPath(DropboxNameMapping.MatchPath(entry.Item)));
             if (invalidName.Item is { } invalid)
             {
                 ctx.Notices.Add(new Notice(ctx.PairId, 30, NoticeKind.Info, invalid.Path,

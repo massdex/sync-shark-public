@@ -156,7 +156,7 @@ internal static partial class ExecutorChecks
         var a = new FakeEndpoint(Side.A, "ra");
         var b = new FakeEndpoint(Side.B, "rb") { Latency = TimeSpan.FromMilliseconds(5) };
         var record = new RecordingWriter(b, new List<string>());
-        var executor = new Executor(store, Settings(128), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor = new Executor(store, Settings(128), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         var actions = Enumerable.Range(0, 128)
             .Select(i => Act(ActionKind.CopyNew, Side.B, "f" + i, source: a.Seed("f" + i, "v" + i), key: "k" + i))
             .ToArray();
@@ -191,7 +191,7 @@ internal static partial class ExecutorChecks
         var store = new JournalStore(inner, new List<string>());
         var writer = new DropboxWriter(new RootDef("rb", "Dropbox", "acc", "/Pilot", DropboxWire.RootId),
             Side.B, client, "unused", isStateDamage: StorageFailureClassifier.IsStateDamage, settings);
-        var work = Apply(new Executor(store, settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), Plan(actions), source, writer);
+        var work = Apply(new Executor(store, settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), Plan(actions), source, writer);
         try
         {
             // The finish request reaching the scripted transport proves every checkpoint was already awaited durable.
@@ -230,7 +230,7 @@ internal static partial class ExecutorChecks
         var writer = new DropboxWriter(new RootDef("rb", "Dropbox", "acc", "/Pilot", DropboxWire.RootId),
             Side.B, client, "unused", isStateDamage: StorageFailureClassifier.IsStateDamage, settings);
 
-        var results = await Apply(new Executor(store, settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), Plan(actions), source, writer)
+        var results = await Apply(new Executor(store, settings, Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), Plan(actions), source, writer)
             .WaitAsync(HeldEffectTimeout);
         Require(wire.Finishes == 0, "no finish is sent when the checkpoint write fails");
         Require(results.Count == files && results.All(r => r.Outcome != Outcome.Done),

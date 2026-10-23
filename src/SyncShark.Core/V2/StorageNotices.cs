@@ -120,6 +120,8 @@ internal static class StorageNotices
     {
         var pairNotices = store.OpenStoragePairCauses(pair.PairId, pair.A.RootId, pair.B.RootId);
         if (pairNotices.Count == 0) return;
+        // Every live scope counts, including a suppressed (ignored) cause: an unrelated success must never
+        // retire a binding/volume suppression, and only an all-connectivity success reaches the close below.
         if (!pairNotices.All(notice => notice.Scope is "network" or "auth" or "provider")) return;
         if (pairCauseReportedThisTurn && !requested) return;
         store.ClearStorageRootBackoff(pair.A.RootId);

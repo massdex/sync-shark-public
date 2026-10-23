@@ -21,7 +21,7 @@ public sealed partial class SqliteStateStore
             _notices.Add(transaction, pairNo, review.PendingNotice!, NowMs());
             return;
         }
-        var retry = new SyncRetry(action.Path, "sync", 0, result.Reason ?? DeleteSourceGuard.ReasonKey,
+        var retry = new SyncRetry(action.Path, "sync", 0, result.Reason ?? DeleteSourceNotice.ReasonKey,
             result.RetryAfterSeconds is > 0 ? DateTimeOffset.FromUnixTimeMilliseconds(NowMs()).AddSeconds(result.RetryAfterSeconds.Value) : DateTimeOffset.MinValue)
         {
             DeleteBlockedDetail = result.Reason ?? "The deletion source could not be verified. Nothing was deleted; sync will retry.",

@@ -30,7 +30,7 @@ internal static class LocalIgnoredChildrenChecks
         for (var index = 0; index < children; index++)
             LocalChecks.Seed(root, $"folder/f{index:D4}.tmp", "ignored bytes");
         using var store = SqliteStateStore.Open(Path.Combine(Path.GetDirectoryName(root)!, "state"),
-            V2Settings.Default, TimeProvider.System);
+            V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var gen = store.BeginGeneration(localRoot.RootId, "full");
         var snapshot = await LocalChecks.Inventory(root, store, TimeProvider.System)
             .FullAsync(gen, _ => true, new Progress<string>(), CancellationToken.None);
@@ -63,7 +63,7 @@ internal static class LocalIgnoredChildrenChecks
             .AddWriter(localRoot, setup.Writer)
             .AddInventory(localRoot, LocalChecks.Inventory(setup.Root, store, TimeProvider.System));
         var settings = V2Settings.Default with { MaxWorkers = 1, ProgressInterval = TimeSpan.Zero };
-        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
+        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException),
             provider, settings, TimeProvider.System);
         var progress = new RecordingProgress();
         var plan = await run.PreviewFirstSyncAsync(pair.PairId, progress, CancellationToken.None);
@@ -101,7 +101,7 @@ internal static class LocalIgnoredChildrenChecks
         var provider = new FakeEndpointProvider().Add(remoteRoot, remote)
             .AddWriter(localRoot, setup.Writer).AddInventory(localRoot, inventory);
         var settings = V2Settings.Default with { MaxWorkers = 1, ProgressInterval = TimeSpan.Zero };
-        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
+        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException),
             provider, settings, TimeProvider.System);
         var progress = new RecordingProgress();
         var plan = await run.PreviewFirstSyncAsync(pair.PairId, progress, CancellationToken.None);
@@ -221,7 +221,7 @@ internal static class LocalIgnoredChildrenChecks
         var local = LocalChecks.RootOf(root, "root-local");
         var remote = new RootDef("remote-frozen", SyncProviders.Dropbox, "test", "/remote", "id:remote");
         var pair = new PairDef(LocalChecks.PairId, "frozen physical", local, remote, [], ["FileName:desktop.ini"], true);
-        using var store = SqliteStateStore.Open(Path.Combine(Path.GetDirectoryName(root)!, "state"), V2Settings.Default, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(Path.GetDirectoryName(root)!, "state"), V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
         store.SavePair(pair);
         var gen = store.BeginGeneration(local.RootId, "full");
         var snapshot = await LocalChecks.Inventory(root, store, TimeProvider.System).FullAsync(gen, _ => true,
@@ -267,7 +267,7 @@ internal static class LocalIgnoredChildrenChecks
             var local = LocalChecks.RootOf(root, "root-local");
             var remote = new RootDef("remote-frozen", SyncProviders.Dropbox, "test", "/remote", "id:remote");
             var pair = new PairDef(LocalChecks.PairId, "frozen unchanged", local, remote, [], ["FolderName:cache"], true);
-            using var store = SqliteStateStore.Open(Path.Combine(Path.GetDirectoryName(root)!, "state"), V2Settings.Default, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(Path.GetDirectoryName(root)!, "state"), V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
             store.SavePair(pair);
             var gen = store.BeginGeneration(local.RootId, "full");
             var snapshot = await LocalChecks.Inventory(root, store, TimeProvider.System).FullAsync(gen, _ => true,

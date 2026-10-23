@@ -8,7 +8,7 @@ internal static partial class DropboxChecks
         {
             var directory = LocalChecks.FreshRoot("dropbox-notice-" + mode);
             using var h = new Harness();
-            using var store = SqliteStateStore.Open(Path.Combine(directory, "state"), V2Settings.Default, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(directory, "state"), V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var local = new FakeEndpoint(Side.A, "ra") { DropboxHashes = true };
             var writer = h.Writer(Path.Combine(directory, "spool"));
             var pair = new PairDef("p1", "restore", new RootDef("ra", SyncProviders.Local, null, "C:\\a", "id:ra"),
@@ -37,7 +37,7 @@ internal static partial class DropboxChecks
             if (mode == "bad-download") h.Wire.DownloadMetadataRevisionOverride = "wrong-download-revision";
             var writes = h.Wire.AttemptedWritePaths.Count;
             var provider = new FakeEndpointProvider().Add(pair.A, local).AddWriter(pair.B, writer);
-            var run = new SyncRun(store, new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
+            var run = new SyncRun(store, new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException),
                 provider, V2Settings.Default, TimeProvider.System);
             var result = await run.RestoreNoticeVersionAsync(pair.PairId, noticeId, false, CancellationToken.None);
             if (mode != "swap")

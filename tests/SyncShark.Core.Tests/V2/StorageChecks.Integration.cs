@@ -17,7 +17,7 @@ internal static partial class StorageChecks
         GapStagingChecks(root);
         Require(StoreSchema.Version >= 18, "integrated schema never regresses to an isolated preview version");
         var fresh = Fresh(root, "integrated-fresh");
-        using (var store = SqliteStateStore.Open(fresh, Fast, new TestClock())) { }
+        using (var store = SqliteStateStore.Open(fresh, Fast, new TestClock(), LocalItems.CaptureOptionalHash)) { }
         var expected = Inspect(fresh);
         foreach (var table in IntegratedTables)
             Require(expected.Contains(table), "fresh integration includes " + table);
@@ -55,7 +55,7 @@ internal static partial class StorageChecks
             var expectedCursor = "0000000000000001:100";
             for (var reopen = 0; reopen < 2; reopen++)
             {
-                using (var store = SqliteStateStore.Open(folder, Fast, new TestClock()))
+                using (var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
                 {
                     Require(store.Cursor("root-a") == expectedCursor, "upgrade preserves exact previously committed root cursor");
                     var retained = store.ByObject("root-a", "entity-a")!;

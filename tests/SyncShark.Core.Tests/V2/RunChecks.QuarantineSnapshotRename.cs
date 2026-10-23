@@ -6,7 +6,7 @@ internal static partial class RunChecks
 {
     private static async Task QuarantineReusedNameSyncAsync(string root)
     {
-        using var store = SqliteStateStore.Open(Path.Combine(root, "reused-name-sync"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "reused-name-sync"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var original = fx.A.Seed("old.txt", "held bytes");
         store.WriteSnapshot(new("ra", Side.A, store.BeginGeneration("ra", "seed"), "", [original], []));
@@ -26,7 +26,7 @@ internal static partial class RunChecks
 
     private static void QuarantineIdentityReleaseChecks(string root)
     {
-        using var store = SqliteStateStore.Open(Path.Combine(root, "identity-release"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "identity-release"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var item = new ItemState("old.txt", ItemKind.File, "moving", null, new string('a', 64), 1, DateTimeOffset.UtcNow, ItemFlags.None);
         var moved = item with { Path = "new.txt" };
@@ -53,7 +53,7 @@ internal static partial class RunChecks
     {
         foreach (var side in new[] { Side.A, Side.B })
         {
-            using var store = SqliteStateStore.Open(Path.Combine(root, $"counterpart-identity-{side}"), Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(root, $"counterpart-identity-{side}"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             var rootId = side == Side.A ? "ra" : "rb";
             var held = new ItemState("held.txt", ItemKind.File, "held-entity", null, new string('a', 64),
@@ -93,7 +93,7 @@ internal static partial class RunChecks
             var label = $"full-only rename oldFirst={oldFirst} reuse={reuseOldName} {mode}";
             var folder = Path.Combine(root, $"snapshot-rename-{oldFirst}-{reuseOldName}-{mode}");
             var settings = Settings with { StoreBatchRows = 1 };
-            var store = SqliteStateStore.Open(folder, settings, TimeProvider.System);
+            var store = SqliteStateStore.Open(folder, settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             try
             {
                 var fx = Build(suppliedStore: store);
@@ -161,7 +161,7 @@ internal static partial class RunChecks
                     }
                     AssertRollback();
                     store.Dispose();
-                    store = SqliteStateStore.Open(folder, settings, TimeProvider.System);
+                    store = SqliteStateStore.Open(folder, settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
                     AssertRollback();
                     Sql("DROP TRIGGER fail_held_retirement;");
                 }

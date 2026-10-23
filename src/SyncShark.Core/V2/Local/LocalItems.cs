@@ -102,23 +102,10 @@ internal static class LocalItems
         return (volume, fileId);
     }
 
-    internal const string CaseRenameArtifactPrefix = ".syncshark-case-";
+    internal const string CaseRenameArtifactPrefix = ArtifactPaths.CaseRenameArtifactPrefix;
 
     /// <summary>True when any path segment is a Sync Shark product artifact that must never be inventoried.</summary>
-    public static bool IsArtifactPath(string path)
-    {
-        if (string.IsNullOrEmpty(path)) return false;
-        foreach (var segment in path.Split('/'))
-        {
-            if (segment.Length == 0) continue;
-            if (segment.StartsWith(CaseRenameArtifactPrefix, StringComparison.OrdinalIgnoreCase) ||
-                SyncLocalRecovery.IsRecoveryFolderName(segment) ||
-                segment.StartsWith(SyncControlNamespace.LocalPrefix, StringComparison.OrdinalIgnoreCase) ||
-                SyncLocalTransfer.IsTransferArtifactName(segment))
-                return true;
-        }
-        return false;
-    }
+    public static bool IsArtifactPath(string path) => ArtifactPaths.IsArtifactPath(path);
 
     /// <summary>True when the path is the empty whole-root prefix, a subtree, or a descendant of one.</summary>
     public static bool InsideAny(string path, IEnumerable<string> subtrees)

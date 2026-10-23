@@ -195,9 +195,9 @@ public static partial class Planner
     // provenance (PreserveAsync is metadata-only); local/local and unknown providers must preserve the bytes.
     private static bool CanUseDropboxHistory(Context ctx, Side target, ItemState cur, string? revisionHash) =>
         string.Equals(target == Side.A ? ctx.Options.ProviderA : ctx.Options.ProviderB,
-            SyncProviders.Local, StringComparison.OrdinalIgnoreCase) &&
+            ProviderIds.Local, StringComparison.OrdinalIgnoreCase) &&
         string.Equals(target == Side.A ? ctx.Options.ProviderB : ctx.Options.ProviderA,
-            SyncProviders.Dropbox, StringComparison.OrdinalIgnoreCase) &&
+            ProviderIds.Dropbox, StringComparison.OrdinalIgnoreCase) &&
         MatchesDeletedRevision(cur, revisionHash);
 
     /// <summary>The content hash of the baseline side that disappeared.</summary>
@@ -207,7 +207,7 @@ public static partial class Planner
     // Local bytes only Recovery can restore; a cloud target keeps the deleted revision in its own history.
     private static bool IsLocalTarget(Context ctx, Side target) =>
         string.Equals(target == Side.A ? ctx.Options.ProviderA : ctx.Options.ProviderB,
-            SyncProviders.Local, StringComparison.OrdinalIgnoreCase);
+            ProviderIds.Local, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The hash inside a prepare stamp ("objectId|h:hash"); null for folder, version or metadata stamps.</summary>
     private static string? PreparedHash(string stamp)

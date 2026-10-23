@@ -8,7 +8,7 @@ internal static class FilesOnDemandProtectionChecks
         foreach (var parentMove in new[] { false, true })
         {
             using var store = SqliteStateStore.Open(Path.Combine(root, parentMove ? "folder" : "file"),
-                V2Settings.Default, TimeProvider.System);
+                V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var pair = new PairDef("pair", "Pair A",
                 new("local", SyncProviders.Local, null, "/local", "local"),
                 new("remote", SyncProviders.Dropbox, "account", "/Remote", "remote-root"), [], [], true);

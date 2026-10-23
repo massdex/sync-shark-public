@@ -7,8 +7,8 @@ internal static class RecoverySafety
         !action.RecoveryFirst && action.Kind is ActionKind.Update or ActionKind.CopyNew or ActionKind.KeepBoth &&
         action.ExpectedTarget is { Kind: ItemKind.File } victim &&
         (victim.Flags & (ItemFlags.Placeholder | ItemFlags.OwnedPointer)) == 0 &&
-        string.Equals(providerA, SyncProviders.Local, StringComparison.OrdinalIgnoreCase) &&
-        string.Equals(providerB, SyncProviders.Local, StringComparison.OrdinalIgnoreCase)
+        string.Equals(providerA, ProviderIds.Local, StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(providerB, ProviderIds.Local, StringComparison.OrdinalIgnoreCase)
             ? action with { RecoveryFirst = true } : action;
 
     // Provenance, not content equality: a historical victim may predate hashing. The archive reader still
@@ -30,9 +30,9 @@ internal static class RecoverySafety
         if (frozen.Kind == ItemKind.Folder) return verified.VersionId == frozen.VersionId;
         if (string.IsNullOrWhiteSpace(verified.Hash) || verified.Size != frozen.Size) return false;
         if (frozen.Hash is not null) return Content.SameContent(frozen, verified) == true;
-        if (string.Equals(provider, SyncProviders.Dropbox, StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(provider, ProviderIds.Dropbox, StringComparison.OrdinalIgnoreCase))
             return frozen.VersionId is not null && verified.VersionId == frozen.VersionId;
-        return string.Equals(provider, SyncProviders.Local, StringComparison.OrdinalIgnoreCase) &&
+        return string.Equals(provider, ProviderIds.Local, StringComparison.OrdinalIgnoreCase) &&
             verified.Mtime.UtcTicks == frozen.Mtime.UtcTicks;
     }
 

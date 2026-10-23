@@ -88,6 +88,6 @@ public sealed partial class DropboxWriter
         var from = action.FromPath ?? throw new ArgumentException("A case rename requires its original path.", nameof(action));
         var parent = from[..(from.LastIndexOf('/') + 1)];
         var suffix = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(action.ActionId)))[..24].ToLowerInvariant();
-        return parent + LocalItems.CaseRenameArtifactPrefix + suffix;
+        return parent + ArtifactPaths.CaseRenameArtifactPrefix + suffix;
     }
 }

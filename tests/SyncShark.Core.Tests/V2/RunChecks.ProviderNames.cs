@@ -6,7 +6,7 @@ internal static partial class RunChecks
     {
         var settings = StorageChecks.Fast with { MaxWorkers = 8, ProgressInterval = TimeSpan.Zero };
         var clock = new CompletionClock();
-        using var store = SqliteStateStore.Open(root, settings, clock);
+        using var store = SqliteStateStore.Open(root, settings, clock, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         for (var i = 0; i < 30; i++) fx.A.Seed($"refused-{i}", "unchanged");
         fx.A.Seed("ordinary", "normal retry");
@@ -19,7 +19,7 @@ internal static partial class RunChecks
             Interlocked.Increment(ref refusedAttempts);
             return new ProviderNameRefusedException(new IOException("structured test refusal"));
         };
-        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), fx.Provider,
+        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), fx.Provider,
             settings, clock);
         var first = await FirstSyncAsync(run, fx);
         Require(first.Failed == 1 && first.Uploaded == 0 && first.Skipped == 30 && first.Done == 0 &&

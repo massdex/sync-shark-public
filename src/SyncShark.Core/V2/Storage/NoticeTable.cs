@@ -41,6 +41,8 @@ internal sealed partial class NoticeTable
                 [.. parameters, ("$closingChoice", choice)]);
             return;
         }
+        // This is the shared episode-success owner: closing replaces an earlier Ignore choice as well as
+        // retiring its state. Every family routes success here; Ignore never carries into a later failure.
         StoreSchema.Execute(_connection, transaction,
             "UPDATE notice SET closed_at=CASE WHEN state<>'closed' OR choice IS NOT $closingChoice " +
             "OR closed_at IS NULL THEN $closedAt ELSE closed_at END,state='closed',choice=$closingChoice WHERE " + where,
@@ -95,7 +97,7 @@ internal sealed partial class NoticeTable
             return;
         // The uncertain-delete explanation owns this failure, regardless of publication order.
         // Aggregated rows still own the per-item explanation behind their summary.
-        if (notice.ReasonKey == "interrupted-delete-unverified")
+        if (notice.ReasonKey == InterruptedDelete.UnverifiedReason)
             CloseResolved(transaction, pairNo,
                 ShortId.Make("n", notice.PairId, "40", RowCodec.Key(notice.Path), "sync-retry"), "superseded");
         if (notice.ReasonKey is "content-unconfirmed" or "sync-retry" &&
@@ -210,7 +212,7 @@ internal sealed partial class NoticeTable
             "WHERE notice_id=$id AND ((NOT (" + suppressed + ") AND state <> 'open') OR restore_hold <> $hold " +
             "OR ($refresh=1 AND (detail <> $detail OR path <> $path OR path_key <> $path_key OR reason_key <> $reason OR rule <> $rule)));",
             ("$sameEpisode", sameEpisode ? 1 : 0),
-            ("$refresh", notice.Storage is not null || JournalSizing.IsNotice(notice) || notice.Quarantine is not null || notice.DefenderHistory is not null || NoticeChoices.IsRetryNotice(notice) || notice.FreeSpace is not null || (notice.Kind == NoticeKind.UserDecision && notice.Detail.Contains(ProviderNameRefusedException.Detail, StringComparison.Ordinal)) || notice.ReasonKey == ProviderNameRefusedException.NoticeKey ? 1 : 0),
+            ("$refresh", notice.Storage is not null || NoticeVocabulary.IsJournalNotice(notice) || notice.Quarantine is not null || notice.DefenderHistory is not null || NoticeChoices.IsRetryNotice(notice) || notice.FreeSpace is not null || (notice.Kind == NoticeKind.UserDecision && notice.Detail.Contains(ProviderNameRefusedException.Detail, StringComparison.Ordinal)) || notice.ReasonKey == ProviderNameRefusedException.NoticeKey ? 1 : 0),
             ("$id", noticeId), ("$rule", notice.Rule), ("$kind", notice.Kind.ToString()), ("$path", notice.Path),
             ("$path_key", PathKey.Of(notice.Path)), ("$reason", notice.ReasonKey), ("$detail", NoticeDetailCodec.Encode(notice)),
             ("$hold", restoreHold));

@@ -5,6 +5,7 @@ internal static partial class ExecutorChecks
     private static async Task DeleteSourceChecksAsync()
     {
         await FailureBoundaryChecks.RunAsync();
+        await StoreCapabilityChecksAsync();
         foreach (var side in new[] { Side.A, Side.B })
         {
             var (store, a, b, executor) = Rig();
@@ -266,16 +267,16 @@ internal static partial class ExecutorChecks
             var b = new FakeEndpoint(Side.B, "rb");
             var source = a.Seed("x", "same");
             var victim = b.Seed("x", "same");
-            using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
+            using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 store.SavePair(Pair());
                 var adopt = Act(ActionKind.Adopt, Side.B, "x", source: source, expected: victim, key: "kx");
                 store.CommitResult("p1", 1, adopt, new ActionResult(adopt.ActionId, Outcome.Done, source, victim, null, null));
-                var executor = new Executor(store, Settings(2), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+                var executor = new Executor(store, Settings(2), Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
                 var results = await Apply(executor, Plan(Act(ActionKind.Delete, Side.B, "x", expected: victim, key: "kx")), a, b);
                 Require(results.Single().DeleteSourceUnconfirmed, "source guard marks durable replan debt");
             }
-            using (var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
+            using (var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 Require(reopened.Baselines("p1").Count == 1 && reopened.SyncRetryAt("p1", "x") is { Kind: "sync" },
                     "reopening without another scan preserves both baseline and due retry");

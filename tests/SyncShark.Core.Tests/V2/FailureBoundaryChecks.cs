@@ -4,6 +4,7 @@ internal static class FailureBoundaryChecks
 {
     internal static async Task RunAsync()
     {
+        StorageClassifierSeamChecks.Run();
         foreach (var code in new[] { 11, 26, 5, 6, 13, 19 })
         {
             var raw = new Microsoft.Data.Sqlite.SqliteException("synthetic", code);
@@ -12,7 +13,7 @@ internal static class FailureBoundaryChecks
                 var damage = code is 11 or 26;
                 LocalChecks.Require(StorageFailureClassifier.ScopeOf(error, default) == (damage
                     ? FailureRetryOwner.FailureScope.State : FailureRetryOwner.FailureScope.Item), "damage-only traversal leaves other codes unchanged");
-                LocalChecks.Require(DateRepair.ItemFailure(error, StorageFailureClassifier.IsStateDamage) == !damage,
+                LocalChecks.Require(DateRepair.ItemFailure(error, StorageFailureClassifier.IsStateDamage, StorageFailureClassifier.IsDirectStateDamage) == !damage,
                     "date failure filter rejects nested damage only");
             }
         }
@@ -27,7 +28,7 @@ internal static class FailureBoundaryChecks
             StorageFailureClassifier.ScopeOf(new OperationCanceledException("wrapped", new Microsoft.Data.Sqlite.SqliteException("synthetic", 11)), stop.Token) == FailureRetryOwner.FailureScope.State,
             "state damage takes precedence without changing ordinary stop handling");
         foreach (Action construct in new Action[] {
-            () => { _ = new Executor(null!, null!, null!, null!); },
+            () => { _ = new Executor(null!, null!, null!, null!, isStoreException: StorageFailureClassifier.IsStoreException); },
             () => { _ = new LocalInventory(null!, default, null!, null!, null!, null!, null!); },
             () => { _ = new DropboxWriter(null!, default, null!, "", null!); },
             () => { _ = new AdmissionAbsenceBatch(null!); },

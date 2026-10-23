@@ -49,7 +49,7 @@ public sealed partial class SqliteStateStore
         // The first manifest and its victim/source snapshots commit together. No retry may freeze a later tree.
         if (prior is null)
         {
-            foreach (var action in operation.Actions.Where(FolderDelete.Expands))
+            foreach (var action in operation.Actions.Where(FolderExpansion.Expands))
                 FreezeChoiceVictims(transaction, pairId, action.ActionId,
                     action.Target == Side.A ? pair.A.RootId : pair.B.RootId, action.Path);
             if (operation.Choice == NoticeChoices.ReplaceExisting &&

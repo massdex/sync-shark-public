@@ -45,7 +45,7 @@ internal static partial class RunChecks
     private static async Task SupersededKeepsDebtAsync()
     {
         var folder = FixtureFolder("superseded-debt");
-        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.Seed("file.txt", "same"); fx.B.Seed("file.txt", "same");
         await FirstSyncAsync(fx.Run(), fx);

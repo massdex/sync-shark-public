@@ -7,6 +7,7 @@ internal static partial class StorageChecks
     private static void NoticeCatalogueChecks()
     {
         CatalogueEquivalenceChecks();
+        FailureSummaryOptionsChecks();
         // All non-payload retry reasons, plus dynamic reason families and payload branches below.
         // No Ignore is allowed on tagged keep-both successors: abandoning that successor would
         // silently undo an established keep-both decision (ExecutionReasons.ConflictCopyBlocked).
@@ -44,6 +45,44 @@ internal static partial class StorageChecks
             "tagged keep-both successor is Retry-only, never silently abandoned");
         Require(!NoticeChoices.CanQueueExclusion(new("p1", 40, NoticeKind.Info, "file.txt", "failed", "sync-retry"),
             "file.txt", NoticeChoices.Ignore), "Ignore never enters deferred permanent exclusion queue");
+    }
+
+    /// <summary>A failure summary and an unknown failure keep Retry and Ignore beside their existing page
+    /// action, so a failure never renders with no choices and never ends sync. A decision notice keeps its own
+    /// empty catalogue: it waits for the user's decision, never a retry.</summary>
+    private static void FailureSummaryOptionsChecks()
+    {
+        (string Reason, int Rule)[] summaries =
+        [
+            (SqliteStateStore.BlockedDeleteSummary, 0), (SqliteStateStore.UncertainDeleteSummary, 0),
+            (SqliteStateStore.DeleteReviewSummary, 0), ("held-intents", 0),
+            (RehashProtection.Reason, RehashProtection.Rule)
+        ];
+        foreach (var (reason, rule) in summaries)
+        {
+            var summary = new Notice("pair", rule, NoticeKind.Info, "", "summary", reason);
+            var options = NoticeOptions.Options(summary);
+            Require(options.Any(option => option.Choice == ShowRemaining), reason + " keeps its bounded Show remaining action");
+            Require(options.Any(option => option.Choice == RetryNow), reason + " offers Retry");
+            Require(options.Any(option => option.Choice == Ignore), reason + " offers Ignore without ending sync");
+            Require(options.Select(option => option.Choice).Distinct().Count() == options.Count, reason + " has no duplicate options");
+        }
+        var unknown = new Notice("pair", 40, NoticeKind.Info, "Parent/file.txt", "A new failure.", "unrecognised-failure");
+        Require(NoticeOptions.Options(unknown).Select(option => option.Choice)
+                .SequenceEqual([RepairHelp, RetryNow, Ignore, Exclude]),
+            "an unknown non-decision failure gets the generic why/retry/ignore notice with explicit exclusion");
+        var decision = new Notice("pair", 40, NoticeKind.UserDecision, "Parent/file.txt", "A decision.", "unrecognised-decision");
+        Require(NoticeOptions.Options(decision).Count == 0, "a decision notice never offers Retry or Ignore");
+        var automatic = new Notice("pair", 4, NoticeKind.AutoConflict, "Parent/file.txt", "Decided automatically.",
+            PlanNotices.AutoConflict.Key);
+        Require(NoticeOptions.Options(automatic).Count == 0, "an automatic decision notice never offers Retry or Ignore");
+        var review = new Notice("pair", 40, NoticeKind.UserDecision, "Parent/file.txt", "Review the deletion.", "deletion-review");
+        Require(NoticeOptions.Options(review).All(option => option.Choice != RetryNow),
+            "a deletion-review decision notice never offers Retry");
+        foreach (var reason in new[] { PlanNotices.OutsidePairArea.Key, PlanNotices.PairExcluded.Key,
+            PlanNotices.StubWithoutCounterpart.Key, "name-mapping-collision" })
+            Require(NoticeOptions.Options(new Notice("pair", 40, NoticeKind.Info, "Parent/file.txt", "known information", reason)).Count == 0,
+                reason + " remains a known informational notice, not a generic retry");
     }
 
     private static void CatalogueEquivalenceChecks()
@@ -204,15 +243,18 @@ internal static partial class StorageChecks
             ? [new(RetryNow, "Retry with the same plan bound"), new(ApprovePlanSize, "Approve this plan size"),
                new(Ignore, "Ignore this cause"), new(RepairHelp, "Review preview / provenance and the plan bound")]
             : (notice.ReasonKey is SqliteStateStore.BlockedDeleteSummary or SqliteStateStore.UncertainDeleteSummary or SqliteStateStore.DeleteReviewSummary)
-            ? [new(ShowRemaining, "Show remaining blocked deletions (50 per page)")]
+            ? [new(ShowRemaining, "Show remaining blocked deletions (50 per page)"),
+               new(RetryNow, "Retry now"), new(Ignore, "Ignore this cause; keep the blocked work protected")]
             : IsRecoveryRestoreNotice(notice)
             ? LegacyRecoveryRestoreOptions(notice)
             : notice.ReasonKey == "folder-delete-unrestored"
             ? LegacyFolderRestoreOptions(notice)
             : notice.ReasonKey == "held-intents"
-            ? [new(ShowRemaining, "Show remaining changes (50 per page)")]
+            ? [new(ShowRemaining, "Show remaining changes (50 per page)"), new(RetryNow, "Retry now"),
+               new(Ignore, "Ignore this cause")]
             : notice.ReasonKey == RehashProtection.Reason
-            ? [new(ShowRemaining, "Show remaining changes (50 per page)")]
+            ? [new(ShowRemaining, "Show remaining changes (50 per page)"), new(RetryNow, "Retry now"),
+               new(Ignore, "Ignore this cause")]
             : notice.ReasonKey == "permanent-boundary"
             ? [new(Ignore, "Ignore this information (keep boundary protected)")]
             : notice.Storage is not null

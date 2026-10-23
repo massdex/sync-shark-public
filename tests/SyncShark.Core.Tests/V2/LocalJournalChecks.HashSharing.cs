@@ -18,7 +18,7 @@ internal static partial class LocalJournalChecks
         const int size = 16 * 1024 * 1024;
         using (var seed = new FileStream(Path.Combine(parent, "large.bin"), FileMode.CreateNew, FileAccess.Write, FileShare.None))
             seed.SetLength(size);
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var root = LocalChecks.RootOf(rootPath, "hash-sharing");
         var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), StorageChecks.Fast, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage);
         var snapshot = await inventory.FullAsync(store.BeginGeneration(root.RootId, "full"), _ => true, null!, default);

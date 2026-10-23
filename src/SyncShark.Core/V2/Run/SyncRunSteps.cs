@@ -719,7 +719,8 @@ public sealed partial class SyncRun
                 observationStore.BeginPrefixHydration(root.RootId, ct);
                 hydrationFailures = await RehearsalEndpoints.HydrateAsync(inventory, hydrating, hydrate, rows =>
                 {
-                    observationStore.StagePrefixHydration(root.RootId, rows, include);
+                    observationStore.StagePrefixHydration(root.RootId, rows.Where(row => include(row.Path))
+                        .Select(row => (row.Path, row.Entry is null ? null : DropboxItems.ToItem(row.Entry))).ToArray());
                     return Task.CompletedTask;
                 }, ct);
                 observationStore.InstallPrefixHydration(root, side, deltaGen, hydrate,

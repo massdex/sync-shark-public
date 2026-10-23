@@ -41,7 +41,7 @@ internal static class LinkExclusionChecks
         var b = new FakeEndpoint(Side.B, pair.B.RootId);
         var provider = new FakeEndpointProvider().Add(pair.A, a).Add(pair.B, b)
             .AddWriter(pair.A, new CountingWriter(a)).AddWriter(pair.B, new CountingWriter(b));
-        var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider, Settings,
+        var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), provider, Settings,
             TimeProvider.System);
         return (pair, store, a, b, run);
     }
@@ -191,7 +191,7 @@ internal static class LinkExclusionChecks
     private static void StoreForgetsBaselinesWhenLinkIsWritten()
     {
         var data = Path.Combine(Path.GetTempPath(), "v2-linkforget-" + Guid.NewGuid().ToString("N"));
-        using var sqlite = SqliteStateStore.Open(data, V2Settings.Default, TimeProvider.System);
+        using var sqlite = SqliteStateStore.Open(data, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
         foreach (var store in new IStateStore[] { new InMemoryStateStore(), sqlite })
         {
             var pair = NewPair(store);
@@ -243,7 +243,7 @@ internal static class LinkExclusionChecks
         b.Seed("keep-out.txt", "remote only");
         var provider = new FakeEndpointProvider().Add(pair.A, a).Add(pair.B, b)
             .AddWriter(pair.A, new CountingWriter(a)).AddWriter(pair.B, new CountingWriter(b));
-        var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider, Settings,
+        var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), provider, Settings,
             TimeProvider.System);
         var plan = await run.PreviewFirstSyncAsync(pair.PairId, null, [new OneSidedChoice("", Side.B, true)],
             new RecordingProgress(), CancellationToken.None);
@@ -283,7 +283,7 @@ internal static class LinkExclusionChecks
         var writerB = new CountingWriter(b);
         var provider = new FakeEndpointProvider().Add(pair.A, a).Add(pair.B, b).AddInventory(pair.A, linking)
             .AddWriter(pair.A, new CountingWriter(a)).AddWriter(pair.B, writerB);
-        var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider, Settings,
+        var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), provider, Settings,
             TimeProvider.System);
         var plan = await run.PreviewFirstSyncAsync(pair.PairId, new RecordingProgress(), CancellationToken.None);
         await run.ApplyAsync(pair.PairId, plan, new RecordingProgress(), CancellationToken.None);
@@ -321,7 +321,7 @@ internal static class LinkExclusionChecks
         var stubbing = new LinkingInventory(a, "s.txt", ItemFlags.Placeholder);
         var provider = new FakeEndpointProvider().Add(pair.A, a).Add(pair.B, b).AddInventory(pair.A, stubbing)
             .AddWriter(pair.A, new CountingWriter(a)).AddWriter(pair.B, new CountingWriter(b));
-        var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider, Settings,
+        var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), provider, Settings,
             TimeProvider.System);
         var plan = await run.PreviewFirstSyncAsync(pair.PairId, null, [new OneSidedChoice("", Side.B, true)],
             new RecordingProgress(), CancellationToken.None);
@@ -440,7 +440,7 @@ internal static class LinkExclusionChecks
                 var provider = new FakeEndpointProvider().Add(local, a).Add(cloud, b)
                     .AddInventory(local, linking)
                     .AddWriter(local, writerA).AddWriter(cloud, writerB);
-                var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider,
+                var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), provider,
                     Settings, TimeProvider.System);
                 var (plan, resolution) = await run.PreviewFirstSyncResolvedAsync(pair.PairId, null, null,
                     [new RebuildableChoice("js-packages")], new RecordingProgress(), CancellationToken.None);
@@ -537,7 +537,7 @@ internal static class LinkExclusionChecks
         var writerB = new CountingWriter(b);
         var provider = new FakeEndpointProvider().Add(pair.A, a).Add(pair.B, b).AddInventory(pair.A, linking)
             .AddWriter(pair.A, writerA).AddWriter(pair.B, writerB);
-        var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), provider, Settings,
+        var run = new SyncRun(store, new Executor(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), provider, Settings,
             TimeProvider.System);
         var removeAll = new[] { new OneSidedChoice("", Side.B, true) };
 

@@ -10,7 +10,7 @@ internal static partial class RunChecks
         foreach (var choice in new[] { NoticeChoices.KeepA, NoticeChoices.KeepB, NoticeChoices.KeepBoth, "stale", "retry" })
         {
             var root = LocalChecks.FreshRoot($"conflict-choice-{rule}-{choice}");
-            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             fx.A.DropboxHashes = fx.B.DropboxHashes = true;
             var a = fx.A.Seed("a.txt", "left version");
@@ -61,7 +61,7 @@ internal static partial class RunChecks
         foreach (var choice in new[] { NoticeChoices.RenameIncoming, NoticeChoices.ReplaceExisting, NoticeChoices.Dismiss, "stale" })
         {
             var root = LocalChecks.FreshRoot("incoming-choice-" + choice);
-            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             fx.A.DropboxHashes = fx.B.DropboxHashes = true;
             var a = fx.A.Seed("new.txt", "incoming");
@@ -87,7 +87,7 @@ internal static partial class RunChecks
         foreach (var mode in new[] { "clean", "overlap", "missing", "stale" })
         {
             var root = LocalChecks.FreshRoot("merge-base-" + mode);
-            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             fx.A.DropboxHashes = fx.B.DropboxHashes = true;
             var oldA = fx.A.Seed("story.txt", "alpha\nbeta\ngamma\n");
@@ -141,7 +141,7 @@ internal static partial class RunChecks
         foreach (var choice in new[] { NoticeChoices.KeepA, NoticeChoices.ReplaceExisting })
         {
             var root = LocalChecks.FreshRoot("folder-choice-" + choice);
-            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             fx.A.DropboxHashes = fx.B.DropboxHashes = true;
             Notice notice;
@@ -199,7 +199,7 @@ internal static partial class RunChecks
         foreach (var large in new[] { false, true })
         {
             var root = LocalChecks.FreshRoot("comparison-export-" + large);
-            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             fx.A.DropboxHashes = fx.B.DropboxHashes = true;
             var a = fx.A.Seed("data.bin", large ? new string('x', 9 * 1024 * 1024) : "a\0b");

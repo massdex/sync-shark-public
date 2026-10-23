@@ -7,7 +7,7 @@ internal static partial class StorageChecks
     private static void IntentHorizonMigrationChecks(string root)
     {
         var folder = Fresh(root, "intent-horizon-migration");
-        using (var store = SqliteStateStore.Open(folder, Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(folder, Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(Pair("p1"));
             foreach (var id in new[] { "first", "second", "third", "last" })

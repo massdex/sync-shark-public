@@ -6,7 +6,7 @@ internal static partial class RunChecks
     {
         HydrationIdentityChecks();
         var folder = Path.Combine(Path.GetTempPath(), "hydration-review-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var item = fx.A.Seed("available.txt", "content") with { Flags = ItemFlags.Placeholder };
         MappingSnapshot(store, fx.Pair.A, Side.A, [item]);
@@ -101,7 +101,7 @@ internal static partial class RunChecks
     private static async Task DeletionIgnoreOutageChecksAsync()
     {
         var folder = Path.Combine(Path.GetTempPath(), "ignore-outage-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.Seed("held.txt", "surviving content");
         fx.Provider.AddInventory(fx.Pair.B, new DeferredInventory(fx.B) { ProviderOutage = true });
@@ -139,7 +139,7 @@ internal static partial class RunChecks
     private static async Task DeletionIgnoreReincludeChecksAsync()
     {
         var folder = Path.Combine(Path.GetTempPath(), "ignore-evidence-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.Seed("held.txt", "surviving content");
         fx.Provider.AddInventory(fx.Pair.B, new DeferredInventory(fx.B) { ProviderOutage = true });
@@ -199,7 +199,7 @@ internal static partial class RunChecks
     {
         foreach (var scenario in new[] { "folder", "partial-first-sync", "released", "recreated", "cli" })
         {
-            using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "restored-hold-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "restored-hold-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             var item = fx.A.Seed("held", "content", scenario == "folder" ? ItemKind.Folder : ItemKind.File);
             store.SaveSyncRetry(fx.Pair.PairId, new(item.Path, "post-preview", 0, "original failure", DateTimeOffset.MinValue,
@@ -299,7 +299,7 @@ internal static partial class RunChecks
                 }
             }
         }
-        using var paged = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "restored-pages-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System);
+        using var paged = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "restored-pages-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var many = Build(suppliedStore: paged);
         var pair = many.Pair with { B = many.Pair.B with { Provider = SyncProviders.Local }, Excluded = ["folder"] };
         paged.SavePair(pair);
@@ -349,7 +349,7 @@ internal static partial class RunChecks
         foreach (var answered in new[] { false, true })
         {
             using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(),
-                "restored-budget-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System);
+                "restored-budget-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             var item = fx.A.Seed("held.txt", "content");
             store.SaveSyncRetry(fx.Pair.PairId, new SyncRetry(item.Path, "deletion-evidence", 0, "",
@@ -386,7 +386,7 @@ internal static partial class RunChecks
         // cancellation, so the evidence lane must consult PairPause directly. The same answered lookup in
         // a running pair still spends exactly one attempt.
         using (var pausedStore = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(),
-                   "restored-paused-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System))
+                   "restored-paused-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             var pausedFx = Build(suppliedStore: pausedStore);
             var pausedItem = pausedFx.A.Seed("held.txt", "content");

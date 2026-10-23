@@ -12,7 +12,7 @@ internal static class DeleteReviewNoticeChecks
     {
         var clock = new RetentionClock();
         string activeId, closedId;
-        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, clock))
+        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, clock, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(new PairDef("retention", "Pair A", new("local", SyncProviders.Local, null, "/local", "local"),
                 new("cloud", SyncProviders.Dropbox, null, "/cloud", "cloud"), [], [], true));
@@ -35,7 +35,7 @@ internal static class DeleteReviewNoticeChecks
             clock.Now += StorageChecks.Fast.HistoryRetention + TimeSpan.FromDays(1);
             store.Prune();
         }
-        using var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, clock);
+        using var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, clock, LocalItems.CaptureOptionalHash);
         LocalChecks.Require(reopened.NoticeById("retention", activeId) is { Closed: false },
             "aged active aggregated review survives prune and cold reopen");
         LocalChecks.Require(reopened.NoticeById("retention", closedId) is null,
@@ -45,7 +45,7 @@ internal static class DeleteReviewNoticeChecks
     internal static void Run(string folder)
     {
         AggregatedRetention(Path.Combine(folder, "retention"));
-        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pair = new PairDef("pair", "Pair A", new("local", SyncProviders.Local, null, "/local", "local"),
             new("cloud", SyncProviders.Dropbox, null, "/cloud", "cloud"), [], [], true);
         store.SavePair(pair);
@@ -81,7 +81,7 @@ internal static class DeleteReviewNoticeChecks
         var reviewPage = store.ReadDeleteNoticeItems(pair.PairId, true);
         var item = reviewPage.Items[0];
         LocalChecks.Require(store.NoticeById(pair.PairId, item.NoticeId!) is { Closed: false }, "aggregated item remains actionable by id");
-        var run = new SyncRun(store, new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
+        var run = new SyncRun(store, new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException),
             new FakeEndpointProvider(), V2Settings.Default, TimeProvider.System);
         var shown = run.ApplyRetryNoticeChoiceAsync(pair.PairId, summary.NoticeId!, NoticeChoices.ShowRemaining, default).GetAwaiter().GetResult();
         LocalChecks.Require(shown.Contains(item.NoticeId!, StringComparison.Ordinal) && shown.Contains(NoticeChoices.DeleteReviewed, StringComparison.Ordinal),

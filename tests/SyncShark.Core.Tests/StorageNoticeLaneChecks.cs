@@ -17,7 +17,7 @@ internal static class StorageNoticeLaneChecks
         if (Directory.Exists(root)) throw new InvalidOperationException("Use a fresh disposable database directory.");
         Directory.CreateDirectory(root);
         var local = new RootDef("local", SyncProviders.Local, null, root, "root-object");
-        using var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System);
+        using var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
         store.EnableStorage();
         store.SavePair(new PairDef("pair", "Pair A", local,
             new RootDef("remote", SyncProviders.Dropbox, "fixture-account", "/Remote", "remote-root"), [], [], true));
@@ -62,6 +62,52 @@ internal static class StorageNoticeLaneChecks
             "the ignored cause A remains suppressed after the transition");
         StorageNotices.Complete(store, pair.PairId, item);
         HydrationNoticeWriterChecks.Require(StorageStorage(store, pair).Count == 0, "flip fixture is clean");
+
+        // Decision 89: an Ignore covers only the outage it silenced. Every live pair cause, suppressed or not,
+        // is a scope the success evidence must cover; an unrelated success may never retire it.
+        var availability = new StorageNotice(local.RootId, "object-avail", pair.B.RootId, "settlement");
+        StorageNotices.Report(store, pair, string.Empty, availability, new StoragePairException("network", "offline"));
+        var ignoredNetwork = SingleStorageNotice(store, pair);
+        HydrationNoticeWriterChecks.Require(ignoredNetwork.Storage is { Operation: "availability", ObjectId: "", Scope: "network" },
+            "a transport settlement failure is one pair availability cause");
+        store.CloseNotice(ignoredNetwork.NoticeId!, NoticeChoices.Ignore);
+        HydrationNoticeWriterChecks.Require(store.StorageCauseIgnored(pair.PairId, ignoredNetwork.ReasonKey),
+            "Ignore suppresses the exact network availability cause");
+        StorageNotices.CompleteSuccess(store, pair, requested: false, pairCauseReportedThisTurn: false);
+        HydrationNoticeWriterChecks.Require(!store.StorageCauseIgnored(pair.PairId, ignoredNetwork.ReasonKey),
+            "a connectivity success retires the ignored network availability cause");
+        StorageNotices.Report(store, pair, string.Empty, availability, new StoragePairException("network", "offline"));
+        HydrationNoticeWriterChecks.Require(StorageStorage(store, pair).Count == 1,
+            "a later outage after success raises an actionable availability notice");
+
+        // An unrelated transport success must not clear a suppression whose cause it did not fix.
+        StorageNotices.Report(store, pair, string.Empty, availability,
+            new StoragePairException("volume", "the volume is unavailable"));
+        var ignoredVolume = store.UnresolvedNotices(pair.PairId).Single(notice => notice.Storage is not null);
+        HydrationNoticeWriterChecks.Require(ignoredVolume.Storage is { Scope: "volume" }, "the current cause is a volume failure");
+        store.CloseNotice(ignoredVolume.NoticeId!, NoticeChoices.Ignore);
+        StorageNotices.CompleteSuccess(store, pair, requested: false, pairCauseReportedThisTurn: false);
+        HydrationNoticeWriterChecks.Require(store.StorageCauseIgnored(pair.PairId, ignoredVolume.ReasonKey),
+            "an unrelated success never retires an ignored binding/volume cause");
+        StorageNotices.CompletePair(store, pair, "availability");
+        HydrationNoticeWriterChecks.Require(!store.StorageCauseIgnored(pair.PairId, ignoredVolume.ReasonKey),
+            "a justified availability success retires the ignored volume cause");
+
+        // The hydration lane's own success retires its ignored pair cause, and the next failure is actionable.
+        var hydrationPair = new StorageNotice(local.RootId, "object-hyd", pair.B.RootId, "hydration");
+        StorageNotices.Report(store, pair, string.Empty, hydrationPair, new StoragePairException("network", "offline"));
+        var ignoredHydration = SingleStorageNotice(store, pair);
+        HydrationNoticeWriterChecks.Require(ignoredHydration.Storage is { Operation: StorageNotices.HydrationPairOperation, ObjectId: "" },
+            "a transport hydration failure is one pair hydration cause");
+        store.CloseNotice(ignoredHydration.NoticeId!, NoticeChoices.Ignore);
+        StorageNotices.CompleteHydrationPair(store, pair);
+        HydrationNoticeWriterChecks.Require(!store.StorageCauseIgnored(pair.PairId, ignoredHydration.ReasonKey),
+            "the hydration lane's own success retires its ignored pair cause");
+        StorageNotices.Report(store, pair, string.Empty, hydrationPair, new StoragePairException("network", "offline"));
+        HydrationNoticeWriterChecks.Require(StorageStorage(store, pair).Count == 1,
+            "a later hydration outage after success is actionable");
+        StorageNotices.CompleteHydrationPair(store, pair);
+        HydrationNoticeWriterChecks.Require(StorageStorage(store, pair).Count == 0, "availability fixture is clean");
 
         // N6/N11 through the writer: a renamed item closes by callback identity; a prior-process pair cause closes on
         // the first successful hydration of a new writer.

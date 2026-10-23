@@ -48,7 +48,7 @@ internal static partial class RunChecks
         var winner = (await writer.ObserveAsync("file.txt", CancellationToken.None))!;
         var other = new FakeEndpoint(Side.B, "rb") { DropboxHashes = true };
         var otherWinner = other.Seed("file.txt", "winner bytes");
-        using var store = SqliteStateStore.Open(Path.Combine(directory, "state"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(directory, "state"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pair = new PairDef("pair00001", "restore", localRoot,
             new RootDef("rb", SyncProviders.Dropbox, "acc", "/b", "id:rb"), [], [], true);
         store.SavePair(pair);

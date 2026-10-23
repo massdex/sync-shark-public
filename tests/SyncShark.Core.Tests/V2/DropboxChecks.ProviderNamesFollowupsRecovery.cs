@@ -15,7 +15,7 @@ internal static partial class DropboxChecks
         await File.WriteAllBytesAsync(file, bytes);
         var settings = StorageChecks.Fast with { MaxWorkers = 1, ProgressInterval = TimeSpan.Zero };
         using var h = new Harness();
-        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var localRoot = LocalChecks.RootOf(local, "root-local");
         var pair = new PairDef("recovery-refusal", "Recovery refusal", localRoot, Root(), [], [], true);
         store.SavePair(pair);
@@ -26,7 +26,7 @@ internal static partial class DropboxChecks
             .AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, store, pair.PairId))
             .AddWriter(pair.B, h.Writer());
         h.Wire.NameWriteErrors[refusedPath] = "disallowed_name";
-        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage), endpoints,
+        var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), endpoints,
             settings, TimeProvider.System);
         var plan = await run.PreviewFirstSyncAsync(pair.PairId, new RecordingProgress(), CancellationToken.None);
         await run.ApplyAsync(pair.PairId, plan, new RecordingProgress(), CancellationToken.None);
@@ -57,7 +57,7 @@ internal static partial class DropboxChecks
     private static async Task ProviderRefusedHeldDescendantAsync(string root, bool inherited = false)
     {
         var settings = StorageChecks.Fast with { MaxWorkers = 1, ProgressInterval = TimeSpan.Zero };
-        using var store = SqliteStateStore.Open(root, settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(root, settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pair = new PairDef("p1", "held refusal",
             new RootDef("ra", SyncProviders.Local, null, "C:\\synthetic", "id:local"),
             new RootDef("rb", SyncProviders.Dropbox, "account", "/synthetic", "id:cloud"), [], [], true);
@@ -73,7 +73,7 @@ internal static partial class DropboxChecks
         writerB.Refused.Add(refusedPath);
         var provider = new FakeEndpointProvider().Add(pair.A, a).Add(pair.B, b)
             .AddWriter(pair.A, writerA).AddWriter(pair.B, writerB);
-        var executor = new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+        var executor = new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
         var run = new SyncRun(store, executor, provider, settings, TimeProvider.System);
         if (inherited)
         {

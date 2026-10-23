@@ -60,7 +60,7 @@ internal static partial class RunChecks
     private static async Task DeferralWriteFailureRetainsCursorAsync()
     {
         var folder = FixtureFolder("deferred-write-fault");
-        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.Seed("Held/File", "same");
         fx.B.Seed("Held/File", "same");
@@ -91,7 +91,7 @@ internal static partial class RunChecks
     private static async Task GenerationAndGapCommitAtomicallyAsync()
     {
         var folder = FixtureFolder("generation-gap-atomic");
-        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.Seed("anchor.txt", "same");
         fx.B.Seed("anchor.txt", "same");

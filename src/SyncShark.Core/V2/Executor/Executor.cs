@@ -9,16 +9,19 @@ namespace Massdex.SyncShark.V2;
 public sealed partial class Executor : IExecutor
 {
     private readonly Func<Exception, bool> _isStateDamage;
+    private readonly Func<Exception, bool> _isStoreException;
     private readonly IStateStore _store;
     private readonly V2Settings _settings;
     private readonly SyncTransferResourceController _admission;
     private readonly SemaphoreSlim _storeGate = new(1, 1);
 
     /// <summary>Creates the executor over one store, its settings and the shared admission controller.</summary>
-    public Executor(IStateStore store, V2Settings settings, SyncTransferResourceController admission, Func<Exception, bool> isStateDamage)
+    public Executor(IStateStore store, V2Settings settings, SyncTransferResourceController admission, Func<Exception, bool> isStateDamage, Func<Exception, bool> isStoreException)
     {
         ArgumentNullException.ThrowIfNull(isStateDamage);
+        ArgumentNullException.ThrowIfNull(isStoreException);
         _isStateDamage = isStateDamage;
+        _isStoreException = isStoreException;
         if (settings.UnknownCommitGracePeriod <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(settings), "Unknown commit observation grace must be positive.");
         _store = store;
@@ -384,7 +387,7 @@ public sealed partial class Executor : IExecutor
                 var group = new List<SyncAction>();
                 while (index < ordered.Count && ordered[index].Step == level)
                     group.Add(ordered[index++].Action);
-                await RunGroupAsync(group, gate, pending, runner, writer, ct, consumerGone, _isStateDamage).ConfigureAwait(false);
+                await RunGroupAsync(group, gate, pending, runner, writer, ct, consumerGone, _isStateDamage, _isStoreException).ConfigureAwait(false);
             }
             writer.TryComplete();
         }
@@ -396,7 +399,7 @@ public sealed partial class Executor : IExecutor
 
     private static async Task RunGroupAsync(IReadOnlyList<SyncAction> group, SemaphoreSlim gate,
         SemaphoreSlim pending, ActionRunner runner, ChannelWriter<ActionResult> writer, CancellationToken ct,
-        CancellationToken consumerGone, Func<Exception, bool> isStateDamage)
+        CancellationToken consumerGone, Func<Exception, bool> isStateDamage, Func<Exception, bool> isStoreException)
     {
         var running = new List<Task>();
         try
@@ -409,7 +412,7 @@ public sealed partial class Executor : IExecutor
                 catch { pending.Release(); throw; }
                 try { PairPause.Check(); }
                 catch { gate.Release(); pending.Release(); throw; }
-                running.Add(LaunchAsync(action, gate, pending, runner, writer, ct, consumerGone, isStateDamage));
+                running.Add(LaunchAsync(action, gate, pending, runner, writer, ct, consumerGone, isStateDamage, isStoreException));
                 // Observe every completed task (including faults) without retaining one task per plan row.
                 for (var i = running.Count - 1; i >= 0; i--)
                 {
@@ -442,7 +445,7 @@ public sealed partial class Executor : IExecutor
     }
 
     private static async Task LaunchAsync(SyncAction action, SemaphoreSlim gate, SemaphoreSlim pending,
-        ActionRunner runner, ChannelWriter<ActionResult> writer, CancellationToken ct, CancellationToken consumerGone, Func<Exception, bool> isStateDamage)
+        ActionRunner runner, ChannelWriter<ActionResult> writer, CancellationToken ct, CancellationToken consumerGone, Func<Exception, bool> isStateDamage, Func<Exception, bool> isStoreException)
     {
         var previous = SyncEffectStaging.Current.Value;
         var staging = new SyncEffectStaging(() => gate.Release());
@@ -453,7 +456,7 @@ public sealed partial class Executor : IExecutor
                 await writer.WriteAsync(result, consumerGone).ConfigureAwait(false);
         }
         catch (Exception error) when (!isStateDamage(error) && error is not (PairPausedException or OperationCanceledException or EndpointAccessException or StateDamagedException) &&
-            error is not Microsoft.Data.Sqlite.SqliteException)
+            !isStoreException(error))
         {
             // The intent, if any, remains unresolved for next-run reconciliation. Do not
             // claim that an effect failed before it happened; an unknown post-write error is uncertain.
@@ -578,9 +581,9 @@ public sealed partial class Executor : IExecutor
             : await GateAsync(() => BaselineKeysByObject(pair.PairId, folder.Target, descendants), ct)
                 .ConfigureAwait(false);
         var localDropbox = string.Equals((folder.Target == Side.A ? pair.A : pair.B).Provider,
-                SyncProviders.Local, StringComparison.OrdinalIgnoreCase) &&
+                ProviderIds.Local, StringComparison.OrdinalIgnoreCase) &&
             string.Equals((folder.Target == Side.A ? pair.B : pair.A).Provider,
-                SyncProviders.Dropbox, StringComparison.OrdinalIgnoreCase);
+                ProviderIds.Dropbox, StringComparison.OrdinalIgnoreCase);
         var children = descendants.Select(item => new SyncAction(folder.ActionId + ":" + item.Path.ToLowerInvariant(),
             folder.Rule, ActionKind.Delete, folder.Target, item.Path, null, null, item,
             // No bytes are lost by removing a verified fully-dehydrated reference. The local

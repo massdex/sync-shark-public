@@ -13,7 +13,7 @@ internal static class DateRepairChecks
         Directory.CreateDirectory(root);
         var localRoot = Path.Combine(root, "files");
         Directory.CreateDirectory(localRoot);
-        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "state"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pair = new PairDef("dates", "Dates", LocalChecks.RootOf(localRoot, "local"),
             new RootDef("cloud", SyncProviders.Dropbox, "account", "/test", "id:cloud"), [], [], true);
         store.SavePair(pair);
@@ -52,25 +52,25 @@ internal static class DateRepairChecks
         remote["small-gap"] = remote["small-gap"] with { Mtime = stamp.AddHours(-23) };
         using var locked = new FileStream(Path.Combine(localRoot, "locked"), FileMode.Open, FileAccess.Read, FileShare.None);
         Task<ItemState?> Observe(string path, CancellationToken _) => Task.FromResult<ItemState?>(remote[path]);
-        var dry = await DateRepair.RunAsync(store, pair, Observe, root, true, [], CancellationToken.None, StorageFailureClassifier.IsStateDamage);
+        var dry = await DateRepair.RunAsync(store, pair, Observe, root, true, [], CancellationToken.None, [], [], false, StorageFailureClassifier.IsStateDamage, StorageFailureClassifier.IsDirectStateDamage, StorageFailureClassifier.IsBusy);
         LocalChecks.Require(dry.Eligible == 1 && dry.Changed == 0 && dry.Skipped == 4 && dry.Examples.Count == 1,
             "dry run counts eligible, changed, held, locked and remote mismatches");
         LocalChecks.Require(File.GetLastWriteTimeUtc(Path.Combine(localRoot, "fix")) == stamp.UtcDateTime &&
             store.Baselines(pair.PairId, ["fix"]).Single().A.Mtime == stamp, "dry run changes neither file nor baseline");
-        var done = await DateRepair.RunAsync(store, pair, Observe, root, false, [], CancellationToken.None, StorageFailureClassifier.IsStateDamage);
+        var done = await DateRepair.RunAsync(store, pair, Observe, root, false, [], CancellationToken.None, [], [], false, StorageFailureClassifier.IsStateDamage, StorageFailureClassifier.IsDirectStateDamage, StorageFailureClassifier.IsBusy);
         LocalChecks.Require(done.Changed == 1 && done.Skipped == 4, "only identical unheld unlocked file repaired");
         LocalChecks.Require(File.GetLastWriteTimeUtc(Path.Combine(localRoot, "fix")) == original.UtcDateTime &&
             store.Baselines(pair.PairId, ["fix"]).Single().A.Mtime == original, "local and baseline dates agree");
         LocalChecks.Require(File.ReadAllText(Path.Combine(localRoot, "fix")) == "same content" &&
             File.ReadAllText(Path.Combine(localRoot, "changed")) == "edit content", "content never changed");
         LocalChecks.Require(File.ReadAllText(done.ReportFile).Contains("repaired"), "durable change report exists");
-        var again = await DateRepair.RunAsync(store, pair, Observe, root, false, [], CancellationToken.None, StorageFailureClassifier.IsStateDamage);
+        var again = await DateRepair.RunAsync(store, pair, Observe, root, false, [], CancellationToken.None, [], [], false, StorageFailureClassifier.IsStateDamage, StorageFailureClassifier.IsDirectStateDamage, StorageFailureClassifier.IsBusy);
         LocalChecks.Require(again.Changed == 0 && again.Eligible == 0, "repair is idempotent");
         var first = store.DateRepairPage(pair.PairId, "", 2);
         var second = store.DateRepairPage(pair.PairId, first[^1].ObjectKey, 2);
         LocalChecks.Require(first.Count == 2 && second.Count == 2 && !first.Select(b => b.ObjectKey).Intersect(second.Select(b => b.ObjectKey)).Any(),
             "keyset pages are bounded and disjoint");
-        var run = new SyncRun(store, new Executor(store, StorageChecks.Fast, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
+        var run = new SyncRun(store, new Executor(store, StorageChecks.Fast, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException),
             new FakeEndpointProvider(), StorageChecks.Fast, TimeProvider.System);
         await run.WithDateRepairLockAsync(async () =>
         {

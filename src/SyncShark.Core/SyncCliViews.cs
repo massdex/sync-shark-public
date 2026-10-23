@@ -181,12 +181,6 @@ public sealed record SyncCliRebuildableFolderData(string Path, bool Chosen);
 /// <summary>One example of a held deletion's exact path, local pair side and conditional rule.</summary>
 public sealed record SyncCliHeldDeletionData(string Path, string Local, string Rule);
 
-/// <summary>Ignored descendants removed along with a planned (or conditionally held) folder delete.</summary>
-public sealed record SyncCliCarriedIgnoredData(string Path, string Side, int Files, int Folders, long Bytes)
-{
-    public string? ReviewedSignature { get; init; }
-}
-
 public sealed record SyncCliPreparationData(string PairId, string PairName, long PolicyRevision,
     string LocalScanGenerationId, string DropboxScanGenerationId, int TotalItems, int LocalOnlyItems,
     int DropboxOnlyItems, int ConflictItems, long RecommendedUploadBytes, long RecommendedDownloadBytes,

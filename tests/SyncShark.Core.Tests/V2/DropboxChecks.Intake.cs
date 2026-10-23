@@ -59,7 +59,7 @@ internal static partial class DropboxChecks
     {
         using var h = new Harness();
         var state = Path.Combine(_root, "collapse-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         store.SavePair(new PairDef("p1", "collapse fixture",
             new RootDef("ra", SyncProviders.Local, null, state, "id:ra"), Root(), [], [], true));
         var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, "p1");
@@ -373,7 +373,7 @@ internal static partial class DropboxChecks
         h.Wire.SeedChangePage("sqlite-start", [h.Wire.ChangeDeleted("/Pilot/gone.txt")], false, "sqlite-end");
         UseFastHistoryRetryClock(h);
         h.Wire.OnRevisionAsync = _ => throw new TaskCanceledException("scripted request timeout");
-        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(new PairDef("p1", "intake fixture",
                 new RootDef("ra", SyncProviders.Local, null, state, "id:ra"), Root(), [], [], true));
@@ -387,7 +387,7 @@ internal static partial class DropboxChecks
                 delta.ReleasedDeletionEvidence.Contains("gone.txt"),
                 "the production store records the transient hold and releases the feed");
         }
-        using var reopened = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         Require(reopened.DeletionEvidenceRows("p1", RootId).Single(row => row.Path == "gone.txt").Failure
                 is { Attempts: 1, Released: true },
             "the item-owned transient fact survives a cold reopen");

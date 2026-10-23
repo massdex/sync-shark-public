@@ -106,7 +106,7 @@ public sealed partial class SqliteStateStore
         // Read once from the same pinned snapshot as protection. Large backlogs retain
         // the existing bounded fallback; ordinary retries never require per-item SQL.
         internal Func<string, bool, bool> RetryLookup(string pairId, IReadOnlySet<string> active,
-        bool restoredOnly, Action? onRead = null) => DamageBoundary(() => RetryProtection.Create(RetryPaths(pairId, restoredOnly), active,
+        bool restoredOnly, Action? onRead = null) => DamageBoundary(() => RetryPathIndex.Create(RetryPaths(pairId, restoredOnly), active,
         (path, descendants) =>
         {
             onRead?.Invoke();

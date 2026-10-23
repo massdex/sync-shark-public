@@ -124,9 +124,9 @@ public sealed record GoogleDriveConnectionBinding(
 // Provider identifiers. The Dropbox literal is unchanged so existing stored state stays valid.
 public static class SyncProviders
 {
-    public const string Local = "local";
-    public const string Dropbox = "dropbox";
-    public const string GoogleDrive = "google-drive";
+    public const string Local = V2.ProviderIds.Local;
+    public const string Dropbox = V2.ProviderIds.Dropbox;
+    public const string GoogleDrive = V2.ProviderIds.GoogleDrive;
 
     // Provider IDs are storage/protocol identities. User-facing names live here,
     // so UI and CLI consumers never infer a provider from translated/display text.
@@ -138,9 +138,7 @@ public static class SyncProviders
     public static bool IsKnown(string? provider) => SyncEndpointProviders.All.Any(definition =>
         definition.ProviderId is not null && string.Equals(provider, definition.ProviderId, StringComparison.Ordinal));
 
-    public static string Normalize(string? provider) => string.IsNullOrWhiteSpace(provider)
-        ? Dropbox
-        : provider.Trim().ToLowerInvariant();
+    public static string Normalize(string? provider) => V2.ProviderIds.Normalize(provider);
 }
 
 public interface IGoogleDriveAccessTokenSource

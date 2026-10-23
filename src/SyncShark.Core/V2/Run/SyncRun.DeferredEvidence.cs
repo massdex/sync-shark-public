@@ -604,7 +604,7 @@ public sealed partial class SyncRun
                         lock (sync) { notices.Add(notice); pending.Add(rule.Path); }
                         return;
                     }
-                    RefuseUnreviewedDeletes(pair, resolved, reviewedDeletes);
+                    resolved = HoldUnreviewedAtApply(pair, resolved, reviewedDeletes);
                     // A reviewed held victim is explicit per-item authority, not inferred source absence.
                     // Persist that authority in the intent; never grant it merely from a tombstone or
                     // from approval of another path (ordinary post-prepare propagation stays guarded).

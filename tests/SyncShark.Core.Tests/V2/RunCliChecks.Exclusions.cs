@@ -27,7 +27,7 @@ internal static partial class RunCliChecks
             var root = TempRoot();
             try
             {
-                using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+                using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
                 var fx = Build(store: store);
                 for (var i = 0; i < 600; i++) fx.B.Seed((i % 2 == 0 ? "cut/" : "keep/") + i + ".txt", "bytes");
                 var runtime = Runtime(fx, root);
@@ -48,7 +48,7 @@ internal static partial class RunCliChecks
                     var error = await RefusalAsync(() => runtime.SetSelectionAsync(fx.Pair.PairId, "cut", "exclude", CancellationToken.None));
                     Require(error is IOException && batches == 1 && store.ReadPrepare(fx.Pair.PairId)?.Digest == SqliteStateStore.NarrowingDigest,
                         "interrupted narrowing has no published authorization");
-                    using var reopened = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+                    using var reopened = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
                     Require(reopened.ReadPrepare(fx.Pair.PairId)?.Digest == SqliteStateStore.NarrowingDigest &&
                         FirstSyncChoicesState.Load(root, fx.Pair.PairId, reopened) is null,
                         "cold reopen cannot trust interrupted narrowed rows");
@@ -85,7 +85,7 @@ internal static partial class RunCliChecks
         var root = TempRoot();
         try
         {
-            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(store: store);
             fx.A.Seed("keep-out", "", ItemKind.Folder);
             fx.A.Seed("keep-out/f.txt", "local");
@@ -128,7 +128,7 @@ internal static partial class RunCliChecks
         var root = TempRoot();
         try
         {
-            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(store: store);
             foreach (var prefix in new[] { "cut", "cut-sibling" })
             {
@@ -235,7 +235,7 @@ internal static partial class RunCliChecks
         var root = TempRoot();
         try
         {
-            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(store: store);
             fx.B.Seed("cut/file.txt", "untouched");
             var runtime = Runtime(fx, root);
@@ -275,7 +275,7 @@ internal static partial class RunCliChecks
         var root = TempRoot();
         try
         {
-            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(store: store);
             fx.B.Seed("Äpfel/Über.txt", "protected");
             fx.B.Seed("Äpfel-extra/Über.txt", "reviewed");
@@ -305,7 +305,7 @@ internal static partial class RunCliChecks
         var root = TempRoot();
         try
         {
-            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(store: store);
             var runtime = Runtime(fx, root);
             if (ignore) await runtime.SaveIgnoresAsync(fx.Pair.PairId, "FolderName:cut", CancellationToken.None);

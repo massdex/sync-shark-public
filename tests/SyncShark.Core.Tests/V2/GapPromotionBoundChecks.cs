@@ -29,7 +29,7 @@ internal static class GapPromotionBoundChecks
         var rows = Enumerable.Range(1, staged).Select(n => new ItemState("folder/" + n.ToString("D5"),
             ItemKind.File, "object-" + n.ToString("D5"), null, new string('a', 64), 3,
             DateTimeOffset.UnixEpoch.AddDays(1), ItemFlags.None)).ToArray();
-        using (var store = SqliteStateStore.Open(product, Fast, new TestClock()))
+        using (var store = SqliteStateStore.Open(product, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             // The handoff is pair-scoped: a saved pair is what makes the root consumable.
             store.SavePair(new PairDef("p1", "Pair A",
@@ -77,7 +77,7 @@ internal static class GapPromotionBoundChecks
                 store.ProtectionBatch(rootId, ItemFlags.NeedsRehash, [rows[changedIndex].Path])[0].Covered,
                 "a capped pass keeps the unvisited suffix and the changed observation protected");
         }
-        using (var store = SqliteStateStore.Open(product, Fast, new TestClock()))
+        using (var store = SqliteStateStore.Open(product, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             // The rows retired by the capped pass are gone; the remainder was committed before the
             // store closed, so this reopen resumes the same epoch without a new cursor.
@@ -117,7 +117,7 @@ internal static class GapPromotionBoundChecks
     {
         var product = Path.Combine(root, "stage-gap-orphans-plan-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(product);
-        using (SqliteStateStore.Open(product, Fast, new TestClock())) { }
+        using (SqliteStateStore.Open(product, Fast, new TestClock(), LocalItems.CaptureOptionalHash)) { }
         using var db = new SqliteConnection($"Data Source={DbPath(product)};Pooling=False");
         db.Open();
         const int rows = 20000;

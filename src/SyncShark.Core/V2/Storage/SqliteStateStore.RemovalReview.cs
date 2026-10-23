@@ -2,8 +2,17 @@ using System.Text.Json;
 
 namespace Massdex.SyncShark.V2;
 
-public sealed partial class SqliteStateStore
+public sealed partial class SqliteStateStore : IStoreRemovalObservation
 {
+    void IStoreRemovalObservation.StageRemovalItems(string session, Side side,
+        IReadOnlyList<ItemState> rows, bool ordinalPaths) => StageRemovalItems(session, side, rows, ordinalPaths);
+
+    IEnumerable<ItemState> IStoreRemovalObservation.RemovalObservation(string session, Side side) =>
+        RemovalObservation(session, side);
+
+    void IStoreRemovalObservation.ClearRemovalObservation(string session, Exception? primaryError) =>
+        FairStoreGate.Cleanup(() => ClearRemovalObservation(session), primaryError: primaryError);
+
     // Root bindings and folder path identify the entity, not a pair-wide prepare slot.
     internal static string RemovalKey(PairDef pair, string path) =>
         JsonSerializer.Serialize(new { pair.PairId, pair.A, pair.B, Path = PathKey.Of(path) });

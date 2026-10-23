@@ -7,11 +7,61 @@ internal static partial class StorageChecks
     private static void SnapshotReviewFollowups(string root)
     {
         SnapshotPartialReplacement(root);
+        SnapshotVerifierLifetime(root);
         SnapshotInitialDebtAndTombstone(root);
         SnapshotPartialMove(root);
         HistoryHoldIsNotIdentityProof(root);
         SnapshotConcurrentFallback(root);
         SnapshotProfileTrace(root);
+    }
+
+    private static void SnapshotVerifierLifetime(string root)
+    {
+        foreach (var status in new[] { FileAbsence.Present, FileAbsence.Unknown, FileAbsence.Gone })
+        foreach (var delta in new[] { false, true })
+        {
+            using var fixture = new SnapshotFixture(Fresh(root, $"verifier-{status}-{delta}"));
+            var old = F("file", "old", "aa");
+            var next = F("file", "new", "bb");
+            fixture.Write([old]);
+            var verifier = new RecordingAbsenceVerifier(status);
+            var snapshot = new Snapshot("root", Side.A, 1, "c", [next], ["blocked"])
+                { OpenAbsenceVerifier = () => verifier };
+            if (delta)
+                fixture._writer.WriteDelta(new Delta("root", Side.A, 1, "before", "after",
+                    [new Change(ChangeKind.Upsert, next.ObjectId, next.Path, next, null)], false, ["blocked"])
+                    { DisplacementEvidence = snapshot, PendingDeletionEvidence = snapshot.PendingDeletionEvidence }, 1);
+            else fixture._writer.WriteSnapshot(snapshot, 1);
+            Require(verifier.Checks > 0 && verifier.Disposals == 1, "snapshot/delta disposes the capability verifier once");
+            Require(fixture.Reader.Live(1, null).Any(item => item.ObjectId == old.ObjectId) == (status != FileAbsence.Gone),
+                "interface verifier preserves present/unknown and closes only affirmative absence");
+        }
+        using var failed = new SnapshotFixture(Fresh(root, "verifier-failure"));
+        var throwing = new RecordingAbsenceVerifier(FileAbsence.Unknown) { Fail = true };
+        failed.Write([F("file", "old", "aa")]);
+        var refused = false;
+        try
+        {
+            failed._writer.WriteSnapshot(new Snapshot("root", Side.A, 1, "c", [F("file", "new", "bb")], ["blocked"])
+                { OpenAbsenceVerifier = () => throwing }, 1);
+        }
+        catch (InvalidOperationException error) when (error.Message == "verifier failed") { refused = true; }
+        Require(refused && throwing.Disposals == 1, "verifier is disposed when its check throws");
+        Require(failed.Reader.Live(1, null).Single().ObjectId == "old", "failed verifier cannot remove the survivor");
+    }
+
+    private sealed class RecordingAbsenceVerifier(FileAbsence status) : IFileAbsenceVerifier
+    {
+        internal int Checks { get; private set; }
+        internal int Disposals { get; private set; }
+        internal bool Fail { get; init; }
+        public FileAbsence Check(ItemState item)
+        {
+            Checks++;
+            if (Fail) throw new InvalidOperationException("verifier failed");
+            return status;
+        }
+        public void Dispose() => Disposals++;
     }
 
     private static void SnapshotProfileTrace(string root)
@@ -124,7 +174,7 @@ internal static partial class StorageChecks
 
     private static void HistoryHoldIsNotIdentityProof(string root)
     {
-        using var store = SqliteStateStore.Open(Fresh(root, "history-hold-proof-store"), Fast, new TestClock());
+        using var store = SqliteStateStore.Open(Fresh(root, "history-hold-proof-store"), Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         var folder = Fresh(root, "history-hold-proof-root");
         Directory.CreateDirectory(folder);
         var inventory = LocalChecks.Inventory(folder, store, new TestClock());
@@ -173,7 +223,7 @@ internal static partial class StorageChecks
         var folder = Fresh(root, "partial-move");
         Directory.CreateDirectory(folder);
         File.WriteAllText(Path.Combine(folder, "old"), "content");
-        using var store = SqliteStateStore.Open(Fresh(root, "partial-move-store"), Fast, new TestClock());
+        using var store = SqliteStateStore.Open(Fresh(root, "partial-move-store"), Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         var inventory = LocalChecks.Inventory(folder, store, new TestClock());
         inventory.WalkCheckpointForTest = () => (new NtfsUsnCheckpoint(1, 0, 100, 0), false);
         var initial = inventory.FullAsync(1, _ => true, null!, CancellationToken.None).GetAwaiter().GetResult();

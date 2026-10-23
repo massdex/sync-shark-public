@@ -46,9 +46,9 @@ internal static partial class StorageChecks
             var b = a with { ObjectId = "b:" + i, VersionId = i % 2 == 0 ? "rev" : null,
                 Kind = i % 7 == 0 ? ItemKind.Folder : ItemKind.File };
             // Same final post-hash planning rows: the old writer computed stamps at serialization.
-            var old = new FirstSyncChoicesState.StoredMatch(a.Path, Content.SideStamp(a), Content.SideStamp(b));
+            var old = new StoredMatch(a.Path, Content.SideStamp(a), Content.SideStamp(b));
             var compact = new MatchedPair(a.Path, a, b);
-            var current = new FirstSyncChoicesState.StoredMatch(compact.Path, Content.SideStamp(compact.A), Content.SideStamp(compact.B));
+            var current = new StoredMatch(compact.Path, Content.SideStamp(compact.A), Content.SideStamp(compact.B));
             Require(JsonSerializer.Serialize(old) == JsonSerializer.Serialize(current),
                 "compact matches preserve serialized prepare bytes");
         }
@@ -251,7 +251,7 @@ internal static partial class StorageChecks
 
         public SnapshotFixture(string folder, bool legacy = false)
         {
-            using (var store = SqliteStateStore.Open(folder, Fast, new TestClock())) store.BeginGeneration("root", "snapshot");
+            using (var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash)) store.BeginGeneration("root", "snapshot");
             Connection = new SqliteConnection($"Data Source={DbPath(folder)};Pooling=False");
             Connection.Open();
             StoreSchema.Execute(Connection, null, "PRAGMA synchronous=NORMAL; PRAGMA cache_size=-2048;" +

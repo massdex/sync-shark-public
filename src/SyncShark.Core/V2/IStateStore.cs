@@ -3,6 +3,22 @@ namespace Massdex.SyncShark.V2;
 /// <summary>The only place that reads and writes the sync database.</summary>
 public interface IStateStore : IDisposable
 {
+    bool HasOwnedPointers(string rootId) => false;
+    IReadOnlyList<StorageRegistration> StorageRegistrations() => [];
+    StorageSettlement? StoragePointerFor(string root, string item, string binding) => null;
+    StorageSettlement? StorageSettlementFor(string root, string item, string binding) => null;
+    bool QueueVerifiedPointerAcknowledgment(string rootId, string objectId,
+        string remoteBinding, PilotRemoteEntry verifiedReceipt) =>
+        throw new NotSupportedException("Pointer acknowledgments are not supported by this store.");
+    void RequestPointerVerification(string pairId, string rootId, string objectId,
+        string path, PilotRemoteEntry receipt) =>
+        throw new NotSupportedException("Pointer verification is not supported by this store.");
+    IReadOnlyList<StorageSettlement> StorageSettlementPage(long afterJobId = 0,
+        int limit = 128, IReadOnlyCollection<string>? activeRoots = null) => [];
+    bool IsCurrentStorageSettlement(StorageSettlement job) => false;
+    bool CompleteStorageSettlement(StorageSettlement job, StorageObserved observed) =>
+        throw new NotSupportedException("Storage settlement is not supported by this store.");
+
     string? ReportStorageNotice(string pairId, Notice notice, string familyPrefix) =>
         throw new NotSupportedException("Storage notices are not supported by this store.");
     void RecordPointerVerificationNotice(string pairId, Notice itemNotice,
@@ -281,8 +297,8 @@ public interface IStateStore : IDisposable
         .Where(retry => retry.Match is null && retry.Kind is ("sync" or "first-sync" or "post-preview"));
     /// <summary>Protection-eligible retry paths; excludes dormant restored-evidence rows.</summary>
     IEnumerable<string> ReadSyncRetryPaths(string pairId) => ReadSyncRetries(pairId)
-        .Where(row => RetryProtectionPredicate.Includes(row)).Select(row => row.Path);
-    bool SyncRetryExists(string pairId, string path) => SyncRetryAt(pairId, path) is { } row && RetryProtectionPredicate.Includes(row);
+        .Where(row => RetryProtectionDomain.Includes(row)).Select(row => row.Path);
+    bool SyncRetryExists(string pairId, string path) => SyncRetryAt(pairId, path) is { } row && RetryProtectionDomain.Includes(row);
     void SaveSyncRetry(string pairId, SyncRetry retry);
     void ClearSyncRetry(string pairId, string path);
     void RefreshInterruptedDeleteNotice(string pairId) { }
@@ -291,7 +307,7 @@ public interface IStateStore : IDisposable
     DeleteNoticePage ReadDeleteNoticeItems(string pairId, bool review, string? after = null, int limit = 50) => new([], null);
     IReadOnlyList<SyncRetry> InterruptedDeleteRepairsAt(string pairId, IReadOnlyCollection<string> paths) =>
         paths.Select(path => SyncRetryAt(pairId, path)).OfType<SyncRetry>()
-            .Where(retry => retry.Kind == SqliteStateStore.InterruptedDeleteRestoreKind).ToArray();
+            .Where(retry => retry.Kind == InterruptedDelete.RestoreKind).ToArray();
     void RequestSyncRetryNow(string pairId, string path)
     {
         if (SyncRetryAt(pairId, path) is { } retry) SaveSyncRetry(pairId, retry with { RetryAfter = DateTimeOffset.MinValue });
@@ -304,7 +320,7 @@ public interface IStateStore : IDisposable
 
     /// <summary>Whether any restored evidence hold is still active (not dormant). One check per run, never per item.</summary>
     bool HasActiveRestoredRetries(string pairId) =>
-        ReadSyncRetries(pairId).Any(retry => RetryProtectionPredicate.Includes(retry, restoredOnly: true));
+        ReadSyncRetries(pairId).Any(retry => RetryProtectionDomain.Includes(retry, restoredOnly: true));
 
     /// <summary>Several results in one transaction (the Executor's group commit, B-124); the default commits each.</summary>
     void CommitResults(string pairId, long gen, IReadOnlyList<(SyncAction Action, ActionResult Result)> results)

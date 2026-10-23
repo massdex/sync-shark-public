@@ -1,6 +1,5 @@
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 
 namespace Massdex.SyncShark.V2;
 
@@ -11,13 +10,11 @@ namespace Massdex.SyncShark.V2;
 /// old per-pair JSON is imported incrementally and atomically. Non-SQLite fixtures retain the legacy JSON format.
 /// A missing or unreadable record means there is no prepare to apply.
 /// </summary>
-internal static class FirstSyncChoicesState
+internal static partial class FirstSyncChoicesState
 {
     private const string DirectoryName = "v2";
     private const string FileNamePrefix = "first-sync-";
     private const string FileNameSuffix = ".choices.json";
-    private const string UnreviewedDeletes =
-        " not shown in the last prepare — run prepare again. For example: ";
 
     private static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
@@ -33,48 +30,16 @@ internal static class FirstSyncChoicesState
     /// <summary>Test seam: substitutes the wait between transient read retries.</summary>
     internal static Action<TimeSpan>? RetryWaitForTest { get; set; }
 
-    /// <summary>One reviewed one-sided choice and the effect the prepare reported for it.</summary>
-    internal sealed record StoredChoice(string Side, string Prefix, string Action, int Files, int Folders, long Bytes);
-
-    /// <summary>One frozen rebuildable folder: its category and the exact pair-relative path the prepare detected.</summary>
-    internal sealed record StoredRebuildable(string Category, string Path);
-
-    /// <summary>A pending inventory cursor captured by prepare or a successfully guarded apply repreview.</summary>
-    internal sealed record StoredInventoryCursor(string RootId, string Cursor);
-
-    /// <summary>
-    /// One path the prepare saw on both sides, with a compact per-side identity and content stamp .
-    /// Short JSON names keep the record small: a first sync can match hundreds of thousands of paths.
-    /// </summary>
-    internal sealed record StoredMatch([property: JsonPropertyName("p")] string Path,
-        [property: JsonPropertyName("a")] string A, [property: JsonPropertyName("b")] string B);
-
-    /// <summary>
-    /// The retained prepare: the choices digest, per-choice effects, the reviewed deletes' victims, the frozen
-    /// rebuildable set and the both-sides matched set. The rebuildable set is the only source the apply may draw
-    /// rebuildable paths from; RebuildableChoices records the reviewed scope for inspection (the digest enforces it).
-    /// The matched set is the reviewed apply's baseline for post-prepare deletion propagation.
-    /// </summary>
-    internal sealed record Prepared(string Digest, IReadOnlyDictionary<string, string> Paths,
-        IReadOnlyList<StoredChoice> OneSided, IReadOnlyList<string> DeleteVictims, int DeleteVictimCount,
-        IReadOnlyList<StoredRebuildable> Rebuildables, IReadOnlyList<HeldDeletion> HeldDeletions,
-        IReadOnlyList<StoredMatch> Matched, IReadOnlyList<RebuildableChoice>? RebuildableChoices = null,
-        IReadOnlyList<string>? Warnings = null)
+    internal static void SavePrepared(SqliteStateStore store, string pairId, Prepared small,
+        IEnumerable<string> victims, IEnumerable<HeldDeletion> held, IEnumerable<MatchedPair> matches,
+        IEnumerable<SyncCliCarriedIgnoredData> budgets)
     {
-        public IReadOnlyList<SyncCliCarriedIgnoredData> CarriedIgnoredDeletes { get; init; } = [];
-        [JsonIgnore] internal PrepareDatabase? Database { get; init; }
-        public IReadOnlyList<StoredInventoryCursor> InventoryCursors { get; init; } = [];
-        public string? InventoryScope { get; init; }
-        // Narrowing changes the review digest, never the approved choices. This independent binding
-        // excludes large held sets, whose authorization remains in the filtered SQLite rows.
-        public string? NarrowedChoicesDigest { get; init; }
-        public IReadOnlyList<string> NarrowedIgnoreRules { get; init; } = [];
-        /// <summary>
-        /// Set when a review action rewrote the choices without re-detecting the folders they cover (Choose folder).
-        /// The retained review no longer describes what the new rule applies to, so an apply must wait for a prepare
-        /// that detects folders under the new prefix.
-        /// </summary>
-        public bool NeedsReprepare { get; init; }
+        try { PrepareDatabase.Save(store, pairId, small, victims, held, matches, budgets); }
+        catch (PreparePublicationException error)
+        {
+            throw new SyncCliReviewException("The first-sync prepare could not be published: " +
+                error.Message + " Review the pair and run prepare again.");
+        }
     }
 
     /// <summary>
@@ -101,7 +66,7 @@ internal static class FirstSyncChoicesState
             {
                 InventoryCursors = inventoryCursors ?? [], InventoryScope = inventoryScope
             };
-            PrepareDatabase.Save(database, pairId, small, deleteVictims, heldDeletions ?? [], matched ?? [],
+            SavePrepared(database, pairId, small, deleteVictims, heldDeletions ?? [], matched ?? [],
                 carriedIgnoredDeletes ?? []);
             return;
         }
@@ -290,7 +255,9 @@ internal static class FirstSyncChoicesState
                         metadata.RootElement.TryGetProperty("Signature", out _)) return null;
                     return new PrepareDatabase(database, header).Read();
                 }
-                return File.Exists(file) ? PrepareDatabase.Import(database, pairId, file) : null;
+                if (!File.Exists(file)) return null;
+                using var stream = OpenRecord(file);
+                return PrepareDatabase.Import(database, pairId, stream);
             }
             if (!File.Exists(file))
                 return null;
@@ -313,10 +280,15 @@ internal static class FirstSyncChoicesState
                 ? record with { Matched = matched, CarriedIgnoredDeletes = record.CarriedIgnoredDeletes ?? [] }
                 : Unreadable("invalid prepare record shape");
         }
-        catch (Microsoft.Data.Sqlite.SqliteException error)
+        catch (PreparePublicationException error)
+        {
+            throw new SyncCliReviewException("The first-sync prepare could not be published: " +
+                error.Message + " Review the pair and run prepare again.");
+        }
+        catch (Exception error) when (StorageFailureClassifier.IsStoreException(error))
         {
             throw new SyncCliReviewException("The retained first-sync prepare could not be read or imported: " +
-                $"SQLite error {error.SqliteErrorCode} ({error.Message}). Resolve the database error and run prepare again.");
+                $"SQLite error {StorageFailureClassifier.DirectErrorCode(error)} ({error.Message}). Resolve the database error and run prepare again.");
         }
         catch (JsonException error)
         {
@@ -372,23 +344,6 @@ internal static class FirstSyncChoicesState
             grown.Add(choices[index]);
         }
         return grown;
-    }
-
-    /// <summary>
-    /// Decision 54 addendum, narrowed by decision 71: refuses an apply that would carry out a guarded delete outside
-    /// the reviewed prepare's set. The caller passes the guarded list from
-    /// <see cref="FolderDelete.SplitVictims"/>; ordinary deletion propagation is ongoing sync. Fewer deletes is fine.
-    /// </summary>
-    public static void RefuseUnreviewedDeletes(Prepared prepared, IReadOnlyList<string> victims) =>
-        RefuseUnreviewedDeletes(ReviewedDeleteKeys(prepared), victims);
-
-    public static void RefuseUnreviewedDeletes(IReadOnlySet<string> shown, IReadOnlyList<string> victims)
-    {
-        var extra = victims.Where(victim => !shown.Contains(victim))
-            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        if (extra.Length == 0) return;
-        throw new SyncCliReviewException("The first sync would delete " + extra.Length + " item(s)" +
-            UnreviewedDeletes + string.Join(", ", extra.Take(10)) + ".");
     }
 
     /// <summary>Apply uses the reviewed per-folder ceiling, never the newly scanned amount as authorization.</summary>

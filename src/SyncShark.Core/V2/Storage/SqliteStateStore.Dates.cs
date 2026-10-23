@@ -1,33 +1,40 @@
 namespace Massdex.SyncShark.V2;
 
-public sealed partial class SqliteStateStore
+public sealed partial class SqliteStateStore : IDateRepairStore
 {
+    void IDateRepairStore.PrepareDateRepairExclusions(IEnumerable<string> normalizedPaths) => PrepareDateRepairExclusions(normalizedPaths);
+    void IDateRepairStore.PrepareDateWriteEvidence(string pairId,
+        IEnumerable<(string Path, DateTimeOffset Occurred)> rows, bool requireLogs) => PrepareDateWriteEvidence(pairId, rows, requireLogs);
+    IReadOnlyList<Baseline> IDateRepairStore.DateRepairPage(string pairId, string after, int limit, Side side,
+        long startUtcTicks, long endUtcTicks, bool mismatch) => DateRepairPage(pairId, after, limit, side, startUtcTicks, endUtcTicks, mismatch);
+    void IDateRepairStore.PrepareDateRepair(string pairId) => PrepareDateRepair(pairId);
+    bool IDateRepairStore.DateRepairExcluded(string path) => DateRepairExcluded(path);
+    bool IDateRepairStore.DateRepairHeld(PairDef pair, Baseline baseline) => DateRepairHeld(pair, baseline);
+    string? IDateRepairStore.DateWriteSkipReason(Side side, ItemState local, string? hash) => DateWriteSkipReason(side, local, hash);
+    bool IDateRepairStore.DateLogCorrelated(ItemState local) => DateLogCorrelated(local);
+    DateTimeOffset IDateRepairStore.RepairDate(Baseline baseline, Side side, DateTimeOffset time,
+        Func<DateTimeOffset, DateTimeOffset> setTime, DateTimeOffset? originalTime, ItemState? live, string? verifiedHash) =>
+        RepairDate(baseline, side, time, setTime, originalTime, live, verifiedHash);
+
     internal Action<Baseline>? BeforeDateRepairCommitForTest { get; set; }
     internal IReadOnlyList<Baseline> DateRepairPage(string pairId, string after, int limit = 128,
-        Side side = Side.A, DateOnly? localDate = null, DateRepairBound? from = null, DateRepairBound? to = null, bool mismatch = false) =>
+        Side side = Side.A, long startUtcTicks = 0, long endUtcTicks = 3155378975999999999L, bool mismatch = false) =>
         InStore(() =>
         {
             var pair = Pair(pairId)!;
             return _points.DateRepairPage(pairId, RequirePair(pairId),
                 RootNo((side == Side.A ? pair.A : pair.B).RootId)!.Value,
-                RootNo((side == Side.A ? pair.B : pair.A).RootId)!.Value, after, limit, side, localDate, from, to, mismatch);
+                RootNo((side == Side.A ? pair.B : pair.A).RootId)!.Value, after, limit, side, startUtcTicks, endUtcTicks, mismatch);
         });
 
-    internal void PrepareDateRepairExclusions(string? file) => InStore(() =>
+    internal void PrepareDateRepairExclusions(IEnumerable<string> normalizedPaths) => InStore(() =>
     {
         StoreSchema.Execute(_connection, null,
             "CREATE TEMP TABLE IF NOT EXISTS date_repair_exclude(path TEXT PRIMARY KEY) WITHOUT ROWID; DELETE FROM date_repair_exclude;");
-        if (file is null) return;
         using var transaction = _connection.BeginTransaction();
-        foreach (var line in File.ReadLines(file))
-        {
-            if (string.IsNullOrWhiteSpace(line)) continue;
-            if (Path.IsPathRooted(line) || line.Contains(':'))
-                throw new SyncCliUsageException("--exclude-list must contain relative pair paths, one per line.");
-            var path = PilotPath.NormalizeRelative(line);
+        foreach (var path in normalizedPaths)
             StoreSchema.Execute(_connection, transaction, "INSERT OR IGNORE INTO date_repair_exclude VALUES($path);",
                 ("$path", RowCodec.Key(path)));
-        }
         transaction.Commit();
     });
 
@@ -40,7 +47,7 @@ public sealed partial class SqliteStateStore
         StoreSchema.Execute(_connection, null,
             "CREATE TEMP TABLE IF NOT EXISTS date_repair_hold(path TEXT PRIMARY KEY) WITHOUT ROWID; DELETE FROM date_repair_hold;");
         // Empty display notices do not protect a root; explicit durable scope failures/decisions do.
-        if (LinkExclusions.HasRootDecisionHold(this, pairId) || SyncRetryAt(pairId, string.Empty) is { Kind: "scan" })
+        if (DecisionHolds.HasRootDecisionHold(this, pairId) || SyncRetryAt(pairId, string.Empty) is { Kind: "scan" })
             StoreSchema.Execute(_connection, null, "INSERT OR IGNORE INTO date_repair_hold VALUES('');");
         using var command = StoreSchema.Command(_connection, null,
             "SELECT path FROM notice WHERE pair_no=$p AND " + NoticeTable.ActionableSql("state") + " AND path<>'' AND reason_key<>'local-download-date' UNION ALL " +

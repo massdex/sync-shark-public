@@ -5,7 +5,7 @@ internal static partial class StorageChecks
     public static async Task IndexingSignalChecksAsync(string root)
     {
         Directory.CreateDirectory(root);
-        using var sqlite = SqliteStateStore.Open(root, Fast, TimeProvider.System);
+        using var sqlite = SqliteStateStore.Open(root, Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         using var memory = new InMemoryStateStore();
         foreach (IStateStore store in new IStateStore[] { sqlite, memory })
         {

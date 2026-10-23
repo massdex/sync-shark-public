@@ -64,12 +64,12 @@ public sealed partial class SqliteStateStore
         })) { }
     }
 
-    internal void StagePrefixHydration(string root, IReadOnlyList<DropboxChange> rows, Func<string, bool> include) => InStore(() =>
+    internal void StagePrefixHydration(string root, IReadOnlyList<(string Path, ItemState? State)> rows) => InStore(() =>
     {
         using var transaction = _connection.BeginTransaction();
-        foreach (var row in rows.Where(row => include(row.Path)))
+        foreach (var row in rows)
         {
-            var item = row.Entry is null ? null : DropboxItems.ToItem(row.Entry);
+            var item = row.State;
             if (item is not null && (long)StoreSchema.Scalar(_connection, transaction,
                 "SELECT EXISTS(SELECT 1 FROM hydration_seen WHERE root_no=$r AND path_key=$k AND json IS NOT NULL AND object_id<>$o);",
                 ("$r", RootNo(root)), ("$k", RowCodec.Key(row.Path)), ("$o", item.ObjectId))! != 0)

@@ -5,6 +5,14 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SqliteStateStore
 {
+    IReadOnlyList<StorageRegistration> IStateStore.StorageRegistrations() => StorageRegistrations();
+    StorageSettlement? IStateStore.StoragePointerFor(string root, string item, string binding) => StoragePointerFor(root, item, binding);
+    StorageSettlement? IStateStore.StorageSettlementFor(string root, string item, string binding) => StorageSettlementFor(root, item, binding);
+    IReadOnlyList<StorageSettlement> IStateStore.StorageSettlementPage(long afterJobId, int limit,
+        IReadOnlyCollection<string>? activeRoots) => StorageSettlementPage(afterJobId, limit, activeRoots);
+    bool IStateStore.IsCurrentStorageSettlement(StorageSettlement job) => IsCurrentStorageSettlement(job);
+    bool IStateStore.CompleteStorageSettlement(StorageSettlement job, StorageObserved observed) => CompleteStorageSettlement(job, observed);
+
     void IStateStore.CloseStorageNoticeBatch(string pairId, IReadOnlyList<StorageNotice> items) =>
         CloseStorageNoticeBatch(pairId, items);
 
@@ -140,7 +148,7 @@ public sealed partial class SqliteStateStore
     });
 
     internal bool StorageCauseIgnored(string pairId, string reasonKey) => InStore(() =>
-        StoreSchema.Scalar(_connection, null, "SELECT 1 FROM notice WHERE pair_no=$p AND reason_key=$k AND choice='ignore' LIMIT 1;",
+        StoreSchema.Scalar(_connection, null, "SELECT 1 FROM notice WHERE pair_no=$p AND reason_key=$k AND choice='ignore' AND " + NoticeTable.ActionableSql("state") + " LIMIT 1;",
             ("$p", RequirePair(pairId)), ("$k", reasonKey)) is not null);
 
     // Persist one explicit Retry without running it. Only an existing queued row is marked, so a completed

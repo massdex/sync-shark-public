@@ -33,7 +33,7 @@ internal static partial class DropboxChecks
             var actions = new List<SyncAction>();
             var pair = new PairDef("dispatch", "Pair A", new("local", SyncProviders.Local, null, "/local", "local"),
                 Root(), [], [], true);
-            using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
+            using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 store.SavePair(pair);
                 for (var i = 0; i < 3; i++)
@@ -52,7 +52,7 @@ internal static partial class DropboxChecks
                 var gate = DropboxDeleteJobGate.For(binding.ConnectionId, binding.RootNamespaceId);
                 gate.Throttled(); gate.Throttled();
                 await gate.EnterAsync();
-                var executor = new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+                var executor = new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
                 var running = CollectAsync();
                 try
                 {
@@ -87,7 +87,7 @@ internal static partial class DropboxChecks
                     return results;
                 }
             }
-            using var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+            using var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
             Require(reopened.SyncRetryAt(pair.PairId, "file-0") is not null &&
                 reopened.Baselines(pair.PairId).Any(b => b.ObjectKey == "key-0") &&
                 reopened.UnresolvedIntents(pair.PairId).Count == 0,
@@ -130,7 +130,7 @@ internal static partial class DropboxChecks
             var a = (await local.ObserveAsync("item", default))!;
             var b = (await remote.ObserveAsync("item", default))!;
             var folder = Path.Combine(Path.GetDirectoryName(setup.Root)!, "state");
-            using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
+            using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 store.SavePair(new PairDef("move-out", "Pair A", LocalChecks.RootOf(setup.Root, "local"), Root(), [], [], true));
                 var adopt = new SyncAction("adopt", 12, ActionKind.Adopt, Side.B, "item", null, a, b, false, "key");
@@ -141,12 +141,12 @@ internal static partial class DropboxChecks
                 var action = new SyncAction("delete", 6, ActionKind.Delete, target, "item", null, null,
                     target == Side.A ? a : b, true, "key");
                 var results = new List<ActionResult>();
-                await foreach (var result in new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage)
+                await foreach (var result in new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException)
                     .ApplyAsync(new("move-out", 2, [action], []), local, remote, default)) results.Add(result);
                 Require(results.Single().Outcome == Outcome.Done && results.Single().Recovery is not null,
                     "confirmed move-out propagates recoverable removal on either side: " + results.Single().Reason);
             }
-            using var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+            using var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
             Require(reopened.Baselines("move-out").Count == 0, "move-out correspondence retires only after recoverable success");
         }
     }

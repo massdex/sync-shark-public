@@ -10,7 +10,7 @@ internal static partial class StorageChecks
             $"folder/{i}.txt", "Waiting for room", "local-free-space", FreeSpace:
             new FreeSpaceNoticeMetadata(i % 2 == 0 ? "c:\\" : "C:/", 10, 100 - i, 50))).ToArray();
         string id;
-        using (var store = SqliteStateStore.Open(folder, Fast, new TestClock()))
+        using (var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             store.SavePair(Pair("p1"));
             store.AddNotices(notices.Append(legacy).ToArray());
@@ -18,7 +18,7 @@ internal static partial class StorageChecks
             store.AddNotices([notices[0] with { FreeSpace = notices[0].FreeSpace! with { FreeBytes = 80 } }]);
             Require(store.OpenNotices("p1").Count == 6, "space retries keep one row per original problem");
         }
-        using (var store = SqliteStateStore.Open(folder, Fast, new TestClock()))
+        using (var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             var read = store.OpenNotices("p1");
             Require(read.Single(n => n.Path == legacy.Path).Detail == legacy.Detail &&

@@ -42,7 +42,7 @@ internal static partial class RunChecks
     private static async Task Completion_ExcludeNarrowsPrepareAsync()
     {
         var root = Path.Combine(Path.GetTempPath(), "retry-narrow-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.Seed("skip.txt", "leave local");
         fx.A.Seed("good.txt", "copy normally");
@@ -335,7 +335,7 @@ internal static partial class RunChecks
         {
             var root = Path.Combine(Path.GetTempPath(), "retry-schema-" + Guid.NewGuid().ToString("N"));
             string database;
-            using (var store = SqliteStateStore.Open(root, Settings, TimeProvider.System))
+            using (var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 var fx = Build(suppliedStore: store);
                 store.MarkFirstSyncDone(fx.Pair.PairId);
@@ -346,7 +346,7 @@ internal static partial class RunChecks
                 connection.Open();
                 StoreSchema.Execute(connection, null, $"DROP TABLE sync_retry; PRAGMA user_version={version};");
             }
-            using var reopened = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var reopened = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             Require(reopened.CountSyncRetries("p1") == 0, "v11 migration and v12 presence repair both create retry schema");
         }
         Console.WriteLine("PASS Completion_RetrySchema");
@@ -445,7 +445,7 @@ internal static partial class RunChecks
     {
         var clock = new CompletionClock();
         var root = Path.Combine(Path.GetTempPath(), "fscomplete-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(root, Settings, clock);
+        using var store = SqliteStateStore.Open(root, Settings, clock, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         store.MarkFirstSyncDone(fx.Pair.PairId);
         fx.WriterB.OnRead = path => { if (path == "stuck.txt") throw new IOException("unreadable target"); };

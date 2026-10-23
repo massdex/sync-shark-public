@@ -23,11 +23,11 @@ public static class BlockerNames
     internal static string Destination(string path, string? name)
     {
         name ??= Suggest(path);
-        if (name.Length is 0 or > 180 || name.Contains('/') || name.Contains('\\') || !PilotPath.IsWindowsTransferPath(name))
+        if (name.Length is 0 or > 180 || name.Contains('/') || name.Contains('\\') || !PathRules.IsWindowsTransferPath(name))
             throw new SyncRunRefusedException("Choose one Windows-compatible file or folder name, not a path.");
         var slash = path.LastIndexOf('/');
         var destination = (slash < 0 ? "" : path[..(slash + 1)]) + name;
-        if (!PilotPath.IsWindowsTransferPath(DropboxNameMapping.Map(destination)) || PairPath.Same(path, destination))
+        if (!PathRules.IsWindowsTransferPath(DropboxNameMapping.Map(destination)) || PairPath.Same(path, destination))
             throw new SyncRunRefusedException("Choose a different safe name. If a parent has an invalid name, rename that parent first.");
         return destination;
     }

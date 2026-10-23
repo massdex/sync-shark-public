@@ -91,12 +91,13 @@ public sealed partial class SyncRun
         {
             if (touchesGrowth(action.Path) || action.FromPath is { } from && touchesGrowth(from) ||
                 action.Source is { } source && touchesGrowth(source.Path)) continue;
-            if (action.Kind != ActionKind.Delete || !blocked.Contains(FolderDelete.VictimKey(action.Target, action.Path)))
-            { actions.Add(action); continue; }
-            if (_store.SyncRetryAt(pair.PairId, action.Path)?.Kind != "decision")
-                _store.SaveSyncRetry(pair.PairId, new(action.Path, "post-preview", 0, "", DateTimeOffset.MinValue));
+            // A remaining unreviewed delete is never silently dropped: the run's single hold owner below keeps it on
+            // its item with durable retry input and exactly one explanation, while the rest of the plan proceeds.
+            actions.Add(action);
         }
-        return plan with { Actions = actions, Notices = notices };
+        plan = plan with { Actions = actions, Notices = notices };
+        // Grown choices retain their own notice; every remaining victim uses the shared apply hold.
+        return HoldUnreviewedAtApply(pair, plan, reviewed);
     }
 
     internal Plan HoldGrownRemoveChoices(PairDef pair, Plan plan, IReadOnlyList<OneSidedChoice> choices,

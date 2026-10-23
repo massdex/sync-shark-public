@@ -8,7 +8,7 @@ internal static partial class LocalJournalChecks
         {
             var root = Path.Combine(folder, "root");
             LocalChecks.Seed(root, "one.txt", "same");
-            using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var inventory = LocalChecks.Inventory(root, store, TimeProvider.System,
                 settings: V2Settings.Default with { LocalDeltaMaxPaths = 2 });
             inventory.WalkCheckpointForTest = () => (new(1, 0, 100, 0), false);
@@ -44,7 +44,7 @@ internal static partial class LocalJournalChecks
             var root = Path.Combine(folder, "root");
             LocalChecks.Seed(root, "old/file.txt", "same");
             LocalChecks.Require(CreateHardLink(Path.Combine(root, "alias.txt"), Path.Combine(root, "old/file.txt"), IntPtr.Zero), "rename alias");
-            using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var inventory = LocalChecks.Inventory(root, store, TimeProvider.System);
             inventory.WalkCheckpointForTest = () => (new(1, 0, 100, 0), false);
             var saved = await SaveFull(inventory, store);
@@ -88,7 +88,7 @@ internal static partial class LocalJournalChecks
             LocalChecks.Require(CreateHardLink(Path.Combine(root, "survivor.txt"), Path.Combine(root, "gone.txt"), IntPtr.Zero), "two live aliases");
             var data = Path.Combine(folder, "store");
             string objectId;
-            using (var store = SqliteStateStore.Open(data, StorageChecks.Fast, TimeProvider.System))
+            using (var store = SqliteStateStore.Open(data, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 var inventory = LocalChecks.Inventory(root, store, TimeProvider.System);
                 inventory.WalkCheckpointForTest = () => (new(1, 0, 100, 0), false);
@@ -116,7 +116,7 @@ internal static partial class LocalJournalChecks
                     store.Live("root-local", ["survivor.txt"]).Single().ObjectId == objectId,
                     "deleting one alias retires only its exact row; live sibling survives");
             }
-            using (var reopened = SqliteStateStore.Open(data, StorageChecks.Fast, TimeProvider.System))
+            using (var reopened = SqliteStateStore.Open(data, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 LocalChecks.Require(reopened.ByObject("root-local", objectId)?.Path == "survivor.txt" &&
                     reopened.ObjectPaths("root-local", objectId, 0, 10).SequenceEqual(["survivor.txt"]),

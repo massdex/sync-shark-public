@@ -3,6 +3,18 @@ namespace Massdex.SyncShark.V2;
 /// <summary>Storage-owned damage recognition; other failure scopes remain shallow.</summary>
 internal static class StorageFailureClassifier
 {
+    internal static bool IsStoreException(Exception error) =>
+        error is Microsoft.Data.Sqlite.SqliteException;
+
+    internal static bool IsDirectStateDamage(Exception error) =>
+        error is Microsoft.Data.Sqlite.SqliteException { SqliteErrorCode: 11 or 26 };
+
+    internal static bool IsBusy(Exception error) =>
+        error is Microsoft.Data.Sqlite.SqliteException { SqliteErrorCode: 5 or 6 };
+
+    internal static int? DirectErrorCode(Exception error) =>
+        error is Microsoft.Data.Sqlite.SqliteException sqlite ? sqlite.SqliteErrorCode : null;
+
     internal static bool IsStateDamage(Exception error)
     {
         var pending = new Stack<Exception>();

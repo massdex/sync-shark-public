@@ -5,7 +5,7 @@ internal static partial class RunChecks
     private static async Task Incremental_LocalLocalDeleteCreatesRecoveryAsync()
     {
         var folder = Path.Combine(Path.GetTempPath(), "local-local-recovery-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store, localLocal: true);
         fx.A.Seed("same.txt", "content");
         var run = fx.Run();

@@ -324,7 +324,7 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
                     matched: plan.MatchedBothSides, warnings: warnings,
                     carriedIgnoredDeletes: removalReport, store: _store,
                     inventoryCursors: plan.InventoryCursors.Select(entry =>
-                        new FirstSyncChoicesState.StoredInventoryCursor(entry.Key, entry.Value)).ToArray(),
+                        new StoredInventoryCursor(entry.Key, entry.Value)).ToArray(),
                     inventoryScope: plan.InventoryScope);
                 RaiseRebuildableRuleNotices(pair, choices.Rebuildables, rebuildables.Detected);
                 return Preparation(pair, plan, effects, FirstSyncChoices.Digest(choices, rebuildables.Selected, plan.HeldDeletions),
@@ -445,9 +445,9 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
                     effects = ChoiceEffects(pair, plan, choices.OneSided);
                 }
                 // only first-sync choice deletes and unreviewed deletion-evidence deletes need to be in
-                // the reviewed set; ordinary deletion propagation after a successful prepare is ongoing sync.
-                FirstSyncChoicesState.RefuseUnreviewedDeletes(reviewed,
-                    FolderDelete.SplitVictims(_store, pair, plan, reviewed).Guarded);
+                // the reviewed set; ordinary deletion propagation after a successful prepare is ongoing sync. The run is
+                // the single safety owner: its apply holds each unreviewed delete on its own item (retry plus one notice)
+                // instead of refusing the whole apply, so independent reviewed work still completes (decision 85).
                 // The refreshed observation is durable before effects start, independently of execution success.
                 // Keep the frozen review unchanged; legacy/reset prepares gain a usable checkpoint after one full
                 // fallback. Full snapshots supply their fully drained race-closure cursor, never a new latest-cursor request here.

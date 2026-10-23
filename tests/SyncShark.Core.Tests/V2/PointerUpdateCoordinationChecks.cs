@@ -21,7 +21,7 @@ internal static class PointerUpdateCoordinationChecks
 
     internal static async Task RunAsync(string root)
     {
-        using var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System);
+        using var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pair = new PairDef("pair", "Pair A",
             new("local", SyncProviders.Local, null, root, "root-object"),
             new("remote", SyncProviders.Dropbox, "account", "/Remote", "remote-root"), [], [], true);
@@ -61,7 +61,7 @@ internal static class PointerUpdateCoordinationChecks
         Require(store.OpenNotices(pair.PairId).Count == 1 && store.OpenNotices(pair.PairId)[0].Path == "",
             "multiple blocked updates produce one pair notice");
         Require(writer.ByteCalls == 0, "blocked updates never download, read, replace or archive bytes");
-        using (var reopened = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System))
+        using (var reopened = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash))
             Require(reopened.SyncRetryAt(pair.PairId, action.Path)?.ReadRoots?.Count == 2 &&
                 reopened.BaselinesAt(pair.PairId, Side.A, [local.Path]).Single().B.VersionId == "rev-1",
                 "deferred retry and unsynced baseline survive a new store connection");
@@ -170,11 +170,11 @@ internal static class PointerUpdateCoordinationChecks
         Require(OwnedPointerUpdates.PairCause(new ExpectedTargetMismatchException("changed")) is null,
             "an item target mismatch is not a pair cause");
 
-        Require(!store.StoragePointerUpdateIsStale(pair, action), "original stored revision authorizes update");
+        Require(!((IStoragePointerCommit)store).StoragePointerUpdateIsStale(pair, action), "original stored revision authorizes update");
         var receipt = store.StoragePointerFor(pair.A.RootId, local.ObjectId, pair.B.RootId)!;
         var next = DropboxItems.ToEntry(remote);
         store.CompleteStoragePointerUpdate(receipt, next);
-        Require(store.StoragePointerUpdateIsStale(pair, action), "same applied revision is deduplicated");
+        Require(((IStoragePointerCommit)store).StoragePointerUpdateIsStale(pair, action), "same applied revision is deduplicated");
         store.CompleteStoragePointerUpdate(receipt, receipt.Remote with { Revision = "obsolete" });
         Require(store.StoragePointerFor(pair.A.RootId, local.ObjectId, pair.B.RootId)!.Remote.Revision == "rev-2",
             "stale completion cannot overwrite stored revision");
@@ -206,7 +206,7 @@ internal static class PointerUpdateCoordinationChecks
         store.CommitResult(pair.PairId, 2, action, new(action.ActionId, Outcome.Done, updated, remote, null, null));
         Require(store.ByObject(pair.B.RootId, remote.ObjectId)?.VersionId == "rev-3" &&
             store.ChangedStoragePointers().Count == 1, "older run receipt preserves newer indexed revision and dirty work");
-        Require(store.StoragePointerUpdateIsStale(pair, action), "indexed newer revision rejects stale run plan");
+        Require(((IStoragePointerCommit)store).StoragePointerUpdateIsStale(pair, action), "indexed newer revision rejects stale run plan");
         Console.WriteLine("PASS pointer pair deferral, durable retries and shared revision CAS");
     }
 

@@ -59,7 +59,7 @@ internal static partial class RunChecks
         CheckOverlayPort();
         await LiveLedgerAndAdmissionAsync();
         PlanOnlyPathChecks(); // Includes live-root, alias, state-hardlink and export refusal.
-        using var store = SqliteStateStore.Open(LocalChecks.FreshRoot("rehearsal-store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(LocalChecks.FreshRoot("rehearsal-store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.Seed("edit.txt", "old");
         await FirstSyncAsync(fx.Run(), fx);

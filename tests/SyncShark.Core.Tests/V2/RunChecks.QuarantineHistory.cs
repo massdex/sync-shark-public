@@ -11,7 +11,7 @@ internal static partial class RunChecks
         await QuarantineRehashHoldAsync(root, false);
         await QuarantineRehashHoldAsync(root, true);
         await QuarantineFolderFullScanAsync(root);
-        using var store = SqliteStateStore.Open(Path.Combine(root, "history"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "history"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.Seed("folder/child.txt", "keep child");
         fx.A.Seed("blocked.txt", "history bytes");
@@ -84,7 +84,7 @@ internal static partial class RunChecks
     // RQ-034: exercise the real full-run publisher, then release and reobserve the subtree.
     private static async Task QuarantineBlockedFolderRunAsync(string root)
     {
-        using var store = SqliteStateStore.Open(Path.Combine(root, "blocked-folder-run"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "blocked-folder-run"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.Seed("held", "", ItemKind.Folder);
         fx.A.Seed("held/child.txt", "must survive");
@@ -133,7 +133,7 @@ internal static partial class RunChecks
 
     private static async Task QuarantineCheckpointAsync(string root)
     {
-        using var store = SqliteStateStore.Open(Path.Combine(root, "checkpoint"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "checkpoint"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.B.Seed("blocked.txt", "checkpoint bytes");
         fx.B.Seed("sibling.txt", "sibling bytes");
@@ -161,7 +161,7 @@ internal static partial class RunChecks
     private static async Task QuarantineCandidatePagingAsync(string root)
     {
         var data = Path.Combine(root, "candidate-pages");
-        using var store = SqliteStateStore.Open(data, Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(data, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.Seed("folder/child.txt", "page seed");
         await FirstSyncAsync(fx.Run(), fx);
@@ -199,7 +199,7 @@ internal static partial class RunChecks
     {
         foreach (var mode in new[] { "unavailable", "partial", "empty" })
         {
-            using var store = SqliteStateStore.Open(Path.Combine(root, "history-delete-" + mode), Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(root, "history-delete-" + mode), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             var item = fx.A.Seed("blocked.txt", "surviving cloud bytes");
             var run = fx.Run();
@@ -236,7 +236,7 @@ internal static partial class RunChecks
 
     private static async Task QuarantineDeferralExpiryAsync(string root)
     {
-        using var store = SqliteStateStore.Open(Path.Combine(root, "deferral-expiry"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "deferral-expiry"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.Seed("missing.txt", "preserve until evidence");
         await FirstSyncAsync(fx.Run(), fx);
@@ -275,7 +275,7 @@ internal static partial class RunChecks
         await QuarantineSharedHeldAsync(root);
         foreach (var mode in new[] { "unknown", "active", "timeout", "cap", "age" })
         {
-            using var store = SqliteStateStore.Open(Path.Combine(root, "deferral-review-" + mode), Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(Path.Combine(root, "deferral-review-" + mode), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
             store.SavePair(fx.Pair with { A = fx.Pair.A with { RootObjectId = "id:local:00000001:0000000000000001" } });
             var item = fx.A.Seed("missing.txt", "cloud survives until explicit consent");
@@ -390,7 +390,7 @@ internal static partial class RunChecks
         await DefenderHistory.ReadStreamAsync(new StringReader(resource + resource), evidence, default, maxRecords: 1, limitReached: () => limited = true);
         Require(limited, "entry cap explicitly requests immediate aggregate review");
 
-        using var queueStore = SqliteStateStore.Open(Path.Combine(root, "deferral-queue"), Settings, TimeProvider.System);
+        using var queueStore = SqliteStateStore.Open(Path.Combine(root, "deferral-queue"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var queueFx = Build(suppliedStore: queueStore);
         for (var i = 0; i < 7; i++) queueFx.A.Seed("q" + i + ".txt", "keep");
         await FirstSyncAsync(queueFx.Run(), queueFx);
@@ -441,7 +441,7 @@ internal static partial class RunChecks
         foreach (var priorVersion in new[] { StoreSchema.Version - 1, StoreSchema.Version })
         {
             var migrationRoot = Path.Combine(root, "quarantine-consent-upgrade-" + priorVersion);
-            using (var before = SqliteStateStore.Open(migrationRoot, Settings, TimeProvider.System))
+            using (var before = SqliteStateStore.Open(migrationRoot, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
                 before.DeferDefenderHistory(["retained-epoch"], "before", DateTimeOffset.UtcNow);
             using (var connection = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + SqliteStateStore.DatabasePath(migrationRoot)))
             {
@@ -450,13 +450,13 @@ internal static partial class RunChecks
                 command.CommandText = "DROP INDEX defender_deferral_batch; ALTER TABLE defender_deferral DROP COLUMN batch; ALTER TABLE defender_deferral DROP COLUMN consent; PRAGMA user_version=" + priorVersion + ";";
                 command.ExecuteNonQuery();
             }
-            using (var after = SqliteStateStore.Open(migrationRoot, Settings, TimeProvider.System))
+            using (var after = SqliteStateStore.Open(migrationRoot, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 after.AssignDefenderBatch(["retained-epoch"], "upgraded");
                 Require(after.DefenderBatchCount("upgraded") == 1 && after.DefenderDeferralConsent(["retained-epoch"])["retained-epoch"] == 0,
                     "preview " + priorVersion + " gains consent metadata without losing prior deferrals");
             }
-            using (var again = SqliteStateStore.Open(migrationRoot, Settings, TimeProvider.System))
+            using (var again = SqliteStateStore.Open(migrationRoot, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
                 Require(again.DefenderBatchCount("upgraded") == 1, "quarantine consent upgrade is idempotent on reopen");
             using (var connection = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + SqliteStateStore.DatabasePath(migrationRoot)))
             {
@@ -511,7 +511,7 @@ internal static partial class RunChecks
 
     private static async Task QuarantineFolderFullScanAsync(string root)
     {
-        using var store = SqliteStateStore.Open(Path.Combine(root, "folder-full-scan"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "folder-full-scan"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.Seed("dir", "", ItemKind.Folder);
         foreach (var name in new[] { "inbatch", "outside", "kept" }) fx.A.Seed("dir/" + name + ".txt", "full scan " + name);
@@ -564,7 +564,7 @@ internal static partial class RunChecks
 
     private static async Task QuarantineParallelReviewsAsync(string root)
     {
-        using var store = SqliteStateStore.Open(Path.Combine(root, "parallel-reviews"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "parallel-reviews"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var items = new[] { fx.A.Seed("first.txt", "first"), fx.A.Seed("later.txt", "later") };
         await FirstSyncAsync(fx.Run(), fx);
@@ -607,7 +607,7 @@ internal static partial class RunChecks
 
     private static async Task QuarantineSharedHeldAsync(string root)
     {
-        using var store = SqliteStateStore.Open(Path.Combine(root, "shared-held"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "shared-held"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var item = fx.A.Seed("shared.txt", "keep on both pairs");
         await FirstSyncAsync(fx.Run(), fx);
@@ -680,7 +680,7 @@ internal static partial class RunChecks
 
     private static async Task QuarantineHeldNoticeAsync(string root)
     {
-        using var store = SqliteStateStore.Open(Path.Combine(root, "held-notice"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "held-notice"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         store.SavePair(fx.Pair with { A = fx.Pair.A with { RootObjectId = "id:local:00000001:0000000000000001" } });
         var items = new[] { "a.txt", "b.txt", "c.txt" }.Select(path => fx.A.Seed(path, "held " + path)).ToArray();
@@ -737,7 +737,7 @@ internal static partial class RunChecks
     private static async Task QuarantinePruneAsync(string root)
     {
         var clock = new ShiftedClock(TimeSpan.Zero);
-        using var store = SqliteStateStore.Open(Path.Combine(root, "deferral-prune"), Settings, clock);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "deferral-prune"), Settings, clock, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         var items = new[] { "kept.txt", "pending.txt", "proceeded.txt", "released.txt" }.Select(path => fx.A.Seed(path, "prune " + path)).ToArray();
         await FirstSyncAsync(fx.Run(), fx);
@@ -804,7 +804,7 @@ internal static partial class RunChecks
 
     private static async Task QuarantineDeferredFolderAsync(string root)
     {
-        using var store = SqliteStateStore.Open(Path.Combine(root, "deferred-folder"), Settings, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(root, "deferred-folder"), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.Seed("foo", "", ItemKind.Folder);
         fx.A.Seed("foo/held.txt", "held");

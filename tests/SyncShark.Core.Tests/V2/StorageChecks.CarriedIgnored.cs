@@ -4,7 +4,7 @@ internal static partial class StorageChecks
 {
     private static void CommitFolderDeleteRetiresCarriedRows(string root)
     {
-        using var store = SqliteStateStore.Open(Fresh(root, "commit-carried-rows"), Fast, new TestClock());
+        using var store = SqliteStateStore.Open(Fresh(root, "commit-carried-rows"), Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         var folder = D("docs", "id:folder");
         var child = F("docs/desktop.ini", "id:ignored", "11");

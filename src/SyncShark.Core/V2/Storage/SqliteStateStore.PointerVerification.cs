@@ -5,11 +5,17 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SqliteStateStore
 {
+    bool IStateStore.QueueVerifiedPointerAcknowledgment(string rootId, string objectId,
+        string remoteBinding, PilotRemoteEntry verifiedReceipt) =>
+        QueueVerifiedPointerAcknowledgment(rootId, objectId, remoteBinding, verifiedReceipt);
+    void IStateStore.RequestPointerVerification(string pairId, string rootId, string objectId,
+        string path, PilotRemoteEntry receipt) => RequestPointerVerification(pairId, rootId, objectId, path, receipt);
+
     private void QueuePointerMoveAcknowledgment(SqliteTransaction tx, PairDef pair, ActionResult result)
     {
         var local = result.NewA;
         var remote = result.NewB;
-        if (pair.A.Provider != SyncProviders.Local || pair.B.Provider != SyncProviders.Dropbox ||
+        if (pair.A.Provider != ProviderIds.Local || pair.B.Provider != ProviderIds.Dropbox ||
             local is not { Kind: ItemKind.File } || (local.Flags & ItemFlags.OwnedPointer) == 0 ||
             remote is not { Kind: ItemKind.File, VersionId: not null } ||
             !PairPath.Same(local.Path, remote.Path) || Content.SameContent(local, remote) != true)

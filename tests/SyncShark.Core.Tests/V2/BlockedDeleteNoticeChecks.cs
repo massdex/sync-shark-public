@@ -4,7 +4,7 @@ internal static class BlockedDeleteNoticeChecks
 {
     internal static void Run(string folder)
     {
-        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pair = new PairDef("pair", "Pair A", new("local", SyncProviders.Local, null, "/local", "local"),
             new("cloud", SyncProviders.Dropbox, null, "/cloud", "cloud"), [], [], true);
         store.SavePair(pair);
@@ -17,7 +17,7 @@ internal static class BlockedDeleteNoticeChecks
         LocalChecks.Require(summary.Detail.Contains("57 deletions", StringComparison.Ordinal) &&
             !store.OpenNotices(pair.PairId).Any(x => x.ReasonKey == DeleteSourceGuard.ReasonKey), "one exact pair summary above threshold");
         LocalChecks.Require(NoticeOptions.Options(summary).Any(x => x.Choice == NoticeChoices.ShowRemaining), "summary routes to remaining items");
-        var run = new SyncRun(store, new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
+        var run = new SyncRun(store, new Executor(store, V2Settings.Default, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException),
             new FakeEndpointProvider(), V2Settings.Default, TimeProvider.System);
         var shown = run.ApplyRetryNoticeChoiceAsync(pair.PairId, summary.NoticeId!, NoticeChoices.ShowRemaining,
             default).GetAwaiter().GetResult();

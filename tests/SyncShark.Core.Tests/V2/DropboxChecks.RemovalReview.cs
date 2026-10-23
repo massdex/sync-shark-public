@@ -7,7 +7,7 @@ internal static partial class DropboxChecks
         using var h = new Harness();
         var product = Path.Combine(_root, "removal-review");
         var pair = ClassificationPair();
-        using var store = SqliteStateStore.Open(Path.Combine(product, "state"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(product, "state"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         store.SavePair(pair);
         store.MarkFirstSyncDone(pair.PairId);
         h.Wire.SeedFolder("folder");

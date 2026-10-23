@@ -9,7 +9,7 @@ internal static partial class RunCliChecks
         var root = TempRoot();
         try
         {
-            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(store: store);
             var loser = fx.A.Seed("choice.txt", "older");
             var winner = fx.B.Seed("choice.txt", "newer");
@@ -55,7 +55,7 @@ internal static partial class RunCliChecks
         foreach (var choice in new[] { "rename-incoming=Renamed.txt", NoticeChoices.ReplaceExisting, NoticeChoices.Dismiss })
         {
             var root = TempRoot();
-            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(store: store);
             var a = fx.A.Seed("choice.txt", "incoming");
             var b = fx.B.Seed("choice.txt", "occupant");

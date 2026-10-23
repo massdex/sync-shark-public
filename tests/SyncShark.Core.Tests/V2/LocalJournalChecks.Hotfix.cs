@@ -27,7 +27,7 @@ internal static partial class LocalJournalChecks
         LocalChecks.Seed(root, "one.txt", "old");
         LocalChecks.Seed(root, "healthy.txt", "old");
         LocalChecks.Require(CreateHardLink(Path.Combine(root, "alias.txt"), Path.Combine(root, "one.txt"), IntPtr.Zero), "hard-link slice fixture");
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var inventory = LocalChecks.Inventory(root, store, TimeProvider.System);
         inventory.WalkCheckpointForTest = () => (new(1, 0, 100, 0), false);
         var snapshot = await SaveFull(inventory, store);
@@ -66,7 +66,7 @@ internal static partial class LocalJournalChecks
     {
         var root = Path.Combine(folder, "root");
         for (var n = 0; n < 600; n++) LocalChecks.Seed(root, $"file-{n:D4}.txt", "content");
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var inventory = LocalChecks.Inventory(root, store, TimeProvider.System);
         inventory.WalkCheckpointForTest = () => (new(1, 0, 100, 0), false);
         await SaveFull(inventory, store);
@@ -113,7 +113,7 @@ internal static partial class LocalJournalChecks
 
     private static async Task WorkerForegroundAsync(string folder)
     {
-        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var stamp = DateTimeOffset.UtcNow;
         var root = new RootDef("worker-root", SyncProviders.Local, null, folder, SyncLocalEndpointStore.ObjectId(1, 1));
         var rows = Enumerable.Range(1, 1024).Select(n => new ItemState("file-" + n, ItemKind.File,
@@ -138,7 +138,7 @@ internal static partial class LocalJournalChecks
     {
         var root = Path.Combine(folder, "root");
         LocalChecks.Seed(root, "file.txt", "content");
-        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System);
+        using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var inventory = LocalChecks.Inventory(root, store, TimeProvider.System);
         inventory.WalkCheckpointForTest = () => (new(1, 0, 100, 0), false);
         await SaveFull(inventory, store);

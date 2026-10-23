@@ -31,7 +31,7 @@ public sealed partial class SyncRun
             // Lost authority, cancellation or damaged state halts dependent writes,
             // but cannot retroactively erase effects already counted by the executor.
             _halt |= !RunFailure(error, ct);
-            if (!RunFailure(error, ct)) _haltingError ??= error is Microsoft.Data.Sqlite.SqliteException sql && StoreSchema.IsDamaged(sql)
+            if (!RunFailure(error, ct)) _haltingError ??= StorageFailureClassifier.IsDirectStateDamage(error)
                 ? new StateDamagedException(error.Message, error) : error;
             RunLog.Trace("Run completion step failed: " + error.ToString());
         }

@@ -115,7 +115,7 @@ internal static partial class StorageChecks
     private static void FolderDelete_CrashBetweenBatches(string root)
     {
         var folder = Fresh(root, "subtree-crash");
-        using var store = SqliteStateStore.Open(folder, Fast with { StoreBatchRows = 2 }, new TestClock());
+        using var store = SqliteStateStore.Open(folder, Fast with { StoreBatchRows = 2 }, new TestClock(), LocalItems.CaptureOptionalHash);
         // One folder, so its rows go in key order: n1..n4 commit in two batches before n5 fails.
         var gen = store.BeginGeneration("ra", "snapshot");
         store.WriteSnapshot(new Snapshot("ra", Side.A, gen, "c",

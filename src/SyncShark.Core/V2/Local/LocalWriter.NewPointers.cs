@@ -8,7 +8,7 @@ public sealed partial class LocalWriter
         await EnsureParentsAsync(path, ct).ConfigureAwait(false);
         using var root = PilotDirectoryLease.Open(_rootPath, _rootIdentity);
         ct.ThrowIfCancellationRequested();
-        var result = provider.CreateNewPlaceholder(DropboxItems.ToEntry(remote with { Path = path }), _rootIdentity);
+        var result = provider.CreateNewPlaceholder(RemoteEntries.ToEntry(remote with { Path = path }), _rootIdentity);
         return PointerState(path, result, _rootIdentity.VolumeSerialNumber);
     }
 

@@ -10,7 +10,7 @@ internal static partial class RunCliChecks
             var root = TempRoot();
             try
             {
-                using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+                using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
                 var fx = Build(store: store);
                 var endpoint = side == Side.A ? fx.A : fx.B;
                 endpoint.Seed("folder", "", ItemKind.Folder);
@@ -58,7 +58,7 @@ internal static partial class RunCliChecks
         var root = TempRoot();
         try
         {
-            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(store: store);
             fx.B.Seed("a/cache", "reviewed file");
             fx.B.Seed("b/cache", "", ItemKind.Folder);
@@ -99,7 +99,7 @@ internal static partial class RunCliChecks
         var root = TempRoot();
         try
         {
-            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System);
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(store: store);
             var runtime = Runtime(fx, root);
             await runtime.PrepareFirstSyncAsync(fx.Pair.PairId, _ => { }, CancellationToken.None);

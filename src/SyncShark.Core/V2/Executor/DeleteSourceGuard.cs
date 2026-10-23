@@ -4,7 +4,7 @@ namespace Massdex.SyncShark.V2;
 internal static class DeleteSourceGuard
 {
     internal const string ReasonKey = NoticeVocabulary.DeleteSourceReasonKey;
-    internal static string NoticeId(string pairId, string path) => ShortId.Make("n", pairId, "0", PathKey.Of(path), ReasonKey);
+    internal static string NoticeId(string pairId, string path) => DeleteSourceNotice.NoticeId(pairId, path);
 
     // Explicit decisions authorize conditional removal of their frozen victim, not propagation of absence.
     internal static bool ExplicitRemoval(SyncAction action) => action.ChoiceRemove || action.RebuildableRemove ||
@@ -119,7 +119,7 @@ internal static class DeleteSourceGuard
         var folder = expected.Kind == ItemKind.Folder;
         var hasCarried = false;
         var session = "delete-check-" + Guid.NewGuid().ToString("N");
-        var db = store as SqliteStateStore;
+        var db = store as IStoreRemovalObservation;
         var memory = db is null ? new List<ItemState>() : null;
         var rootSeen = false;
         var valid = true;
@@ -177,7 +177,7 @@ internal static class DeleteSourceGuard
             damaged = FailureRetryOwner.ScopeOf(error, ct, isStateDamage: isStateDamage) == FailureRetryOwner.FailureScope.State;
             throw;
         }
-        finally { if (!damaged && db is not null) FairStoreGate.Cleanup(() => db.ClearRemovalObservation(session)); }
+        finally { if (!damaged && db is not null) db.ClearRemovalObservation(session); }
     }
 
     internal static async Task<bool?> ObserveAbsenceAsync(IEndpointWriter source, ItemState? historical,
@@ -232,19 +232,6 @@ internal static class DeleteSourceGuard
             path = slash < 0 ? "" : path[..slash];
         }
         return null;
-    }
-
-    internal static async Task RevalidateCurrentAsync(SyncAction? action)
-    {
-        if (action?.Kind != ActionKind.Delete) return;
-        var context = ProviderEffectContext.Current.Value;
-        var matches = context?.Action?.ActionId == action.ActionId;
-        var observation = matches && context?.RevalidateDelete is { } check
-            ? await check().ConfigureAwait(false) : new AbsenceObservation(null, "No delete recheck supplied.");
-        if (observation.Absent == true) return;
-        var refusal = matches && context?.RefuseDelete is { } refuse ? await refuse(observation).ConfigureAwait(false) : null;
-        throw new DeleteSourceUnconfirmedException(refusal ?? new ActionResult(action.ActionId,
-            Outcome.Skipped, null, null, null, observation.Reason) { DeleteSourceUnconfirmed = true });
     }
 
     internal static Task<ActionResult?> CheckAsync(SyncAction action, IEndpointWriter source,

@@ -18,7 +18,7 @@ internal static class FilesOnDemandNoticeAggregationChecks
         var localRoot = new RootDef("local", SyncProviders.Local, null, root, "id:local:00000001:0000000000000001");
         var remoteRoot = new RootDef("remote", SyncProviders.Dropbox, "account", "/Remote", "remote-root");
         var pair = new PairDef("pair", "Pair A", localRoot, remoteRoot, [], [], true);
-        using var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System);
+        using var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
         store.SavePair(pair);
         var generation = store.BeginGeneration(localRoot.RootId, "snapshot");
         var states = Enumerable.Range(0, items).Select(index => new ItemState(
@@ -87,6 +87,27 @@ internal static class FilesOnDemandNoticeAggregationChecks
             "an ignored pair cause stays suppressed while the debt remains durable");
         Require((store.ByObject(localRoot.RootId, states[0].ObjectId)!.Flags & ItemFlags.NeedsRehash) != 0,
             "Ignore leaves every entity retry debt in place");
+
+        // Decision 89 / F4: the Ignore covers this verification episode only. Settling every durable debt
+        // retires the ignored summary, and a later verification failure is actionable again.
+        foreach (var state in states)
+            Require(store.CompleteRehash(localRoot.RootId, state, new string('d', 64)), "verification settles each entity after Ignore");
+        store.RetirePointerVerificationSummaries(pair.PairId);
+        Require(!store.UnresolvedNotices(pair.PairId).Any(notice =>
+                notice.Storage?.Operation == StorageNotices.PointerVerificationPairOperation),
+            "verified success retires the ignored pair summary");
+        foreach (var state in states)
+            store.RequireRehash(localRoot.RootId, store.ByObject(localRoot.RootId, state.ObjectId)!, "verification pending again");
+        for (var index = 0; index < items; index++)
+            store.RequestPointerVerification(pair.PairId, localRoot.RootId, states[index].ObjectId, states[index].Path, receipts[index]);
+        Require(store.OpenNotices(pair.PairId).Any(notice =>
+                notice.Storage?.Operation == StorageNotices.PointerVerificationPairOperation),
+            "a later verification outage after success raises an actionable summary");
+        foreach (var state in states)
+            Require(store.CompleteRehash(localRoot.RootId, state, new string('e', 64)), "cleanup verification settles each entity");
+        store.RetirePointerVerificationSummaries(pair.PairId);
+        Require(!store.UnresolvedNotices(pair.PairId).Any(notice => notice.Storage is not null),
+            "verification fixture is clean");
 
         // Transient scanner observations: one durable SyncRetry per entity, one summary notice above the limit.
         for (var index = 0; index < items; index++)

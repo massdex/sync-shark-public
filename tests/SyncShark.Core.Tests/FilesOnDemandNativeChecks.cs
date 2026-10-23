@@ -123,7 +123,7 @@ internal static class FilesOnDemandNativeChecks
             var uploaded = new ItemState(remote.RelativePath, ItemKind.File,
                 SyncLocalEndpointStore.ObjectId(uploadedIdentity.VolumeSerialNumber, uploadedIdentity.FileId),
                 null, hash, remote.Size, new DateTimeOffset(File.GetLastWriteTimeUtc(path)), ItemFlags.None);
-            using (var uploadStore = SqliteStateStore.Open(database, V2Settings.Default, TimeProvider.System))
+            using (var uploadStore = SqliteStateStore.Open(database, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 uploadStore.EnableStorage();
                 uploadStore.SavePair(pair);
@@ -140,7 +140,7 @@ internal static class FilesOnDemandNativeChecks
                     uploaded, uploaded with { ObjectId = receipt.Id!, VersionId = receipt.Revision }, null, null));
             } // restart after the upload receipt, before production settlement
             provider.Dispose();
-            using (var restarted = SqliteStateStore.Open(database, V2Settings.Default, TimeProvider.System))
+            using (var restarted = SqliteStateStore.Open(database, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash))
             using (var lifetime = new CloudFilesLifetime((_, _, _) => provider = new WindowsCloudFilesProvider(
                 binding, source, root, SyncDirectoryStorage.CloudOnly), _ => true, restarted,
                 (_, _, _) => Task.FromResult<PilotRemoteEntry?>(source.Current)))
@@ -163,7 +163,7 @@ internal static class FilesOnDemandNativeChecks
             provider.Dispose();
             // Round-5 metadata-only checks: a transient registration failure must not create debt, and a
             // dirty in-sync-cleared pointer must self-heal through one entity acknowledgment.
-            using (var pointerStore = SqliteStateStore.Open(database, V2Settings.Default, TimeProvider.System))
+            using (var pointerStore = SqliteStateStore.Open(database, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
                 var metadataReads = source.Reads;
                 await FilesOnDemandNativePointerChecks.VerifyTransientRegistrationAsync(uploaded.Path,
@@ -196,7 +196,7 @@ internal static class FilesOnDemandNativeChecks
             Exception? renameFailure = null;
             try
             {
-                using var renameStore = SqliteStateStore.Open(database, V2Settings.Default, TimeProvider.System);
+                using var renameStore = SqliteStateStore.Open(database, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
                 // The acknowledgment service creates and owns the provider for this root; close the
                 // foreground provider first so the fixture never double-connects the same root.
                 provider.Dispose();
@@ -252,7 +252,7 @@ internal static class FilesOnDemandNativeChecks
                 throw new IOException("Owned hydrated reconversion did not return verified online-only state.");
             var beforeUpdateReads = source.Reads;
             provider.Dispose();
-            using (var restarted = SqliteStateStore.Open(database, V2Settings.Default, TimeProvider.System))
+            using (var restarted = SqliteStateStore.Open(database, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash))
             using (var lifetime = new CloudFilesLifetime((_, _, _) => provider = new WindowsCloudFilesProvider(
                 binding, source, root, SyncDirectoryStorage.CloudOnly), _ => true, restarted,
                 (_, _, _) => Task.FromResult<PilotRemoteEntry?>(source.Current)))
@@ -279,7 +279,7 @@ internal static class FilesOnDemandNativeChecks
                         string.Join("; ", restarted.OpenNotices(pair.PairId).Select(n => n.Detail)));
                 }
             }
-            using var verifyStore = SqliteStateStore.Open(database, V2Settings.Default, TimeProvider.System);
+            using var verifyStore = SqliteStateStore.Open(database, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
             using var verifyLifetime = new CloudFilesLifetime((_, _, _) => new WindowsCloudFilesProvider(
                 binding, source, root, SyncDirectoryStorage.CloudOnly), _ => true, verifyStore);
             provider = verifyLifetime.RequireProvider(pair, CancellationToken.None);

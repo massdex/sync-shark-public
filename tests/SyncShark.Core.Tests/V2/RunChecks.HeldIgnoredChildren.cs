@@ -25,7 +25,7 @@ internal static partial class RunChecks
             var recovery = Path.Combine(Path.GetDirectoryName(root)!, "recovery");
             // Exercise production result-transaction subtree retirement, not the baseline-only fake store.
             using var store = SqliteStateStore.Open(Path.Combine(Path.GetDirectoryName(root)!, "state"),
-                V2Settings.Default, TimeProvider.System);
+                V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var localRoot = LocalChecks.RootOf(root, "root-local");
             var remoteRoot = new RootDef("root-cloud", SyncProviders.Dropbox, "test-account", "/remote", "id:remote");
             string[] rules = test.ExtraRule.Length == 0 ? ["FileName:desktop.ini"] : ["FileName:desktop.ini", test.ExtraRule];
@@ -39,7 +39,7 @@ internal static partial class RunChecks
                 .AddWriter(localRoot, writer)
                 .AddInventory(localRoot, LocalChecks.Inventory(root, store, TimeProvider.System));
             var settings = V2Settings.Default with { MaxWorkers = 1, ProgressInterval = TimeSpan.Zero };
-            var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage),
+            var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException),
                 provider, settings, TimeProvider.System);
             var progress = new RecordingProgress();
             var plan = await run.PreviewFirstSyncAsync(pair.PairId, progress, default);

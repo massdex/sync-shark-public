@@ -21,7 +21,7 @@ internal static class ConflictRetirementChecks
         var toB = Successor("copy-to-b.txt", Side.B);
         var toA = Successor("copy-to-a.txt", Side.A);
         long gen;
-        using (var store = SqliteStateStore.Open(root, Settings, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(pair);
             store.MarkFirstSyncDone(PairId);
@@ -33,7 +33,7 @@ internal static class ConflictRetirementChecks
                 "two tagged successors start with their dedicated Retry-only notices");
         }
 
-        using (var reopened = SqliteStateStore.Open(root, Settings, TimeProvider.System))
+        using (var reopened = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             Require(reopened.UnresolvedIntents(PairId).Count == 2 && Open(reopened).Length == 2,
                 "the intents and their notices survive a cold reopen");
@@ -55,7 +55,7 @@ internal static class ConflictRetirementChecks
                 "each dedicated notice closes with its retirement in the same result transaction");
         }
 
-        using (var reopened = SqliteStateStore.Open(root, Settings, TimeProvider.System))
+        using (var reopened = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
             Require(reopened.UnresolvedIntents(PairId).Count == 0 && Open(reopened).Length == 0,
                 "retirement and notice closure stay durable across another cold reopen");
 

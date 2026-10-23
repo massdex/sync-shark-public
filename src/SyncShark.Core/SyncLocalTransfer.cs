@@ -14,7 +14,7 @@ public sealed record SyncLocalDownloadOutcome(SyncDownloadResult Result, SyncTra
 
 public static class SyncLocalTransfer
 {
-    internal const string ArtifactPrefix = ".syncshark-transfer-";
+    internal const string ArtifactPrefix = V2.ArtifactPaths.ArtifactPrefix;
     internal static Action<string>? StageWriteIntervalForTest { get; set; }
     internal static Action<string>? BackupWriteIntervalForTest { get; set; }
     internal static Action<string>? CommittedBeforeReturnForTest { get; set; }
@@ -25,15 +25,7 @@ public static class SyncLocalTransfer
     internal static Action<string>? TargetPromotedForTest { get; set; }
     internal static Action<string>? BeforeTargetCommitForTest { get; set; }
 
-    public static bool IsTransferArtifactName(string name)
-    {
-        var artifactName = name.EndsWith(SyncLocalFileAuthority.AccessRecoverySuffix, StringComparison.OrdinalIgnoreCase)
-            ? name[..^SyncLocalFileAuthority.AccessRecoverySuffix.Length]
-            : name;
-        return artifactName.StartsWith(ArtifactPrefix, StringComparison.OrdinalIgnoreCase) &&
-               (artifactName.EndsWith(".partial", StringComparison.OrdinalIgnoreCase) ||
-                artifactName.EndsWith(".backup", StringComparison.OrdinalIgnoreCase));
-    }
+    public static bool IsTransferArtifactName(string name) => V2.ArtifactPaths.IsTransferArtifactName(name);
 
     public static (string StageFileName, string? BackupFileName) CreateArtifactNames(bool replacing)
     {
