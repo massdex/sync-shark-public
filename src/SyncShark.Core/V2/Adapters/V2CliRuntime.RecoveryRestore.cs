@@ -2,31 +2,6 @@ using System.Globalization;
 
 namespace Massdex.SyncShark.V2;
 
-/// <summary>One retained Recovery row on the bounded page surface, with its current-state hint.</summary>
-public sealed record SyncCliRecoveryPageItemData(string Id, string Side, string Path, string? Version, long Size,
-    DateTimeOffset Created, string Classification, string? Destination, string? Detail);
-
-/// <summary>
-/// One bounded keyset page of a pair's retained Recovery rows: the rows, the limit used, whether more rows are
-/// known to follow (or may follow when the 500-row engine bound prevented an extra probe), the exclusive cursor
-/// that continues the scan, and the hint that explains what the page means (one page per call).
-/// </summary>
-public sealed record SyncCliRecoveryPageData(string PairId, IReadOnlyList<SyncCliRecoveryPageItemData> Items,
-    int Limit, int Returned, bool HasMore, bool MayHaveMore, string? NextCursor, string CurrentStateHint,
-    IReadOnlyList<string> Warnings);
-
-/// <summary>One structured restore row: identity, side, path, verified classification, destination and action.</summary>
-public sealed record SyncCliRecoveryRestoreItemData(string Id, string Side, string Path, string? Version, long Size,
-    DateTimeOffset Created, string Classification, string? Destination, string? Detail, string Action);
-
-/// <summary>
-/// One bounded restore page: each row is either previewed (dry run, the default) or restored, and a full page
-/// carries the exclusive cursor for the next invocation. No invocation ever loads or restores a whole history.
-/// </summary>
-public sealed record SyncCliRecoveryRestorePageData(string PairId,
-    IReadOnlyList<SyncCliRecoveryRestoreItemData> Items, bool DryRun, bool AsCopy, int Returned, bool HasMore,
-    bool MayHaveMore, string? NextCursor, string CurrentStateHint, IReadOnlyList<string> Warnings);
-
 // The core v2 Recovery surface: every `recovery list` is one bounded keyset page, and `recovery restore` selects
 // one exact id or one such page. Both read the store's own Recovery index; restore additionally reaches the
 // engine's guarded effect. A plain list is store-only (no provider request, no engine gate); --verify explicitly

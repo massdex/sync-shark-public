@@ -4,18 +4,6 @@ using System.Text.Json;
 
 namespace Massdex.SyncShark.V2;
 
-public sealed record DefenderDetection(string Resource, DateTimeOffset DetectedAt);
-public enum DefenderAvailability { Unknown, Active, Inactive }
-public sealed record DefenderHistoryResult(IReadOnlyList<DefenderDetection> Detections, bool Complete,
-    DefenderAvailability Availability = DefenderAvailability.Unknown, bool LimitReached = false)
-{
-    public static DefenderHistoryResult Unknown { get; } = new([], false);
-}
-public interface IDefenderHistory
-{
-    Task<DefenderHistoryResult> ReadAsync(CancellationToken ct);
-}
-
 /// <summary>Bounded read-only evidence. Absence is useful only after a complete successful query.</summary>
 public sealed class DefenderHistory : IDefenderHistory
 {

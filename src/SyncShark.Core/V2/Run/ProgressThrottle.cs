@@ -1,7 +1,5 @@
 namespace Massdex.SyncShark.V2;
 
-internal sealed record ActionKindProgress(ActionKind Kind, long Done, long Total);
-
 /// <summary>
 /// Forwards run progress on a phase change or once per interval, so a fast run stays quiet. Every phase begins with a
 /// start line (its identity) and ends with a "done" line carrying its counts and elapsed time; a phase running longer

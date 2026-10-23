@@ -2,33 +2,6 @@ using System.Collections.Concurrent;
 
 namespace Massdex.SyncShark.V2;
 
-internal enum LocalGapHashOutcome { Unverifiable, Paused, Disabled, Verified }
-
-internal sealed record LocalGapHashResult(LocalGapHashOutcome Outcome, string? Hash = null, LocalGapProof? Proof = null, string? Reason = null, int? QuarantineCode = null);
-
-internal interface ILocalGapIo
-{
-    bool Paused { get; }
-    LocalGapProof? Probe(RootDef root, ItemState item);
-    ILocalGapProbe OpenProbes(RootDef root) => new DelegatingGapProbe(this, root);
-    string PauseReason => Paused ? "content verification paused for activity or power" : "content verification running";
-    bool Excluded(RootDef root, ItemState item) => false;
-    Task<LocalGapHashResult> HashAsync(RootDef root, ItemState item, CancellationToken ct);
-}
-
-internal interface ILocalGapProbe : IDisposable
-{
-    LocalGapProof? Probe(ItemState item);
-    string? UnavailableReason => null;
-    string? LastFailureReason => null;
-}
-
-internal sealed class DelegatingGapProbe(ILocalGapIo io, RootDef root) : ILocalGapProbe
-{
-    public LocalGapProof? Probe(ItemState item) => io.Probe(root, item);
-    public void Dispose() { }
-}
-
 /// <summary>Composition-owned, root-deduplicated background work. Never joined by planning.</summary>
 internal sealed class LocalGapWorker(ILocalGapStore store, ILocalGapIo io) : IAsyncDisposable
 {

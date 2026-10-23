@@ -3,20 +3,6 @@ using System.Text.Json;
 
 namespace Massdex.SyncShark.V2;
 
-/// <summary>Durable due markers for explicit per-entity storage retries.</summary>
-internal static class StorageDue
-{
-    // An explicit Retry of one entity. Negative so ordinary due<=$now admission includes it, and distinct
-    // from normal scheduling so only this exact row may bypass a pair-level root backoff.
-    internal const long UserRequested = -1;
-    // A claimed row parks here while one worker performs the effect. This is the crash-retry delay, not an
-    // exclusion guarantee: a concurrent Request may overwrite it.
-    internal const long ClaimLeaseMs = 60_000;
-}
-
-/// <summary>Outcome of one atomic claim; only <see cref="StorageClaim.None"/> means another worker owns the row.</summary>
-internal enum StorageClaim { None = 0, Requested = 1, Normal = 2 }
-
 public sealed partial class SqliteStateStore
 {
     internal const string HasStorageWorkSql = """
@@ -344,5 +330,3 @@ public sealed partial class SqliteStateStore
         return (IReadOnlyList<StorageRegistration>)result;
     });
 }
-
-public sealed record StorageRegistration(string RootId, string Path, string RegistrationId);

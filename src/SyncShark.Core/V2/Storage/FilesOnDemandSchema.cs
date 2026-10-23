@@ -140,16 +140,3 @@ internal static class FilesOnDemandSchema
         END;
         """;
 }
-
-public sealed record StorageSettlement(long JobId, string RootId, string ObjectId, string RemoteBinding, PilotRemoteEntry Remote, long RefreshDue = 0, string? Kind = null)
-{
-    public const string AcknowledgeMove = "acknowledge-move";
-}
-public sealed record StorageObserved(string Availability, bool Pinned, bool InSync);
-public sealed record StorageFolderSummary(string ObjectId, string Path, long Items, long Hydrated, long Dehydrated)
-{
-    public long Unknown => Items - Hydrated - Dehydrated;
-}
-
-public sealed record StorageHydrationJob(long JobId, string RootId, string ObjectId);
-public sealed record StoragePathIntent(string Path, string Mode);

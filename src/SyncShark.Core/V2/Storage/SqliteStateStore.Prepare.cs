@@ -3,10 +3,6 @@ using Microsoft.Data.Sqlite;
 
 namespace Massdex.SyncShark.V2;
 
-internal sealed record PrepareHeader(string PairId, string Generation, string MetadataJson, string Digest);
-internal sealed record PrepareRow(long Ordinal, string Key, string Json);
-internal sealed class PreparePublicationException(string message) : Exception(message);
-
 public sealed partial class SqliteStateStore
 {
     internal PrepareHeader? ReadPrepare(string pairId) => InStore(() =>

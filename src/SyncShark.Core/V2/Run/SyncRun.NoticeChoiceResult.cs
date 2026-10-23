@@ -1,7 +1,5 @@
 namespace Massdex.SyncShark.V2;
 
-internal sealed record NoticeChoiceResult(bool Accepted, string Message);
-
 public sealed partial class SyncRun
 {
     // UI and CLI share this boundary; the legacy throwing entry point remains available

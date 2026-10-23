@@ -75,15 +75,3 @@ internal sealed class LocalWalkCheckpoint(SqliteStateStore store, string root, s
         _sinceFlush.Restart();
     }
 }
-
-internal sealed record LocalWalkSelection(string Path, bool Include, bool Traverse);
-internal sealed record LocalWalkPage(string Directory, string[] AddedDirectories,
-    PilotLocalEntry[] Entries, PilotDecision[] Decisions, LocalWalkSelection[] Selections,
-    long Bytes, int Found)
-{
-    [JsonRequired] public int Version { get; init; } = 3;
-    public PilotDirectoryIdentity? DirectoryIdentity { get; init; }
-    public PilotDirectoryIdentity?[] AddedDirectoryIdentities { get; init; } = [];
-}
-internal sealed class LocalWalkPolicyChangedException : Exception { }
-internal sealed class LocalWalkReplayInvalidException(string message, Exception? inner = null) : Exception(message, inner) { }

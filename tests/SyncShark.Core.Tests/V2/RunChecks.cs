@@ -1951,6 +1951,20 @@ internal static partial class RunChecks
         var report = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
         Require(fx.WriterA.Calls == callsA && fx.WriterB.Calls == callsB && report.Failed == 0,
             $"no half of the keep-both row runs (A calls {fx.WriterA.Calls - callsA}, B calls {fx.WriterB.Calls - callsB})");
+        var measuredNotices = fx.Store.OpenNotices(fx.Pair.PairId);
+        var measuredRetry = fx.Store.SyncRetryAt(fx.Pair.PairId, "f.txt");
+        var supersededPlanner = false;
+        var suppressContent = RetryNoticeFold.SuppressIncoming(
+            new Notice(fx.Pair.PairId, 30, NoticeKind.Info, "f.txt", PlanNotices.ContentUnconfirmed.Detail,
+                PlanNotices.ContentUnconfirmed.Key),
+            () => measuredRetry?.DeleteBlockedDetail is not null,
+            () => measuredNotices.Any(notice => notice.Path == "f.txt" && notice.ReasonKey == "sync-retry"),
+            () => supersededPlanner = true);
+        Console.WriteLine($"KEEPBOTH-HOLD outcome={report.Outcome}; held={report.Held}; deferred={report.Deferred}; done={report.Done}; " +
+            $"retry={System.Text.Json.JsonSerializer.Serialize(measuredRetry)}; " +
+            $"notices={System.Text.Json.JsonSerializer.Serialize(measuredNotices)}; " +
+            $"foldProbeSuppressContent={suppressContent}; foldProbeSupersedesPlanner={supersededPlanner}; " +
+            $"a={await TextAsync(fx.A, "f.txt")}; b={await TextAsync(fx.B, "f.txt")}");
         Require(fx.Store.OpenNotices(fx.Pair.PairId).Any(notice => notice.Rule == 30 &&
                 notice.ReasonKey == PlanNotices.ContentUnconfirmed.Key),
             "the row is held with the content-unconfirmed notice");

@@ -3,9 +3,6 @@ using Microsoft.Data.Sqlite;
 
 namespace Massdex.SyncShark.V2;
 
-public sealed record PairRemovalArchive(string PairId, string ArchivePath, string ManifestPath,
-    IReadOnlyDictionary<string, long> RowCounts, IReadOnlyList<string> OrphanedRoots, long UnfinishedEffects);
-
 public sealed partial class SqliteStateStore
 {
     /// <summary>Archives a disabled pair before atomically removing its catalog and pair-owned rows.

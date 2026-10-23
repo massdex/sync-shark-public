@@ -2,12 +2,6 @@ using System.ComponentModel;
 
 namespace Massdex.SyncShark.V2;
 
-/// <summary>The exact entities protected by a confirmed antivirus I/O failure, not an inferred deletion.</summary>
-public sealed record QuarantineNotice(Side Target, ItemState? Source, ItemState? ExpectedTarget, bool ScanOnly = false, string? PendingActionId = null, string? ObjectKey = null, ItemState? HeldSource = null, string? GrantedExclusionPath = null, string? GrantedStagePath = null, string? ConflictingGrantId = null);
-
-public sealed record DefenderGrant(string GrantId, string OwnerObject, string? SourceObject, string? LocalObject,
-    string Path, string StagePath, bool Verified = false);
-
 public static class QuarantineFailure
 {
     internal static string GrantWarning(string path) => "Defender exclusions may still cover these recorded paths: " + path + "; " + AttendedElevatedAction.DownloadStagePath(path) +

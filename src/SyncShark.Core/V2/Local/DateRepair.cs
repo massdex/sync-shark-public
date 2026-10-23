@@ -2,23 +2,6 @@ using System.Text.Json;
 
 namespace Massdex.SyncShark.V2;
 
-public sealed record DateRepairExample(string Path, DateTimeOffset OldUtc, DateTimeOffset NewUtc, string Outcome)
-{
-    public string? Evidence { get; init; }
-    public string? Hash { get; init; }
-    public string? ObjectId { get; init; }
-    public string? ObjectKey { get; init; }
-    public long Size { get; init; }
-}
-public sealed record DateRepairReport(string PairId, bool DryRun, long Examined, long Eligible, long Changed,
-    long Skipped, string ReportFile, IReadOnlyList<DateRepairExample> Examples)
-{
-    public long MissingWriteHistory { get; init; }
-    public long LocalDateNotWritten { get; init; }
-    public long Mismatches { get; init; }
-    public string? CsvFile { get; init; }
-}
-
 /// <summary>Metadata-only repair. No writer or upload API is accepted by this service.</summary>
 internal static partial class DateRepair
 {

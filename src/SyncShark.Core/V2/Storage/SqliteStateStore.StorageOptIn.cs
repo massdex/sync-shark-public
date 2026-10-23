@@ -2,8 +2,6 @@ using Microsoft.Data.Sqlite;
 
 namespace Massdex.SyncShark.V2;
 
-public sealed record StorageOptInResult(bool Enabled, string? BackupPath, string? Warning);
-
 public sealed partial class SqliteStateStore
 {
     internal static string StorageRelativePath(string path)

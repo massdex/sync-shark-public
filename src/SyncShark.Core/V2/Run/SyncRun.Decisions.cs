@@ -2,9 +2,6 @@ using System.Globalization;
 
 namespace Massdex.SyncShark.V2;
 
-/// <summary>One open needs-decision path observed fresh from both endpoints under the run gate (decision 64).</summary>
-internal sealed record DecisionSnapshot(string NoticeId, string Path, ItemState? A, ItemState? B, string Token);
-
 // Decision 64: the needs-decision paths' fresh observation, their version token and the one verb that applies a
 // decision. The token pins the exact notice id and both sides' current state, so a case-variant notice is never
 // confused and a path that changed since the user looked is refused before any effect.

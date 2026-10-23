@@ -2,10 +2,6 @@ using System.Collections.Concurrent;
 
 namespace Massdex.SyncShark.V2;
 
-/// <summary>One pair's opened endpoints: an inventory reader and a writer per side.</summary>
-public sealed record PairEndpoints(IInventorySource InventoryA, IInventorySource InventoryB,
-    IEndpointWriter WriterA, IEndpointWriter WriterB);
-
 /// <summary>Opens the real Local/Dropbox endpoints per pair at run time; refusals happen before any effect.</summary>
 public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatchSource
 {

@@ -3,13 +3,6 @@ using System.Text;
 
 namespace Massdex.SyncShark.V2;
 
-/// <summary>Explicit diagnostic/admission options for one run; absent options preserve ordinary execution.</summary>
-public sealed record RunOptions
-{
-    public string? EffectsExportPath { get; init; }
-    public long? MaxPlannedActions { get; init; }
-}
-
 /// <summary>One streaming CSV owner for simulated endpoint effects and durable live result commits.</summary>
 internal sealed class EffectsLedger : IDisposable
 {

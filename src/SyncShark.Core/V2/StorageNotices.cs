@@ -4,13 +4,6 @@ using System.Security.Authentication;
 
 namespace Massdex.SyncShark.V2;
 
-public sealed record StorageNotice(string RootId, string ObjectId, string RemoteBinding, string Operation, string? Scope = null);
-
-internal sealed class StoragePairException(string cause, string message, Exception? inner = null) : IOException(message, inner)
-{
-    internal string Cause { get; } = cause;
-}
-
 /// <summary>Shared storage notice vocabulary and actions; no delete or upload authority.</summary>
 internal static class StorageNotices
 {

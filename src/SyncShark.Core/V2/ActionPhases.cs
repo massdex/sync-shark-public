@@ -1,8 +1,5 @@
 namespace Massdex.SyncShark.V2;
 
-/// <summary>One action's execution slot: an ordered phase and a level inside that phase.</summary>
-public sealed record Step(int Phase, int Level);
-
 /// <summary>Assigns every planned action a phase and level so effects run in a safe order (executor.md section 2).</summary>
 public static class ActionPhases
 {

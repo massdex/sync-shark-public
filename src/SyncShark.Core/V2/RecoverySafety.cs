@@ -1,10 +1,5 @@
 namespace Massdex.SyncShark.V2;
 
-public interface IRecoveryAvailability
-{
-    string? RecoveryUnavailable { get; }
-}
-
 internal static class RecoverySafety
 {
     // Local/local has no provider history. Reuse RecoveryFirst, including its durable receipt and restart rules.

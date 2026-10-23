@@ -3,8 +3,6 @@ using System.Text.RegularExpressions;
 
 namespace Massdex.SyncShark.V2;
 
-internal sealed record DateProvenanceSource(string File, string Prefix);
-
 internal static class DateProvenanceLog
 {
     // A throttled progress stream proves only the paths actually printed, never intervening items.

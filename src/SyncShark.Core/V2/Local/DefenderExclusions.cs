@@ -3,12 +3,6 @@ using System.Text;
 
 namespace Massdex.SyncShark.V2;
 
-public sealed record DefenderExclusionView(bool Authoritative, IReadOnlyList<string> Paths);
-public interface IDefenderExclusions
-{
-    Task<DefenderExclusionView> ReadAsync(CancellationToken ct);
-}
-
 /// <summary>Read-only explicit-retry proof. Empty hidden/non-admin output is never absence evidence.</summary>
 public sealed class DefenderExclusions : IDefenderExclusions
 {

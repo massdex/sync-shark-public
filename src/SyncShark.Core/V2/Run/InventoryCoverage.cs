@@ -29,5 +29,3 @@ internal sealed record InventoryCoverage(RootDef Root, string[] Prefixes, string
         return removed.Where(path => !removed.Any(parent => parent != path && PairPath.IsUnder(path, parent))).ToArray();
     }
 }
-
-internal sealed record InventoryObservation(InventoryCoverage Coverage, string Cursor);

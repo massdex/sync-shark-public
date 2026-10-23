@@ -112,6 +112,11 @@ internal static partial class DropboxChecks
         Require(local.WriteCalls == localWrites && CloudWrites() == cloudWrites &&
             await local.ObserveAsync("gone.txt", default) is not null && await h.Writer().ObserveAsync("gone.txt", default) is null,
             "ordinary follow-up neither deletes the held local survivor nor resurrects the cloud tombstone");
+        // Cursor release after a timeout is not review release: N4/F1 in SyncRun.DeferredEvidence
+        // counts only answered unavailable runs. Once reachable, this held item must be re-probed.
+        Require(h.Known.SyncRetryAt("p1", "gone.txt") is
+            { Kind: "deletion-evidence", ReprobeEvidence: true, EvidenceReleased: false, Attempts: 0 },
+            "cursor release after an outage does not spend the answered-failure budget or release review");
         h.Wire.OnRevisionAsync = null;
         h.Known.SaveSyncRetry("p1", h.Known.SyncRetryAt("p1", "gone.txt")! with { RetryAfter = DateTimeOffset.MinValue });
         var probesBeforeRetry = h.Wire.Calls.Count(call => call == "/2/files/list_revisions");
@@ -128,13 +133,25 @@ internal static partial class DropboxChecks
         Console.WriteLine("released evidence notices: " + System.Text.Json.JsonSerializer.Serialize(h.Known.OpenNotices("p1").Where(n => n.Path == "gone.txt")));
         Require(second.Failed == 0 && h.Known.Cursor(RootId) == "file-after" &&
             await local.ObserveAsync("gone.txt", CancellationToken.None) is not null &&
-            h.Wire.Calls.Count(call => call == "/2/files/list_revisions") == probesBeforeRetry &&
+            h.Wire.Calls.Count(call => call == "/2/files/list_revisions") == probesBeforeRetry + 1 &&
             h.Known.OpenNotices("p1").Any(n => n.Path == "gone.txt" && n.ReasonKey == "deletion-review") &&
             local.WriteCalls == localWrites && CloudWrites() == cloudWrites,
-            "released evidence asks for a decision without another history probe; no delete or resurrection without explicit choice");
+            "cursor-released evidence asks for a decision after exactly one reachable history probe; no delete or resurrection without explicit choice");
+        var decisions = h.Known.OpenNotices("p1").Where(n => n.Path == "gone.txt" && n.ReasonKey == "deletion-review").ToArray();
+        Require(decisions.Length == 1 && NoticeChoices.Options(decisions[0]).Select(option => option.Choice)
+            .ToHashSet(StringComparer.Ordinal).SetEquals([NoticeChoices.DeleteReviewed, NoticeChoices.KeepRestore, NoticeChoices.Ignore]),
+            "one deletion-review notice offers Delete with Recovery, Keep/restore, and Ignore");
+        Require(h.Known.SyncRetryAt("p1", "gone.txt") is { Kind: "decision" } &&
+            await h.Writer().ObserveAsync("gone.txt", default) is null,
+            "successful re-probe leaves a decision hold without resurrecting the cloud tombstone");
+        var probesBeforeDecisionFollowup = h.Wire.Calls.Count(call => call == "/2/files/list_revisions");
         await run.IncrementalAsync("p1", new Progress<RunProgress>(), default);
         Require(local.WriteCalls == localWrites && CloudWrites() == cloudWrites &&
             await local.ObserveAsync("gone.txt", default) is not null, "decision hold remains inert across later runs");
+        Require(h.Wire.Calls.Count(call => call == "/2/files/list_revisions") == probesBeforeDecisionFollowup &&
+            await h.Writer().ObserveAsync("gone.txt", default) is null &&
+            h.Known.OpenNotices("p1").Count(n => n.Path == "gone.txt" && n.ReasonKey == "deletion-review") == 1,
+            "decision follow-up performs no further history probe or resurrection and does not duplicate the notice");
         var decision = h.Known.OpenNotices("p1").Single(n => n.Path == "gone.txt" && n.ReasonKey == "deletion-review");
         await run.ApplyRetryNoticeChoiceAsync("p1", decision.NoticeId!, NoticeChoices.DeleteReviewed, default);
         await run.IncrementalAsync("p1", new Progress<RunProgress>(), default);

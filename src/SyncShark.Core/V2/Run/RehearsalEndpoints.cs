@@ -343,5 +343,3 @@ internal sealed class RehearsalEndpoints(IEndpointProvider real, RehearsalOverla
                 FolderTreeStatus.Uncertain, "not simulated: retained whole-folder checkpoint reconciliation")).ToArray());
     }
 }
-
-internal sealed record RehearsalEffect(string Kind, string Side, string Provider, string Path, long Size, string? Hash);

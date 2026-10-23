@@ -4,8 +4,6 @@ using Microsoft.Win32.SafeHandles;
 
 namespace Massdex.SyncShark.V2;
 
-internal enum FileAbsence { Unknown, Present, Gone }
-
 /// <summary>One identity-verification scope; an unavailable root never proves absence.</summary>
 internal sealed class LocalFileAbsence : IDisposable
 {
