@@ -285,7 +285,7 @@ internal static partial class StorageChecks
                     "the v22 recovery receipt survives the upgrade");
                 Require(store.OpenNotices("p1").Any(notice => notice.NoticeId == openNotice &&
                     notice.Detail == "Seeded v22 notice"), "the v22 open notice survives the upgrade");
-                Require(store.ReadSyncRetries("p1").Count == 1, "the v22 retry debt survives the upgrade");
+                Require(store.ReadSyncRetries("p1").Count() == 1, "the v22 retry debt survives the upgrade");
             }
             using (var db = new SqliteConnection("Data Source=" + database + ";Pooling=False"))
             {

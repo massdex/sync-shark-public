@@ -312,10 +312,11 @@ internal static partial class DropboxChecks
                 CancellationToken.None);
             var pending = store.SyncRetryAt(pair.PairId, "held.txt");
             Console.WriteLine($"PrepareCursorDeferred: Deferred={applied.Deferred}; " +
-                $"Pending=[{string.Join(",", applied.DeletionEvidencePending)}]; " +
+                $"Pending={applied.Pending}; EvidencePending={applied.DeletionEvidencePendingCount}; " +
+                $"EvidenceExamples=[{string.Join(",", applied.DeletionEvidencePendingExamples)}]; " +
                 $"Cursor={store.Cursor(RootId)}; ExpectedCursor=deferred-refreshed; " +
                 $"FirstSyncDone={store.FirstSyncDone(pair.PairId)}; Held={pending?.Held?.Path}; " +
-                $"Done={applied.Done}; Failed={applied.Failed}; Outcome={applied.Outcome}; " +
+                $"AppliedItems={applied.AppliedItems}; Failed={applied.Failed}; Outcome={applied.Outcome}; " +
                 $"RetryCount={store.CountSyncRetries(pair.PairId)}; " +
                 $"UnresolvedIntents={store.UnresolvedIntents(pair.PairId).Count}");
             Require(applied.Failed == 0 && applied.Deferred == 0 && store.FirstSyncDone(pair.PairId) &&
