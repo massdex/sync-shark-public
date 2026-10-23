@@ -160,6 +160,25 @@ internal static partial class DropboxChecks
                 plan.HeldDeletions,
                 plan.UnreviewedHeldDeletions
             });
+            Console.WriteLine($"{scenario} plan conjuncts: same-effects={Effects(delta.Plan) == Effects(full.Plan)}; " +
+                $"matched-delete={delta.Plan.Actions.Any(action => action.Kind == ActionKind.Delete && action.Path == "matched.txt")}; " +
+                $"vanished-download-dropped={delta.Plan.Actions.All(action => action.Path != "remote-only.txt")}");
+            Console.WriteLine($"{scenario} delta effects: {Effects(delta.Plan)}");
+            Console.WriteLine($"{scenario} full effects: {Effects(full.Plan)}");
+            Console.WriteLine($"{scenario} saved matched stamps: {JsonSerializer.Serialize(matches)}");
+            Console.WriteLine($"{scenario} delta delete actions: {JsonSerializer.Serialize(delta.Plan.Actions.Where(action => action.Kind == ActionKind.Delete))}");
+            Console.WriteLine($"{scenario} full delete actions: {JsonSerializer.Serialize(full.Plan.Actions.Where(action => action.Kind == ActionKind.Delete))}");
+            var diagnosticPaths = delta.Plan.Actions.Concat(full.Plan.Actions)
+                .Where(action => action.Kind == ActionKind.Delete).Select(action => action.Path)
+                .Concat(new[] { "matched.txt", "remote-only.txt" }).Distinct(StringComparer.OrdinalIgnoreCase);
+            foreach (var path in diagnosticPaths)
+            {
+                var observedA = await local.ObserveAsync(path, CancellationToken.None);
+                var observedB = await h.Writer().ObserveAsync(path, CancellationToken.None);
+                Console.WriteLine($"{scenario} deletion observation {path}: " +
+                    $"local={JsonSerializer.Serialize(observedA)}; remote={JsonSerializer.Serialize(observedB)}; " +
+                    $"retry={JsonSerializer.Serialize(store.SyncRetryAt(pair.PairId, path))}");
+            }
             Require(Effects(delta.Plan) == Effects(full.Plan) &&
                 delta.Plan.Actions.Any(action => action.Kind == ActionKind.Delete && action.Path == "matched.txt") &&
                 delta.Plan.Actions.All(action => action.Path != "remote-only.txt"),

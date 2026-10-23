@@ -206,7 +206,8 @@ internal static partial class RunChecks
         fx.A.Seed("bad.txt", "retry me");
         var inventory = new ScriptedInventory(fx.A) { Hashless = true, ThrowHashPath = "bad.txt" };
         fx.Provider.AddInventory(fx.Pair.A, inventory);
-        var run = fx.Run();
+        var clock = new CompletionClock();
+        var run = new SyncRun(fx.Store, fx.Executor, fx.Provider, Settings, clock);
         var plan = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), default);
         await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), default, ReviewedHeld(plan));
         Require(fx.Store.FirstSyncDone(fx.Pair.PairId) && await fx.B.ObserveAsync("good.txt", default) is not null &&
@@ -216,8 +217,21 @@ internal static partial class RunChecks
             fx.Store.OpenNotices(fx.Pair.PairId).Count(notice => notice.Path == "bad.txt") == 1,
             "unknown hash failure has one durable retry and exactly one notice");
         inventory.ThrowHashPath = null;
+        // docs/design/retry-resume-rewind.md: automatic work waits for the exact persisted deadline.
+        var sleeping = fx.Store.SyncRetryAt(fx.Pair.PairId, "bad.txt")!;
+        var putsA = fx.WriterA.Puts;
+        var putsB = fx.WriterB.Puts;
+        clock.Now = sleeping.RetryAfter.AddTicks(-1);
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        Require(fx.Store.SyncRetryAt(fx.Pair.PairId, "bad.txt") == sleeping &&
+            await fx.B.ObserveAsync("bad.txt", default) is null &&
+            fx.WriterA.Puts == putsA && fx.WriterB.Puts == putsB &&
+            fx.WriterA.Deletes == 0 && fx.WriterB.Deletes == 0,
+            "unknown hash debt stays unchanged with no effects before its exact deadline");
+        clock.Now = sleeping.RetryAfter;
         await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
         Require(await fx.B.ObserveAsync("bad.txt", default) is not null &&
+            fx.Store.SyncRetryAt(fx.Pair.PairId, "bad.txt") is null &&
             !fx.Store.OpenNotices(fx.Pair.PairId).Any(notice => notice.Path == "bad.txt"),
             "unknown hash failure retries and auto-closes after success");
     }

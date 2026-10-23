@@ -338,7 +338,11 @@ internal static partial class RunChecks
         var preferences = new UiPreferencesStore(instance.StateAuthority);
         var reads = 0;
         var failNextRead = 0;
-        var host = new V2SyncHost(sql, run, new ObservedExecutor(fx.Executor), null!, Settings,
+        // Decision 72 / RQ-141: both pairs enter independently. Hold only the fixture's second
+        // run at its start until pair 1 has exercised the mid-effect refresh and stopped safely.
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var gatedRun = new PairStartGate(run, gatedPairId: "p2", observedPairId: "p1", gate.Task);
+        var host = new V2SyncHost(sql, gatedRun, new ObservedExecutor(fx.Executor), null!, Settings,
             clock, SqliteStateStore.DatabasePath(root))
         {
             PauseSource = () =>
@@ -389,8 +393,19 @@ internal static partial class RunChecks
         };
         var pairs = new[] { PauseView(fx.Pair),
             PauseView(second.Def) };
-        var summaries = new List<string>();
-        var result = await host.RunPairsAsync(pairs, "scope-mid-pair", admissionProgress: summaries.Add);
+        var summaries = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        SyncAuthorityBatchResult result;
+        try
+        {
+            result = await host.RunPairsAsync(pairs, "scope-mid-pair", admissionProgress: text =>
+            {
+                summaries.Enqueue(text);
+                gate.TrySetResult();
+            });
+        }
+        finally { gate.TrySetResult(); }
+        Require(gatedRun.EnteredWhileOtherRunning,
+            "mid-pair pause fixture admits both independent pairs before pair 1 finishes");
         Require(saved && (account is null
                 ? PauseStateProjection.GlobalPaused(preferences.Load(), clock.GetUtcNow())
                 : PauseStateProjection.AccountPaused(preferences.Load(), account, clock.GetUtcNow()) &&
@@ -398,15 +413,15 @@ internal static partial class RunChecks
             "mid-pair pause is durable in the requested scope");
         if (account is null or PauseAccount)
         {
-            Console.Error.WriteLine($"SCOPE-MID account={account ?? "global"} readError={readError?.GetType().Name ?? "none"} " +
-                $"items={result.Items.Count} p1puts={fx.WriterB.Puts} p2putsAtPause={secondPutsAtPause} p2puts={second.Writer.Puts} reads={Volatile.Read(ref reads)} " +
-                "outcomes=[" + string.Join(";", result.Items.Select(item =>
-                    $"{item.Pair.Id}:{item.Result?.Outcome ?? "null"}:failure={item.FailureType ?? "none"}")) +
-                "] summaries=[" + string.Join(";", summaries) + "]");
-            Require(result.Items.Count == 1 && summaries.Single().Contains("(" + RunOutcomes.Paused + ")",
-                StringComparison.Ordinal) && fx.WriterB.Puts > 0 && fx.WriterB.Puts < 12,
-                "durable scope pause stops pair 1 at a safe point after the two-second refresh");
-            Require(second.Writer.Puts == 0, "pair 2 on the paused account never runs");
+            Require(result.Items.Count == 2 && summaries.Count == 2 &&
+                result.Items.All(item => item.FailureType is null && item.Result?.Outcome == RunOutcomes.Paused) &&
+                summaries.All(text => text.Contains("(" + RunOutcomes.Paused + ")", StringComparison.Ordinal)) &&
+                fx.WriterB.Puts == 1,
+                "durable scope pause stops pair 1 after its admitted effect and both pairs report Paused");
+            Require(secondPutsAtPause == 0 && second.Writer.Puts == secondPutsAtPause &&
+                result.Items.Single(item => item.Pair.Id == "p2").Result is
+                    { Uploaded: 0, Downloaded: 0, AppliedItems: 0, Decisions: { Count: 0 } },
+                "pair 2 reaches its safe point after the saved pause without starting any effect");
         }
         else
         {
@@ -432,7 +447,7 @@ internal static partial class RunChecks
                     : both with { AccountPauses = [] });
                 var putsBefore = fx.WriterB.Puts;
                 summaries.Clear();
-                var held = await host.RunPairsAsync([pairs[0]], "partial-scope-resume", admissionProgress: summaries.Add);
+                var held = await host.RunPairsAsync([pairs[0]], "partial-scope-resume", admissionProgress: summaries.Enqueue);
                 Require(held.Items.Count == 1 && summaries.Single().Contains("(" + RunOutcomes.Paused + ")",
                     StringComparison.Ordinal) && fx.WriterB.Puts == putsBefore && !sql.PairPaused("p1"),
                     "resuming one scope leaves a single-pair run paused at its first safe point by the other");
@@ -441,7 +456,7 @@ internal static partial class RunChecks
         await preferences.SaveAsync(preferences.Load() with { PauseUntilResumed = false, AccountPauses = [] });
         second.A.Seed("after-resume.txt", "three");
         summaries.Clear();
-        var resumed = await host.RunPairsAsync(pairs, "account-mid-pair-resume", admissionProgress: summaries.Add);
+        var resumed = await host.RunPairsAsync(pairs, "account-mid-pair-resume", admissionProgress: summaries.Enqueue);
         Require(resumed.Items.Count == 2 && fx.WriterB.Puts == 12 && second.Writer.Puts == 2 &&
             summaries.All(text => text.Contains("(" + RunOutcomes.Complete + ")", StringComparison.Ordinal)),
             "durable resume lets a fresh batch finish both pairs without a stale scope cache");

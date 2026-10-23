@@ -2076,7 +2076,8 @@ internal static partial class RunChecks
         var inventory = new ScriptedInventory(fx.A) { Hashless = true, ThrowHashPath = "4.txt" };
         fx.Provider.AddInventory(fx.Pair.A, inventory);
         var settings = Settings with { LocalHashCheckpointFiles = 2 };
-        var run = new SyncRun(fx.Store, fx.Executor, fx.Provider, settings, TimeProvider.System);
+        var clock = new CompletionClock();
+        var run = new SyncRun(fx.Store, fx.Executor, fx.Provider, settings, clock);
         var preview = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
         Require(preview.RunUnavailable is null && fx.Store.SyncRetryAt(fx.Pair.PairId, "4.txt") is not null,
             "failed hash checkpoint remains retryable while the preview completes");
@@ -2086,7 +2087,16 @@ internal static partial class RunChecks
         inventory.ThrowHashPath = null;
         store.Dispose();
         using var reopened = SqliteStateStore.Open(folder, Settings, TimeProvider.System);
-        var restarted = new SyncRun(reopened, NewExecutor(reopened), fx.Provider, settings, TimeProvider.System);
+        var restarted = new SyncRun(reopened, NewExecutor(reopened), fx.Provider, settings, clock);
+        // docs/design/retry-resume-rewind.md: cold reopen does not bypass the persisted deadline.
+        var sleeping = reopened.SyncRetryAt(fx.Pair.PairId, "4.txt")!;
+        clock.Now = sleeping.RetryAfter.AddTicks(-1);
+        await restarted.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+        Require(reopened.SyncRetryAt(fx.Pair.PairId, "4.txt") == sleeping && inventory.HashedPaths == 4 &&
+            fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0 &&
+            await fx.A.ObserveAsync("4.txt", default) is not null && await fx.B.ObserveAsync("4.txt", default) is not null,
+            "cold restart before deadline retains hash debt and both copies without hashing or writing");
+        clock.Now = sleeping.RetryAfter;
         await restarted.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
         Require(inventory.HashedPaths == 5, "restart hashes only the remainder, not the two committed chunks");
     }

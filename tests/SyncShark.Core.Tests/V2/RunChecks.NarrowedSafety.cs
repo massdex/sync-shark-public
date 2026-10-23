@@ -98,6 +98,8 @@ internal static partial class RunChecks
             if (kind == ActionKind.Delete)
             {
                 var notice = fx.Store.OpenNotices(pair.PairId).Single(item => item.ReasonKey == "reviewed-removal-skipped");
+                Console.WriteLine("NOTICE-MEASURE skipped-removal sides=" + notice.RemovalSides +
+                    " choices=" + string.Join(",", NoticeChoices.Options(notice).Select(option => option.Choice)));
                 Require(NoticeChoices.Options(notice).Select(option => option.Choice).SequenceEqual(
                     new[] { NoticeChoices.ReviewRemoval, NoticeChoices.OpenFolderSettings, NoticeChoices.Dismiss }),
                     "skipped removal offers a fresh review, settings and dismiss, never unsigned deletion");
