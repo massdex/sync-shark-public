@@ -204,11 +204,11 @@ public sealed partial class SqliteStateStore
         if (!exact) return false;
         // A validated handle proves one physical entity. Do not unhold aliases with different metadata.
         if (StoreSchema.Scalar(_connection, tx,
-            "SELECT 1 FROM file_state WHERE root_no=$r AND object_id=$o AND (size!=$s OR mtime!=$m) LIMIT 1;",
+            "SELECT 1 FROM file_state INDEXED BY fs_obj WHERE root_no=$r AND object_id=$o AND (size!=$s OR mtime!=$m) LIMIT 1;",
             ("$r", root.Value), ("$o", expected.ObjectId), ("$s", expected.Size),
             ("$m", expected.Mtime.UtcTicks)) is not null) return false;
         StoreSchema.Execute(_connection, tx,
-            "UPDATE file_state SET flags=flags & ~256,hash=$h WHERE root_no=$r AND object_id=$o;",
+            "UPDATE file_state INDEXED BY fs_obj SET flags=flags & ~256,hash=$h WHERE root_no=$r AND object_id=$o;",
             ("$r", root.Value), ("$o", expected.ObjectId), ("$h", RowCodec.HashBlob(hash)));
         // This exclusive foreground verification also settles the entity's gap work atomically.
         StoreSchema.Execute(_connection, tx, "DELETE FROM local_gap_item WHERE root_no=$r AND object_id=$o;",

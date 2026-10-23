@@ -32,6 +32,10 @@ public sealed record V2Settings(
     public int StoreRehashPageRows { get; init; } = 128;
     internal const int MinimumStoreRehashPageRows = 1;
 
+    /// <summary>Maximum notices maintained or published per store gate lease.</summary>
+    public int StoreNoticePageRows { get; init; } = 128;
+    internal const int MinimumStoreNoticePageRows = 1;
+
     /// <summary>Shared background gap-verification byte budget; never used for foreground transfers.</summary>
     public long LocalGapBytesPerSecond { get; init; } = 30_000_000;
     /// <summary>User-input quiet time required for background gap IO; battery operation also pauses it.</summary>

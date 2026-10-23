@@ -21,6 +21,8 @@ internal static partial class StorageChecks
         DeferredAliasContinuationChecks(root);
         await JournalSizingChecks.RunAsync(root);
         await RehashGateChecks(root);
+        await GapGateChecks(root);
+        await NoticeGateChecks(root);
         OpenFreshReopen(root);
         OpenDamagedRoots(root);
         PrepareStorageChecks(root);

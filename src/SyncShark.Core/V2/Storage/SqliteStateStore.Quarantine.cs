@@ -243,34 +243,6 @@ public sealed partial class SqliteStateStore
         return paths;
     });
 
-    // Same-identity inventory moves carry the hold and its review to the new name. Path-bound
-    // Defender grants deliberately stay at their exact historical exclusion paths instead.
-    private void FollowQuarantineNotices(string rootId)
-    {
-        var rootNo = RootNo(rootId);
-        if (rootNo is null) return;
-        foreach (var pair in Pairs().Where(p => p.A.RootId == rootId || p.B.RootId == rootId))
-        {
-            var side = pair.A.RootId == rootId ? Side.A : Side.B;
-            var pairNo = RequirePair(pair.PairId);
-            foreach (var notice in _notices.Open(pairNo, reasonKey: QuarantineFailure.NoticeKey, unresolved: true))
-            {
-                if (notice.Quarantine is not { ConflictingGrantId: null, GrantedExclusionPath: null } hold) continue;
-                var expected = hold.Target == side ? hold.ExpectedTarget : hold.Source;
-                if (expected is null || _reads.ByObject(rootNo.Value, expected.ObjectId) is not { } current ||
-                    !current.Flags.HasFlag(ItemFlags.Quarantined) || current.Path == expected.Path) continue;
-                // Preserve reviewed content evidence; a rename is not permission to accept new bytes.
-                var moved = expected with { Path = current.Path };
-                var updated = hold.Target == side ? hold with { ExpectedTarget = moved } : hold with { Source = moved };
-                using var transaction = _connection.BeginTransaction();
-                _notices.Add(transaction, pairNo, notice with { NoticeId = null, Path = current.Path, Quarantine = updated }, NowMs());
-                if (!PairPath.Same(notice.Path, current.Path))
-                    _notices.CloseResolved(transaction, pairNo, notice.NoticeId!, "quarantine-renamed");
-                transaction.Commit();
-            }
-        }
-    }
-
     private sealed record CapturedDefenderNotice(Notice Original, Notice Captured, PairDef? Pair,
         ItemState? SourceObservation, ItemState? TargetObservation, QuarantineNotice? Previous = null);
 

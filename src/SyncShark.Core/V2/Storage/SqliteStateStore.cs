@@ -156,7 +156,7 @@ public sealed partial class SqliteStateStore : IStateStore
         IndexingWorkSignal.Publish(this);
         InStore(CleanupStorageItems);
         InStore(() => BindStoragePathIntents(snapshot.RootId));
-        InStore(() => FollowQuarantineNotices(snapshot.RootId));
+        FollowQuarantineNotices(snapshot.RootId);
         ObserveDefenderGrants(snapshot.RootId, publish: true);
     }
 
@@ -171,8 +171,8 @@ public sealed partial class SqliteStateStore : IStateStore
             _files.WriteDelta(delta, rootNo);
             CleanupStorageItems();
             BindStoragePathIntents(delta.RootId);
-            FollowQuarantineNotices(delta.RootId);
         });
+        FollowQuarantineNotices(delta.RootId);
         ObserveDefenderGrants(delta.RootId, publish: true);
     }
 
@@ -720,29 +720,6 @@ public sealed partial class SqliteStateStore : IStateStore
             _notices.Add(transaction, pairNo, notice, now);
         transaction.Commit();
     });
-
-    public void AddNotices(IEnumerable<Notice> notices)
-    {
-        var prepared = notices.Select(notice => PrepareDefenderNotice(notice, retainLive: false)).ToArray();
-        PublishPreparedNotices(prepared);
-    }
-
-    private void PublishPreparedNotices(IReadOnlyList<CapturedDefenderNotice> prepared)
-    {
-        InStore(() =>
-        {
-            using var transaction = _connection.BeginTransaction();
-            // Explicit reviews retain their own entity/version binding. The validation owner
-            // rejects raced optional hashes; a current path occupant cannot replace the review.
-            var captured = prepared.Select(item => ValidateDefenderCapture(item, item.Original, transaction)).ToArray();
-            var now = NowMs();
-            foreach (var notice in captured)
-                _notices.Add(transaction, RequirePair(notice.PairId), notice, now);
-            foreach (var pairId in captured.Where(notice => notice.ReasonKey == "deletion-review").Select(notice => notice.PairId).Distinct())
-                RefreshDeleteReviewNotices(transaction, RequirePair(pairId), pairId, now, exact: false);
-            transaction.Commit();
-        });
-    }
 
     public IReadOnlyList<Notice> OpenNotices(string? pairId) => ReadNotices(pairId, unresolved: false);
 
