@@ -319,7 +319,11 @@ internal static partial class DropboxChecks
                 $"AppliedItems={applied.AppliedItems}; Failed={applied.Failed}; Outcome={applied.Outcome}; " +
                 $"RetryCount={store.CountSyncRetries(pair.PairId)}; " +
                 $"UnresolvedIntents={store.UnresolvedIntents(pair.PairId).Count}");
-            Require(applied.Failed == 0 && applied.Deferred == 0 && store.FirstSyncDone(pair.PairId) &&
+            // docs/design/run.md:329-334: the first-sync marker never erases unfinished-work accounting.
+            Require(applied.Failed == 0 && applied.Deferred == 1 && store.FirstSyncDone(pair.PairId) &&
+                applied.DeletionEvidencePendingCount == 1 &&
+                applied.DeletionEvidencePendingExamples.SequenceEqual(["held.txt"]) &&
+                applied.AppliedItems == 1 && applied.Outcome == "partial" &&
                 store.Cursor(RootId) == "deferred-refreshed" && pending is not null &&
                 await local.ObserveAsync("ordinary.txt", CancellationToken.None) is not null &&
                 await local.ObserveAsync("held.txt", CancellationToken.None) is not null,

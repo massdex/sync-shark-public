@@ -6,7 +6,7 @@ namespace Massdex.SyncShark.V2;
 /// double is safe for concurrent callers too (the scan reads both sides at once). Reads still return copies, so no
 /// internal collection escapes under the lock.
 /// </remarks>
-internal sealed class InMemoryStateStore : IStateStore
+internal sealed partial class InMemoryStateStore : IStateStore
 {
     private readonly HashSet<string> _pausedPairs = new(StringComparer.Ordinal);
     public bool PairPaused(string pairId) { lock (_gate) return _pausedPairs.Contains(pairId); }
@@ -919,8 +919,10 @@ internal sealed class InMemoryStateStore : IStateStore
         {
             // Decision 26: one notice per open problem (pair, path, rule, reason). Raising it again while open adds
             // nothing; raising it after it was closed reopens it.
-            foreach (var notice in n)
+            foreach (var incoming in n)
             {
+                var notice = incoming;
+                if (SuppressDedicatedRetry(ref notice)) continue;
                 // Storage adapters supply facts/effects; the production owner decides the fold.
                 if (RetryNoticeFold.SuppressIncoming(notice,
                     () => SyncRetryAt(notice.PairId, notice.Path)?.DeleteBlockedDetail is not null,

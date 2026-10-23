@@ -165,9 +165,15 @@ internal static partial class RunChecks
         Require(fx.WriterA.Deletes == 0 && await fx.A.ObserveAsync("held.txt", ct) is not null &&
             await fx.A.ObserveAsync("ordinary.txt", ct) is not null,
             "late authority hold preserves the victim while independent work completes");
+        var heldRetries = fx.Store.ReadSyncRetries(fx.Pair.PairId).Count(retry => retry.Path == "held.txt");
+        var heldNotices = fx.Store.UnresolvedNotices(fx.Pair.PairId).Where(notice => notice.Path == "held.txt").ToArray();
+        Console.WriteLine($"Late authority hold: retries={heldRetries}; notices={heldNotices.Length}; " +
+            $"reasons={string.Join(",", heldNotices.Select(notice => notice.ReasonKey))}");
         Require(fx.Store.SyncRetryAt(fx.Pair.PairId, "held.txt") is not null &&
             fx.Store.UnresolvedNotices(fx.Pair.PairId).Count(notice => notice.Path == "held.txt") == 1,
             "late authority hold retains one retry and exactly one notice");
+        Require(heldRetries == 1 && heldNotices.Single().ReasonKey == "deletion-evidence-pending",
+            "late authority hold keeps one item retry and its dedicated evidence notice");
         Require(fx.Store.BaselinesAt(fx.Pair.PairId, Side.A, ["held.txt"]).Count == 0,
             "the held victim is not marked synced");
         Console.WriteLine("PASS DeferredEvidence_ReviewWithdrawalHoldsOnlyItem");

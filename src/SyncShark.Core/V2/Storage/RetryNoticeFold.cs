@@ -22,6 +22,24 @@ internal static class RetryNoticeFold
         return false;
     }
 
+    // Dedicated explanations own the retry in either publication order, including ignored causes.
+    // Adapters provide indexed facts and transactional effects; they never duplicate this policy.
+    internal static bool SuppressDedicated(ref Notice notice, Func<string, bool> exists,
+        Action<string> closeGeneric, Func<Notice, Notice> foldUnreadable)
+    {
+        if (notice.ReasonKey is ExecutionReasons.ConflictCopyBlocked or InterruptedDelete.UnverifiedReason or
+            "deletion-evidence-pending" or "unreadable")
+            closeGeneric(notice.ReasonKey == "deletion-evidence-pending" ? "evidence-pending" : "superseded");
+        if (notice.ReasonKey is not ("content-unconfirmed" or "sync-retry")) return false;
+        if (exists(ExecutionReasons.ConflictCopyBlocked) || exists(InterruptedDelete.UnverifiedReason)) return true;
+        if (notice.ReasonKey == "sync-retry")
+        {
+            if (exists("deletion-evidence-pending")) return true;
+            notice = foldUnreadable(notice);
+        }
+        return false;
+    }
+
     private static int Specificity(Notice notice) => notice.ReasonKey == "content-unconfirmed" ? 1 :
         notice.CauseKey?.StartsWith("Content proof is unavailable", StringComparison.Ordinal) == true ? 0 : 2;
 }

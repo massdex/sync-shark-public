@@ -18,13 +18,20 @@ internal static partial class StorageChecks
     {
         var folder = Fresh(root, "dedicated-retry-publication");
         using var store = SqliteStateStore.Open(folder, Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
+        DedicatedRetryPublicationChecks(store);
+        using var memory = new InMemoryStateStore();
+        DedicatedRetryPublicationChecks(memory);
+    }
+
+    private static void DedicatedRetryPublicationChecks(IStateStore store)
+    {
         store.SavePair(Pair("p1"));
         foreach (var reason in new[] { ExecutionReasons.ConflictCopyBlocked, InterruptedDelete.UnverifiedReason,
             "deletion-evidence-pending", "unreadable" })
         foreach (var dedicatedFirst in new[] { false, true })
         {
             var path = reason + (dedicatedFirst ? "/first" : "/last");
-            var dedicated = new Notice("p1", reason == "unreadable" ? 30 : 40, NoticeKind.Info,
+            var dedicated = new Notice("p1", reason == "unreadable" ? 30 : reason == "deletion-evidence-pending" ? 4 : 40, NoticeKind.Info,
                 path, "Dedicated explanation", reason);
             var generic = FailureRetryOwner.RetryNotice("p1", path, "stable-cause", 3) with
                 { FailureRetry = new(3, DateTimeOffset.MaxValue) };

@@ -6,22 +6,12 @@ internal sealed partial class NoticeTable
 {
     private bool SuppressDedicatedRetry(SqliteTransaction transaction, long pairNo, ref Notice notice)
     {
-        // Dedicated explanations own the retry in either publication order. Ignore suppresses
-        // their cause only; conflict successors and unresolved evidence remain protected.
-        if (notice.ReasonKey is ExecutionReasons.ConflictCopyBlocked or InterruptedDelete.UnverifiedReason or
-            "deletion-evidence-pending" or "unreadable")
-            CloseResolved(transaction, pairNo,
-                ShortId.Make("n", notice.PairId, "40", RowCodec.Key(notice.Path), "sync-retry"),
-                notice.ReasonKey == "deletion-evidence-pending" ? "evidence-pending" : "superseded");
-        if (notice.ReasonKey is not ("content-unconfirmed" or "sync-retry")) return false;
-        if (HasDedicatedRetry(transaction, pairNo, notice.Path, ExecutionReasons.ConflictCopyBlocked) ||
-            HasDedicatedRetry(transaction, pairNo, notice.Path, InterruptedDelete.UnverifiedReason)) return true;
-        if (notice.ReasonKey == "sync-retry")
-        {
-            if (HasDedicatedRetry(transaction, pairNo, notice.Path, "deletion-evidence-pending")) return true;
-            notice = FoldUnreadableRetry(transaction, pairNo, notice);
-        }
-        return false;
+        var incoming = notice;
+        return RetryNoticeFold.SuppressDedicated(ref notice,
+            reason => HasDedicatedRetry(transaction, pairNo, incoming.Path, reason),
+            choice => CloseResolved(transaction, pairNo,
+                ShortId.Make("n", incoming.PairId, "40", RowCodec.Key(incoming.Path), "sync-retry"), choice),
+            retry => FoldUnreadableRetry(transaction, pairNo, retry));
     }
 
     private bool HasDedicatedRetry(SqliteTransaction transaction, long pairNo, string path, string reason) =>

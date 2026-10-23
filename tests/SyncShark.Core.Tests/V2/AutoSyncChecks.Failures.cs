@@ -311,6 +311,7 @@ internal static partial class AutoSyncChecks
         rig.Auto.Start();
         // Superseded: notification failure degrades to polling, never sync admission refusal.
         await Until(() => rig.Run.Runs("p1") == 1 && rig.Clock.ActiveTimers == 1, "dying watches still permit one poll");
+        Console.Error.WriteLine($"DYING-WATCH-MEASURE startup created={rig.Watches.Created} runs={rig.Run.Runs("p1")} {rig.Clock.DiagnosticSnapshot()}");
         Require(rig.Watches.Created == 4, "one immediate rebuild, then bounded watch backoff");
         Require(rig._store.OpenNotices("p1").Count(n => n.ReasonKey == "autosync-watch-unavailable") == 1,
             "one deduplicated watch failure notice");
@@ -318,11 +319,21 @@ internal static partial class AutoSyncChecks
         await Until(() => rig.Watches.Created >= 6 && rig.Clock.ActiveTimers == 1, "watch retry uses shared backoff");
         // Deterministic bound, not a timing tolerance: a due deadline arms the retry and the single immediate
         // dead-watch rebuild the policy allows, then the loop parks on the next timer. No later deadline can fire.
+        Console.Error.WriteLine($"DYING-WATCH-MEASURE retry created={rig.Watches.Created} runs={rig.Run.Runs("p1")} {rig.Clock.DiagnosticSnapshot()}");
         Require(rig.Watches.Created is >= 6 and <= 8, "a watch retry adds only the retry pair and one bounded rebuild");
         rig.Clock.Advance(SafetyPoll);
         await Until(() => rig.Run.Runs("p1") == 2 && rig.Clock.ActiveTimers == 1, "periodic sync continues while watches fail");
-        Require(rig.Run.Runs("p1") == 2, "the safety poll gives exactly one run while the watches fail");
-        Require(rig.Watches.Created is >= 8 and <= 10, "a safety poll creates at most one more pair, never a tight loop");
+        var created = rig.Watches.Created;
+        var runs = rig.Run.Runs("p1");
+        Console.Error.WriteLine($"DYING-WATCH-MEASURE created={created} runs={runs} {rig.Clock.DiagnosticSnapshot()}");
+        Require(runs == 2, "the safety poll gives exactly one run while the watches fail");
+        // Advance fires newly armed timers within its target, not just the timer present on entry.
+        // Through t=310s, exponential watch retries can occur at 10, 30, 70, 150 and 310s.
+        // Startup creates two pairs (4 watches); five retries add at most five pairs (10 watches).
+        // Each of the two completed polls resets the one-immediate-rebuild budget, adding at most
+        // one pair each (4 watches). Thus 4 + 10 + 4 = 18, even if callbacks rearm during Advance.
+        // Delayed continuations skip deadlines, so they can only reduce the number of retry pairs.
+        Require(created is >= 8 and <= 18, "five elapsed retry deadlines and two reset budgets bound watch creation");
         Require(rig._store.OpenNotices("p1").Count(n => n.ReasonKey == "autosync-watch-unavailable") == 1,
             "repeated watch failure does not duplicate notice");
         Pass("DyingWatches_BoundedRebuilds");
