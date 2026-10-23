@@ -57,22 +57,41 @@ internal static partial class StorageChecks
             var gaps = (ILocalGapStore)store;
             Require(gaps.GapEpoch(root)!.DiscoveryDone && gaps.HasGapProtection(root),
                 "restart preserves both worker progress and unpublished protection");
+            // Owner decision, decisions-map 2026-10-23 18:40 (Option A): gap promotion
+            // drains the captured horizon in 64-row transactions; deferred intake stays capped.
+            Require(Fast.GapPromotionPageRows == 64, "gap promotion retains the approved 64-row page bound");
+            var pages = 0;
+            var stagedBefore = rows.Length;
+            store.GapPromotionPageCommittedForTest = () =>
+            {
+                using var pageDb = new SqliteConnection($"Data Source={DbPath(product)};Pooling=False");
+                pageDb.Open();
+                var stagedAfter = Convert.ToInt32(StoreSchema.Scalar(pageDb, null,
+                    "SELECT COUNT(*) FROM local_gap_item WHERE metadata_ready=1;"));
+                Require(stagedBefore - stagedAfter == Math.Min(64, stagedBefore),
+                    "each committed promotion page visits exactly 64 entities or the final remainder");
+                stagedBefore = stagedAfter;
+                if (++pages != 1) return;
+                var reader = Task.Run(() => store.Live(root).Count);
+                Require(reader.Wait(TimeSpan.FromSeconds(10)) && reader.Result == rows.Length,
+                    "another store caller obtains the gate between promotion pages");
+            };
             gaps.PromoteGapDiscovery(root);
+            store.GapPromotionPageCommittedForTest = null;
+            Require(pages == 10 && stagedBefore == 0, "one invocation drains all 600 staged entities in ten pages");
             var held = store.ProtectionBatch(root, ItemFlags.NeedsRehash, [rows[0].Path, rows[1].Path, rows[^1].Path]);
             using (var measured = new SqliteConnection($"Data Source={DbPath(product)};Pooling=False"))
             {
                 measured.Open();
-                Require((long?)StoreSchema.Scalar(measured, null, "SELECT COUNT(*) FROM local_gap_item;") == 345 &&
-                    (long?)StoreSchema.Scalar(measured, null, "SELECT COUNT(*) FROM local_gap_item WHERE metadata_ready=1;") == 344 &&
-                    (long?)StoreSchema.Scalar(measured, null, "SELECT COUNT(*) FROM local_gap_item WHERE metadata_ready=0;") == 1,
-                    "approved 256 cap leaves measured 345 obligations: 344 staged and one changed");
+                Require((long?)StoreSchema.Scalar(measured, null, "SELECT COUNT(*) FROM local_gap_item;") == 1 &&
+                    (long?)StoreSchema.Scalar(measured, null, "SELECT COUNT(*) FROM local_gap_item WHERE metadata_ready=1;") == 0 &&
+                    (long?)StoreSchema.Scalar(measured, null, "SELECT COUNT(*) FROM local_gap_item WHERE metadata_ready=0 AND object_id=$o;",
+                        ("$o", rows[0].ObjectId)) == 1 &&
+                    (long?)StoreSchema.Scalar(measured, null, "SELECT discovery_done FROM local_gap;") == 1,
+                    "one invocation promotes exactly 599 unchanged entities and retains exactly one changed obligation");
             }
-            Require(held.All(hit => hit.Covered),
-                "capped promotion keeps the unpublished suffix and changed observation protected");
-            for (var pass = 0; pass < 3; pass++) gaps.PromoteGapDiscovery(root);
-            held = store.ProtectionBatch(root, ItemFlags.NeedsRehash, [rows[0].Path, rows[1].Path, rows[^1].Path]);
             Require(held[0].Covered && !held[1].Covered && !held[2].Covered,
-                "later bounded passes drain the metadata remainder and preserve the changed observation");
+                "the complete drain releases verified entities and preserves the changed observation");
             Require(gaps.GapHashPage(root, original, 128).Single().ObjectId == rows[0].ObjectId,
                 "invalid metadata proof returns to normal hash retry lane");
             Require(store.Live(root).All(item => item.Hash == rows[0].Hash) && store.RehashWatermark(root) == 0,
@@ -150,7 +169,7 @@ internal static partial class StorageChecks
         StoreSchema.Execute(db, null, "DROP TRIGGER fail_second_promotion_page;");
         // Simulate an observation change between a committed page and the next attempt.
         StoreSchema.Execute(db, null, "UPDATE file_state SET mtime=mtime+1 WHERE object_id=$o;", ("$o", rows[^1].ObjectId));
-        for (var pass = 0; pass < 3; pass++) gaps.PromoteGapDiscovery(root);
+        gaps.PromoteGapDiscovery(root);
         Require((long?)StoreSchema.Scalar(db, null, "SELECT COUNT(*) FROM local_gap_item;") == 1 &&
             (long?)StoreSchema.Scalar(db, null, "SELECT discovery_done FROM local_gap;") == 1,
             "retry drains all remaining pages and publishes the captured frontier only after completion");
