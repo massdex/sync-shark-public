@@ -7,7 +7,7 @@ internal static partial class RunCliChecks
         await ReviewedHashlessChoiceAsync();
         foreach (var side in new[] { Side.A, Side.B })
         foreach (var carried in new[] { false, true })
-        foreach (var change in new[] { "unchanged", "new", "changed", "missing", "listing-failure", "partial", "timeout", "legacy" })
+        foreach (var change in new[] { "unchanged", "new", "changed", "missing", "listing-failure", "unsupported", "partial", "timeout", "legacy" })
         {
             if (!carried && change == "legacy") continue;
             var directory = TempRoot();
@@ -58,6 +58,7 @@ internal static partial class RunCliChecks
                 await run.IncrementalAsync(fx.Pair.PairId, new Progress<RunProgress>(), default);
                 Require(writer.Deletes == 0, "sleeping reviewed removal has zero effects: " + side + "/" + carried + "/" + change);
                 if (change == "listing-failure") target.SubtreeReadFailure = new IOException("listing failed after a partial page");
+                if (change == "unsupported") target.SubtreeReadFailure = new NotSupportedException("Subtree listing not implemented");
                 if (change == "timeout") target.SubtreeReadFailure = new TimeoutException("targeted listing timed out");
                 if (change == "partial") target.SubtreeTransform = item => item with { IncompleteReason = "incomplete listing" };
                 clock.Now = due.AddTicks(1);

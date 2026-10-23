@@ -361,13 +361,17 @@ internal static partial class DropboxChecks
 
     private static (V2CliRuntime Runtime, SyncRun Run) PrepareCursorRuntime(Harness h, FakeEndpoint local,
         PairDef pair, IStateStore store, string productRoot)
+        => PrepareCursorRuntime(h, local, pair, store, productRoot, TimeProvider.System);
+
+    private static (V2CliRuntime Runtime, SyncRun Run) PrepareCursorRuntime(Harness h, FakeEndpoint local,
+        PairDef pair, IStateStore store, string productRoot, TimeProvider time)
     {
         var settings = V2Settings.Default with { ProgressInterval = TimeSpan.Zero, MaxWorkers = 1 };
         var provider = new FakeEndpointProvider().Add(pair.A, local)
             .AddInventory(pair.B, new DropboxInventory(pair.B, Side.B, h.Client, store, pair.PairId))
             .AddWriter(pair.B, h.Writer(Path.Combine(productRoot, "spool")));
         var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission()),
-            provider, settings, TimeProvider.System);
+            provider, settings, time);
         return (new V2CliRuntime(null, store, run, new EndpointRootProbe(provider), productRoot), run);
     }
 }

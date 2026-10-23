@@ -773,6 +773,11 @@ internal static partial class RunCliChecks
                     resolved(path, new SyncRemoteDeletionEvidence(at, "probed", ContentHash: ContentHashes.GetValueOrDefault(path, ContentHash)));
             return Task.CompletedTask;
         }
+        // This fixture changes deletion-history evidence only; fresh removal proof still reads the endpoint.
+        public Task ReadSubtreeAsync(string path, Func<IReadOnlyList<ItemState>, Task> accept, CancellationToken ct,
+            IProgress<string>? progress = null) => inner.ReadSubtreeAsync(path, accept, ct, progress);
+        public Task VerifyPendingAsync(Func<string, bool> include, Action<string> touched, CancellationToken ct) =>
+            ((IInventorySource)inner).VerifyPendingAsync(include, touched, ct);
         public Task<Snapshot> FullAsync(long gen, Func<string, bool> include, IProgress<string> progress,
             CancellationToken ct) => inner.FullAsync(gen, include, progress, ct);
         public Task<Delta> ChangesSinceAsync(string cursor, long gen, Func<string, bool> include,

@@ -71,20 +71,58 @@ internal static partial class DropboxChecks
                 store.Cursor(pair.B.RootId) == "held-failed" && store.SyncRetryAt(pair.PairId, "held.txt") is not null,
                 "item failures complete first sync with the refreshed safe cursor and durable held input");
         }
-        h.Wire.SeedChangePage("held-failed", [], false, "held-resumed");
+        // RQ-032/RQ-130, docs/design/retry-resume-rewind.md: the persisted exact deadline
+        // gates retry effects across reopen; an immediate run must not bypass its backoff.
+        DateTimeOffset retryAt;
+        h.Wire.SeedChangePage("held-failed", [], false, "held-waiting");
         using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System))
         {
-            var (_, run) = PrepareCursorRuntime(h, local, pair, store, product);
+            var retry = store.SyncRetryAt(pair.PairId, "download.txt");
+            Require(retry is not null, "failed ordinary download has a durable retry after reopen");
+            retryAt = retry!.RetryAfter;
+            var calls = h.Wire.Calls.Count;
+            var (_, run) = PrepareCursorRuntime(h, local, pair, store, product,
+                new LocalChecks.FixedClock(retryAt.AddTicks(-1)));
+            var waiting = await run.IncrementalAsync(pair.PairId, new Progress<RunProgress>(), CancellationToken.None);
+            Require(waiting.Failed == 0 && waiting.Deferred > 0,
+                "ordinary retry remains deferred one tick before its persisted deadline");
+            Require(await local.ObserveAsync("download.txt", CancellationToken.None) is null,
+                "ordinary retry has no local write effect before its deadline");
+            Require(store.SyncRetryAt(pair.PairId, "download.txt")?.RetryAfter == retryAt,
+                "waiting run preserves the exact persisted retry deadline");
+            Require(await local.ObserveAsync("held.txt", CancellationToken.None) is not null,
+                "before retry deadline the D78c survivor remains");
+            Require(store.SyncRetryAt(pair.PairId, "held.txt")?.Held is not null,
+                "before retry deadline the D78c hold evidence remains durable");
+            Require(!h.Wire.Calls.Skip(calls).Any(call => call.Contains("/delete", StringComparison.Ordinal) ||
+                call.Contains("/upload", StringComparison.Ordinal)),
+                "waiting ordinary retry causes no remote delete or upload");
+            Require(store.Baselines(pair.PairId).All(row => row.A.Path != "held.txt"),
+                "waiting ordinary retry never records a successful held baseline");
+        }
+        h.Wire.SeedChangePage("held-waiting", [], false, "held-resumed");
+        using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System))
+        {
+            var (_, run) = PrepareCursorRuntime(h, local, pair, store, product,
+                new LocalChecks.FixedClock(retryAt));
             var resumed = await run.IncrementalAsync(pair.PairId, new Progress<RunProgress>(), CancellationToken.None);
-            Require(resumed.Failed == 0 && resumed.Deferred > 0 && store.FirstSyncDone(pair.PairId) &&
-                h.Wire.ListRequests.Count == lists &&
-                await local.ObserveAsync("download.txt", CancellationToken.None) is not null &&
-                await local.ObserveAsync("held.txt", CancellationToken.None) is not null &&
-                store.Cursor(pair.B.RootId) == "held-resumed",
-                "reopened ordinary sync resumes pending work without a full listing and preserves the D78c hold");
-            Require(store.Baselines(pair.PairId).All(row => row.A.Path != "held.txt") &&
-                !h.Wire.Calls.Any(call => call.Contains("/delete", StringComparison.Ordinal) || call.Contains("/upload", StringComparison.Ordinal)),
-                "unknown held hash never authorizes a delete, upload, or successful held baseline");
+            Require(resumed.Failed == 0, "reopened ordinary retry succeeds at its exact deadline");
+            Require(resumed.Deferred > 0, "reopened ordinary sync still defers the D78c hold");
+            Require(store.FirstSyncDone(pair.PairId), "ordinary resume preserves completed first-sync state");
+            Require(h.Wire.ListRequests.Count == lists, "ordinary retry resumes without a full listing");
+            Require(await local.ObserveAsync("download.txt", CancellationToken.None) is not null,
+                "ordinary retry restores pending download at its exact deadline");
+            Require(await local.ObserveAsync("held.txt", CancellationToken.None) is not null,
+                "ordinary resume preserves the D78c survivor");
+            Require(store.SyncRetryAt(pair.PairId, "held.txt")?.Held is not null,
+                "ordinary resume preserves durable D78c hold evidence");
+            Require(store.Cursor(pair.B.RootId) == "held-resumed", "ordinary resume commits the refreshed cursor");
+            Require(store.Baselines(pair.PairId).All(row => row.A.Path != "held.txt"),
+                "unknown held hash never authorizes a successful held baseline");
+            Require(!h.Wire.Calls.Any(call => call.Contains("/delete", StringComparison.Ordinal)),
+                "unknown held hash never authorizes a remote delete");
+            Require(!h.Wire.Calls.Any(call => call.Contains("/upload", StringComparison.Ordinal)),
+                "unknown held hash never authorizes a remote upload");
         }
     }
 

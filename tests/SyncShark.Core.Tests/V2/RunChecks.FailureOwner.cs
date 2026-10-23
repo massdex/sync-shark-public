@@ -39,8 +39,14 @@ internal static partial class RunChecks
                 var run = new SyncRun(sql, fx.Executor, fx.Provider, Settings, clock);
                 typeof(SyncRun).GetMethod("RetryNotices", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
                     .Invoke(run, [pairId]);
+                // D85 / RQ-032: one notice per problem; ordinary payloads use the canonical identity,
+                // not an arbitrary supplied id. Recovery notices retain their explicit identity.
+                var delivered = sql.NoticeById(pairId, NoticeTable.Id(notice));
+                Require(delivered is { } published && published.Notice.FailureRetry is not null &&
+                    published.Notice.DeliveryRetry is null,
+                    reason + ": delivered canonical notice retains payload state and clears delivery debt");
                 Require(sql.SyncRetryAt(pairId, "payload.txt") is { Attempts: 4, PendingNotice: null } &&
-                    System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(sql.NoticeById(pairId, notice.NoticeId!)!.Value.Notice.FailureRetry!.Value).SequenceEqual(expected),
+                    System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(delivered!.Value.Notice.FailureRetry!.Value).SequenceEqual(expected),
                     reason + ": successful delivery removes pending debt and preserves payload failure state byte-identically");
             }
         }

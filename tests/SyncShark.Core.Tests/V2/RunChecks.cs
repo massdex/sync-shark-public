@@ -966,6 +966,7 @@ internal static partial class RunChecks
         fx.Provider.AddInventory(fx.Pair.A, listingA).AddInventory(fx.Pair.B, listingB);
         var run = fx.Run();
         var applied = await FirstSyncAsync(run, fx);
+        Console.WriteLine($"UNCONFIRMED CONTENT MEASUREMENT outcome={applied.Outcome}; done={applied.Done}; deferred={applied.Deferred}; contentUnconfirmed={applied.ContentUnconfirmedCount}; firstSyncDone={fx.Store.FirstSyncDone(fx.Pair.PairId)}; openUnconfirmed={OpenUnconfirmed(fx)}; retry={System.Text.Json.JsonSerializer.Serialize(fx.Store.SyncRetryAt(fx.Pair.PairId, "x.txt"))}; notices={string.Join(",", fx.Store.OpenNotices(fx.Pair.PairId).Select(notice => notice.ReasonKey))}");
         Require(applied.Done == 0 && fx.Store.FirstSyncDone(fx.Pair.PairId) && OpenUnconfirmed(fx) == 1 &&
             fx.Store.SyncRetryAt(fx.Pair.PairId, "x.txt") is { Attempts: 1 },
             "decision 85: unconfirmed content completes first sync with a durable retry and visible notice");

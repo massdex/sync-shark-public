@@ -206,6 +206,17 @@ internal static partial class RunCliChecks
                 "changed choices are still rejected before effects and leave the narrowed review intact");
             var result = await Runtime(fx, root).ApplyFirstSyncAsync(fx.Pair.PairId, choices, false, null,
                 _ => { }, CancellationToken.None);
+            Console.WriteLine("NARROWED APPLY " + System.Text.Json.JsonSerializer.Serialize(new
+            {
+                ignore, result, callsA = fx.WriterA.Calls, callsB = fx.WriterB.Calls,
+                remainingSiblingVictim = await fx.B.ObserveAsync("cut-sibling/remove/victim.txt", CancellationToken.None),
+                narrowedVictim = await fx.B.ObserveAsync("cut/remove/victim.txt", CancellationToken.None),
+                narrowedPrivate = await fx.B.ObserveAsync("cut/remove/cache/private.txt", CancellationToken.None),
+                narrowedHeld = await fx.A.ObserveAsync("cut/held.txt", CancellationToken.None),
+                narrowedMatchA = await fx.A.ObserveAsync("cut/matched.txt", CancellationToken.None),
+                narrowedMatchB = await fx.B.ObserveAsync("cut/matched.txt", CancellationToken.None),
+                notices = store.UnresolvedNotices(fx.Pair.PairId).ToArray()
+            }));
             Require(result.Failed == 0 && await fx.B.ObserveAsync("cut-sibling/remove/victim.txt", CancellationToken.None) is null &&
                 await fx.B.ObserveAsync("cut/remove/victim.txt", CancellationToken.None) is not null &&
                 await fx.B.ObserveAsync("cut/remove/cache/private.txt", CancellationToken.None) is not null &&
