@@ -73,6 +73,7 @@ internal static partial class RunChecks
     {
         var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: "p1")
         {
+            GapIo = new LocalGapIo(store, Settings, new HashSet<string>(), () => false),
             WalkCheckpointForTest = () => (checkpoint, false),
             DirectoryCompletedForTest = _ => walked()
         };

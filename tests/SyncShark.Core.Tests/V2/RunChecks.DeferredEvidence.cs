@@ -14,6 +14,7 @@ internal static partial class RunChecks
         await DeferredEvidence_MissingReviewRefusedAsync();
         await DeferredEvidence_ChoicesRetainedAsync();
         await DeferredEvidence_TokenlessCancellationStaysPendingAsync();
+        await DeferredEvidence_CallerCancellationEscapesAsync();
         await DeferredEvidence_UnreviewedStaysPendingAsync();
         await DeferredEvidence_NewFolderUsesOrdinaryPlannerAsync();
         await DeferredEvidence_NestedFolderAndCachedChildAsync();
@@ -259,7 +260,47 @@ internal static partial class RunChecks
             "tokenless item evidence cancellation is durable retry work, not caller cancellation or a proven outage");
         Require(fx.WriterA.Puts == 1 && await fx.A.ObserveAsync("ordinary.txt", deadline.Token) is not null,
             "evidence cancellation never cancels the ordinary executor");
+        Require(!report.CompletionFailed && !report.AttemptFailed &&
+            fx.Store.SyncRetryAt(fx.Pair.PairId, string.Empty) is null &&
+            !fx.Store.UnresolvedNotices(fx.Pair.PairId).Any(notice => notice.ReasonKey == "run-unavailable"),
+            "internal evidence cancellation creates no run-level outage or completion failure");
+        Require(fx.WriterA.Deletes == 0 && fx.WriterB.Calls == 0 &&
+            await fx.A.ObserveAsync("held.txt", deadline.Token) is not null &&
+            fx.Store.UnresolvedNotices(fx.Pair.PairId).Count(notice =>
+                notice.Path == "held.txt" && notice.ReasonKey == "deletion-evidence-pending") == 1,
+            "unanswered evidence preserves the survivor with one pending notice and no remote effect");
         Console.WriteLine("PASS DeferredEvidence_TokenlessCancellationStaysPending");
+    }
+
+    private static async Task DeferredEvidence_CallerCancellationEscapesAsync()
+    {
+        var fx = Build();
+        using var deadline = new CancellationTokenSource(GateTimeout);
+        using var caller = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
+        fx.A.Seed("held.txt", "local");
+        var evidence = new DeferredInventory(fx.B) { Block = true };
+        fx.Provider.AddInventory(fx.Pair.B, evidence);
+        var run = fx.Run();
+        var plan = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), deadline.Token);
+        Require(plan.HeldDeletions.Count == 1 && plan.HeldDeletions[0].Path == "held.txt" &&
+            !fx.Store.ReadSyncRetries(fx.Pair.PairId).Any(),
+            "caller cancellation fixture starts with one held probe and no retry debt");
+        var applying = run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), caller.Token, ReviewedHeld(plan));
+        try
+        {
+            await evidence.Started.Task.WaitAsync(deadline.Token);
+            Require(!applying.IsCompleted, "caller cancels while the evidence probe is blocked");
+        }
+        finally { caller.Cancel(); }
+        await ExpectAsync<OperationCanceledException>(() => applying);
+        Require(!fx.Store.ReadSyncRetries(fx.Pair.PairId).Any() &&
+            !fx.Store.UnresolvedNotices(fx.Pair.PairId).Any(notice =>
+                notice.ReasonKey is "deletion-evidence-pending" or "sync-retry" or "run-unavailable"),
+            "caller cancellation escapes without item retry debt, pending notices or a run outage");
+        Require(!fx.Store.FirstSyncDone(fx.Pair.PairId) && fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0 &&
+            await fx.A.ObserveAsync("held.txt", deadline.Token) is not null,
+            "caller cancellation leaves first sync incomplete and the held survivor untouched");
+        Console.WriteLine("PASS DeferredEvidence_CallerCancellationEscapes");
     }
 
     private static async Task DeferredEvidence_UnreviewedStaysPendingAsync()

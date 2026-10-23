@@ -163,7 +163,15 @@ internal static partial class DropboxChecks
         h.Known.SaveSyncRetry("p1", fresh with { RetryAfter = DateTimeOffset.MinValue });
         h.Wire.OnRevisionAsync = _ => throw new InvalidDataException("malformed revision history");
         h.Wire.SeedChangePage("bound-deleted-again", [], false, "bound-ignore");
-        await run.IncrementalAsync("p1", new Progress<RunProgress>(), default);
+        var localWritesBeforeReprobe = local.WriteCalls;
+        var cloudWritesBeforeReprobe = CloudWrites();
+        var permanentReprobe = await run.IncrementalAsync("p1", new Progress<RunProgress>(), default);
+        Require(permanentReprobe.Failed == 0 &&
+            h.Known.SyncRetryAt("p1", "held.txt") is
+                { Kind: "decision", EvidenceReleased: true, Held: not null, ReviewedActions: null } &&
+            h.Known.ReadSyncRetries("p1").Count() == 1 &&
+            local.WriteCalls == localWritesBeforeReprobe && CloudWrites() == cloudWritesBeforeReprobe,
+            "a permanent re-probe releases the existing hold directly to one decision without authorizing effects");
         var dismiss = h.Known.OpenNotices("p1").Single(n => n.Path == "held.txt" && n.ReasonKey == "deletion-review");
         await run.ApplyRetryNoticeChoiceAsync("p1", dismiss.NoticeId!, NoticeChoices.Ignore, default);
         var writesAfterIgnore = local.WriteCalls;

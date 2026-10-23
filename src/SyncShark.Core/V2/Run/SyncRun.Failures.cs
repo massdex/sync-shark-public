@@ -232,11 +232,9 @@ public sealed partial class SyncRun
         StorageFailureClassifier.ScopeOf(error, ct) == FailureRetryOwner.FailureScope.Item &&
         error is not SyncRunRefusedException;
 
-    // Never reinterpret cancellation, lost endpoint authority or damaged persistence as a
-    // successful item. Those conditions cannot be repaired by skipping an individual file.
+    // Caller cancellation, lost endpoint authority and damaged persistence must still escape.
+    // An internal cancellation is item retry debt, not proof of a transport outage (RQ-032).
     private static bool ScopeFailure(Exception error, CancellationToken ct) =>
-        !ct.IsCancellationRequested &&
-        error is not (PairPausedException or EndpointAccessException or StateDamagedException or SyncRunRefusedException) &&
-        (error is not OperationCanceledException || ProviderTransientFailure.IsTransient(error, ct)) &&
+        !ct.IsCancellationRequested && RunFailure(error, ct) &&
         !StorageFailureClassifier.IsStoreException(error);
 }

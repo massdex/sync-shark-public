@@ -295,7 +295,7 @@ public sealed partial class SyncRun
                                 if (resolved.LookupFailed)
                                 {
                                     failures[path] = resolved.Reason;
-                                    answeredUnavailable[path] = 0;
+                                    if (!resolved.PermanentFailure) answeredUnavailable[path] = 0;
                                 }
                                 evidence.Writer.TryWrite((path, resolved));
                             }, token);
@@ -462,10 +462,18 @@ public sealed partial class SyncRun
                     { lock (sync) pending.Add(rule.Path); return; }
                     var isFolder = heldFolders.Contains(rule.Path);
                     var cloud = rule.Local == Side.A ? pair.B : pair.A;
+                    // Permanent answers release both fresh delta holds and later re-probes directly
+                    // to review (dropbox-inventory section 3.2), never to an authorized effect.
+                    var permanentFailure = deletionEvidence is { LookupFailed: true, PermanentFailure: true };
+                    if (!isFolder && permanentFailure && heldRetry is { ReprobeEvidence: true })
+                    {
+                        heldRetry = heldRetry with { EvidenceReleased = true, LastError = deletionEvidence!.Reason };
+                        _store.SaveSyncRetry(pair.PairId, heldRetry);
+                    }
                     // Re-inclusion revoked old evidence, not the hold. An unanswered/failed probe
                     // cannot enter the released-survivor decision path (or create an upload).
                     if (!isFolder && heldRetry is { ReprobeEvidence: true } && !releasedAtStart.Contains(rule.Path) &&
-                        (deletionEvidence is null || deletionEvidence.LookupFailed))
+                        !permanentFailure && (deletionEvidence is null || deletionEvidence.LookupFailed))
                     { lock (sync) pending.Add(rule.Path); return; }
                     if (heldRetry is { Kind: "deletion-evidence" } released)
                     {

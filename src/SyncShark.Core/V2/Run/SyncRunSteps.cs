@@ -1061,7 +1061,10 @@ public sealed partial class SyncRun
                         }
                         catch (Exception itemError) when (ScopeFailure(itemError, ct))
                         {
-                            if (ProviderTransientFailure.IsTransient(itemError, ct) || itemError is TimeoutException)
+                            // ScopeFailure already excludes caller cancellation; internal cancellation
+                            // counts toward this bounded shortcut without changing per-path retry ownership.
+                            if (ProviderTransientFailure.IsTransient(itemError, ct) ||
+                                itemError is TimeoutException or OperationCanceledException)
                             {
                                 consecutiveTransportFailures++;
                                 transportFailure = itemError;

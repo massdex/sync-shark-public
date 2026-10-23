@@ -96,7 +96,8 @@ internal static partial class StorageChecks
     {
         var folder = Fresh(root, "prepare-edge-stream");
         using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
-        store.SavePair(Pair("p1"));
+        // pairs remove requires a disabled pair (CLI-CAPABILITIES); reach the publication race, not that guard.
+        store.SavePair(Pair("p1") with { Enabled = false });
         Directory.CreateDirectory(Path.Combine(folder, "v2"));
         var file = Path.Combine(folder, "v2", "first-sync-p1.choices.json");
         File.WriteAllText(file, "{}");

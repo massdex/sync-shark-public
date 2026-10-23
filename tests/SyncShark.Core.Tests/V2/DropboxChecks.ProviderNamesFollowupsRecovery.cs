@@ -22,7 +22,8 @@ internal static partial class DropboxChecks
         var writer = await ProductionEndpoints.OpenLocalWriterAsync(store, localRoot, Side.A, pair,
             LocalChecks.InstallationId, recovery, CancellationToken.None, settings);
         var endpoints = new FakeEndpointProvider().AddWriter(localRoot, writer)
-            .AddInventory(localRoot, new LocalInventory(localRoot, Side.A, store, new HashSet<string>(), settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage))
+            .AddInventory(localRoot, new LocalInventory(localRoot, Side.A, store, new HashSet<string>(), settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage)
+                { GapIo = new LocalGapIo(store, settings, new HashSet<string>(), () => false) })
             .AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, store, pair.PairId))
             .AddWriter(pair.B, h.Writer());
         h.Wire.NameWriteErrors[refusedPath] = "disallowed_name";

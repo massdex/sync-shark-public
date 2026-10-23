@@ -59,7 +59,7 @@ internal static partial class RunChecks
         var checkpoint = new NtfsUsnCheckpoint(cause == "replaced" ? 2UL : 1UL,
             cause == "retained" ? 150 : 0, 200, 0);
         var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId)
-        { WalkCheckpointForTest = () => (start, false) };
+        { GapIo = new LocalGapIo(store, Settings, new HashSet<string>(), () => false), WalkCheckpointForTest = () => (start, false) };
         var gen = store.BeginGeneration(root.RootId, "full");
         var snapshot = await inventory.FullAsync(gen, _ => true, null!, default);
         var original = snapshot.Items.Single() with { Hash = DropboxContentHash.Compute(System.Text.Encoding.UTF8.GetBytes("old")) };
@@ -230,7 +230,7 @@ internal static partial class RunChecks
         var covered = before with { NextUsn = 200 };
         var through = before with { NextUsn = 300 };
         var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage)
-            { WalkCheckpointForTest = () => (before, false) };
+            { GapIo = new LocalGapIo(store, Settings, new HashSet<string>(), () => false), WalkCheckpointForTest = () => (before, false) };
         var gen = store.BeginGeneration(root.RootId, "full");
         var snapshot = await inventory.FullAsync(gen, _ => true, null!, default);
         store.WriteSnapshot(snapshot);
@@ -400,7 +400,7 @@ internal static partial class RunChecks
         var movedOnce = false;
         var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings,
             TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId)
-            { WalkCheckpointForTest = () => (new NtfsUsnCheckpoint(1, 0, 200, 0), false) };
+            { GapIo = new LocalGapIo(store, Settings, new HashSet<string>(), () => false), WalkCheckpointForTest = () => (new NtfsUsnCheckpoint(1, 0, 200, 0), false) };
         inventory.JournalReadForTest = NoJournalChanges;
         // The root has already listed 'd' and queued its identity when this callback runs: move the
         // whole directory away intact and put a different directory at the same name.
@@ -461,7 +461,7 @@ internal static partial class RunChecks
             store.MarkFirstSyncDone(pair.PairId);
             var checkpoint = new NtfsUsnCheckpoint(1, 0, 200, 0);
             var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings,
-                TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId) { WalkCheckpointForTest = () => (checkpoint, false) };
+                TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId) { GapIo = new LocalGapIo(store, Settings, new HashSet<string>(), () => false), WalkCheckpointForTest = () => (checkpoint, false) };
             // The catch-up replay itself is unavailable, which selects the fresh-fallback branch.
             inventory.JournalReadForTest = OverLimitJournal;
             fx.Provider.AddInventory(root, inventory);
@@ -748,7 +748,7 @@ internal static partial class RunChecks
             store.MarkFirstSyncDone(pair.PairId);
             var checkpoint = new NtfsUsnCheckpoint(1, 0, 200, 0);
             var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings,
-                TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId) { WalkCheckpointForTest = () => (checkpoint, false) };
+                TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId) { GapIo = new LocalGapIo(store, Settings, new HashSet<string>(), () => false), WalkCheckpointForTest = () => (checkpoint, false) };
             inventory.JournalReadForTest = NoJournalChanges;
             fx.Provider.AddInventory(root, inventory);
             fx.Provider.AddWriter(root, await LocalWriter.OpenAsync(root, Side.A, pair.PairId,
@@ -789,7 +789,7 @@ internal static partial class RunChecks
         store.MarkFirstSyncDone(pair.PairId);
         var checkpoint = new NtfsUsnCheckpoint(1, 0, 100, 0);
         var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings,
-            TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId) { WalkCheckpointForTest = () => (checkpoint, false) };
+            TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId) { GapIo = new LocalGapIo(store, Settings, new HashSet<string>(), () => false), WalkCheckpointForTest = () => (checkpoint, false) };
         inventory.JournalReadForTest = NoJournalChanges;
         fx.Provider.AddInventory(root, inventory);
         fx.Provider.AddWriter(root, await LocalWriter.OpenAsync(root, Side.A, pair.PairId,
@@ -832,10 +832,10 @@ internal static partial class RunChecks
         var journalLostB = false;
         var inventoryA = new LocalInventory(rootA, Side.A, store, new HashSet<string>(), Settings,
             TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId)
-            { WalkCheckpointForTest = () => (checkpoint, false), JournalReadForTest = NoJournalChanges };
+            { GapIo = new LocalGapIo(store, Settings, new HashSet<string>(), () => false), WalkCheckpointForTest = () => (checkpoint, false), JournalReadForTest = NoJournalChanges };
         var inventoryB = new LocalInventory(rootB, Side.B, store, new HashSet<string>(), Settings,
             TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId)
-            { WalkCheckpointForTest = () => (journalLostB ? null : checkpoint, false), JournalReadForTest = NoJournalChanges };
+            { GapIo = new LocalGapIo(store, Settings, new HashSet<string>(), () => false), WalkCheckpointForTest = () => (journalLostB ? null : checkpoint, false), JournalReadForTest = NoJournalChanges };
         fx.Provider.AddInventory(rootA, inventoryA);
         fx.Provider.AddInventory(rootB, inventoryB);
         fx.Provider.AddWriter(rootA, await LocalWriter.OpenAsync(rootA, Side.A, pair.PairId,
@@ -979,7 +979,7 @@ internal static partial class RunChecks
         store.MarkFirstSyncDone(pair.PairId);
         var checkpoint = new NtfsUsnCheckpoint(1, 0, 100, 0);
         var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), Settings,
-            TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId) { WalkCheckpointForTest = () => (checkpoint, false) };
+            TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId) { GapIo = new LocalGapIo(store, Settings, new HashSet<string>(), () => false), WalkCheckpointForTest = () => (checkpoint, false) };
         inventory.JournalReadForTest = NoJournalChanges;
         fx.Provider.AddInventory(root, inventory);
         // The fixture's file is read from the real disk, not from the fake endpoint.

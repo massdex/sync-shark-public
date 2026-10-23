@@ -57,7 +57,8 @@ internal static partial class DropboxChecks
         var localWriter = await LocalWriter.OpenAsync(pair.A, Side.A, pair.PairId, LocalChecks.InstallationId,
             Path.Combine(product, "recovery"), CancellationToken.None, isStateDamage: StorageFailureClassifier.IsStateDamage, settings);
         var endpoints = new FakeEndpointProvider().AddWriter(pair.A, localWriter)
-            .AddInventory(pair.A, new LocalInventory(pair.A, Side.A, store, new HashSet<string>(), settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage))
+            .AddInventory(pair.A, new LocalInventory(pair.A, Side.A, store, new HashSet<string>(), settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage)
+                { GapIo = new LocalGapIo(store, settings, new HashSet<string>(), () => false) })
             .AddInventory(pair.B, new DropboxInventory(pair.B, Side.B, h.Client, store, pair.PairId))
             .AddWriter(pair.B, h.Writer());
         var fault = new CrashAfterScanProvider(endpoints, store, RootId);

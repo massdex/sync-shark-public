@@ -17,6 +17,7 @@ internal static partial class DropboxChecks
         ProviderNamesStaleSourceBatch(Path.Combine(root, "stale-source"));
         await ProviderNamesWritesAsync();
         await RunChecks.ProviderNamesTransientAsync(Path.Combine(root, "parallel"));
+        await ProviderNamesLocalAsync(Path.Combine(root, "ntfs-paused"), pauseHashing: true);
         await ProviderNamesLocalAsync(Path.Combine(root, "ntfs"));
         Console.WriteLine("PASS provider refused names: persistence, no retry, first sync, notices, safety, transient retry, rename, write unions");
     }

@@ -66,7 +66,10 @@ internal static class DateRepairReviewChecks
         {
             var audit = Directory.EnumerateFiles(Path.Combine(root, "v2", "logs"), "dates-repair-*.jsonl")
                 .Single(path => path != dry.ReportFile);
-            LocalChecks.Require(File.ReadAllText(audit).Contains("\"Outcome\":\"page-intent\""),
+            // The report writer remains open: the probe must permit its existing write access.
+            using var input = new FileStream(audit, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(input);
+            LocalChecks.Require(reader.ReadToEnd().Contains("\"Outcome\":\"page-intent\""),
                 "page intent is flushed before repair reaches the filesystem setter");
         };
         var done = await DateRepair.RunAsync(store, pair, Observe, root, false, [], CancellationToken.None, [], [], false, StorageFailureClassifier.IsStateDamage, StorageFailureClassifier.IsDirectStateDamage, StorageFailureClassifier.IsBusy, date, withPageLock: Gate);
