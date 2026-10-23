@@ -570,15 +570,12 @@ internal static class StoreSchema
         {
             // Notice semantics migrate once, not on every compatible (possibly read-only archive)
             // open. A current-version database is validated without replaying data mutations.
-            if (fromVersion >= 23)
-            {
-                if (Convert.ToInt64(Scalar(connection, tx,
-                    "SELECT COUNT(*) FROM pragma_table_info('notice') WHERE name='closed_at';")) == 0)
-                    throw new StateDamagedException("Current notice schema is missing its closure timestamp column.");
-                return;
-            }
-            if (Convert.ToInt64(Scalar(connection, tx,
-                "SELECT COUNT(*) FROM pragma_table_info('notice') WHERE name='closed_at';")) == 0)
+            var missingClosureColumn = Convert.ToInt64(Scalar(connection, tx,
+                "SELECT COUNT(*) FROM pragma_table_info('notice') WHERE name='closed_at';")) == 0;
+            // Interrupted preview stores can carry a newer stamp with the old additive shape.
+            // Repair that missing shape once; complete current stores still perform no data writes.
+            if (fromVersion >= 23 && !missingClosureColumn) return;
+            if (missingClosureColumn)
             {
                 Execute(connection, tx, "ALTER TABLE notice ADD COLUMN closed_at INTEGER;");
                 // Legacy rows have no closure timestamp. Creation is not a safe proxy for closure:

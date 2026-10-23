@@ -197,7 +197,7 @@ public sealed partial class SyncAuthorityDatabase
 
         // Read the historical origin of all potential collisions together. Looking
         // through the retained inventory history once per collided file made the
-        // real Bridge inventory take minutes despite the batched metadata writes.
+        // real inventory take minutes despite the batched metadata writes.
         var collisionObjects = byPath.Where(item =>
                 priorKeysByObject.TryGetValue(item.Value, out var priorKeys) && priorKeys.Count > 1 ||
                 occupied.TryGetValue(item.Value, out var occupiedPath) &&

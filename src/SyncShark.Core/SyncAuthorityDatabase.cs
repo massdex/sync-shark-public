@@ -4211,7 +4211,7 @@ public sealed partial class SyncAuthorityDatabase
                 command.Parameters.AddWithValue("$operation", plan.OperationId);
                 // A normal one-file reservation only competes with the same path or a
                 // cross-pair subtree. Do not deserialize every sibling's retained plan
-                // for every file (several GB for the captured Bridge plan). The existing
+                // for every file (several GB for the captured plan). The existing
                 // ordinal checks below remain authoritative. Without a candidate index,
                 // SQLite NOCASE needs the full Unicode/root fallback. With the index,
                 // all selected IDs reach those checks without another path filter.

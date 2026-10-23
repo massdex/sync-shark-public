@@ -105,7 +105,7 @@ public sealed partial class SyncAuthorityDatabase
     }
 
     // The corresponding-included alias projection (OV637-3). The durable reservation collision boundary
-    // compares root-relative paths within one root binding id; a parent "Bridge/file" and the child "file"
+    // compares root-relative paths within one root binding id; a parent "Parent/Child" and the child "Child"
     // reach one physical object through two different verified root bindings. This projection is derived
     // inside the caller's transaction from the active root bindings and the published pair definitions using
     // the shared correspondence decision, so the original ordinal comparison can run in one canonical
@@ -151,7 +151,7 @@ public sealed partial class SyncAuthorityDatabase
         // Path-descriptive endpoints (including Dropbox) establish ancestry from
         // their retained paths. Searching the entire activity history for opaque
         // hierarchy evidence for each local/Dropbox file provides no authority and
-        // made the real two-pair Bridge run spend seconds per planned file.
+        // made the real two-pair run spend seconds per planned file.
         // Unknown endpoint representations retain the original conservative path;
         // any opaque provider still resolves evidence in this exact transaction.
         var needsOpaqueEvidence = list.Any(pair =>
