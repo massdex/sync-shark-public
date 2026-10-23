@@ -139,9 +139,9 @@ internal static partial class DropboxChecks
             "cursor-released evidence asks for a decision after exactly one reachable history probe; no delete or resurrection without explicit choice");
         var decisions = h.Known.OpenNotices("p1").Where(n => n.Path == "gone.txt" && n.ReasonKey == "deletion-review").ToArray();
         Console.WriteLine("released evidence decision options: " + System.Text.Json.JsonSerializer.Serialize(
-            decisions.Select(notice => new { notice.NoticeId, Options = NoticeChoices.Options(notice) })));
-        // NoticeChoices.Options adds explicit exclusion separately from Ignore for item retry notices.
-        Require(decisions.Length == 1 && NoticeChoices.Options(decisions[0]).Select(option => option.Choice)
+            decisions.Select(notice => new { notice.NoticeId, Options = NoticeOptions.Options(notice) })));
+        // NoticeOptions.Options adds explicit exclusion separately from Ignore for item retry notices.
+        Require(decisions.Length == 1 && NoticeOptions.Options(decisions[0]).Select(option => option.Choice)
             .ToHashSet(StringComparer.Ordinal).SetEquals(
                 [NoticeChoices.DeleteReviewed, NoticeChoices.KeepRestore, NoticeChoices.Ignore, NoticeChoices.Exclude]),
             "one deletion-review notice offers exactly Delete with Recovery, Keep/restore, Ignore, and Stop syncing");

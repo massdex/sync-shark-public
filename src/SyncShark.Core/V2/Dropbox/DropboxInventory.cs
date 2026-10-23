@@ -122,7 +122,7 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
         _deletedAncestorsFromFull = null;
         _evidenceBasis = null;
         _evidenceValidatedThisRun = false;
-        if (string.IsNullOrEmpty(cursor) || _known?.HasFullListing(_root) == true) return invalid;
+        if (string.IsNullOrEmpty(cursor) || _known.HasFullListing(_root)) return invalid;
         var classification = _known.ReadDeletionClassification(_root);
         if (firstSync && classification?.Cursor != cursor)
         {
