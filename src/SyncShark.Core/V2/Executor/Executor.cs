@@ -193,6 +193,7 @@ public sealed partial class Executor : IExecutor
                     historicalDeleteSource: historicalDeleteSource, preserved: preserved, deleteRestorePending: deleteRestorePending).ConfigureAwait(false);
             }
             finally { ProviderEffectContext.Current.Value = previousProviderContext; }
+            result = await ResultVerification.NormalizeAsync(intent, result, source, token, _isStateDamage).ConfigureAwait(false);
             if (providerCommitter is not null) intent = providerCommitter.LatestAction(intent);
             if (pairId is not null)
             {
@@ -325,7 +326,7 @@ public sealed partial class Executor : IExecutor
                 return null;
             }
         }
-        else if (checkpoint.Kind is "delete-job" or "mkdir-job") jobId = ProviderJobId(checkpoint.Id);
+        else if (checkpoint.Kind is "delete-submit" or "delete-job" or "mkdir-job") jobId = ProviderJobId(checkpoint.Id);
         else return null;
         if (recorded is null || DateTimeOffset.UtcNow - recorded.Value < _settings.StuckJobEscalation) return null;
         return new Notice(pairId, intent.Rule, NoticeKind.Info, intent.Path,
@@ -339,12 +340,8 @@ public sealed partial class Executor : IExecutor
     // lets it go away at all.
     private void CloseStuckJobNotice(string pairId, SyncAction intent)
     {
-        if (intent.ProviderEffect is not { Kind: "delete-job" or "mkdir-job" or WholeFolderGroupKind }) return;
-        foreach (var open in _store.UnresolvedNotices(pairId))
-            if (open.NoticeId is not null &&
-                string.Equals(open.ReasonKey, ExecutionReasons.StuckProviderJob.Key, StringComparison.Ordinal) &&
-                string.Equals(open.Path, intent.Path, StringComparison.OrdinalIgnoreCase))
-                _store.CloseNotice(open.NoticeId, "resolved");
+        if (intent.ProviderEffect is not { Kind: "delete-submit" or "delete-job" or "mkdir-job" or WholeFolderGroupKind }) return;
+        _store.CloseUnresolvedNotices(pairId, ExecutionReasons.StuckProviderJob.Key, "resolved", intent.Path);
     }
 
     // The job id is the stable identity inside the opaque delete- or folder-create-job checkpoint
@@ -461,7 +458,7 @@ public sealed partial class Executor : IExecutor
             // The intent, if any, remains unresolved for next-run reconciliation. Do not
             // claim that an effect failed before it happened; an unknown post-write error is uncertain.
             var retained = await runner.CommitAsync(action,
-                new(action.ActionId, Outcome.Uncertain, null, null, null, error.Message)).ConfigureAwait(false);
+                new(action.ActionId, ResultEvidence.CommitOnly(action) ? Outcome.Failed : Outcome.Uncertain, null, null, null, error.Message)).ConfigureAwait(false);
             await writer.WriteAsync(retained, consumerGone).ConfigureAwait(false);
         }
         finally
@@ -500,8 +497,7 @@ public sealed partial class Executor : IExecutor
                     (folder.Target == Side.A ? blockedA : blockedB).Add(folder.Path);
                     await StoreAsync(() =>
                     {
-                        if (!_store.UnresolvedNotices(plan.PairId).Any(notice =>
-                                notice.ReasonKey == ProviderRefusedPaths.RetainedNoticeKey && PairPath.Same(notice.Path, folder.Path)))
+                        if (!_store.HasUnresolvedNotice(plan.PairId, ProviderRefusedPaths.RetainedNoticeKey, folder.Path))
                             _store.AddNotices([new Notice(plan.PairId, folder.Rule, NoticeKind.Info, folder.Path,
                                 ProviderRefusedPaths.RetainedNoticeDetail, ProviderRefusedPaths.RetainedNoticeKey)]);
                     }, ct).ConfigureAwait(false);

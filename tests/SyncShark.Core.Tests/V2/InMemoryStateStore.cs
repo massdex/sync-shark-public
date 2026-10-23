@@ -621,6 +621,11 @@ internal sealed class InMemoryStateStore : IStateStore
     {
         lock (_gate)
         {
+            r = ResultEvidence.Normalize(a, r);
+            if (r.Outcome == Outcome.Failed && (ResultEvidence.CommitOnly(a) ||
+                r.Reason == ExecutionReasons.BaselineUnconfirmed.Detail))
+                AddNotices([FailureRetryOwner.RetryNotice(pairId, a.Path,
+                    r.Reason ?? ExecutionReasons.BaselineUnconfirmed.Detail)]);
             if (IntentsFor(pairId).GetValueOrDefault(a.ActionId)?.Action.SuppressReconciledBaseline == true)
                 a = a with { SuppressReconciledBaseline = true };
             // a resolved intent (Done, Skipped) is deleted with its result, like the real store.

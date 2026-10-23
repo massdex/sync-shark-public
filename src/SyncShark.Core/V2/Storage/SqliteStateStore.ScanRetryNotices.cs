@@ -10,12 +10,10 @@ public sealed partial class SqliteStateStore
         if (StoreSchema.Scalar(_connection, null, $"""
             SELECT 1 FROM notice INDEXED BY nt_pair_reason
             WHERE pair_no=$p AND reason_key=$reason AND path='' AND {NoticeTable.ActionableSql("state")}
-              AND COALESCE(choice,'')<>'ignore' LIMIT 1;
+              AND NOT ({NoticeTable.IgnoredSql("choice")}) LIMIT 1;
             """, ("$p", pair), ("$reason", NoticeChoices.PointerObservationSummary)) is not null)
             return ObservationSummaryState.Open;
-        return StoreSchema.Scalar(_connection, null,
-            "SELECT 1 FROM notice INDEXED BY nt_pair_reason WHERE pair_no=$p AND reason_key=$reason AND path='' AND choice='ignore' LIMIT 1;",
-            ("$p", pair), ("$reason", NoticeChoices.PointerObservationSummary)) is not null
+        return _notices.IsIgnored(pair, NoticeChoices.PointerObservationSummary)
             ? ObservationSummaryState.Ignored : ObservationSummaryState.None;
     });
 
@@ -35,14 +33,16 @@ public sealed partial class SqliteStateStore
             ("$length", observation.Length), ("$needle", observation));
     });
 
-    /// <summary>Closes the per-file transient notices that one pair summary replaces. The durable sync_retry rows
-    /// stay untouched, so retirement and protection behave exactly as before.</summary>
+    /// <summary>Aggregates per-file explanations behind their summary without resolving failures.
+    /// The notices and durable sync_retry rows stay live until successful verification.</summary>
     internal void CloseOwnedPointerObservationNotices(string pairId, string observation) => InStore(() =>
     {
         var pair = RequirePair(pairId);
-        _notices.CloseWhere(null, "resolved", $"""
+        _notices.AggregateWhere(null, $"""
             pair_no=$p AND rule=40 AND reason_key='sync-retry' AND path<>'' AND {NoticeTable.ActionableSql("state")}
-              AND substr(detail,1,$length)=$needle;
+              AND EXISTS(SELECT 1 FROM sync_retry r WHERE r.pair_no=notice.pair_no AND r.path_key=notice.path_key
+                AND json_extract(r.json,'$.Kind')='scan'
+                AND substr(json_extract(r.json,'$.LastError'),1,$length)=$needle);
             """, ("$p", pair), ("$length", observation.Length), ("$needle", observation));
     });
 
@@ -62,8 +62,8 @@ public sealed partial class SqliteStateStore
     internal void ExpireIgnoredOwnedPointerObservationSummary(string pairId) => InStore(() =>
     {
         var pair = RequirePair(pairId);
-        _notices.CloseWhere(null, "expired", """
-            pair_no=$p AND rule=40 AND reason_key=$reason AND path='' AND choice='ignore';
+        _notices.CloseWhere(null, "expired", $"""
+            pair_no=$p AND rule=40 AND reason_key=$reason AND path='' AND {NoticeTable.IgnoredSql("choice")};
             """, ("$p", pair), ("$reason", NoticeChoices.PointerObservationSummary));
     });
 }

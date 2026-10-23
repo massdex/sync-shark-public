@@ -193,8 +193,14 @@ internal static class ConflictTransitionChecks
         Require(notice.Path == blocked.Path,
             "the occupied destination raises the dedicated keep-both-copy-blocked reason at the copy path");
         Require(NoticeChoices.IsRetryNotice(notice) &&
-            NoticeOptions.Options(notice).Select(option => option.Choice).SequenceEqual(new[] { NoticeChoices.RetryNow }),
-            "the blocked copy offers Retry only, never Ignore or a decision choice");
+            NoticeOptions.Options(notice).Select(option => option.Choice).SequenceEqual(new[] { NoticeChoices.RetryNow, NoticeChoices.Ignore }),
+            "the blocked copy offers Retry and cause-only Ignore, never a decision choice");
+
+        _ = await run.ApplyRetryNoticeChoiceAsync(PairId, notice.NoticeId!, NoticeChoices.Ignore, CancellationToken.None);
+        Require(reopened.UnresolvedIntents(PairId).Single().ActionId == blocked.ActionId &&
+            reopened.NoticeById(PairId, notice.NoticeId!) is { Closed: false } &&
+            reopened.OpenNotices(PairId).All(item => item.NoticeId != notice.NoticeId),
+            "Ignore hides only the explanation and retains the protected conflict successor");
 
         // The user moves the occupant away, then asks the notice to Retry. The next run must create the retained
         // copy, close the notice and retire the intent.
@@ -265,8 +271,8 @@ internal static class ConflictTransitionChecks
         Require(notices.Length == 2 && notices.All(notice => notice.ReasonKey == ExecutionReasons.ConflictCopyBlocked),
             "each tagged successor's first resumed failure raises its dedicated keep-both-copy-blocked notice");
         Require(notices.All(notice => NoticeChoices.IsRetryNotice(notice) &&
-                NoticeOptions.Options(notice).Select(option => option.Choice).SequenceEqual(new[] { NoticeChoices.RetryNow })),
-            "the failed-copy notice offers Retry only, never Ignore");
+                NoticeOptions.Options(notice).Select(option => option.Choice).SequenceEqual(new[] { NoticeChoices.RetryNow, NoticeChoices.Ignore })),
+            "the failed-copy notice offers Retry and cause-only Ignore");
         Require(notices.All(notice => notice.Detail.Contains("original versions remain protected", StringComparison.Ordinal)),
             "the Retry-only notice keeps the protection explanation");
         Require(!reopened.OpenNotices(PairId).Any(notice => notice.ReasonKey == "sync-retry" &&
@@ -454,7 +460,7 @@ internal static class ConflictTransitionChecks
             "failed observation retains only its successor while the independent copy completes");
         var notice = reopened.OpenNotices(PairId).Single(item => item.ReasonKey == ExecutionReasons.ConflictCopyBlocked);
         Require(notice.Detail.Contains("transient", StringComparison.Ordinal) &&
-            NoticeOptions.Options(notice).All(option => option.Choice == NoticeChoices.RetryNow),
+            NoticeOptions.Options(notice).Select(option => option.Choice).SequenceEqual(new[] { NoticeChoices.RetryNow, NoticeChoices.Ignore }),
             "transient failure remains explained and retryable, without an occupied-name diagnosis");
         rig.WriterA.OnRead = null;
         rig.WriterB.OnRead = null;

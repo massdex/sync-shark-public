@@ -113,11 +113,7 @@ public static partial class Planner
             .Select(entry => entry.Row).ToHashSet();
         foreach (var row in pointerReads)
             HoldPlanningFailure(ctx, row, new InvalidOperationException(PointerReadPending));
-        var failures = new PendingPathIndex(ctx.FailedPaths);
-        bool touches(string path) => failures.Covers(path) || failures.Contains(path);
-        ctx.Draft = ctx.Draft.Where(entry => !touches(entry.Action.Path) &&
-            (entry.Action.FromPath is null || !touches(entry.Action.FromPath)) &&
-            (entry.Action.Source is null || !touches(entry.Action.Source.Path))).ToList();
+        ctx.Draft = FailedPlanRows.Filter(ctx.Draft, ctx.FailedPaths);
         return ctx;
     }
 

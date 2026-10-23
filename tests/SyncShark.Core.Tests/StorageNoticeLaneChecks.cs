@@ -27,19 +27,22 @@ internal static class StorageNoticeLaneChecks
         PairCauseIsOneNotice(store, pair);
 
         // N8: a new cause updates the family's one open notice in place (stable id), and Ignore stays cause-specific.
-        StorageNotices.Report(store, pair, "Folder/one.bin", item, new IOException("cause one"));
+        StorageNotices.Report(store, pair, "Folder/one.bin", item, new IOException("cause one", 1));
         var first = SingleStorageNotice(store, pair);
-        StorageNotices.Report(store, pair, "Folder/one.bin", item, new IOException("cause two"));
+        StorageNotices.Report(store, pair, "Folder/one.bin", item, new IOException("cause two", 2));
         var updated = SingleStorageNotice(store, pair);
         HydrationNoticeWriterChecks.Require(updated.NoticeId == first.NoticeId,
             "a new cause updates the same notice identity instead of adding a second open notice");
         HydrationNoticeWriterChecks.Require(updated.Detail.Contains("cause two", StringComparison.Ordinal),
             "the updated notice shows the current cause");
         store.CloseNotice(updated.NoticeId!, NoticeChoices.Ignore);
-        StorageNotices.Report(store, pair, "Folder/one.bin", item, new IOException("cause two"));
+        StorageNotices.Report(store, pair, "Folder/one.bin", item, new IOException("cause two", 2));
         HydrationNoticeWriterChecks.Require(StorageStorage(store, pair).Count == 0,
             "an ignored exact cause is never reopened");
-        StorageNotices.Report(store, pair, "Folder/one.bin", item, new IOException("cause one"));
+        StorageNotices.Report(store, pair, "Folder/one.bin", item, new IOException("changed display text", 2));
+        HydrationNoticeWriterChecks.Require(StorageStorage(store, pair).Count == 0,
+            "variable message text never reopens the ignored stable cause");
+        StorageNotices.Report(store, pair, "Folder/one.bin", item, new IOException("cause one", 1));
         HydrationNoticeWriterChecks.Require(StorageStorage(store, pair).Count == 1,
             "a different cause stays visible beside ignored history");
         StorageNotices.Complete(store, pair.PairId, item);
@@ -47,17 +50,17 @@ internal static class StorageNoticeLaneChecks
 
         // Ignored cause A, then an open cause B, then cause A again: suppressing A must also close the obsolete
         // open B in the same transition, and A must remain ignored (a later A still opens nothing).
-        StorageNotices.Report(store, pair, "Folder/flip.bin", item, new IOException("flip cause A"));
+        StorageNotices.Report(store, pair, "Folder/flip.bin", item, new IOException("flip cause A", 1));
         var ignoredA = SingleStorageNotice(store, pair);
         store.CloseNotice(ignoredA.NoticeId!, NoticeChoices.Ignore);
-        StorageNotices.Report(store, pair, "Folder/flip.bin", item, new IOException("flip cause B"));
+        StorageNotices.Report(store, pair, "Folder/flip.bin", item, new IOException("flip cause B", 2));
         var openB = SingleStorageNotice(store, pair);
         HydrationNoticeWriterChecks.Require(openB.NoticeId != ignoredA.NoticeId,
             "a different cause opens beside the ignored cause");
-        StorageNotices.Report(store, pair, "Folder/flip.bin", item, new IOException("flip cause A"));
+        StorageNotices.Report(store, pair, "Folder/flip.bin", item, new IOException("flip cause A", 1));
         HydrationNoticeWriterChecks.Require(StorageStorage(store, pair).Count == 0,
             "suppressing cause A closes the obsolete open cause B in the same transition");
-        StorageNotices.Report(store, pair, "Folder/flip.bin", item, new IOException("flip cause A"));
+        StorageNotices.Report(store, pair, "Folder/flip.bin", item, new IOException("flip cause A", 1));
         HydrationNoticeWriterChecks.Require(StorageStorage(store, pair).Count == 0,
             "the ignored cause A remains suppressed after the transition");
         StorageNotices.Complete(store, pair.PairId, item);

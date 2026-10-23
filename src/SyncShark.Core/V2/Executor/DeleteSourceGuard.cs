@@ -206,6 +206,10 @@ internal static class DeleteSourceGuard
                     NewA = action.Target == Side.B ? current : null,
                     NewB = action.Target == Side.A ? current : null
                 };
+            // Identity presence at a different path invalidates absence authority. Retain the
+            // correspondence for move planning, but retire this observation-only delete attempt.
+            return new ActionResult(action.ActionId, Outcome.Skipped, null, null, null,
+                ExecutionReasons.DeleteSourceMoved.Detail) { DeleteSourceUnconfirmed = true };
         }
         // A paired move's already-submitted effect is resolved by identity absence, not plan-local admission.
         var result = await CheckEvidenceAsync(action with { Rule = 6 }, source, historical, restorePending, ct, isStateDamage: isStateDamage)

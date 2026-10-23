@@ -77,7 +77,7 @@ internal static partial class StorageChecks
         CommitFolderDeleteRetiresCarriedRows(root);
         Both(root, "commit-uncertain", CommitUncertainAndFailedUnresolved);
         CommitHoldThrows(root);
-        CommitSizeMismatchThrows(root);
+        CommitSizeMismatchFailsItem(root);
         CommitUnknownMoveContentKeepsBaseline(root);
         SleepingRemovalObservationSurvivesReopen(root);
         MissingPrepareMatchReadIsFilteredAndPaged(root);
@@ -96,6 +96,7 @@ internal static partial class StorageChecks
         Both(root, "intent-stream-horizon", IntentStream_RowidHorizonIsMutationStable);
         Notices_OnePerProblem(root);
         NoticeLifecycleChecks(root);
+        NoticeRegressionChecks(root);
         NoticeUpgradeChecks(root);
         NoticeCatalogueChecks();
         FreeSpacePresentationRoundTrip(root);
@@ -784,14 +785,18 @@ internal static partial class StorageChecks
             store.CommitResult("p1", 1, hold, new ActionResult("a-hold", Outcome.Done, null, null, null, null)));
     }
 
-    private static void CommitSizeMismatchThrows(string root)
+    private static void CommitSizeMismatchFailsItem(string root)
     {
         var folder = Fresh(root, "size-mismatch");
         using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         var action = new SyncAction("a-copy", 1, ActionKind.CopyNew, Side.B, "a.txt", null, F("a.txt", "id:a", "77", 4), null, false, "k1");
-        ExpectThrows<InvalidOperationException>(() => store.CommitResult("p1", 1, action,
-            new ActionResult("a-copy", Outcome.Done, null, F("a.txt", "id:b", "77", 9), null, null)));
+        store.CommitResult("p1", 1, action,
+            new ActionResult("a-copy", Outcome.Done, null, F("a.txt", "id:b", "77", 9), null, null));
+        Require(store.Baselines("p1").Count == 0 && store.UnresolvedIntents("p1").Single().ActionId == action.ActionId &&
+            store.SyncRetryAt("p1", action.Path)?.LastError == ExecutionReasons.BaselineUnconfirmed.Detail &&
+            store.OpenNotices("p1").Single().ReasonKey == "sync-retry",
+            "known size mismatch is unsynced with durable retry and one notice, never a fabricated baseline");
     }
 
     private static void CommitResultOtherPairThrows(string root)

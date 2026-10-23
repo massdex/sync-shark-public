@@ -15,11 +15,17 @@ internal static partial class StorageChecks
             store.SavePair(Pair("p1"));
             SeedBaseline(store, "p1", "k1", a, b);
             store.RecordIntent("p1", action);
-            ExpectThrows<InvalidOperationException>(() => store.CommitResult("p1", 2, action,
-                new ActionResult(action.ActionId, Outcome.Done, null, moved, null, null)));
+            var good = new SyncAction("good", 1, ActionKind.Adopt, Side.B, "good.txt", null,
+                a with { Path = "good.txt", ObjectId = "good-a" }, b with { Path = "good.txt", ObjectId = "good-b" }, false, "good");
+            store.CommitResults("p1", 2, [(action, new(action.ActionId, Outcome.Done, null, moved, null, null)),
+                (good, new(good.ActionId, Outcome.Done, good.Source, good.ExpectedTarget, null, null))]);
+            Require(store.Baselines("p1").Count == 2 && store.SyncRetryAt("p1", action.Path) is not null,
+                "invalid Done preserves retry debt while the independent good result commits in the same batch");
+            Require(store.OpenNotices("p1").Count(n => n.Path == action.Path && n.ReasonKey == "sync-retry") == 1,
+                "missing content evidence raises exactly one actionable notice");
         }
         using var reopened = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
-        var baseline = reopened.Baselines("p1").Single();
+        var baseline = reopened.Baselines("p1").Single(row => row.ObjectKey == "k1");
         Require(baseline.B.Path == "old.txt" && baseline.B.Hash == b.Hash,
             "unknown moved content never synthesizes a new baseline, including after cold reopen");
         Require(reopened.UnresolvedIntents("p1").Single().ActionId == action.ActionId,

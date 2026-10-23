@@ -45,6 +45,7 @@ internal static partial class AutoSyncChecks
             Require(ignored is { Closed: false } && ignored.Value.Notice.FailureRetry == retained,
                 "cold reopen preserves suppressed active watch retry attempts and deadline");
             Require(!store.OpenNotices(pair.PairId).Any(n => n.NoticeId == id), "Ignore stays suppressed across reopen");
+            watches.WatchError = new IOException("watch channel unavailable on another attempt");
             var auto = new AutoSync(store, new FakeSyncRun(), watches, Settings, _ => false, () => SafetyPoll, clock);
             try
             {

@@ -4,40 +4,39 @@ namespace Massdex.SyncShark.V2;
 
 internal sealed partial class NoticeTable
 {
-    private bool SuppressDedicatedRetry(SqliteTransaction transaction, long pairNo, Notice notice)
+    private bool SuppressDedicatedRetry(SqliteTransaction transaction, long pairNo, ref Notice notice)
     {
-        // A blocked conflict successor owns its explanation and Retry-only policy, not the generic
-        // path retry (whose Ignore would silently abandon the established conflict).
-        if (notice.ReasonKey == ExecutionReasons.ConflictCopyBlocked)
+        // Dedicated explanations own the retry in either publication order. Ignore suppresses
+        // their cause only; conflict successors and unresolved evidence remain protected.
+        if (notice.ReasonKey is ExecutionReasons.ConflictCopyBlocked or InterruptedDelete.UnverifiedReason or
+            "deletion-evidence-pending" or "unreadable")
             CloseResolved(transaction, pairNo,
-                ShortId.Make("n", notice.PairId, "40", RowCodec.Key(notice.Path), "sync-retry"), "superseded");
-        if (notice.ReasonKey is "content-unconfirmed" or "sync-retry" &&
-            StoreSchema.Scalar(_connection, transaction,
-                "SELECT 1 FROM notice INDEXED BY nt_pair_reason WHERE pair_no=$p AND reason_key=$reason " +
-                "AND path_key=$key AND " + NoticeTable.ActionableSql("state") + " LIMIT 1;",
-                ("$p", pairNo), ("$key", RowCodec.Key(notice.Path)), ("$reason", ExecutionReasons.ConflictCopyBlocked)) is not null)
-            return true;
-        // The uncertain-delete explanation owns this failure, regardless of publication order.
-        // Aggregated rows still own the per-item explanation behind their summary.
-        if (notice.ReasonKey == InterruptedDelete.UnverifiedReason)
-            CloseResolved(transaction, pairNo,
-                ShortId.Make("n", notice.PairId, "40", RowCodec.Key(notice.Path), "sync-retry"), "superseded");
-        if (notice.ReasonKey is "content-unconfirmed" or "sync-retry" &&
-            StoreSchema.Scalar(_connection, transaction,
-                "SELECT 1 FROM notice INDEXED BY nt_pair_reason WHERE pair_no=$p AND reason_key='interrupted-delete-unverified' " +
-                "AND path_key=$key AND " + ActionableSql("state") + " LIMIT 1;",
-                ("$p", pairNo), ("$key", RowCodec.Key(notice.Path))) is not null)
-            return true;
-        // Unanswered deletion evidence owns its explanation, regardless of publication order.
-        if (notice.ReasonKey == "deletion-evidence-pending")
-            CloseResolved(transaction, pairNo,
-                ShortId.Make("n", notice.PairId, "40", RowCodec.Key(notice.Path), "sync-retry"), "evidence-pending");
-        if (notice.ReasonKey == "sync-retry" &&
-            StoreSchema.Scalar(_connection, transaction,
-                "SELECT 1 FROM notice INDEXED BY nt_pair_reason WHERE pair_no=$p AND reason_key='deletion-evidence-pending' " +
-                "AND path_key=$key AND " + ActionableSql("state") + " LIMIT 1;",
-                ("$p", pairNo), ("$key", RowCodec.Key(notice.Path))) is not null)
-            return true;
+                ShortId.Make("n", notice.PairId, "40", RowCodec.Key(notice.Path), "sync-retry"),
+                notice.ReasonKey == "deletion-evidence-pending" ? "evidence-pending" : "superseded");
+        if (notice.ReasonKey is not ("content-unconfirmed" or "sync-retry")) return false;
+        if (HasDedicatedRetry(transaction, pairNo, notice.Path, ExecutionReasons.ConflictCopyBlocked) ||
+            HasDedicatedRetry(transaction, pairNo, notice.Path, InterruptedDelete.UnverifiedReason)) return true;
+        if (notice.ReasonKey == "sync-retry")
+        {
+            if (HasDedicatedRetry(transaction, pairNo, notice.Path, "deletion-evidence-pending")) return true;
+            notice = FoldUnreadableRetry(transaction, pairNo, notice);
+        }
         return false;
+    }
+
+    private bool HasDedicatedRetry(SqliteTransaction transaction, long pairNo, string path, string reason) =>
+        StoreSchema.Scalar(_connection, transaction,
+            "SELECT 1 FROM notice INDEXED BY nt_pair_reason_path WHERE pair_no=$p AND reason_key=$reason " +
+            "AND path_key=$key AND " + ActionableSql("state") + " LIMIT 1;",
+            ("$p", pairNo), ("$key", RowCodec.Key(path)), ("$reason", reason)) is not null;
+
+    private Notice FoldUnreadableRetry(SqliteTransaction transaction, long pairNo, Notice notice)
+    {
+        // Refresh exact scan debt even while its cause is suppressed, rather than duplicating it.
+        var id = ShortId.Make("n", notice.PairId, "30", RowCodec.Key(notice.Path), "unreadable");
+        return ById(pairNo, id, transaction) is { Closed: false } unreadable
+            ? unreadable.Notice with { Detail = notice.Detail, CauseKey = notice.CauseKey,
+                FailureRetry = notice.FailureRetry ?? unreadable.Notice.FailureRetry }
+            : notice;
     }
 }

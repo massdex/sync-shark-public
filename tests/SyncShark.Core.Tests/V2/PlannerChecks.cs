@@ -14,6 +14,7 @@ internal static partial class PlannerChecks
     public static Task RunAsync()
     {
         PathRuleChecks.Run();
+        FailedMappedRowIsAtomic();
         ContentEvidence_OneOwner();
         Rule01_Unchanged();
         Rule02_EditedOneSide();

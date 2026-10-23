@@ -148,8 +148,7 @@ public sealed partial class SqliteStateStore
     });
 
     internal bool StorageCauseIgnored(string pairId, string reasonKey) => InStore(() =>
-        StoreSchema.Scalar(_connection, null, "SELECT 1 FROM notice WHERE pair_no=$p AND reason_key=$k AND choice='ignore' AND " + NoticeTable.ActionableSql("state") + " LIMIT 1;",
-            ("$p", RequirePair(pairId)), ("$k", reasonKey)) is not null);
+        _notices.IsIgnored(RequirePair(pairId), reasonKey));
 
     // Persist one explicit Retry without running it. Only an existing queued row is marked, so a completed
     // entity is never recreated; the negative due marker survives pause and is consumed by the claim below.

@@ -438,6 +438,7 @@ public sealed partial class SqliteStateStore : IStateStore
         IReadOnlyList<SyncAction> successors, IReadOnlyDictionary<string, CapturedDefenderNotice> prepared,
         List<CommittedAction>? committedResults)
     {
+        results = results.Select(row => (row.Action, ResultEvidence.Normalize(row.Action, row.Result))).ToArray();
         foreach (var (action, result) in results)
         {
             if (!string.Equals(result.ActionId, action.ActionId, StringComparison.Ordinal))
@@ -484,6 +485,10 @@ public sealed partial class SqliteStateStore : IStateStore
                 committed = Outcome.Failed;
             _intents.Commit(transaction, pairNo, retainedAction, committed, now);
             SaveResultFailureCause(transaction, pairNo, retainedAction, result);
+            if (result.Outcome == Outcome.Failed && (ResultEvidence.CommitOnly(action) ||
+                result.Reason == ExecutionReasons.BaselineUnconfirmed.Detail))
+                _notices.Add(transaction, pairNo, FailureRetryOwner.RetryNotice(pairId, action.Path,
+                    result.Reason ?? ExecutionReasons.BaselineUnconfirmed.Detail), now);
             committedResults?.Add(new CommittedAction(retainedAction, result, committed));
             // A tagged successor closes its dedicated Retry-only notice whenever it actually retires: its copy
             // succeeded, or the frozen intent was explicitly retired (re-inclusion, exclusion, ownership boundary,

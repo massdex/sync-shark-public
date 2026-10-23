@@ -1,11 +1,12 @@
 namespace Massdex.SyncShark.V2;
 
-internal static class InterruptedDeleteChecks
+internal static partial class InterruptedDeleteChecks
 {
     internal static async Task RunAsync(string folder)
     {
         foreach (var target in new[] { Side.A, Side.B })
         {
+            await MovedSourceReplansAsync(Path.Combine(folder, target + "-moved-source"), target);
             await RestoreAfterCrashAsync(Path.Combine(folder, target.ToString()), target);
             await ObservationCasesAsync(Path.Combine(folder, target + "-observations"), target);
             await ExpiredIdentityReviewAsync(Path.Combine(folder, target + "-expired-review"), target);

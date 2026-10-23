@@ -352,10 +352,9 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
         }
         if (recreated.Length > 0)
         {
-            var presentAgain = recreated.ToHashSet(StringComparer.OrdinalIgnoreCase);
-            foreach (var notice in _known.UnresolvedNotices(_pairId).Where(notice => presentAgain.Contains(notice.Path) &&
-                notice.ReasonKey is "deletion-review" or "deletion-history-unavailable" or "deletion-evidence-pending"))
-                if (notice.NoticeId is not null) _known.CloseNotice(notice.NoticeId, "remote-recreated");
+            foreach (var path in recreated)
+                foreach (var reason in new[] { "deletion-review", "deletion-history-unavailable", "deletion-evidence-pending" })
+                    _known.CloseUnresolvedNotices(_pairId, reason, "remote-recreated", path);
         }
         // Upgrade previously released failures into the same ordinary retry queue, including
         // empty feeds. Respect Ignore/exclusion just as for fresh feed entries: its cached failure

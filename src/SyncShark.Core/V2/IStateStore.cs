@@ -1,7 +1,7 @@
 namespace Massdex.SyncShark.V2;
 
 /// <summary>The only place that reads and writes the sync database.</summary>
-public interface IStateStore : IDisposable
+public partial interface IStateStore : IDisposable
 {
     bool HasOwnedPointers(string rootId) => false;
     IReadOnlyList<StorageRegistration> StorageRegistrations() => [];

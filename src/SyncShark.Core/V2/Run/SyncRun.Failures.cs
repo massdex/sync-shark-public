@@ -133,9 +133,7 @@ public sealed partial class SyncRun
         }
         if (!plan.Notices.Any(notice => notice.ReasonKey == "planning-degraded") &&
             !_store.ReadSyncRetries(pair.PairId).Any(retry => retry.Kind == "planning"))
-            foreach (var notice in _store.UnresolvedNotices(pair.PairId))
-                if (notice.ReasonKey == "planning-degraded" && notice.NoticeId is not null)
-                    _store.CloseNotice(notice.NoticeId, "resolved");
+            _store.CloseUnresolvedNotices(pair.PairId, "planning-degraded", "resolved");
     }
 
     private RunReport CompleteAvailable(string pairId, RunReport report, CancellationToken ct)
@@ -151,9 +149,7 @@ public sealed partial class SyncRun
     {
         if (_store.SyncRetryAt(pairId, string.Empty)?.Kind == "run")
             _store.ClearSyncRetry(pairId, string.Empty);
-        foreach (var notice in _store.UnresolvedNotices(pairId))
-            if (notice.ReasonKey == "run-unavailable" && notice.NoticeId is not null)
-                _store.CloseNotice(notice.NoticeId, "resolved");
+        _store.CloseUnresolvedNotices(pairId, "run-unavailable", "resolved");
     }
 
     private void WriteNotices(IEnumerable<Notice> notices)

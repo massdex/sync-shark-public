@@ -490,9 +490,8 @@ public sealed partial class SyncRun
                         {
                             _store.ClearSyncRetry(pair.PairId, rule.Path);
                             _store.RemoveDeletionEvidence(pair.PairId, cloud.RootId, [rule.Path]);
-                            foreach (var oldNotice in _store.UnresolvedNotices(pair.PairId).Where(item =>
-                                PairPath.Same(item.Path, rule.Path) && item.ReasonKey is "deletion-review" or "deletion-history-unavailable"))
-                                if (oldNotice.NoticeId is not null) _store.CloseNotice(oldNotice.NoticeId, "recreated");
+                            foreach (var reason in new[] { "deletion-review", "deletion-history-unavailable" })
+                                _store.CloseUnresolvedNotices(pair.PairId, reason, "recreated", rule.Path);
                             if (remoteNow is not null)
                                 _store.SaveSyncRetry(pair.PairId, new(rule.Path, "post-preview", 0, "", DateTimeOffset.MinValue));
                             lock (sync) pending.Remove(rule.Path);
@@ -533,9 +532,8 @@ public sealed partial class SyncRun
                         _store.SaveSyncRetry(pair.PairId, released with { Kind = "decision", RetryAfter = DateTimeOffset.MinValue,
                             HeldReviewed = false, ReviewedActions = null, ProposedActions = [proposal], PendingNotice = attention });
                         WriteNotices([attention]);
-                        foreach (var oldNotice in _store.UnresolvedNotices(pair.PairId).Where(item => PairPath.Same(item.Path, rule.Path) &&
-                            item.ReasonKey is "sync-retry" or "deletion-evidence-pending"))
-                            if (oldNotice.NoticeId is not null) _store.CloseNotice(oldNotice.NoticeId, "decision-required");
+                        foreach (var reason in new[] { "sync-retry", "deletion-evidence-pending" })
+                            _store.CloseUnresolvedNotices(pair.PairId, reason, "decision-required", rule.Path);
                         lock (sync) { notices.Add(attention); pending.Add(rule.Path); }
                         return;
                     }
@@ -602,9 +600,8 @@ public sealed partial class SyncRun
                             ReviewedActions = null, HeldReviewed = false, ProposedActions = resolved.Actions
                         });
                         WriteNotices([notice]);
-                        foreach (var oldNotice in _store.UnresolvedNotices(pair.PairId).Where(item =>
-                            PairPath.Same(item.Path, rule.Path) && item.ReasonKey is "sync-retry" or "deletion-evidence-pending"))
-                            if (oldNotice.NoticeId is not null) _store.CloseNotice(oldNotice.NoticeId, "decision-required");
+                        foreach (var reason in new[] { "sync-retry", "deletion-evidence-pending" })
+                            _store.CloseUnresolvedNotices(pair.PairId, reason, "decision-required", rule.Path);
                         lock (sync) { notices.Add(notice); pending.Add(rule.Path); }
                         return;
                     }

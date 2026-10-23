@@ -108,8 +108,9 @@ internal sealed class ActionRunner
         if (action.Kind == ActionKind.Forget && action.Rule == 27)
         {
             ct.ThrowIfCancellationRequested();
-            if (action.ObjectKey is null || !_conflictSuccessors.TryGetValue(action.ObjectKey, out var successors))
-                throw new InvalidOperationException("Conflict correspondence cannot be forgotten without its successors.");
+            if (action.ObjectKey is null || !_conflictSuccessors.TryGetValue(action.ObjectKey, out var successors) ||
+                successors.Length != 2 || successors.Select(next => next.Target).Distinct().Count() != 2)
+                return await CommitAsync(action, Failed(action, ExecutionReasons.MissingConflictSuccessors.Detail)).ConfigureAwait(false);
             var result = CommitOnlyResult(action);
             await _committer.CommitConflictTransitionAsync(action, result, successors).ConfigureAwait(false);
             _durableConflicts[action.ObjectKey] = 0;
@@ -705,6 +706,7 @@ internal sealed class ActionRunner
     internal async Task<ActionResult> CommitAsync(SyncAction action, ActionResult result)
     {
         using var timing = RunInstrumentation.Current?.Measure(RunTimingStage.ResultCommit);
+        result = ResultEvidence.Normalize(action, result);
         if (action.ConflictTransitionKey is not null && !action.SuppressReconciledBaseline &&
             result.Outcome is Outcome.Skipped or Outcome.Refused)
             result = result with { Outcome = Outcome.Failed };

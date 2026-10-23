@@ -26,7 +26,7 @@ public sealed partial class SqliteStateStore
             using var command = StoreSchema.Command(_connection, null, $"""
                 SELECT detail FROM notice INDEXED BY nt_pair_reason
                   WHERE pair_no=$p AND reason_key>=$lo AND reason_key<$hi AND {NoticeTable.ActionableSql("state")}
-                  ORDER BY (COALESCE(choice,'')='ignore'), created;
+                  ORDER BY ({NoticeTable.IgnoredSql("choice")}), created;
                 """);
             command.Parameters.AddWithValue("$p", pair);
             command.Parameters.AddWithValue("$lo", prefix);
@@ -39,7 +39,7 @@ public sealed partial class SqliteStateStore
         return (IReadOnlyList<StorageNotice>)result;
     });
 
-    /// <summary>Updates the one open item/operation notice in place; ignored causes remain immutable.</summary>
+    /// <summary>Publishes through the shared notice owner; ignored causes retain suppression.</summary>
     internal string? ReportStorageNotice(string pairId, Notice notice, string familyPrefix) => InStore(() =>
     {
         var pair = RequirePair(pairId);
@@ -52,39 +52,6 @@ public sealed partial class SqliteStateStore
     /// <summary>The transaction-scoped form used by aggregate writers, so one decision cannot race its own family.</summary>
     private string? ReportStorageNotice(Microsoft.Data.Sqlite.SqliteTransaction tx, long pair, Notice notice, string familyPrefix)
     {
-        if (notice.Storage is null || notice.ReasonKey is null || !notice.ReasonKey.StartsWith(familyPrefix, StringComparison.Ordinal))
-            throw new ArgumentException("A storage notice must belong to its supplied family.", nameof(notice));
-        var args = new (string, object?)[] { ("$p", pair), ("$reason", notice.ReasonKey), ("$lo", familyPrefix), ("$hi", familyPrefix + "￿") };
-        if (StoreSchema.Scalar(_connection, tx, "SELECT 1 FROM notice WHERE pair_no=$p AND reason_key=$reason AND choice='ignore' AND " + NoticeTable.ActionableSql("state") + " LIMIT 1;", args) is not null)
-        {
-            _notices.CloseWhere(tx, "resolved",
-                "pair_no=$p AND reason_key>=$lo AND reason_key<$hi AND " + NoticeTable.ActionableSql("state") + " AND COALESCE(choice,'')<>'ignore';", args);
-            return null;
-        }
-        // Prefer the existing open identity even when a historical row has the incoming cause.
-        var id = StoreSchema.Scalar(_connection, tx,
-            "SELECT notice_id FROM notice WHERE pair_no=$p AND reason_key>=$lo AND reason_key<$hi AND " + NoticeTable.ActionableSql("state") + " AND COALESCE(choice,'')<>'ignore' LIMIT 1;", args) as string;
-        id ??= StoreSchema.Scalar(_connection, tx, "SELECT notice_id FROM notice WHERE pair_no=$p AND reason_key=$reason AND COALESCE(choice,'')<>'ignore' LIMIT 1;", args) as string;
-        if (id is null)
-        {
-            // Notice ids ordinarily derive from the cause. A prior in-place update can have retained
-            // that id for another cause, so use an independent stable id for this new lifecycle.
-            id = Guid.NewGuid().ToString("N");
-            StoreSchema.Execute(_connection, tx,
-                "INSERT INTO notice(notice_id,pair_no,rule,kind,path,detail,reason_key,state,choice,created) VALUES($id,$p,$rule,$kind,$path,$detail,$reason,'open',NULL,$now);",
-                ("$id", id), ("$p", pair), ("$rule", notice.Rule), ("$kind", notice.Kind.ToString()), ("$path", notice.Path),
-                ("$detail", NoticeDetailCodec.Encode(notice)), ("$reason", notice.ReasonKey), ("$now", NowMs()));
-        }
-        else
-        {
-            StoreSchema.Execute(_connection, tx,
-                "UPDATE notice SET rule=$rule,kind=$kind,path=$path,detail=$detail,reason_key=$reason WHERE notice_id=$id;",
-                ("$id", id), ("$rule", notice.Rule), ("$kind", notice.Kind.ToString()), ("$path", notice.Path), ("$detail", NoticeDetailCodec.Encode(notice)), ("$reason", notice.ReasonKey));
-            _notices.ReopenWhere(tx, "notice_id=$id;", ("$id", id));
-        }
-        _notices.CloseWhere(tx, "resolved",
-            "pair_no=$p AND reason_key>=$lo AND reason_key<$hi AND " + NoticeTable.ActionableSql("state") + " AND notice_id<>$id AND COALESCE(choice,'')<>'ignore';",
-            ("$p", pair), ("$lo", familyPrefix), ("$hi", familyPrefix + "￿"), ("$id", id));
-        return id;
+        return _notices.AddStorage(tx, pair, notice, familyPrefix, NowMs());
     }
 }

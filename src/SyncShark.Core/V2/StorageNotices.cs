@@ -43,7 +43,7 @@ internal static class StorageNotices
             item = item with { ObjectId = "", Operation = operation, Scope = pairError.Cause };
             path = "";
         }
-        var reason = Prefix(item) + Cause(error);
+        var reason = Prefix(item) + FailureCauseIdentity.Of(error);
         var pairScoped = item.Operation == HydrationPairOperation;
         var label = item.Operation == HydrationPairOperation ? "hydration" : item.Operation;
         var detail = "Cloud storage " + label + " failed: " + error.Message +
@@ -54,7 +54,7 @@ internal static class StorageNotices
                     : " Correct the cause and Retry verification/settlement, or Ignore this cause. Local bytes are retained and no upload is repeated.");
         // One open notice per item+operation: the store updates the active family notice in place (keeping its
         // stable id) for a new cause, returns null for an ignored exact cause, and never reopens ignored history.
-        var notice = new Notice(pair.PairId, 42, NoticeKind.Info, path, detail, reason, Storage: item);
+        var notice = new Notice(pair.PairId, 42, NoticeKind.Info, path, detail, reason, Storage: item, CauseKey: FailureCauseIdentity.Of(error));
         if (item.Operation == PointerVerificationOperation)
         {
             // Above the limit one pair summary replaces every per-file notice. Below it the item notice is
@@ -62,14 +62,11 @@ internal static class StorageNotices
             var summary = PointerVerificationSummary(item);
             store.RecordPointerVerificationNotice(pair.PairId, notice, Family(item),
                 new Notice(pair.PairId, 42, NoticeKind.Info, string.Empty, PointerVerificationSummaryDetail,
-                    Prefix(summary) + Cause(error), Storage: summary), Family(summary));
+                    Prefix(summary) + FailureCauseIdentity.Of(error), Storage: summary, CauseKey: FailureCauseIdentity.Of(error)), Family(summary));
             return;
         }
         store.ReportStorageNotice(pair.PairId, notice, Family(item));
     }
-
-    private static string Cause(Exception error) => "cause" + ShortId.Hex16(error.GetType().Name,
-        error.HResult.ToString(System.Globalization.CultureInfo.InvariantCulture), error.Message);
 
     private static StorageNotice PointerVerificationSummary(StorageNotice item) =>
         new(item.RootId, string.Empty, item.RemoteBinding, PointerVerificationPairOperation);

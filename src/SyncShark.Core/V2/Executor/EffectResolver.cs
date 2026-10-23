@@ -19,6 +19,7 @@ internal static class EffectResolver
         ArgumentNullException.ThrowIfNull(isStateDamage);
         // Restore creates only: without the atomic receipt we cannot claim ownership. Abandon the
         // intent, not the Recovery copy or notice, even if observation/provider lookup is unavailable.
+        if (ResultEvidence.CommitOnly(x)) return Skipped(x, NotApplied);
         if (x.ConflictRestore)
             return Skipped(x, RestoreAbandoned);
         var now = (timeProvider ?? TimeProvider.System).GetUtcNow();

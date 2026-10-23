@@ -233,14 +233,14 @@ internal sealed class PairLoop
         var retry = FailureRetryOwner.Failed(_watchAttempts, now);
         _watchAttempts = retry.Attempts;
         _watchRetryAt = retry.RetryAfter;
-        try { _in.Store.AddNotices([WatchNotice(error.Message) with { FailureRetry = retry }]); }
+        try { _in.Store.AddNotices([WatchNotice(error.Message) with { FailureRetry = retry, CauseKey = FailureCauseIdentity.Of(error) }]); }
         catch (Exception noticeError) { RunOutput.Observe(noticeError); }
     }
 
     private Notice WatchNotice(string cause) => new(_pairId, 0, NoticeKind.Info, string.Empty,
         "Change watching unavailable: " + cause +
         ". Sync continues by periodic polling. Check the folder and connectivity, then Retry; Ignore silences this notice without changing sync protection.",
-        "autosync-watch-unavailable", CauseKey: cause);
+        "autosync-watch-unavailable");
 
     private async Task RunOnceAsync(CancellationToken stop)
     {

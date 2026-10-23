@@ -120,17 +120,17 @@ internal static class FilesOnDemandSettlementChecks
 
         var metadata = new StorageNotice(localRoot.RootId, local.ObjectId, remoteRoot.RootId,
             "settlement", StorageNotices.ReceiptScope(remote.Id, remote.Revision, remote.ContentHash));
-        StorageNotices.Report(store, pair, local.Path, metadata, new IOException("cause one"));
+        StorageNotices.Report(store, pair, local.Path, metadata, new IOException("cause one", 1));
         var notice = store.OpenNotices(pair.PairId).Single(n => n.Storage is not null);
         Require(!PlanNotices.HasPathScope(notice), "storage failures never hold ordinary sync");
         store.CloseNotice(notice.NoticeId!, NoticeChoices.Ignore);
-        StorageNotices.Report(store, pair, local.Path, metadata, new IOException("cause one"));
+        StorageNotices.Report(store, pair, local.Path, metadata, new IOException("cause one", 1));
         Require(!store.OpenNotices(pair.PairId).Any(n => n.Storage is not null), "Ignore suppresses exact cause");
-        StorageNotices.Report(store, pair, local.Path, metadata, new IOException("cause two"));
+        StorageNotices.Report(store, pair, local.Path, metadata, new IOException("cause two", 2));
         Require(store.OpenNotices(pair.PairId).Count(n => n.Storage is not null) == 1, "different cause remains visible");
         StorageNotices.Complete(store, pair.PairId, metadata);
         var revisedRemote = remote with { Revision = "rev-2" };
-        StorageNotices.Report(store, pair, local.Path, metadata with { Scope = StorageNotices.ReceiptScope(revisedRemote.Id, revisedRemote.Revision, revisedRemote.ContentHash) }, new IOException("cause one"));
+        StorageNotices.Report(store, pair, local.Path, metadata with { Scope = StorageNotices.ReceiptScope(revisedRemote.Id, revisedRemote.Revision, revisedRemote.ContentHash) }, new IOException("cause one", 1));
         Require(store.OpenNotices(pair.PairId).Count(n => n.Storage is not null) == 1, "new receipt not suppressed by older Ignore");
         StorageNotices.Complete(store, pair.PairId, metadata);
         StorageNotices.Report(store, pair, local.Path, metadata, new StoragePairException("volume", "Requires fixed NTFS"));

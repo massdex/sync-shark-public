@@ -28,11 +28,8 @@ public sealed partial class SqliteStateStore
             return;
         }
         // An ignored pair cause suppresses the whole family: the debt stays durable, but no notice reopens.
-        if (StoreSchema.Scalar(_connection, tx,
-            "SELECT 1 FROM notice INDEXED BY nt_pair_reason WHERE pair_no=$p AND reason_key=$reason AND choice='ignore' AND " + NoticeTable.ActionableSql("state") + " LIMIT 1;",
-            ("$p", pair), ("$reason", summaryNotice.ReasonKey)) is not null)
+        if (_notices.IsIgnored(pair, summaryNotice.ReasonKey, tx))
         {
-            CloseFamily(tx, pair, summaryFamily);
             tx.Commit();
             return;
         }
@@ -44,7 +41,7 @@ public sealed partial class SqliteStateStore
             SELECT COUNT(*) FROM (
               SELECT 1 FROM notice INDEXED BY nt_pair_reason
               WHERE pair_no=$p AND reason_key>=$lo AND reason_key<$hi AND {NoticeTable.ActionableSql("state")}
-                AND COALESCE(choice,'')<>'ignore' LIMIT $cap);
+                AND NOT ({NoticeTable.IgnoredSql("choice")}) LIMIT $cap);
             """, ("$p", pair), ("$lo", operationPrefix), ("$hi", operationEnd),
             ("$cap", StorageNotices.NoticeAggregateLimit + 1)));
         // Existing deployments can already have a per-file flood. Re-reporting an existing
@@ -146,7 +143,7 @@ public sealed partial class SqliteStateStore
         StoreSchema.Scalar(_connection, tx, $"""
             SELECT 1 FROM notice INDEXED BY nt_pair_reason
             WHERE pair_no=$p AND reason_key>=$lo AND reason_key<$hi AND {NoticeTable.ActionableSql("state")}
-              AND COALESCE(choice,'')<>'ignore' LIMIT 1;
+              AND NOT ({NoticeTable.IgnoredSql("choice")}) LIMIT 1;
             """, ("$p", pair), ("$lo", familyPrefix), ("$hi", familyPrefix + "￿")) is not null;
 
     private void CloseFamily(SqliteTransaction? tx, long pair, string familyPrefix, bool includeIgnored = false) =>
@@ -155,6 +152,6 @@ public sealed partial class SqliteStateStore
     private void CloseRange(SqliteTransaction? tx, long pair, string lo, string hi, bool includeIgnored = false) =>
         _notices.CloseWhere(tx, "resolved", $"""
             pair_no=$p AND reason_key>=$lo AND reason_key<$hi AND {NoticeTable.ActionableSql("state")}
-              {(includeIgnored ? "" : "AND COALESCE(choice,'')<>'ignore'")};
+              {(includeIgnored ? "" : "AND NOT (" + NoticeTable.IgnoredSql("choice") + ")")};
             """, ("$p", pair), ("$lo", lo), ("$hi", hi));
 }

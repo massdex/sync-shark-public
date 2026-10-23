@@ -84,19 +84,7 @@ internal sealed partial class NoticeTable
             notice.NoticeId is { } reviewId && ById(pairNo, reviewId, transaction) is { } review &&
             review.Notice.Quarantine is not null && review.Notice.Rule == notice.Rule && PairPath.Same(review.Notice.Path, notice.Path))
             return;
-        if (SuppressDedicatedRetry(transaction, pairNo, notice)) return;
-        // An unreadable item owns its exact scan debt. Fold generic scan failures into that row,
-        // refreshing scheduling evidence even while the cause is suppressed instead of duplicating it.
-        if (notice.ReasonKey == "unreadable")
-            CloseResolved(transaction, pairNo,
-                ShortId.Make("n", notice.PairId, "40", RowCodec.Key(notice.Path), "sync-retry"), "superseded");
-        if (notice.ReasonKey == "sync-retry")
-        {
-            var unreadableId = ShortId.Make("n", notice.PairId, "30", RowCodec.Key(notice.Path), "unreadable");
-            if (ById(pairNo, unreadableId, transaction) is { Closed: false } unreadable)
-                notice = unreadable.Notice with { Detail = notice.Detail, CauseKey = notice.CauseKey,
-                    FailureRetry = notice.FailureRetry ?? unreadable.Notice.FailureRetry };
-        }
+        if (SuppressDedicatedRetry(transaction, pairNo, ref notice)) return;
         // Rule 30's unconfirmed comparison and rule 40's retry are one pending item, not two issues.
         // Fold old rows lazily by exact primary key; no scan, migration or schema bump is required.
         if (RetryNoticeFold.SuppressIncoming(notice,
@@ -295,7 +283,7 @@ internal sealed partial class NoticeTable
                 rebuildable.Category.ToLowerInvariant(), RowCodec.Key(rebuildable.Prefix));
         if (notice.ReasonKey == ExecutionReasons.ConflictCopyBlocked && notice.NoticeId is { Length: > 0 } successorId)
             return successorId;
-        if (notice.Storage is not null) return ShortId.Make("ns", notice.PairId, notice.ReasonKey);
+        if (notice.Storage is not null) return notice.NoticeId ?? ShortId.Make("ns", notice.PairId, notice.ReasonKey);
         // One durable notice per Recovery item: pending and ready share this id, so the verified transition updates
         // the same row instead of leaving a stale pending notice behind.
         if (IsRecoveryRestoreReason(notice.ReasonKey))
@@ -409,12 +397,9 @@ internal sealed partial class NoticeTable
             string.Equals(savedRecoveryId, incomingRecoveryId, StringComparison.Ordinal);
         if (IsRecoveryRestoreReason(savedReason) || IsRecoveryRestoreReason(notice.ReasonKey))
             return reader.GetInt64(0) == pairNo && recoveryItem;
-        // Storage notices keep one identity per pair and reason; compare the captured storage evidence alone.
+        // Storage families may refresh their cause in place; the captured entity/operation must still match.
         if (notice.Storage is not null)
-            return reader.GetInt64(0) == pairNo && reader.GetInt64(1) == notice.Rule &&
-                saved.Storage == notice.Storage &&
-                string.Equals(savedReason, notice.ReasonKey, StringComparison.Ordinal) &&
-                saved.RetainedVersion?.ActionId == notice.RetainedVersion?.ActionId;
+            return reader.GetInt64(0) == pairNo && reader.GetInt64(1) == notice.Rule && SameStorageProblem(saved, notice);
         var sameReason = string.Equals(savedReason, notice.ReasonKey, StringComparison.Ordinal);
         var sameRuleAndPath = recoveryItem || (reader.GetInt64(1) == notice.Rule &&
             (notice.Repair is { } repair

@@ -675,7 +675,7 @@ internal static class StoreSchema
     // At final26 integration this composes AFTER v12..v17/removal_review without changing their stamps.
     private static void MigrateRunSummary(SqliteConnection connection, SqliteTransaction? transaction) =>
         Execute(connection, transaction, RunSummaryDdl +
-            "CREATE INDEX IF NOT EXISTS nt_pair_reason ON notice(pair_no,reason_key);");
+            "CREATE INDEX IF NOT EXISTS nt_pair_reason ON notice(pair_no,reason_key); CREATE INDEX IF NOT EXISTS nt_pair_reason_path ON notice(pair_no,reason_key,path_key);");
 
     private static void MigrateMappedDirectories(SqliteConnection connection)
     {
@@ -714,7 +714,7 @@ internal static class StoreSchema
         "nt_restore_hold_path", "nt_restore_reason_page", "prepare_header", "prepare_row", "prepare_lookup", "prepare_cursor",
         "quarantine_upgrade", "defender_deferral_batch", "fs_quarantine", "defender_deferral", "defender_deferral_updated", "defender_grant", "defender_grant_path",
         "choice_victim", "cv_op", "cv_item", "cv_scan", "choice_restore_receipt", "choice_merge",
-        "run_summary", "run_summary_pair", "nt_pair_reason",
+        "run_summary", "run_summary_pair", "nt_pair_reason", "nt_pair_reason_path",
         "deletion_classification", "deletion_classification_path", "observation_checkpoint",
         "listing_checkpoint", "listing_page", "pair_pause", "local_walk", "local_walk_page",
     ];

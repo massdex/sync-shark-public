@@ -9,8 +9,7 @@ internal static partial class StorageChecks
         CatalogueEquivalenceChecks();
         FailureSummaryOptionsChecks();
         // All non-payload retry reasons, plus dynamic reason families and payload branches below.
-        // No Ignore is allowed on tagged keep-both successors: abandoning that successor would
-        // silently undo an established keep-both decision (ExecutionReasons.ConflictCopyBlocked).
+        // Ignore on tagged successors suppresses the cause without abandoning protected work.
         string[] reasons = ["run-history-unavailable", "run-unavailable", "store-maintenance", "autosync-watch-unavailable",
             "autosync-failed:test", "effects-ledger-incomplete", "recovery-restore-pending", "recovery-restore-ready", "folder-delete-unrestored",
             "unreadable", "item-blocked", "dropbox-storage-full", "online-only-item", "export-required",
@@ -41,8 +40,8 @@ internal static partial class StorageChecks
         Require(NoticeOptions.Options(quarantine).Any(option => option.Choice == NoticeChoices.QuarantineRetry),
             "security hold retains explicit user retry");
         var successor = new Notice("p1", 40, NoticeKind.Info, "Parent/file.txt", "Copy blocked; retry.", ExecutionReasons.ConflictCopyBlocked);
-        Require(NoticeOptions.Options(successor).Select(option => option.Choice).SequenceEqual([NoticeChoices.RetryNow]),
-            "tagged keep-both successor is Retry-only, never silently abandoned");
+        Require(NoticeOptions.Options(successor).Select(option => option.Choice).SequenceEqual([NoticeChoices.RetryNow, NoticeChoices.Ignore]),
+            "tagged keep-both successor offers Retry and cause-only Ignore");
         Require(!NoticeChoices.CanQueueExclusion(new("p1", 40, NoticeKind.Info, "file.txt", "failed", "sync-retry"),
             "file.txt", NoticeChoices.Ignore), "Ignore never enters deferred permanent exclusion queue");
     }
@@ -228,7 +227,7 @@ internal static partial class StorageChecks
     private static bool LegacyCanStopSyncing(Notice notice) =>
         notice.Path.Length != 0 && IsRetryNotice(notice) && !IsPairRetryNotice(notice) &&
         !IsRecoveryRestoreNotice(notice) && notice.RebuildableRule is null && notice.Storage is null &&
-        notice.ReasonKey is not ("permanent-boundary" or "folder-delete-unrestored" or "plan-bound-exceeded" or DropboxQuota.NoticeKey) &&
+        notice.ReasonKey is not ("permanent-boundary" or "folder-delete-unrestored" or "plan-bound-exceeded" or ExecutionReasons.ConflictCopyBlocked or DropboxQuota.NoticeKey) &&
         LegacyOptionsCore(notice).Any(option => option.Choice == Ignore);
 
     /// <summary>The one rendered catalogue for both CLI and UI.</summary>
@@ -345,7 +344,7 @@ internal static partial class StorageChecks
             : notice.ReasonKey == "recovery-unavailable"
             ? [new(RetryNow, "Retry now"), new(OpenRecoverySettings, "Recovery settings"), new(Ignore, "Ignore this cause")]
             : notice.ReasonKey == ExecutionReasons.ConflictCopyBlocked
-            ? [new(RetryNow, "Retry keep-both copy")]
+            ? [new(RetryNow, "Retry keep-both copy"), new(Ignore, "Ignore this cause")]
             : notice.ReasonKey == "planning-degraded"
             ? [new(RetryNow, "Retry now"), new(OpenFolderSettings, "Details / folder settings"), new(Ignore, "Ignore this cause")]
             // A pair-level transient summary has no one path to exclude: Retry makes its durable debts due again,

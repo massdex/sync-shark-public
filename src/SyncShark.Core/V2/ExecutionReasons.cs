@@ -50,6 +50,15 @@ public static class ExecutionReasons
         "Folder '{0}': {1} item(s) recoverable, not restored (or requiring recovery inspection). " +
         "Review Dropbox deleted files and version history; any current content was preserved: {2}");
 
+    public static readonly NoticeReason MissingConflictSuccessors = new("conflict-successors-missing",
+        "Conflict correspondence cannot be forgotten without its successors. Retry replans both copies; originals remain protected.");
+
+    public static readonly NoticeReason BaselineUnconfirmed = new("baseline-unconfirmed",
+        "The completed operation lacks matching file content evidence. No baseline was saved; Retry verifies the item again.");
+
+    public static readonly NoticeReason DeleteSourceMoved = new("delete-source-moved",
+        "The original source survived at another path after an interrupted deletion. The delete was not acknowledged; Retry replans from the surviving identity.");
+
     /// <summary>No observation rule exists for the action kind (executor.md section 6).</summary>
     public static readonly NoticeReason NoObservationRule = new("executor-no-observation-rule", "no observation rule for {0}");
 }

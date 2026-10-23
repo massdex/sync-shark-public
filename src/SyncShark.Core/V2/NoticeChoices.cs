@@ -263,7 +263,7 @@ public static class NoticeChoices
     public static bool CanStopSyncing(Notice notice) =>
         notice.Path.Length != 0 && IsRetryNotice(notice) && !IsPairRetryNotice(notice) &&
         !IsRecoveryRestoreNotice(notice) && notice.RebuildableRule is null && notice.Storage is null &&
-        notice.ReasonKey is not ("permanent-boundary" or "folder-delete-unrestored" or "plan-bound-exceeded" or DropboxQuota.NoticeKey) &&
+        notice.ReasonKey is not ("permanent-boundary" or "folder-delete-unrestored" or "plan-bound-exceeded" or ExecutionReasons.ConflictCopyBlocked or DropboxQuota.NoticeKey) &&
         CatalogueCore(notice).Any(option => option.Choice == Ignore);
 
     /// <summary>Admission uses the final catalogue with exact, ordinal choice identity.</summary>
@@ -384,7 +384,7 @@ public static class NoticeChoices
             : notice.ReasonKey == "recovery-unavailable"
             ? [(RetryNow, "Retry now", false), (OpenRecoverySettings, "Recovery settings", false), (Ignore, "Ignore this cause", false)]
             : notice.ReasonKey == ExecutionReasons.ConflictCopyBlocked
-            ? [(RetryNow, "Retry keep-both copy", false)]
+            ? [(RetryNow, "Retry keep-both copy", false), (Ignore, "Ignore this cause", false)]
             : notice.ReasonKey == "planning-degraded"
             ? [(RetryNow, "Retry now", false), (OpenFolderSettings, "Details / folder settings", false), (Ignore, "Ignore this cause", false)]
             // A pair-level transient summary has no one path to exclude: Retry makes its durable debts due again,

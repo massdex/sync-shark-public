@@ -11,6 +11,9 @@ internal static partial class ExecutorChecks
     public static async Task RunAsync()
     {
         await EndpointSeamChecks.RunAsync();
+        await CommitOnlyMissingSuccessorsAsync();
+        await ReconcileMoveUnhashedSourceAsync();
+        await DeleteSubmitEscalationAsync();
         await DeleteSourceChecksAsync();
         await Order_PhasesAndLevels();
         await Order_InterleavesTargets();
