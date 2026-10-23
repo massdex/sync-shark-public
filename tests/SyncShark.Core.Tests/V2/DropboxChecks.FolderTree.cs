@@ -125,11 +125,13 @@ internal static partial class DropboxChecks
     private static async Task FolderTreeLargeGuardedAsync(bool keepOneSource)
     {
         using var rig = await TreeRigAsync(140);
+        rig.A.DropboxHashes = true;
         var victims = FolderDelete.LiveDescendants(rig.Store, RootId, "big")
             .Append(rig.Delete.ExpectedTarget!).ToArray();
         foreach (var victim in victims)
         {
-            var source = rig.A.Seed(victim.Path, "content", victim.Kind);
+            var content = victim.Kind == ItemKind.Folder ? "" : "content " + Path.GetFileNameWithoutExtension(victim.Path)[1..];
+            var source = rig.A.Seed(victim.Path, content, victim.Kind);
             var key = "baseline-" + victim.ObjectId;
             var adopt = new SyncAction("adopt-" + victim.ObjectId, 1, ActionKind.Adopt, Side.B,
                 victim.Path, null, source, victim, false, key);
@@ -138,6 +140,10 @@ internal static partial class DropboxChecks
             await rig.A.DeleteAsync(new SyncAction("remove-" + source.ObjectId, 6, ActionKind.Delete, Side.A,
                 source.Path, null, null, source, false, null), default);
         }
+        Require(victims.All(victim => rig.Store.Baselines("p1", ["baseline-" + victim.ObjectId])
+                .SingleOrDefault() is { } baseline && baseline.A.Path == victim.Path &&
+                baseline.B.ObjectId == victim.ObjectId && Content.SameContent(baseline.A, baseline.B) == true),
+            "every guarded folder victim has a content-verified source identity baseline before deletion");
         var delete = rig.Delete with { Rule = 6, ChoiceRemove = false,
             ObjectKey = "baseline-" + rig.Delete.ExpectedTarget!.ObjectId };
         rig.A.AbsenceDiagnostics = new();
