@@ -92,13 +92,19 @@ internal sealed class FakeEndpoint : IInventorySource, IEndpointWriter, ISourceA
         lock (_gate) return Task.FromResult<bool?>(_items.Values.Any(entry => entry.State.ObjectId == historical.ObjectId));
     }
 
+    internal System.Collections.Concurrent.ConcurrentQueue<(string Path, string? ObjectId, bool Absent)>? AbsenceDiagnostics { get; set; }
+
     public Task<bool?> IsSourceAbsentAsync(ItemState? historical, string path, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
         lock (_gate)
-            return Task.FromResult<bool?>(!_items.ContainsKey(path) &&
+        {
+            var absent = !_items.ContainsKey(path) &&
                 (historical is null || (!_items.ContainsKey(historical.Path) &&
-                    !_items.Values.Any(entry => entry.State.ObjectId == historical.ObjectId))));
+                    !_items.Values.Any(entry => entry.State.ObjectId == historical.ObjectId)));
+            AbsenceDiagnostics?.Enqueue((path, historical?.ObjectId, absent));
+            return Task.FromResult<bool?>(absent);
+        }
     }
 
     public async Task<ItemState> PutAsync(SyncAction a, Stream content, CancellationToken ct)

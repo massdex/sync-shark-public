@@ -140,7 +140,26 @@ internal static partial class DropboxChecks
         }
         var delete = rig.Delete with { Rule = 6, ChoiceRemove = false,
             ObjectKey = "baseline-" + rig.Delete.ExpectedTarget!.ObjectId };
+        rig.A.AbsenceDiagnostics = new();
+        rig.H.Wire.DeleteBatchDiagnostics = new();
         var results = await rig.ApplyAsync(rig.Plan() with { Actions = [delete] });
+        Console.WriteLine($"FolderTreeLargeGuarded keep-one-source={keepOneSource}; planned-victims={victims.Length}; " +
+            $"result-actions={results.Count}; whole-folder-submitted={rig.H.Wire.WholeFolderDeletes}; " +
+            $"batch-sizes={string.Join(",", rig.H.Wire.DeleteBatchSizes)}; " +
+            $"done={results.Count(result => result.Outcome == Outcome.Done)}; " +
+            $"failed={results.Count(result => result.Outcome == Outcome.Failed)}; " +
+            $"uncertain={results.Count(result => result.Outcome == Outcome.Uncertain)}; " +
+            $"skipped={results.Count(result => result.Outcome == Outcome.Skipped)}");
+        foreach (var probe in rig.A.AbsenceDiagnostics)
+            Console.WriteLine($"FolderTreeLargeGuarded source-probe path={probe.Path}; historical={probe.ObjectId}; absent={probe.Absent}");
+        foreach (var batch in rig.H.Wire.DeleteBatchDiagnostics)
+            Console.WriteLine("FolderTreeLargeGuarded delete_batch " + batch);
+        foreach (var result in results)
+            Console.WriteLine($"FolderTreeLargeGuarded action={result.ActionId}; outcome={result.Outcome}; " +
+                $"source-unconfirmed={result.DeleteSourceUnconfirmed}; reason={result.Reason}");
+        foreach (var intent in rig.Store.UnresolvedIntents("p1"))
+            Console.WriteLine($"FolderTreeLargeGuarded unresolved action={intent.ActionId}; " +
+                $"checkpoint-kind={intent.ProviderEffect?.Kind}");
         if (!keepOneSource)
             Require(results.All(result => result.Outcome == Outcome.Done) && rig.H.Wire.WholeFolderDeletes == 1,
                 "more than128 admitted actions retain whole-folder delete_batch after bounded source preflight");

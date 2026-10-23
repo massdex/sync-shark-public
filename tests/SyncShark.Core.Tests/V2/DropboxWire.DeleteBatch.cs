@@ -12,6 +12,7 @@ internal sealed partial class DropboxWire
     internal Action? AfterDeleteWriteRefusal { get; set; }
     public Dictionary<string, int> DeleteWriteRefusals { get; } = new(StringComparer.OrdinalIgnoreCase);
     public List<int> DeleteBatchSizes { get; } = [];
+    internal System.Collections.Concurrent.ConcurrentQueue<string>? DeleteBatchDiagnostics { get; set; }
     public TaskCompletionSource? DeleteBatchEntered { get; set; }
     public TaskCompletionSource? ReleaseDeleteBatch { get; set; }
     public string? RaceDeleteBatchPath { get; set; }
@@ -85,6 +86,8 @@ internal sealed partial class DropboxWire
         _deleteJobEntries = results.ToArray();
         var jobId = "delete-job-" + (_deleteJobs.Count + 1);
         _deleteJobs[jobId] = _deleteJobEntries;
+        DeleteBatchDiagnostics?.Enqueue($"submitted job={jobId}; async={DeleteBatchAsyncJob}; " +
+            $"request={document.RootElement.GetRawText()}; outcomes={JsonSerializer.Serialize(_deleteJobEntries)}");
         return DeleteBatchAsyncJob
             ? Json(new Dictionary<string, object> { [".tag"] = "async_job_id", ["async_job_id"] = jobId })
             : CompletedDeleteBatch();
@@ -95,6 +98,9 @@ internal sealed partial class DropboxWire
         using var document = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
         var jobId = document.RootElement.GetProperty("async_job_id").GetString()!;
         if (BeforeDeleteJobCheck is { } before) await before();
+        DeleteBatchDiagnostics?.Enqueue($"poll job={jobId}; terminal={DeleteJobTerminal ?? "none"}; " +
+            $"pending-checks={DeleteBatchPendingChecks}; outcomes=" +
+            JsonSerializer.Serialize(_deleteJobs.GetValueOrDefault(jobId) ?? _deleteJobEntries ?? []));
         if (DeleteJobTerminal is { } terminal)
             return terminal == "failed"
                 ? Json(new Dictionary<string, object> { [".tag"] = terminal })
