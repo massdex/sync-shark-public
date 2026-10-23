@@ -41,6 +41,12 @@ internal static partial class DropboxChecks
         Require(prepared.Resolved["cached-00000"].DeletedUtc == DateTimeOffset.UnixEpoch &&
             proxy.PageReads == pageReads && proxy.MaxSelected <= 1 && proxy.FullReads == 0,
             "a later probe selects its own cache row without rebuilding the history cache");
+        var selectedReads = proxy.SelectedReads;
+        var neverExisted = await inventory.PrepareDeletionEvidenceAsync(
+            Enumerable.Range(0, 257).Select(i => $"never-existed-{i}").ToArray(), CancellationToken.None);
+        Require(neverExisted.Resolved.Count == 257 && neverExisted.Pending.Count == 0 &&
+            proxy.SelectedReads == selectedReads && proxy.PageReads == pageReads,
+            "never-existed candidates perform no evidence cache reads, even across a page boundary");
         var selected = observed.DeletionEvidenceRows(pair.PairId, RootId, ["CACHED-00000", "cached-10240", "missing"]);
         Require(selected.Count == 2 && selected.All(row => row.BasisCursor == "next") && proxy.FullReads == 0,
             "indexed selection is case-insensitive and returns only requested validated evidence");
@@ -68,6 +74,7 @@ internal static partial class DropboxChecks
         public int PageReads { get; private set; }
         public int MaxPage { get; private set; }
         public int MaxSelected { get; private set; }
+        public int SelectedReads { get; private set; }
 
         protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
         {
@@ -78,7 +85,10 @@ internal static partial class DropboxChecks
                 throw new InvalidOperationException("Inventory must not materialize deletion evidence history.");
             }
             if (method.Name == nameof(IStateStore.DeletionEvidenceRows) && args?.Length == 3)
+            {
+                SelectedReads++;
                 MaxSelected = Math.Max(MaxSelected, ((IReadOnlyList<string>)args[2]!).Count);
+            }
             var result = method.Invoke(Store, args);
             if (method.Name == nameof(IStateStore.DeletionEvidencePage))
             {

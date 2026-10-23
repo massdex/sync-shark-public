@@ -160,8 +160,16 @@ public sealed partial class SyncRun
         ProgressThrottle throttle, IReadOnlySet<string>? reviewedDeletes, CancellationToken ct,
         bool allowUnreviewedEvidence, Tally tally)
     {
+        var existingConsent = approved.Actions.Where(action => action.RemovalReviewChoice)
+            .Select(action => action.ActionId).ToHashSet(StringComparer.Ordinal);
         var initial = PrepareInitialExecution(approved, pair, reviewedDeletes, allowUnreviewedEvidence);
-        approved = initial.Plan;
+        // Preview stays read-only. Before publishing newly granted consent into any intent,
+        // freeze its full observation; an existing consent is never refreshed on retry.
+        var consented = new List<SyncAction>(initial.Plan.Actions.Count);
+        foreach (var action in initial.Plan.Actions)
+            consented.Add(action.RemovalReviewChoice && !existingConsent.Contains(action.ActionId)
+                ? await RecordRemovalConsentAsync(pair, action, ct).ConfigureAwait(false) : action);
+        approved = initial.Plan with { Actions = consented };
         var unapproved = initial.Unapproved;
         var releasedAtStart = initial.Released;
         var held = approved.HeldDeletions.ToDictionary(item => item.Path, StringComparer.OrdinalIgnoreCase);
@@ -736,7 +744,7 @@ public sealed partial class SyncRun
                 // Cancellation of the consumer cannot erase durable results already queued.
                 while (results.Reader.TryRead(out var item)) tally.Add(pair, item.Action, item.Result);
                 if (executionFailure is null || FailureRetryOwner.ScopeOf(executionFailure, token) != FailureRetryOwner.FailureScope.State)
-                    AddProviderNameRefusalNotice(pair);
+                    FairStoreGate.Cleanup(() => AddProviderNameRefusalNotice(pair));
             }
         }
         Trace($"{skippedRecovery} held deletes skipped Recovery (identical to Dropbox history)");

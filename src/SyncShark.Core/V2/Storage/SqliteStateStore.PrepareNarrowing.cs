@@ -159,14 +159,14 @@ public sealed partial class SqliteStateStore
         }
         finally
         {
-            InStore(() =>
+            lock (PrepareWritersGate) ActivePrepareGenerations.Remove(header.Generation);
+            FairStoreGate.Cleanup(() => InStore(() =>
             {
                 _connection.CreateFunction<string, bool, bool>("prepare_excluded", null);
                 _connection.CreateFunction<string, bool>("prepare_scope_excluded", null);
                 _connection.CreateFunction<string, string>("prepare_parent", null);
                 _connection.CreateFunction<string, string>("prepare_key", null);
-                lock (PrepareWritersGate) ActivePrepareGenerations.Remove(header.Generation);
-            });
+            }));
         }
 
         void WalkRows(Action work, bool notify = false)

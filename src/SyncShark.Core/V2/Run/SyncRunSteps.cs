@@ -612,7 +612,7 @@ public sealed partial class SyncRun
         finally
         {
             DropboxPilotClient.ReadWaiting.Value = previousWait;
-            CloseWaitNotice(); // Including cancellation, cooperative pause and shutdown.
+            FairStoreGate.Cleanup(CloseWaitNotice); // Including cancellation, cooperative pause and shutdown.
         }
 
         void CloseWaitNotice()
@@ -1268,7 +1268,7 @@ public sealed partial class SyncRun
         // Bounded parallel reads prevent unrelated removal scopes waiting on a serial provider round trip.
         var blocked = new List<SyncAction>();
         foreach (var batch in plan.Actions.Where(action => DeleteSourceGuard.ReviewedRemoval(action) &&
-                     FolderDelete.Expands(action)).Chunk(8))
+                     DeleteSourceGuard.RequiresReviewedSubtreeProof(action)).Chunk(8))
         {
             var checks = await Task.WhenAll(batch.Select(async action => (Action: action,
                 Unchanged: await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(action, pair, _store,
@@ -1327,7 +1327,7 @@ public sealed partial class SyncRun
         finally
         {
             if (executionFailure is null || FailureRetryOwner.ScopeOf(executionFailure, ct) != FailureRetryOwner.FailureScope.State)
-                AddProviderNameRefusalNotice(pair);
+                FairStoreGate.Cleanup(() => AddProviderNameRefusalNotice(pair));
         }
         return tally;
     }

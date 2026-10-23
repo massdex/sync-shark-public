@@ -35,6 +35,9 @@ internal static partial class StorageChecks
         }
         finally { release.Set(); await background; store.HeldBatchCommittedForTest = null; }
 
+        var consumedReview = store.WritePrepare(pair.PairId, writer => writer.Commit("{}", "review"),
+            SqliteStateStore.RemovalKey(pair, "reviewed"));
+        store.ConsumeRemovalReview(consumedReview.Generation);
         using var ownerReady = new ManualResetEventSlim();
         using var ownerRelease = new ManualResetEventSlim();
         var owner = Task.Run(() =>
@@ -57,9 +60,31 @@ internal static partial class StorageChecks
             cancel.Cancel();
             Require(await waiter.WaitAsync(TimeSpan.FromSeconds(2)), "cancelled waiter returns while holder still owns gate");
             Require(gate.Waiting == 0, "cancelled ticket removed without stranding later callers");
+            var cleanupTimedOut = false;
+            using (FairStoreGate.WithCancellation(cancel.Token))
+            {
+                try { FairStoreGate.Cleanup(() => store.ClearRemovalReview(consumedReview.Generation), TimeSpan.FromMilliseconds(50)); }
+                catch (TimeoutException) { cleanupTimedOut = true; }
+            }
+            Require(cleanupTimedOut && gate.Waiting == 0,
+                "blocked cleanup surfaces timeout instead of cancellation or silent loss and removes its ticket");
         }
         finally { ownerRelease.Set(); await owner; }
         Require(store.CountHeldIntents("p1") == 768, "queue remains usable after cancellation");
+        Require(store.ReadRemovalReview(pair, "reviewed")?.Digest == "consumed",
+            "cleanup timeout retains consumed digest and cannot revive removal consent");
+        using (FairStoreGate.WithCancellation(cancel.Token))
+        {
+            FairStoreGate.Cleanup(() => store.ClearRemovalReview(consumedReview.Generation));
+            var cleaned = false;
+            FairStoreGate.Cleanup(() => cleaned = store.CountHeldIntents("p1") == 768);
+            Require(cleaned, "cleanup enters real SQLite despite cancelled ambient run");
+            Require(FairStoreGate.CurrentCancellation == cancel.Token,
+                "cleanup restores the original cancelled admission scope");
+        }
+
+        Require(store.ReadRemovalReview(pair, "reviewed") is null,
+            "subsequent cleanup retires consumed rows without replaying consent");
 
         var captureEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var captureRelease = new ManualResetEventSlim();

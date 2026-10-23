@@ -156,7 +156,8 @@ public sealed partial class SyncRun
         }
         finally
         {
-            if (observationSession is not null && _store is SqliteStateStore db) db.ClearRemovalObservation(observationSession);
+            if (observationSession is not null && _store is SqliteStateStore db)
+                FairStoreGate.Cleanup(() => db.ClearRemovalObservation(observationSession));
         }
     }
 

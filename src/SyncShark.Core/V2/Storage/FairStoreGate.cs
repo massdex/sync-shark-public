@@ -12,6 +12,31 @@ internal sealed class FairStoreGate
         AdmissionCancellation.Value = ct;
         return new CancellationScope(previous);
     }
+    // Only cleanup calls use this independent admission deadline. It must never wrap effects
+    // or completed-effect commits. A blocked cleanup remains pending and reaches the normal
+    // failure owner; trying to write a notice through the same blocked gate would deadlock.
+    internal static void Cleanup(Action cleanup, TimeSpan? admissionTimeout = null)
+    {
+        using var deadline = new CancellationTokenSource(admissionTimeout ?? TimeSpan.FromSeconds(5));
+        using var admission = WithCancellation(deadline.Token);
+        try
+        {
+            cleanup();
+            deadline.Token.ThrowIfCancellationRequested();
+        }
+        catch (OperationCanceledException error) when (deadline.IsCancellationRequested)
+        {
+            var failure = new TimeoutException("Store cleanup admission timed out; retained safety state must be retried before dependent work.", error);
+            RunOutput.Observe(failure);
+            throw failure;
+        }
+        catch (Exception error)
+        {
+            RunOutput.Observe(error);
+            throw;
+        }
+    }
+
     private sealed class CancellationScope(CancellationToken previous) : IDisposable
     {
         public void Dispose() => AdmissionCancellation.Value = previous;

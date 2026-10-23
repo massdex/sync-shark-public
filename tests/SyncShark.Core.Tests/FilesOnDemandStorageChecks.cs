@@ -107,9 +107,15 @@ internal static class FilesOnDemandStorageChecks
             var savedNotice = store.OpenNotices("pair").Single(n => n.Storage is not null);
             Require(savedNotice.Storage!.ObjectId == "file-object" && NoticeChoices.Options(savedNotice).Count == 2,
                 "durable storage metadata and Retry/Ignore options survive restart");
+            var savedSettlement = store.StorageSettlementFor(local.RootId, "file-object", "remote");
             using (var connections = new CloudFilesLifetime((_, _, _) => throw new InvalidOperationException("Ignore must not connect"), _ => false))
                 await StorageNotices.ApplyAsync(store, connections, savedNotice, NoticeChoices.Ignore, CancellationToken.None);
-            Require(store.StorageSettlementPage().Count == 1 && store.NoticeById("pair", savedNotice.NoticeId!)!.Value.Closed,
+            // E9: Ignore retains open/actionable authority, hiding only the cause's presentation.
+            Require(store.StorageSettlementPage().Count == 1 &&
+                store.StorageSettlementFor(local.RootId, "file-object", "remote") == savedSettlement &&
+                store.NoticeById("pair", savedNotice.NoticeId!) is { Closed: false } &&
+                store.OpenNotices("pair").All(n => n.NoticeId != savedNotice.NoticeId) &&
+                store.UnresolvedNotices("pair").Any(n => n.NoticeId == savedNotice.NoticeId),
                 "shared Ignore suppresses only the cause without opening provider");
             StorageNotices.Report(store, store.Pair("pair")!, remote.RelativePath, savedNotice.Storage!, new IOException("synthetic conversion failure"));
             Require(!store.OpenNotices("pair").Any(n => n.Storage is not null), "ignored storage cause remains deduplicated");

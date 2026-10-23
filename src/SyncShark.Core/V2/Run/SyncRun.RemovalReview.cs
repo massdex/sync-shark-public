@@ -23,6 +23,14 @@ public sealed partial class SyncRun
         if (notice.RemovalSides is null && notice.ReasonKey == "reviewed-removal-skipped" && RebuildableSelection.Sides(pair) is { } rebuildable)
             notice = notice with { RemovalSides = [rebuildable.Cloud] };
         var header = db.ReadRemovalReview(pair, notice.Path);
+        if (header?.Digest == "consumed")
+        {
+            // A previous cleanup may have timed out. Retire old consent before any new review;
+            // the durable attention notice remains, and an old confirmation cannot replay it.
+            var consumedGeneration = header.Generation;
+            FairStoreGate.Cleanup(() => db.ClearRemovalReview(consumedGeneration));
+            header = null;
+        }
         var binding = notice.ReasonKey.StartsWith(NoticeChoices.RemovalReviewPrefix, StringComparison.Ordinal)
             ? notice.ReasonKey[NoticeChoices.RemovalReviewPrefix.Length..].Split(':') : [];
         var valid = binding.Length == 2 && header is not null && header.Generation == binding[0] && header.Digest != "consumed";
@@ -142,7 +150,7 @@ public sealed partial class SyncRun
             for (var depth = frozen.MaxDepth; depth >= 0; depth--)
                 await ApplyRows("removal-folders-" + depth, filesOnly: false);
         }
-        finally { db.ClearRemovalReview(approvedHeader.Generation); }
+        finally { FairStoreGate.Cleanup(() => db.ClearRemovalReview(approvedHeader.Generation)); }
 
         async Task ApplyRows(string kind, bool filesOnly)
         {

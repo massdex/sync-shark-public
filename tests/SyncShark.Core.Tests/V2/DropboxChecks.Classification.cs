@@ -60,6 +60,10 @@ internal static partial class DropboxChecks
             var allocated = GC.GetTotalAllocatedBytes(true);
             var prepared = await inventory.PrepareDeletionEvidenceAsync(paths, CancellationToken.None);
             allocated = GC.GetTotalAllocatedBytes(true) - allocated;
+            Console.WriteLine($"classification 100k components: cursor-invalid={delta.CursorInvalid}; " +
+                $"pending={prepared.Pending.Count}; resolved={prepared.Resolved.Count}; requested={paths.Length}; " +
+                $"revision-calls={h.Wire.Calls.Count(call => call.Contains("list_revisions", StringComparison.Ordinal))}; " +
+                $"lists-before={lists}; lists-after={h.Wire.ListRequests.Count}; allocated-bytes={allocated}; limit-bytes={96L * 1024 * 1024}");
             Require(!delta.CursorInvalid && prepared.Pending.Count == 0 && prepared.Resolved.Count == paths.Length &&
                 !h.Wire.Calls.Any(call => call.Contains("list_revisions", StringComparison.Ordinal)) &&
                 h.Wire.ListRequests.Count == lists && allocated < 96L * 1024 * 1024,

@@ -34,6 +34,12 @@ public sealed partial class SyncRun
                 return "The earlier rename is not verified yet. The notice remains open; retry to check its outcome.";
             return ScheduleRenamedItem(pair, notice, destination);
         }
+        // A completed captured rename may protect its own retry paths. Verify that exact
+        // effect before mutation admission; this only schedules observation, never another move.
+        if (repair.Destination is not null &&
+            await writer.ObserveAsync(repair.Item.Path, ct) is null &&
+            SameRepairItem(await writer.ObserveAsync(destination, ct), repair.Item))
+            return ScheduleRenamedItem(pair, notice, destination);
         // Use normal scope guards, including nested pairs, product-owned paths, links and placeholders.
         // A refused-name flag itself is not exclusion permission for a different entity.
         var guards = ActionPredicates(pair, Protection(pair, activeRetries: new HashSet<string>()));
@@ -43,9 +49,6 @@ public sealed partial class SyncRun
         {
             var current = await writer.ObserveAsync(repair.Item.Path, ct);
             var existing = await writer.ObserveAsync(destination, ct);
-            // Crash after commit, before returning: recognize only our captured exact identity and revision.
-            if (repair.Destination is not null && current is null && SameRepairItem(existing, repair.Item))
-                return ScheduleRenamedItem(pair, notice, destination);
             if (!SameRepairItem(current, repair.Item) && repair.Destination is null &&
                 current is not null && current.ObjectId == repair.Item.ObjectId && current.Kind == repair.Item.Kind)
             {

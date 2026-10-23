@@ -689,9 +689,15 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
         IReadOnlyList<string> paths, CancellationToken ct)
     {
         await PrepareEvidenceCacheAsync(ct);
-        return _known.DeletionEvidenceRows(_pairId, _root.RootId, paths)
-            .Where(row => row.Failure is null && row.BasisCursor == _evidenceBasis)
-            .ToDictionary(row => row.Path, StringComparer.OrdinalIgnoreCase);
+        var cached = new Dictionary<string, DeletionEvidenceRecord>(StringComparer.OrdinalIgnoreCase);
+        // Classification owns probe eligibility. Never create a SQLite reader per never-existed
+        // candidate merely to discover there is no cached evidence (100k candidates exceed the
+        // allocation budget that way). Keep selection/gate batches bounded even for many matches.
+        foreach (var batch in paths.Where(path => DropboxPilotClient.IsDeletionProbe(path,
+            _deletedExactFromFull!, _deletedAncestorsFromFull!)).Chunk(256))
+            foreach (var row in _known.DeletionEvidenceRows(_pairId, _root.RootId, batch))
+                if (row.Failure is null && row.BasisCursor == _evidenceBasis) cached[row.Path] = row;
+        return cached;
     }
 
     private async Task<IReadOnlyDictionary<string, DeletionEvidenceRecord>> PrepareEvidenceCacheAsync(CancellationToken ct)

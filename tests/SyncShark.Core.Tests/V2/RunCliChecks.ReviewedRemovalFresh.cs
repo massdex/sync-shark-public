@@ -11,6 +11,7 @@ internal static partial class RunCliChecks
         {
             if (!carried && change == "legacy") continue;
             var directory = TempRoot();
+            var passed = false;
             try
             {
                 using var store = SqliteStateStore.Open(Path.Combine(directory, "state"), Settings, TimeProvider.System);
@@ -65,8 +66,13 @@ internal static partial class RunCliChecks
                     Require(writer.Deletes == 0 && await target.ObserveAsync(folder.Path, default) is not null &&
                         store.UnresolvedNotices(fx.Pair.PairId).Any(notice => notice.Path == folder.Path && notice.ReasonKey == "reviewed-folder-grew"),
                         "new/changed/missing/unproven child holds whole removal with zero deletes: " + side + "/" + carried + "/" + change);
+                passed = true;
             }
-            finally { Cleanup(directory); }
+            finally
+            {
+                if (passed) Cleanup(directory);
+                else Console.Error.WriteLine("Retained reviewed-removal fixture: " + directory);
+            }
         }
     }
 }

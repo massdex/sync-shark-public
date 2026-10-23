@@ -66,13 +66,11 @@ public sealed partial class SqliteStateStore
         }
         finally
         {
-            using (_gate.Enter(CancellationToken.None))
-            {
-                lock (PrepareWritersGate) ActivePrepareGenerations.Remove(generation);
-            }
-            // Maintenance must neither mask the callback's exception nor report a committed
-            // publication as failed. Open retries any rows left by an interrupted cleanup.
-            TrySweepPrepareGenerations();
+            // The writer has finished: releasing its in-memory registration needs no SQLite gate.
+            lock (PrepareWritersGate) ActivePrepareGenerations.Remove(generation);
+            // A cleanup timeout is surfaced without undoing a committed publication. Open retries
+            // retained rows; no cancelled ambient run may silently strand housekeeping.
+            FairStoreGate.Cleanup(() => TrySweepPrepareGenerations());
         }
     }
 

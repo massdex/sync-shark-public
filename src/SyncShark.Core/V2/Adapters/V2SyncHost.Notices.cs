@@ -74,6 +74,7 @@ public sealed partial class V2SyncHost
         // Validate every target first and close nothing on failure: a stale selection must change nothing.
         var targets = new List<(Notice Notice, string Choice, string? Item, NoticeActionInput? Input)>();
         var messages = new Dictionary<string, string>(StringComparer.Ordinal);
+        var refused = new HashSet<string>(StringComparer.Ordinal);
         foreach (var request in requests)
         {
             var itemChoice = request.NoticeChoice is { } named && NoticeChoices.IsHeldItemChoice(named);
@@ -135,7 +136,9 @@ public sealed partial class V2SyncHost
             }
             if (NoticeChoices.IsRetryNotice(notice))
             {
-                messages[notice.NoticeId!] = await ApplyRetryNoticeChoiceAsync(notice, choice, cancellationToken, onProgress, input);
+                var result = await ApplyRetryNoticeChoiceAsync(notice, choice, cancellationToken, onProgress, input);
+                messages[notice.NoticeId!] = result.Message;
+                if (!result.Accepted) refused.Add(notice.NoticeId!);
                 continue;
             }
             if (NoticeChoices.IsQuarantineChoice(choice))
@@ -176,7 +179,7 @@ public sealed partial class V2SyncHost
         {
             var pairDef = _store.Pair(group.Key)
                 ?? throw new InvalidDataException("This folder pair is no longer available.");
-            var decisions = group.Select(target => new SyncDecision(target.Notice.Path, SyncDecisionKind.Recovered, messages.GetValueOrDefault(target.Notice.NoticeId!) ?? NoticeChoices.Result(target.Choice, target.Notice)))
+            var decisions = group.Select(target => new SyncDecision(target.Notice.Path, refused.Contains(target.Notice.NoticeId!) ? SyncDecisionKind.Blocked : SyncDecisionKind.Recovered, messages.GetValueOrDefault(target.Notice.NoticeId!) ?? NoticeChoices.Result(target.Choice, target.Notice)))
                 .ToArray();
             items.Add(new SyncAuthorityBatchItemResult(Mapped(pairDef), new SyncRunResult(group.Key, decisions), null, null));
         }

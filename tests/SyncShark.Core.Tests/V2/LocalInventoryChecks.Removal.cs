@@ -43,7 +43,16 @@ internal static partial class LocalInventoryChecks
             LocalChecks.Require(consent.RemovalReviewChoice && consent.FrozenRemovalSignature is not (null or "unproven") &&
                 await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(consent, consentPair, store, inventory, default),
                 "consent freezes complete carried observation together with authority on " + side);
+            var plannedConsent = await DeleteSourceGuard.RecordRemovalConsentAsync(
+                proposed with { ActionId = "planned-consent", DescendantsPlanned = true, PreserveIgnoredChildren = false },
+                consentPair, store, inventory, default);
+            LocalChecks.Require(DeleteSourceGuard.RequiresReviewedSubtreeProof(plannedConsent) &&
+                plannedConsent.FrozenRemovalSignature is not (null or "unproven") &&
+                await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(plannedConsent, consentPair, store, inventory, default),
+                "separately planned folder freezes carried children on " + side);
             LocalChecks.Seed(directory, "consented/late.tmp", "later");
+            LocalChecks.Require(!await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(plannedConsent, consentPair, store, inventory, default),
+                "separately planned folder holds ignored child added after consent on " + side);
             LocalChecks.Require(!await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(consent, consentPair, store, inventory, default),
                 "carried file added after consent holds whole removal on " + side);
             var incompleteConsent = await DeleteSourceGuard.RecordRemovalConsentAsync(proposed, consentPair, store, inventory, default);

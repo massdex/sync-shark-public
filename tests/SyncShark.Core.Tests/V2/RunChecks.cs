@@ -757,6 +757,7 @@ internal static partial class RunChecks
         var plan = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
         fx.A.Seed("changed.txt", "different bytes");
         var report = await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), CancellationToken.None);
+        Console.WriteLine($"CHANGED SOURCE MEASUREMENT outcome={report.Outcome}; skipped={report.Skipped}; deferred={report.Deferred}; done={report.Done}; failed={report.Failed}; firstSyncDone={fx.Store.FirstSyncDone(fx.Pair.PairId)}");
         Require(report.Skipped == 1 && report.Deferred == 0 && report.Done == 0 && report.Failed == 0,
             "a changed source is counted as skipped, but no longer blocks first-sync completion");
         Require(report.Outcome == RunOutcomes.Partial && fx.Store.FirstSyncDone(fx.Pair.PairId) &&

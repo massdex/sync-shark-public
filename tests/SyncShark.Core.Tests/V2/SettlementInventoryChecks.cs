@@ -85,9 +85,12 @@ internal static class SettlementInventoryChecks
             var removal = new SyncAction("pointer-review", 40, ActionKind.Delete, Side.A, "", null,
                 null, reviewRoot, false, null) { RemovalReviewChoice = true };
             var proof = await DeleteSourceGuard.CaptureReviewedRemovalAsync(removal, pair, store, inventory, default);
-            Require(proof is not null && await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(
-                removal with { FrozenRemovalSignature = proof }, pair, store, inventory, default),
+            Require(proof is not null && proof == await DeleteSourceGuard.CaptureReviewedRemovalAsync(
+                removal, pair, store, inventory, default),
                 "real local subtree reader proves owned pointers from native identity and version metadata without hydration");
+            Require(!await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(
+                removal with { FrozenRemovalSignature = proof }, pair, store, inventory, default),
+                "whole-root observation never authorises removal of the pair root");
             store.WriteSnapshot(scanned with { Gen = store.BeginGeneration(pair.A.RootId, "snapshot") });
             // An unavailable NTFS journal can independently protect this disposable root.
             // Assert the foreign-stub classification, not the absence of unrelated gap protection.

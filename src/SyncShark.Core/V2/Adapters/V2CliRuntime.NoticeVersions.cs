@@ -96,7 +96,7 @@ public sealed partial class V2CliRuntime
                     var removed = 0;
                     var removalFailures = 0;
                     var removalUncertain = 0;
-                    var message = await _run.ApplyRetryNoticeChoiceAsync(pairId, conflictId, choice, cancellationToken,
+                    var choiceResult = await _run.ApplyRetryNoticeChoiceResultAsync(pairId, conflictId, choice, cancellationToken,
                         (previous, updated) => SaveNarrowerPair(previous, updated), (action, result) =>
                         {
                             if (result.Outcome == Outcome.Done && action.ExpectedTarget?.Kind == ItemKind.File) removed++;
@@ -104,7 +104,10 @@ public sealed partial class V2CliRuntime
                             if (result.Outcome == Outcome.Uncertain) removalUncertain++;
                         }, new RunProgressForwarder(Console.Error.WriteLine), acceptedExclusion: acceptedExclusion, input: input,
                         updateRebuildableRule: (currentPair, current, replacement) => UpdateRebuildableRule(currentPair, current, replacement));
-                    Console.Error.WriteLine(message);
+                    Console.Error.WriteLine(choiceResult.Message);
+                    if (!choiceResult.Accepted)
+                        return new SyncCliRunData(pairId, pair.Name, 0, 0, 0, 0, 1, false)
+                        { NotAttempted = 1 };
                     if ((NoticeChoices.IsPairRetryNotice(notice) && choice != NoticeChoices.RetryNow) || NoticeChoices.IsIndexFailure(notice) || notice.ReasonKey == PlanNotices.PlanBoundExceededKey)
                         return new SyncCliRunData(pairId, pair.Name, 0, 0, 0, 0, 0, false);
                     if (choice is not (NoticeChoices.RestoreAgain or NoticeChoices.Rename or NoticeChoices.RetryNow or NoticeChoices.DeleteReviewed or NoticeChoices.KeepRestore) || !_store.FirstSyncDone(pairId))

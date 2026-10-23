@@ -67,9 +67,17 @@ internal static class DeleteSourceGuard
     internal static bool ReviewedRemoval(SyncAction action) => action.Kind == ActionKind.Delete &&
         (action.FirstSyncChoice || action.ChoiceRemove || action.RebuildableRemove || action.RemovalReviewChoice);
 
+    // Even a separately planned folder delete can carry ignored leftovers at effect time.
+    // Only an empty-only folder delete that preserves those children has no subtree authority.
+    internal static bool RequiresReviewedSubtreeProof(SyncAction action) =>
+        action.Kind == ActionKind.Delete && (action.Path.Length == 0 ||
+        (action.ExpectedTarget?.Kind == ItemKind.Folder &&
+         (FolderDelete.Expands(action) || !action.PreserveIgnoredChildren)));
+
     internal static Notice ReviewedRemovalNotice(string pairId, string path, IReadOnlyList<SyncAction> actions) =>
         new(pairId, 40, NoticeKind.UserDecision, path,
-            "The reviewed removal no longer matches its saved item or contents, or a complete fresh read could not prove it. Nothing was removed or copied back." + NoticeChoices.RemovalAttentionHelp,
+            (path.Length == 0 ? "The pair root cannot be removed by a reviewed removal. Review individual items instead. Nothing was removed or copied back." :
+                "The reviewed removal no longer matches its saved item or contents, or a complete fresh read could not prove it. Nothing was removed or copied back.") + NoticeChoices.RemovalAttentionHelp,
             actions.Any(action => action.ExpectedTarget?.Kind == ItemKind.Folder) ? "reviewed-folder-grew" : "reviewed-removal-skipped",
             RemovalSides: actions.Select(action => action.Target).Distinct().ToArray());
 
@@ -113,6 +121,8 @@ internal static class DeleteSourceGuard
     internal static async Task<bool> ReviewedRemovalUnchangedAsync(SyncAction action, PairDef pair,
         IStateStore store, IInventorySource inventory, CancellationToken ct)
     {
+        // Whole-root inventory is useful proof input, but never destructive authority over a pair root.
+        if (action.Path.Length == 0) return false;
         var observed = await ObserveReviewedRemovalAsync(action, pair, store, inventory, ct).ConfigureAwait(false);
         if (observed.Signature is null) return false;
         if (action.ExpectedTarget?.Kind != ItemKind.Folder) return true;
@@ -131,7 +141,7 @@ internal static class DeleteSourceGuard
         IStateStore store, IInventorySource inventory, CancellationToken ct)
     {
         if (action.Kind != ActionKind.Delete) return action;
-        if (!FolderDelete.Expands(action) || action.FrozenRemovalSignature is not null)
+        if (!RequiresReviewedSubtreeProof(action) || action.FrozenRemovalSignature is not null)
             return action with { RemovalReviewChoice = true };
         var budget = action.CarriedIgnoredBudget;
         var signature = await CaptureDisclosedRemovalAsync(action, pair, store, inventory,
@@ -183,7 +193,8 @@ internal static class DeleteSourceGuard
                                 Content.SideStamp(item) != Content.SideStamp(expected)))) valid = false;
                         rootSeen = true;
                     }
-                    else if (!folder || !PairPath.IsUnder(item.Path, action.Path)) valid = false;
+                    // Root-prefix coverage is enabled only for observation, never removal admission.
+                    else if (!folder || !PairPath.CoveredBy(item.Path, [action.Path], rootPrefixCovers: true)) valid = false;
                     else
                     {
                         var carried = refused.Contains(item) || SyncIgnorePolicy.IsIgnored(item.Path, item.Kind == ItemKind.Folder, rules);
@@ -211,7 +222,7 @@ internal static class DeleteSourceGuard
             damaged = FailureRetryOwner.ScopeOf(error, ct) == FailureRetryOwner.FailureScope.State;
             throw;
         }
-        finally { if (!damaged) db?.ClearRemovalObservation(session); }
+        finally { if (!damaged && db is not null) FairStoreGate.Cleanup(() => db.ClearRemovalObservation(session)); }
     }
 
     internal static async Task<bool?> ObserveAbsenceAsync(IEndpointWriter source, ItemState? historical,

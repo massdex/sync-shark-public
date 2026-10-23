@@ -60,6 +60,29 @@ internal static partial class RunChecks
         await run.ApplyRetryNoticeChoiceAsync(pairId, notice.NoticeId!, NoticeChoices.Rename, default);
         Require(fx.WriterA.Moves == 1, "repeated rename verifies existing effect without a second move");
         Require(store.SyncRetryAt(pairId, "safe.txt") is not null, "rename schedules targeted re-observation");
+        var savedRenameDebt = store.SyncRetryAt(pairId, "safe.txt");
+        var host = new V2SyncHost(store, run, new ObservedExecutor(fx.Executor), null!, Settings, TimeProvider.System,
+            Path.Combine(folder, "state.db"));
+        var refusedUi = await host.ResolveConflictSelectionCommandAsync(
+            [new(new(notice.NoticeId!, pairId, notice.Path, 0), SyncAuthorityConflictResolutionKind.PreserveBoth,
+                NoticeChoices.Rename, NoticeInput: new("different.txt"))]);
+        Require(refusedUi.Items.Single().Result is { Blocked: 1, Recovered: 0 },
+            "UI mismatched repeat returns typed refusal rather than an escaped exception");
+        var cli = new V2CliRuntime(null, store, run, new EndpointRootProbe(fx.Provider), folder);
+        var refusedCli = await cli.ResolveNoticeAsync(pairId, notice.Path, NoticeChoices.Rename,
+            notice.NoticeId, 0, null, default, input: new("different.txt"));
+        Require(refusedCli.Blocked == 1 && refusedCli.NotAttempted == 1 && fx.WriterA.Moves == 1 &&
+            store.SyncRetryAt(pairId, "safe.txt") == savedRenameDebt &&
+            await fx.A.ObserveAsync("different.txt", default) is null &&
+            (await fx.A.ObserveAsync("safe.txt", default))?.ObjectId == original.ObjectId,
+            "CLI mismatched repeat returns typed refusal and preserves bytes, debt and the captured destination");
+        var refusalNotice = store.OpenNotices(pairId).Single(n => n.NoticeId == notice.NoticeId);
+        Require(refusalNotice.Repair?.Destination == "safe.txt" &&
+            refusalNotice.Detail.Contains("earlier rename", StringComparison.Ordinal) &&
+            NoticeChoices.Options(refusalNotice).Any(o => o.Choice == NoticeChoices.RetryNow) &&
+            NoticeChoices.Options(refusalNotice).Any(o => o.Choice == NoticeChoices.Ignore) &&
+            store.OpenNotices(pairId).Count(n => n.ReasonKey == "provider-name-refused") == 1,
+            "refused choices update one actionable notice with why, Retry and Ignore");
         await FirstSyncAsync(run, fx);
         Require(store.NoticeById(pairId, notice.NoticeId!) is { Closed: true }, "notice closes only after renamed identity has synced");
         var reserved = fx.B.Seed("CON", "", ItemKind.Folder);

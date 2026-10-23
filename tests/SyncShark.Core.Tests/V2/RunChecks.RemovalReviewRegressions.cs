@@ -264,6 +264,9 @@ internal static partial class RunChecks
                     review.NoticeId!, NoticeChoices.ConfirmRemoval, canceled.Token, removalResult: (_, _) => canceled.Cancel()));
                 Require(store.ReadRemovalReview(fx.Pair, "folder") is null, "interrupted confirmation retires its consumed review");
                 Require(store.OpenNotices(fx.Pair.PairId).Count(NoticeChoices.IsRemovalAttention) == 1, "interrupted confirmation leaves exactly one notice");
+                var hold = store.OpenNotices(fx.Pair.PairId).Single(NoticeChoices.IsRemovalAttention);
+                Require(NoticeChoices.Options(hold).Any(option => option.Choice == NoticeChoices.ReviewRemoval),
+                    "callback cancellation completes cleanup and leaves one actionable Review again hold");
                 await runtime.SaveIgnoresAsync(fx.Pair.PairId, "FileName:keep.txt", default);
                 await runtime.SetSelectionAsync(fx.Pair.PairId, "folder", "exclude", default);
                 await runtime.RescanPairAsync(fx.Pair.PairId, null, default);

@@ -342,7 +342,7 @@ internal sealed class RunScope
         }
         finally
         {
-            try { FlushDeferred(); }
+            try { FairStoreGate.Cleanup(FlushDeferred); }
             finally
             {
                 _deferredPair = null;

@@ -240,7 +240,11 @@ internal static class InterruptedDeleteChecks
             Require(pendingResult.Outcome == Outcome.Uncertain && !pendingResult.ForgetUnsafeDeleteBaseline,
                 "unknown provider job/submit never restores under a possibly running delete");
         }
-        var absentSubmission = await EffectResolver.ResolveAsync(elapsed, writer, source, default, historicalDeleteSource: historical);
+        var pendingRestoreSubmission = await EffectResolver.ResolveAsync(elapsed, writer, source, default, historicalDeleteSource: historical);
+        Require(pendingRestoreSubmission.Outcome == Outcome.Uncertain && !pendingRestoreSubmission.ForgetUnsafeDeleteBaseline,
+            "E8 conservative default keeps a pending restoration from acquiring a second restore transition");
+        var absentSubmission = await EffectResolver.ResolveAsync(elapsed, writer, source, default,
+            deleteRestorePending: false, historicalDeleteSource: historical);
         Require(absentSubmission.Outcome == Outcome.Skipped && absentSubmission.ForgetUnsafeDeleteBaseline,
             "E8 absent submission uses source-aware absence resolution and protects surviving source content");
         var terminal = await EffectResolver.ResolveAsync(pending, new TerminalWriter(writer), source, default,
