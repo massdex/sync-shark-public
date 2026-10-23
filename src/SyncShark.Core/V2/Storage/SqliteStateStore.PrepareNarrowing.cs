@@ -29,6 +29,7 @@ public sealed partial class SqliteStateStore
                 ("$d", NarrowingDigest), ("$p", previous.PairId));
             tx.Commit();
         });
+        Exception? primaryError = null;
         try
         {
             InStore(() =>
@@ -157,6 +158,7 @@ public sealed partial class SqliteStateStore
                 tx.Commit();
             });
         }
+        catch (Exception error) { primaryError = error; throw; }
         finally
         {
             lock (PrepareWritersGate) ActivePrepareGenerations.Remove(header.Generation);
@@ -166,7 +168,7 @@ public sealed partial class SqliteStateStore
                 _connection.CreateFunction<string, bool>("prepare_scope_excluded", null);
                 _connection.CreateFunction<string, string>("prepare_parent", null);
                 _connection.CreateFunction<string, string>("prepare_key", null);
-            }));
+            }), primaryError: primaryError);
         }
 
         void WalkRows(Action work, bool notify = false)

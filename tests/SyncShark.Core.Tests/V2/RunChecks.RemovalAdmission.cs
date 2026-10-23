@@ -3,7 +3,7 @@ namespace Massdex.SyncShark.V2;
 internal static partial class RunChecks
 {
     // Part A only: no cursor/scope-retention dependency; call the production execution lane directly.
-    private static async Task DeferredEvidence_ReviewedFolderFreshAdmissionAsync()
+    internal static async Task DeferredEvidence_ReviewedFolderFreshAdmissionAsync()
     {
         foreach (var side in new[] { Side.A, Side.B })
         foreach (var preserve in new[] { false, true })
@@ -17,14 +17,25 @@ internal static partial class RunChecks
                 RemovalReviewChoice = true, DescendantsPlanned = true, PreserveIgnoredChildren = preserve,
                 FrozenRemovalSignature = FolderDelete.Signature([])
             };
+            var source = side == Side.A ? fx.B : fx.A;
+            var target = side == Side.A ? fx.A : fx.B;
+            var independentFile = source.Seed("independent.txt", "keep syncing");
+            var independent = new SyncAction("independent-copy", 1, ActionKind.CopyNew, side,
+                independentFile.Path, null, independentFile, null, false, null);
             var admission = typeof(SyncRun).GetMethod("AdmitReviewedRemovalsAsync",
                 System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
             var result = await (Task<Plan>)admission.Invoke(fx.Run(),
-                [new Plan(fx.Pair.PairId, 1, [action], []), fx.Pair, CancellationToken.None])!;
-            Require(result.Actions.Count == 0 && result.Notices.Any(NoticeChoices.IsRemovalAttention) &&
+                [new Plan(fx.Pair.PairId, 1, [action, independent], []), fx.Pair, CancellationToken.None])!;
+            Require(result.Actions.Count == 1 && result.Actions[0].ActionId == independent.ActionId &&
+                result.Notices.Any(NoticeChoices.IsRemovalAttention) &&
                 fx.Store.SyncRetryAt(fx.Pair.PairId, "")?.ReviewedActions?.Count == 1 &&
                 fx.WriterA.Deletes == 0 && fx.WriterB.Deletes == 0,
                 "pair-root reviewed removal is held with a notice regardless of subtree proof or preserve flag");
+            await foreach (var effect in NewExecutor(fx.Store).ApplyAsync(result, fx.WriterA, fx.WriterB, default))
+                Require(effect.Outcome == Outcome.Done, "independent copy executes while root removal stays held");
+            Require(await target.ObserveAsync(independentFile.Path, default) is not null &&
+                fx.WriterA.Deletes == 0 && fx.WriterB.Deletes == 0,
+                "held pair-root action does not block independent work on either side");
         }
         foreach (var side in new[] { Side.A, Side.B })
         foreach (var held in new[] { false, true })

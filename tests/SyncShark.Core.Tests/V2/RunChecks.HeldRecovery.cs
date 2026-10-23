@@ -262,6 +262,8 @@ internal static partial class RunChecks
         var runtime = new V2CliRuntime(null, fx.Store, fx.Run(), new EndpointRootProbe(fx.Provider), root);
         await runtime.PrepareFirstSyncAsync(fx.Pair.PairId, _ => { }, default);
         var result = await runtime.ApplyFirstSyncAsync(fx.Pair.PairId, null, true, null, _ => { }, default);
+        Console.WriteLine($"UNCONFIRMED-SUMMARY count={result.ContentUnconfirmedCount}; examples={result.ContentUnconfirmedExamples.Count}; " +
+            $"deferred={result.Deferred}; complete={result.FirstSyncComplete}; evidence={result.DeletionEvidencePendingCount}");
         Require(result is { ContentUnconfirmedCount: 55, Deferred: 0, FirstSyncComplete: true,
                 DeletionEvidencePendingCount: 0 } && result.ContentUnconfirmedExamples.SequenceEqual(paths.Take(50)),
             "CLI exposes full content-unconfirmed count and only fifty deterministic example paths");

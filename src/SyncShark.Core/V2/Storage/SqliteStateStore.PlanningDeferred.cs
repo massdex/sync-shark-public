@@ -31,6 +31,13 @@ public sealed partial class SqliteStateStore
         ORDER BY d.version,d.root_no,d.object_id LIMIT $limit;
         """;
 
+    // One identity/version seek per admitted entity. A JSON UPDATE FROM lets SQLite choose
+    // the pair/version index as its outer loop and re-scan the JSON page for every queued row.
+    internal const string DeferredPlanningRotateSql = """
+        UPDATE planning_deferred SET version=$next
+        WHERE root_no=$root AND object_id=$id AND pair_no=$pair AND version=$version;
+        """;
+
     internal void DeferPlanning(string pairId, IEnumerable<(string Root, ItemState Item)> items)
     {
         foreach (var batch in items.Chunk(256))
@@ -134,19 +141,21 @@ public sealed partial class SqliteStateStore
             // their admission order. Checked arithmetic keeps versions monotonic; an impossible
             // overflow throws before any update instead of lowering a selected version.
             var start = checked(beforeVersion + 1);
-            var rotated = admitted.Select((row, index) => new
-            {
-                root = row.Root, id = row.ObjectId, version = row.Version, rotated = checked(start + index)
-            }).ToArray();
-            StoreSchema.Execute(_connection, tx, """
-                UPDATE planning_deferred AS d SET version=j.rotated
-                FROM (SELECT json_extract(value,'$.root') root,json_extract(value,'$.id') id,
-                        json_extract(value,'$.version') version,json_extract(value,'$.rotated') rotated
-                      FROM json_each($rows)) j
-                WHERE d.pair_no=$p AND d.root_no=j.root AND d.object_id=j.id AND d.version=j.version;
-                """, ("$p", pair.Value), ("$rows", System.Text.Json.JsonSerializer.Serialize(rotated)));
+            using var rotateRow = StoreSchema.Command(_connection, tx, DeferredPlanningRotateSql);
+            var next = rotateRow.Parameters.AddWithValue("$next", 0L);
+            var root = rotateRow.Parameters.AddWithValue("$root", 0L);
+            var id = rotateRow.Parameters.AddWithValue("$id", "");
+            rotateRow.Parameters.AddWithValue("$pair", pair.Value);
+            var version = rotateRow.Parameters.AddWithValue("$version", 0L);
+            rotateRow.Prepare();
             for (var index = 0; index < admitted.Count; index++)
-                admitted[index] = admitted[index] with { Version = rotated[index].rotated };
+            {
+                var row = admitted[index];
+                var rotated = checked(start + index);
+                next.Value = rotated; root.Value = row.Root; id.Value = row.ObjectId; version.Value = row.Version;
+                rotateRow.ExecuteNonQuery();
+                admitted[index] = row with { Version = rotated };
+            }
         }
         tx.Commit();
         return admitted;

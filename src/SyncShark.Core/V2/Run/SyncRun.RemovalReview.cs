@@ -142,6 +142,7 @@ public sealed partial class SyncRun
         db.ConsumeRemovalReview(approvedHeader.Generation);
         _store.CloseNotice(notice.NoticeId!, choice);
         var failed = false;
+        Exception? primaryError = null;
         try
         {
             await ApplyRows(RemovalRows, filesOnly: true);
@@ -150,7 +151,8 @@ public sealed partial class SyncRun
             for (var depth = frozen.MaxDepth; depth >= 0; depth--)
                 await ApplyRows("removal-folders-" + depth, filesOnly: false);
         }
-        finally { FairStoreGate.Cleanup(() => db.ClearRemovalReview(approvedHeader.Generation)); }
+        catch (Exception error) { primaryError = error; throw; }
+        finally { FairStoreGate.Cleanup(() => db.ClearRemovalReview(approvedHeader.Generation), primaryError: primaryError); }
 
         async Task ApplyRows(string kind, bool filesOnly)
         {

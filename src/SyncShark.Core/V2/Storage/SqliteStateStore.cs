@@ -149,21 +149,24 @@ public sealed partial class SqliteStateStore : IStateStore
         InStore(CleanupStorageItems);
         InStore(() => BindStoragePathIntents(snapshot.RootId));
         InStore(() => FollowQuarantineNotices(snapshot.RootId));
-        InStore(() => ObserveDefenderGrants(snapshot.RootId, publish: true));
+        ObserveDefenderGrants(snapshot.RootId, publish: true);
     }
 
-    public void WriteDelta(Delta delta) => InIndexingStore(() =>
+    public void WriteDelta(Delta delta)
     {
-        if (delta.CursorInvalid)
-            throw new InvalidOperationException("A cursor-invalid delta must not be written; run a full scan.");
-        var rootNo = RootNo(delta.RootId) ?? throw new InvalidOperationException($"Unknown root {delta.RootId}");
-        RequireOpenGen(null, delta.Gen, rootNo);
-        _files.WriteDelta(delta, rootNo);
-        CleanupStorageItems();
-        BindStoragePathIntents(delta.RootId);
-        FollowQuarantineNotices(delta.RootId);
+        InIndexingStore(() =>
+        {
+            if (delta.CursorInvalid)
+                throw new InvalidOperationException("A cursor-invalid delta must not be written; run a full scan.");
+            var rootNo = RootNo(delta.RootId) ?? throw new InvalidOperationException($"Unknown root {delta.RootId}");
+            RequireOpenGen(null, delta.Gen, rootNo);
+            _files.WriteDelta(delta, rootNo);
+            CleanupStorageItems();
+            BindStoragePathIntents(delta.RootId);
+            FollowQuarantineNotices(delta.RootId);
+        });
         ObserveDefenderGrants(delta.RootId, publish: true);
-    });
+    }
 
     public void CompleteGeneration(long gen, string cursor, bool complete) =>
         CompleteGeneration(gen, cursor, complete, settleInventory: false, cursorHeldForEvidence: false);
@@ -713,6 +716,11 @@ public sealed partial class SqliteStateStore : IStateStore
     public void AddNotices(IEnumerable<Notice> notices)
     {
         var prepared = notices.Select(notice => PrepareDefenderNotice(notice, retainLive: false)).ToArray();
+        PublishPreparedNotices(prepared);
+    }
+
+    private void PublishPreparedNotices(IReadOnlyList<CapturedDefenderNotice> prepared)
+    {
         InStore(() =>
         {
             using var transaction = _connection.BeginTransaction();

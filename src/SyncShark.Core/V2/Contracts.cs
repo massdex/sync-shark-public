@@ -227,6 +227,7 @@ public sealed record SyncRetry(string Path, string Kind, int Attempts, string La
     public string? DeleteBlockedDetail { get; init; }
     public bool DeleteBlockedDeferred { get; init; }
     public bool MissingDeleteIdentityReview { get; init; }
+    public FailureRetryOwner.FailureKind? FailureKind { get; init; }
 }
 
 /// <summary>The kind of notice raised to the user.</summary>

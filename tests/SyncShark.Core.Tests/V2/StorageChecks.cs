@@ -81,6 +81,7 @@ internal static partial class StorageChecks
         SleepingRemovalObservationSurvivesReopen(root);
         MissingPrepareMatchReadIsFilteredAndPaged(root);
         RetryDeadlineUsesExactPersistedInstant(root);
+        ContentProofSummaryIncludesSleepingDebt(root);
         CommitResultOtherPairThrows(root);
         await Executor_FolderDeleteExpansion_RealStore(root);
         await Executor_MoveThenUpdate_RealStore(root);

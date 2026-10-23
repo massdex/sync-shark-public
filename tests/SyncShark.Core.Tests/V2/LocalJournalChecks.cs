@@ -189,21 +189,59 @@ internal static partial class LocalJournalChecks
             LocalChecks.Require(store.CountDeferredPlanning(pair.PairId) <= 1,
                 "one million unchanged hidden entities do not become deferred work");
         }
+        using (var connection = new SqliteConnection($"Data Source={SqliteStateStore.DatabasePath(Path.Combine(folder, "store"))};Pooling=False"))
+        {
+            connection.Open();
+            var plans = StoreSchema.QueryPlan(connection, "intake", SqliteStateStore.DeferredPlanningIntakeSql,
+                "$p", "$before", "$limit").Concat(StoreSchema.QueryPlan(connection, "rotation",
+                SqliteStateStore.DeferredPlanningRotateSql, "$next", "$root", "$id", "$pair", "$version")).ToArray();
+            Console.WriteLine(string.Join(Environment.NewLine, plans));
+            LocalChecks.Require(plans.All(plan => !plan.Contains("SCAN", StringComparison.OrdinalIgnoreCase)) &&
+                plans.Any(plan => plan.Contains("planning_deferred_pair_version", StringComparison.Ordinal)) &&
+                plans.Any(plan => plan.Contains("SEARCH planning_deferred USING PRIMARY KEY", StringComparison.Ordinal)),
+                "intake and rotation seek indexed rows, never scan the pair or a JSON page");
+        }
+        double PageMilliseconds()
+        {
+            var best = double.MaxValue;
+            for (var sample = 0; sample < 3; sample++)
+            {
+                var watch = System.Diagnostics.Stopwatch.StartNew();
+                var page = store.AdmitDeferredPlanning(pair.PairId, DateTime.UtcNow.Ticks);
+                best = Math.Min(best, watch.Elapsed.TotalMilliseconds);
+                LocalChecks.Require(page.Count == 256, "scale sample admits and rotates a complete bounded page");
+            }
+            return best;
+        }
         var createWatch = System.Diagnostics.Stopwatch.StartNew();
-        store.DeferPlanning(pair.PairId, Enumerable.Range(0, 1_000_000)
+        store.DeferPlanning(pair.PairId, Enumerable.Range(0, 10_000)
             .Select(n => (pair.A.RootId, held with { ObjectId = $"volume-{n:D7}", Path = $"Volume/{n}" })));
-        Console.WriteLine($"1M deferral creation: elapsed-ms={createWatch.ElapsedMilliseconds}");
+        var smallPageMs = PageMilliseconds();
+        store.DeferPlanning(pair.PairId, Enumerable.Range(10_000, 990_000)
+            .Select(n => (pair.A.RootId, held with { ObjectId = $"volume-{n:D7}", Path = $"Volume/{n}" })));
+        var largePageMs = PageMilliseconds();
+        Console.WriteLine($"1M deferral creation: elapsed-ms={createWatch.ElapsedMilliseconds}; page-10k-ms={smallPageMs}; page-1m-ms={largePageMs}");
+        LocalChecks.Require(largePageMs <= Math.Max(1000, smallPageMs * 4),
+            "a 256-entity admission at one million stays near its 10k page cost, not proportional to queue length");
+        var queued = store.CountDeferredPlanning(pair.PairId);
+        var maximumPasses = (queued + 255) / 256;
         var drained = 0;
+        var passes = 0;
         var drainWatch = System.Diagnostics.Stopwatch.StartNew();
-        while (store.CountDeferredPlanning(pair.PairId) > 0)
+        // Count once, not once per page: COUNT itself scans the remaining pair. A fixed pass horizon
+        // plus final cardinality assertion detects non-retiring/re-admitted work without an endless test.
+        while (drained < queued && passes < maximumPasses)
         {
             var page = store.AdmitDeferredPlanning(pair.PairId, DateTime.UtcNow.Ticks);
-            LocalChecks.Require(page.Count <= 256, "each simulated run obeys bounded intake (RQ-032/140)");
+            LocalChecks.Require(page.Count > 0 && page.Count <= 256, "each simulated run obeys bounded intake (RQ-032/140)");
             drained += page.Count;
+            passes++;
             store.AcknowledgeDeferredPlanning(pair.PairId, page, _ => true);
+            if (drainWatch.Elapsed > TimeSpan.FromMinutes(5))
+                throw new InvalidOperationException($"Million-row drain exceeded five minutes: passes={passes}; drained={drained}/{queued}");
         }
-        LocalChecks.Require(drained >= 1_000_000 && store.CountDeferredPlanning(pair.PairId) == 0,
+        LocalChecks.Require(drained == queued && drained >= 1_000_000 && store.CountDeferredPlanning(pair.PairId) == 0,
             "repeated bounded run intakes acknowledge every entity at million-row scale");
-        Console.WriteLine($"1M deferral drain: elapsed-ms={drainWatch.ElapsedMilliseconds}; count={drained}");
+        Console.WriteLine($"1M deferral drain: elapsed-ms={drainWatch.ElapsedMilliseconds}; count={drained}; passes={passes}");
     }
 }

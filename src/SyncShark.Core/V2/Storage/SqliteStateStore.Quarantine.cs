@@ -272,7 +272,7 @@ public sealed partial class SqliteStateStore
     }
 
     private sealed record CapturedDefenderNotice(Notice Original, Notice Captured, PairDef? Pair,
-        ItemState? SourceObservation, ItemState? TargetObservation);
+        ItemState? SourceObservation, ItemState? TargetObservation, QuarantineNotice? Previous = null);
 
     private ItemState? NoticeObservation(ItemState? item, RootDef root, Microsoft.Data.Sqlite.SqliteTransaction? transaction = null) =>
         item is not null && RootNo(root.RootId, transaction) is { } number
@@ -293,22 +293,28 @@ public sealed partial class SqliteStateStore
 
     private CapturedDefenderNotice PrepareDefenderNotice(Notice notice, bool retainLive, CancellationToken? cancellationToken = null)
     {
-        // Reentrant publication (e.g. grant observation during WriteSnapshot) cannot
-        // release its caller's atomic transaction. Optional evidence stays unknown there.
+        // Reentrant publication cannot release its caller's atomic transaction.
+        // Grant observations instead stage a bounded page and capture after releasing the gate.
         if (notice.Quarantine is null || _gate.IsHeldByCurrentThread) return new(notice, notice, null, null, null);
-        var start = InStore(() =>
-        {
-            var pair = PairRecord(notice.PairId) ?? throw new InvalidOperationException($"Unknown pair {notice.PairId}");
-            var original = retainLive ? RetainedDefenderNotice(notice, pair) : notice;
-            var previous = _notices.ById(RequirePair(pair.PairId), NoticeTable.Id(original))?.Notice.Quarantine;
-            var hold = original.Quarantine!;
-            return (Pair: pair, Original: original, Previous: previous,
-                Source: NoticeObservation(hold.Source, hold.Target == Side.A ? pair.B : pair.A),
-                Target: NoticeObservation(hold.ExpectedTarget, hold.Target == Side.A ? pair.A : pair.B));
-        });
+        return CapturePreparedDefenderNotice(InStore(() => PrepareDefenderNoticeCore(notice, retainLive)),
+            cancellationToken ?? FairStoreGate.CurrentCancellation);
+    }
+
+    private CapturedDefenderNotice PrepareDefenderNoticeCore(Notice notice, bool retainLive)
+    {
+        var pair = PairRecord(notice.PairId) ?? throw new InvalidOperationException($"Unknown pair {notice.PairId}");
+        var original = retainLive ? RetainedDefenderNotice(notice, pair) : notice;
+        var previous = _notices.ById(RequirePair(pair.PairId), NoticeTable.Id(original))?.Notice.Quarantine;
+        var hold = original.Quarantine!;
+        return new(original, original, pair,
+            NoticeObservation(hold.Source, hold.Target == Side.A ? pair.B : pair.A),
+            NoticeObservation(hold.ExpectedTarget, hold.Target == Side.A ? pair.A : pair.B), previous);
+    }
+
+    private CapturedDefenderNotice CapturePreparedDefenderNotice(CapturedDefenderNotice prepared, CancellationToken ct)
+    {
         if (_gate.IsHeldByCurrentThread) throw new InvalidOperationException("Optional hashing must run outside the store gate.");
-        var captured = CaptureDefenderNotice(start.Original, start.Pair, start.Previous, cancellationToken ?? FairStoreGate.CurrentCancellation);
-        return new(start.Original, captured, start.Pair, start.Source, start.Target);
+        return prepared with { Captured = CaptureDefenderNotice(prepared.Original, prepared.Pair!, prepared.Previous, ct) };
     }
 
     private Notice ValidateDefenderCapture(CapturedDefenderNotice capture, Notice current, Microsoft.Data.Sqlite.SqliteTransaction transaction)
@@ -423,12 +429,13 @@ public sealed partial class SqliteStateStore
     private IReadOnlyList<string> ObserveDefenderGrants(string rootId, bool publish)
     {
         var held = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (RootNo(rootId) is not { } rootNo) return (IReadOnlyList<string>)[];
-        var bindings = RootSides(rootNo, null).Select(binding =>
+        var rootNumber = InStore(() => RootNo(rootId));
+        if (rootNumber is not { } rootNo) return [];
+        var bindings = InStore(() => RootSides(rootNo, null).Select(binding =>
         {
             var json = (string)StoreSchema.Scalar(_connection, null, "SELECT def_json FROM pair WHERE pair_no=$p;", ("$p", binding.PairNo))!;
             return (Pair: Deserialize(json), binding.Side);
-        }).ToArray();
+        }).ToArray());
         if (bindings.Length == 0) return [];
         var first = bindings[0];
         var root = first.Side == Side.A ? first.Pair.A : first.Pair.B;
@@ -440,31 +447,46 @@ public sealed partial class SqliteStateStore
         {
             // Range/keyset over grant paths, never a file inventory scan or an all-grants x all-items join.
             var page = new List<DefenderGrant>();
-            using (var cmd = StoreSchema.Command(_connection, null,
-                "SELECT grant_id,owner_object,source_object,local_object,path,stage_path,verified FROM defender_grant " +
-                "WHERE path_key >= $prefix AND path_key < $end AND (path_key > $after OR (path_key=$after AND grant_id>$id)) " +
-                "AND verified<>2 ORDER BY path_key,grant_id LIMIT 512;"))
+            var prepared = new List<CapturedDefenderNotice>();
+            InStore(() =>
             {
-                cmd.Parameters.AddWithValue("$prefix", prefix); cmd.Parameters.AddWithValue("$end", prefix + char.MaxValue);
-                cmd.Parameters.AddWithValue("$after", after); cmd.Parameters.AddWithValue("$id", afterId);
-                using var reader = cmd.ExecuteReader();
-                while (reader.Read()) page.Add(ReadGrant(reader));
-            }
+                using (var cmd = StoreSchema.Command(_connection, null,
+                    "SELECT grant_id,owner_object,source_object,local_object,path,stage_path,verified FROM defender_grant " +
+                    "WHERE path_key >= $prefix AND path_key < $end AND (path_key > $after OR (path_key=$after AND grant_id>$id)) " +
+                    "AND verified<>2 ORDER BY path_key,grant_id LIMIT 512;"))
+                {
+                    cmd.Parameters.AddWithValue("$prefix", prefix); cmd.Parameters.AddWithValue("$end", prefix + char.MaxValue);
+                    cmd.Parameters.AddWithValue("$after", after); cmd.Parameters.AddWithValue("$id", afterId);
+                    using var reader = cmd.ExecuteReader();
+                    while (reader.Read()) page.Add(ReadGrant(reader));
+                }
+                foreach (var grant in page)
+                {
+                    var relative = Path.GetRelativePath(root.RootPath, grant.Path).Replace('\\', '/');
+                    var item = _reads.Lookup(rootNo, relative)?.Item;
+                    if (item is null) continue; // Missing does not prohibit a separately authorized same-source download.
+                    if (item.Kind == ItemKind.File && !string.IsNullOrEmpty(item.ObjectId) && item.ObjectId == grant.LocalObject &&
+                        (item.Flags & (ItemFlags.Unreadable | ItemFlags.Locked | ItemFlags.Link)) == 0) continue;
+                    held.Add(item.Path);
+                    if (!publish) continue;
+                    foreach (var binding in bindings)
+                    {
+                        // Do not attach a captured old-root observation to a newly rebound pair.
+                        var currentPair = PairRecord(binding.Pair.PairId);
+                        if (currentPair is null || currentPair.A != binding.Pair.A || currentPair.B != binding.Pair.B) continue;
+                        prepared.Add(PrepareDefenderNoticeCore(new Notice(binding.Pair.PairId, 30, NoticeKind.UserDecision,
+                            item.Path, QuarantineFailure.GrantWarning(grant.Path), QuarantineFailure.NoticeKey,
+                            Quarantine: new(binding.Side, null, item, ScanOnly: true, GrantedExclusionPath: grant.Path,
+                                GrantedStagePath: grant.StagePath, ConflictingGrantId: grant.GrantId)), retainLive: false));
+                    }
+                }
+            });
             if (page.Count == 0) break;
-            foreach (var grant in page)
-            {
-                var relative = Path.GetRelativePath(root.RootPath, grant.Path).Replace('\\', '/');
-                var item = _reads.Lookup(rootNo, relative)?.Item;
-                if (item is null) continue; // Missing does not prohibit a separately authorized same-source download.
-                if (item.Kind == ItemKind.File && !string.IsNullOrEmpty(item.ObjectId) && item.ObjectId == grant.LocalObject &&
-                    (item.Flags & (ItemFlags.Unreadable | ItemFlags.Locked | ItemFlags.Link)) == 0) continue;
-                held.Add(item.Path);
-                if (!publish) continue;
-                foreach (var binding in bindings)
-                    AddNotices([new Notice(binding.Pair.PairId, 30, NoticeKind.UserDecision, item.Path, QuarantineFailure.GrantWarning(grant.Path),
-                        QuarantineFailure.NoticeKey, Quarantine: new(binding.Side, null, item, ScanOnly: true,
-                            GrantedExclusionPath: grant.Path, GrantedStagePath: grant.StagePath, ConflictingGrantId: grant.GrantId))]);
-            }
+            // Durable grants and inventory re-derive this page after interruption; no cursor or
+            // grant is advanced by capture/publication. Notice ids make repeated publication idempotent.
+            if (prepared.Count != 0)
+                PublishPreparedNotices(prepared.Select(item => CapturePreparedDefenderNotice(item,
+                    FairStoreGate.CurrentCancellation)).ToArray());
             after = RowCodec.Key(page[^1].Path);
             afterId = page[^1].GrantId;
         }

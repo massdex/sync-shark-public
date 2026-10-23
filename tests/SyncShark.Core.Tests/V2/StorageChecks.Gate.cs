@@ -68,6 +68,23 @@ internal static partial class StorageChecks
             }
             Require(cleanupTimedOut && gate.Waiting == 0,
                 "blocked cleanup surfaces timeout instead of cancellation or silent loss and removes its ticket");
+            var fatal = new StateDamagedException("original state damage");
+            Exception? retained = null;
+            try
+            {
+                Exception? primary = null;
+                try { throw fatal; }
+                catch (Exception error) { primary = error; throw; }
+                finally
+                {
+                    FairStoreGate.Cleanup(() => store.ClearRemovalReview(consumedReview.Generation),
+                        TimeSpan.FromMilliseconds(50), primaryError: primary);
+                }
+            }
+            catch (Exception error) { retained = error; }
+            Require(ReferenceEquals(retained, fatal) && fatal.Data["StoreCleanupFailure"] is TimeoutException &&
+                FailureRetryOwner.ScopeOf(retained!, default) == FailureRetryOwner.FailureScope.State && gate.Waiting == 0,
+                "finally cleanup timeout retains original fatal exception and attaches secondary failure without downgrading state damage");
         }
         finally { ownerRelease.Set(); await owner; }
         Require(store.CountHeldIntents("p1") == 768, "queue remains usable after cancellation");

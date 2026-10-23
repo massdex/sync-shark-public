@@ -97,7 +97,8 @@ public sealed partial class SqliteStateStore
         var old = json is null ? null : JsonSerializer.Deserialize<SyncRetry>(json, RowCodec.Json);
         if (old?.Kind == "decision") return;
         var retry = (old ?? new SyncRetry(action.Path, "sync", 0, "", DateTimeOffset.MinValue)) with
-        { LastError = result.Reason ?? "The item could not be confirmed or applied." };
+        { LastError = result.Reason ?? "The item could not be confirmed or applied.",
+            FailureKind = FailureRetryOwner.ClassifyCause(result.Reason ?? "The item could not be confirmed or applied.") };
         StoreSchema.Execute(_connection, transaction,
             "INSERT INTO sync_retry(pair_no,path_key,json,retry_after) VALUES($p,$k,$j,$due) " +
             "ON CONFLICT(pair_no,path_key) DO UPDATE SET json=excluded.json;",

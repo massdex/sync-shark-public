@@ -264,6 +264,31 @@ public sealed partial class SyncRun
         return reasons;
     }
 
+    internal static (int Count, IReadOnlyList<string> Examples) SummarizeContentUnconfirmed(
+        IEnumerable<string> currentPaths, IEnumerable<SyncRetry> retries)
+    {
+        // Only the current plan is materialized. Persisted debt is unique by path and streams in
+        // bounded pages; the sample never holds more than fifty paths, even for a million retries.
+        var current = currentPaths.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var sample = new SortedSet<string>(StringComparer.Ordinal);
+        var count = 0;
+        foreach (var retry in retries)
+        {
+            if (FailureRetryOwner.KindOf(retry) != FailureRetryOwner.FailureKind.ContentProof) continue;
+            current.Remove(retry.Path);
+            Add(retry.Path);
+        }
+        foreach (var path in current) Add(path);
+        return (count, sample.ToArray());
+
+        void Add(string path)
+        {
+            if (count < int.MaxValue) count++;
+            sample.Add(path);
+            if (sample.Count > 50) sample.Remove(sample.Max!);
+        }
+    }
+
     private void ParkFirstSyncWork(PairDef pair, Plan plan, Tally tally, IEnumerable<string> pending,
         IEnumerable<string> unconfirmed, IEnumerable<string> blocked) =>
         ParkFirstSyncWorkWithEvidence(pair, plan, tally, pending, unconfirmed, blocked, false);
@@ -310,7 +335,8 @@ public sealed partial class SyncRun
                 HeldReviewed: held.ContainsKey(path), HeldExpected: held.TryGetValue(path, out var heldItem)
                     ? _store.Live(heldItem.Local == Side.A ? pair.A.RootId : pair.B.RootId, [path]).FirstOrDefault() : null,
                 PendingNotice: prior?.PendingNotice, Match: prior?.Match,
-                ReprobeEvidence: evidenceUnavailable && held.ContainsKey(path)));
+                ReprobeEvidence: evidenceUnavailable && held.ContainsKey(path))
+                { FailureKind = FailureRetryOwner.ClassifyCause(reason) });
             // A tagged conflict successor gets only its dedicated Retry-only explanation, even for a pair-wide
             // quota condition: the generic notice's Ignore cannot resolve the frozen original authority.
             if (conflictSuccessor is not null)

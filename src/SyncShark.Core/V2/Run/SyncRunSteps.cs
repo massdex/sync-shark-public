@@ -585,34 +585,39 @@ public sealed partial class SyncRun
         var previousWait = DropboxPilotClient.ReadWaiting.Value;
         DropboxPilotClient.ReadWaiting.Value = message => WriteNotices([
             new Notice(pair.PairId, 40, NoticeKind.Info, readRoot.RootId, message, "inventory-waiting")]);
+        Exception? primaryError = null;
         try
         {
-            var scan = await ScanSideCoreAsync(pair, side, throttle, ct, inventoryCursors, firstSync);
-            return scan;
-        }
-        catch (Exception error) when (ScopeFailure(error, ct) &&
-            (error is IOException or UnauthorizedAccessException or TimeoutException || ProviderTransientFailure.IsTransient(error, ct)))
-        {
-            // RQ-032/034: a failed read is durable retry debt, never absence authority.
-            // Provider page/local-walk checkpoints belong to the inventory and are left intact.
-            // Do not cancel the other side: it can finish and retain its own progress.
-            var root = side == Side.A ? pair.A : pair.B;
-            var gen = _store.BeginGeneration(root.RootId, "full");
-            var cursor = inventoryCursors?.GetValueOrDefault(root.RootId) ?? _store.Cursor(root.RootId) ?? "";
-            var reason = "Inventory read incomplete: " + error.Message +
-                " Progress is saved; restore connectivity or access and Retry to resume.";
-            _store.WriteSnapshot(new Snapshot(root.RootId, side, gen, cursor, [], [""]));
-            throttle.Report(RunPhases.Reading(root), reason, 0, 0);
-            return new SideScan(gen, cursor, false, true, [], [], NoDeletions, [])
+            try
             {
-                IncompleteSubtrees = [""],
-                IncompleteReasons = new Dictionary<string, string> { [""] = reason }
-            };
+                var scan = await ScanSideCoreAsync(pair, side, throttle, ct, inventoryCursors, firstSync);
+                return scan;
+            }
+            catch (Exception error) when (ScopeFailure(error, ct) &&
+                (error is IOException or UnauthorizedAccessException or TimeoutException || ProviderTransientFailure.IsTransient(error, ct)))
+            {
+                // RQ-032/034: a failed read is durable retry debt, never absence authority.
+                // Provider page/local-walk checkpoints belong to the inventory and are left intact.
+                // Do not cancel the other side: it can finish and retain its own progress.
+                var root = side == Side.A ? pair.A : pair.B;
+                var gen = _store.BeginGeneration(root.RootId, "full");
+                var cursor = inventoryCursors?.GetValueOrDefault(root.RootId) ?? _store.Cursor(root.RootId) ?? "";
+                var reason = "Inventory read incomplete: " + error.Message +
+                    " Progress is saved; restore connectivity or access and Retry to resume.";
+                _store.WriteSnapshot(new Snapshot(root.RootId, side, gen, cursor, [], [""]));
+                throttle.Report(RunPhases.Reading(root), reason, 0, 0);
+                return new SideScan(gen, cursor, false, true, [], [], NoDeletions, [])
+                {
+                    IncompleteSubtrees = [""],
+                    IncompleteReasons = new Dictionary<string, string> { [""] = reason }
+                };
+            }
         }
+        catch (Exception error) { primaryError = error; throw; }
         finally
         {
             DropboxPilotClient.ReadWaiting.Value = previousWait;
-            FairStoreGate.Cleanup(CloseWaitNotice); // Including cancellation, cooperative pause and shutdown.
+            FairStoreGate.Cleanup(CloseWaitNotice, primaryError: primaryError); // Including cancellation, cooperative pause and shutdown.
         }
 
         void CloseWaitNotice()
@@ -1285,6 +1290,7 @@ public sealed partial class SyncRun
             }
             WriteNotices(notices);
             var held = plan.Actions.Where(action => blocked.Any(folder =>
+                folder.Path.Length == 0 ? action.ActionId == folder.ActionId :
                 (action.Kind != ActionKind.Delete || action.Target == folder.Target) &&
                 PairPath.IsSelfOrUnder(action.Path, folder.Path))).ToArray();
             plan = plan with { Actions = plan.Actions.Except(held).ToArray(),

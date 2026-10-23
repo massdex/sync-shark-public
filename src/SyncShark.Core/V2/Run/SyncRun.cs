@@ -748,6 +748,8 @@ public sealed partial class SyncRun : ISyncRun
                 PersistRebuildables(pair, statuses);
                 _store.MarkFirstSyncDone(pairId);
             }
+            // Reporting includes sleeping content debt without re-parking it or changing its deadline.
+            var contentSummary = SummarizeContentUnconfirmed(unconfirmed, _store.ReadSyncRetries(pairId));
             var report = WithReconciliation(BuildReport(pairId, approved, tally, ct.IsCancellationRequested), reconcile);
             completedReport = report with
             {
@@ -756,8 +758,8 @@ public sealed partial class SyncRun : ISyncRun
                 ReviewedDeletionEvidencePendingCount = approved.HeldDeletions
                     .Select(held => held.Path).Distinct(StringComparer.OrdinalIgnoreCase).Count(pendingEvidence.Contains),
                 UnreviewedPending = approved.UnreviewedHeldDeletions.Count,
-                ContentUnconfirmedCount = unconfirmed.Length,
-                ContentUnconfirmedExamples = unconfirmed.Take(50).ToArray(),
+                ContentUnconfirmedCount = contentSummary.Count,
+                ContentUnconfirmedExamples = contentSummary.Examples,
                 RebuildablesBlocked = blockedRebuildables
             };
         });

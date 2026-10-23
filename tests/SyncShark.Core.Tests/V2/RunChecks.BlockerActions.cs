@@ -61,15 +61,15 @@ internal static partial class RunChecks
         Require(fx.WriterA.Moves == 1, "repeated rename verifies existing effect without a second move");
         Require(store.SyncRetryAt(pairId, "safe.txt") is not null, "rename schedules targeted re-observation");
         var savedRenameDebt = store.SyncRetryAt(pairId, "safe.txt");
-        var host = new V2SyncHost(store, run, new ObservedExecutor(fx.Executor), null!, Settings, TimeProvider.System,
+        var refusalHost = new V2SyncHost(store, run, new ObservedExecutor(fx.Executor), null!, Settings, TimeProvider.System,
             Path.Combine(folder, "state.db"));
-        var refusedUi = await host.ResolveConflictSelectionCommandAsync(
+        var refusedUi = await refusalHost.ResolveConflictSelectionCommandAsync(
             [new(new(notice.NoticeId!, pairId, notice.Path, 0), SyncAuthorityConflictResolutionKind.PreserveBoth,
                 NoticeChoices.Rename, NoticeInput: new("different.txt"))]);
         Require(refusedUi.Items.Single().Result is { Blocked: 1, Recovered: 0 },
             "UI mismatched repeat returns typed refusal rather than an escaped exception");
-        var cli = new V2CliRuntime(null, store, run, new EndpointRootProbe(fx.Provider), folder);
-        var refusedCli = await cli.ResolveNoticeAsync(pairId, notice.Path, NoticeChoices.Rename,
+        var refusalCli = new V2CliRuntime(null, store, run, new EndpointRootProbe(fx.Provider), folder);
+        var refusedCli = await refusalCli.ResolveNoticeAsync(pairId, notice.Path, NoticeChoices.Rename,
             notice.NoticeId, 0, null, default, input: new("different.txt"));
         Require(refusedCli.Blocked == 1 && refusedCli.NotAttempted == 1 && fx.WriterA.Moves == 1 &&
             store.SyncRetryAt(pairId, "safe.txt") == savedRenameDebt &&

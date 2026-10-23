@@ -15,7 +15,7 @@ internal sealed class FairStoreGate
     // Only cleanup calls use this independent admission deadline. It must never wrap effects
     // or completed-effect commits. A blocked cleanup remains pending and reaches the normal
     // failure owner; trying to write a notice through the same blocked gate would deadlock.
-    internal static void Cleanup(Action cleanup, TimeSpan? admissionTimeout = null)
+    internal static void Cleanup(Action cleanup, TimeSpan? admissionTimeout = null, Exception? primaryError = null)
     {
         using var deadline = new CancellationTokenSource(admissionTimeout ?? TimeSpan.FromSeconds(5));
         using var admission = WithCancellation(deadline.Token);
@@ -28,12 +28,26 @@ internal sealed class FairStoreGate
         {
             var failure = new TimeoutException("Store cleanup admission timed out; retained safety state must be retried before dependent work.", error);
             RunOutput.Observe(failure);
+            if (RetainFatal(failure)) return;
             throw failure;
         }
         catch (Exception error)
         {
             RunOutput.Observe(error);
+            if (RetainFatal(error)) return;
             throw;
+        }
+
+        bool RetainFatal(Exception secondary)
+        {
+            if (primaryError is null || FailureRetryOwner.ScopeOf(primaryError, CancellationToken.None) !=
+                FailureRetryOwner.FailureScope.State) return false;
+            // The original throw retains its type/stack and remains the failure owner's authority.
+            // Cleanup diagnostics are secondary; they must never downgrade state damage to retryable IO.
+            const string key = "StoreCleanupFailure";
+            primaryError.Data[key] = primaryError.Data[key] is Exception prior
+                ? new AggregateException(prior, secondary) : secondary;
+            return true;
         }
     }
 

@@ -263,6 +263,7 @@ internal sealed class RunScope
             Batches(contextB.Count, ItemBatchSize);
         using var snapshot = (_store as SqliteStateStore)?.OpenPlanningProtection(pair);
         _deferredPair = pair;
+        Exception? primaryError = null;
         try
         {
             // Normalize before staging so mapped spellings are identical to the consumer.
@@ -340,9 +341,10 @@ internal sealed class RunScope
                 ContextB = HideCore(contextB, Side.B, context: true).DistinctBy(i => i.ObjectId).ToArray()
             };
         }
+        catch (Exception error) { primaryError = error; throw; }
         finally
         {
-            try { FairStoreGate.Cleanup(FlushDeferred); }
+            try { FairStoreGate.Cleanup(FlushDeferred, primaryError: primaryError); }
             finally
             {
                 _deferredPair = null;

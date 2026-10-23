@@ -40,6 +40,7 @@ public sealed partial class SqliteStateStore
             return number;
         });
         using var writer = new PrepareWriter(this, generation);
+        Exception? primaryError = null;
         try
         {
             write(writer);
@@ -64,13 +65,14 @@ public sealed partial class SqliteStateStore
             });
             return header;
         }
+        catch (Exception error) { primaryError = error; throw; }
         finally
         {
             // The writer has finished: releasing its in-memory registration needs no SQLite gate.
             lock (PrepareWritersGate) ActivePrepareGenerations.Remove(generation);
             // A cleanup timeout is surfaced without undoing a committed publication. Open retries
             // retained rows; no cancelled ambient run may silently strand housekeeping.
-            FairStoreGate.Cleanup(() => TrySweepPrepareGenerations());
+            FairStoreGate.Cleanup(() => TrySweepPrepareGenerations(), primaryError: primaryError);
         }
     }
 

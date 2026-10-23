@@ -13,6 +13,16 @@ public static class FailureRetryOwner
     public static bool IsDue(DateTimeOffset retryAfter, DateTimeOffset now) => now >= retryAfter;
 
     public enum FailureScope { Item, Endpoint, Stop, State }
+    public enum FailureKind { Other, ContentProof }
+
+    // Legacy JSON has no typed kind. Keep raw-cause compatibility in this one owner.
+    public static FailureKind ClassifyCause(string cause) =>
+        cause.StartsWith("Hash:", StringComparison.Ordinal) ||
+        cause.StartsWith("Hash deferred after repeated transport failures:", StringComparison.Ordinal) ||
+        cause.StartsWith("Content proof is unavailable", StringComparison.Ordinal)
+            ? FailureKind.ContentProof : FailureKind.Other;
+
+    public static FailureKind KindOf(SyncRetry retry) => retry.FailureKind ?? ClassifyCause(retry.LastError);
 
     /// <summary>
     /// Scope is independent of retry timing. Endpoint identity remains with the caller.
@@ -77,13 +87,15 @@ public static class FailureRetryOwner
         string? reason, SyncRetry? old, DateTimeOffset now)
     {
         var state = Failed(old?.Attempts ?? 0, now, old is not { ReprobeEvidence: true });
+        var cause = reason ?? (old?.LastError is { Length: > 0 } previous
+            ? previous : "The item could not be confirmed or applied.");
         var retry = (old ?? new SyncRetry(path, "sync", 0, "", DateTimeOffset.MinValue)) with
         {
             Attempts = state.Attempts,
             DeleteBlockedDetail = null,
             DeleteBlockedDeferred = false,
-            LastError = reason ?? (old?.LastError is { Length: > 0 } previous
-                ? previous : "The item could not be confirmed or applied."),
+            LastError = cause,
+            FailureKind = reason is null && old is not null ? KindOf(old) : ClassifyCause(cause),
             RetryAfter = state.RetryAfter
         };
         store.SaveSyncRetry(pairId, retry);

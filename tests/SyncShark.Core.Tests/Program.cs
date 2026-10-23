@@ -91,6 +91,12 @@ if (args is ["--v2-hotfix-completion-checks"])
     return 0;
 }
 
+if (args is ["--v2-removal-admission-checks"])
+{
+    await Massdex.SyncShark.V2.RunChecks.DeferredEvidence_ReviewedFolderFreshAdmissionAsync();
+    return 0;
+}
+
 if (args is ["--v2-removal-review-checks"])
 {
     await Massdex.SyncShark.V2.RunChecks.RemovalReviewChecksAsync();

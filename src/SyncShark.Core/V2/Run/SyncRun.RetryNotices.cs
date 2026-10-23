@@ -103,6 +103,7 @@ public sealed partial class SyncRun
         }
         string? observationSession = null;
         PairDef? observedPair = null;
+        Exception? primaryError = null;
         try
         {
             if ((choice is NoticeChoices.ReviewRemoval or NoticeChoices.ReviewRemovalA or NoticeChoices.ReviewRemovalB or NoticeChoices.ConfirmRemoval) &&
@@ -154,10 +155,11 @@ public sealed partial class SyncRun
             }
             return await ApplyRetryNoticeChoiceCoreAsync(pairId, noticeId, choice, ct, saveNarrowerPair, removalResult, observationSession, observedPair, acceptedExclusion, input, updateRebuildableRule);
         }
+        catch (Exception error) { primaryError = error; throw; }
         finally
         {
             if (observationSession is not null && _store is SqliteStateStore db)
-                FairStoreGate.Cleanup(() => db.ClearRemovalObservation(observationSession));
+                FairStoreGate.Cleanup(() => db.ClearRemovalObservation(observationSession), primaryError: primaryError);
         }
     }
 

@@ -2,8 +2,57 @@ namespace Massdex.SyncShark.V2;
 
 internal static partial class RunChecks
 {
+    private static void QuarantineGrantPublicationRecoveryChecks(string root)
+    {
+        var state = Path.Combine(root, "grant-publication-recovery");
+        var localRoot = Path.Combine(root, "grant-publication-local");
+        Directory.CreateDirectory(localRoot);
+        var item = new ItemState("held.txt", ItemKind.File, "held-entity", null, null, 3,
+            DateTimeOffset.UtcNow, ItemFlags.None);
+        var path = AttendedElevatedAction.ValidatePath(localRoot, item.Path);
+        var grant = new DefenderGrant("publication-grant", "prior-owner", null, null, path,
+            AttendedElevatedAction.DownloadStagePath(path));
+        using (var store = SqliteStateStore.Open(state, Settings, TimeProvider.System))
+        {
+            var fx = Build(suppliedStore: store);
+            store.SavePair(fx.Pair with { A = fx.Pair.A with { RootPath = localRoot } });
+            store.StoreDefenderGrant(grant);
+            store.DefenderCaptureForTest = _ => throw new IOException("publication-interruption");
+            var interrupted = false;
+            try { store.WriteSnapshot(new("ra", Side.A, store.BeginGeneration("ra", "seed"), "", [item], [])); }
+            catch (IOException error) when (error.Message == "publication-interruption") { interrupted = true; }
+            Require(interrupted && store.Live("ra").Single().ObjectId == item.ObjectId &&
+                store.OpenNotices("p1").Count == 0 && store.DefenderGrantById(grant.GrantId) == grant &&
+                store.DefenderGrantHoldPaths("ra").Contains(item.Path),
+                "interruption after snapshot commit leaves durable ungranted path protection before notice publication");
+        }
+        using (var store = SqliteStateStore.Open(state, Settings, TimeProvider.System))
+        {
+            var gate = (FairStoreGate)typeof(SqliteStateStore).GetField("_gate",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(store)!;
+            var captures = 0;
+            store.DefenderCaptureForTest = observed =>
+            {
+                Require(!gate.IsHeldByCurrentThread, "grant review hashes outside the store gate");
+                captures++;
+                return observed with { Hash = new string('a', 64) };
+            };
+            void Observe() => store.WriteDelta(new("ra", Side.A, store.BeginGeneration("ra", "resume"), "", "", [], false, []));
+            Observe();
+            var notice = store.OpenNotices("p1").Single();
+            Require(notice.Quarantine!.ExpectedTarget!.Hash == new string('a', 64) && captures == 1 &&
+                store.DefenderGrantById(grant.GrantId) == grant && store.Live("ra").Single().Hash is null,
+                "reopen and empty delta re-derive hashed review without granting or hashing inventory");
+            Observe();
+            Require(store.OpenNotices("p1").Single().NoticeId == notice.NoticeId && captures == 1 &&
+                store.DefenderGrantById(grant.GrantId) == grant,
+                "grant publication replay is singular and preserves reviewed hash without rereading");
+        }
+    }
+
     private static void QuarantineReviewedBindingChecks(string root)
     {
+        QuarantineGrantPublicationRecoveryChecks(root);
         foreach (var side in new[] { Side.A, Side.B })
         {
             using var store = SqliteStateStore.Open(Path.Combine(root, $"reviewed-binding-{side}"), Settings, TimeProvider.System);
