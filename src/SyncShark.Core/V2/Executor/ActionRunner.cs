@@ -357,24 +357,8 @@ internal sealed partial class ActionRunner
         // Once an archive exists, every settled outcome must carry it, and a non-Done destructive replace must not
         // close its intent as Skipped/Refused: the target original was already removed, so a later plan would read
         // the absence as a user deletion. Keep such an outcome protective (Uncertain) until reconciliation observes.
-        async Task<ActionResult?> SettleAsync(ActionResult result)
-        {
-            if (result.Recovery is null && recoveryHolder.Reference is { } retained)
-                result = result with { Recovery = retained };
-            var preservedDestructive = RecoverySafety.HasPreservedFileVictim(action) &&
-                (recoveryHolder.Reference is not null || recoveryHolder.CheckpointRecorded);
-            if (preservedDestructive && result.Outcome is Outcome.Skipped or Outcome.Refused)
-                result = result with
-                {
-                    Outcome = Outcome.Uncertain,
-                    Recovery = result.Recovery ?? recoveryHolder.Reference,
-                    Reason = "The displaced original is retained; this effect did not complete. " +
-                        "Reconcile will prove the target state; restore from Recovery if needed. " + result.Reason,
-                    RetryAfterSeconds = ProviderTransientFailure.VerificationRetrySeconds,
-                    ProviderNameRefused = false
-                };
-            return await CommitAsync(action, result).ConfigureAwait(false);
-        }
+        Task<ActionResult?> SettleAsync(ActionResult result, bool definitelyNotApplied = false) =>
+            SettleEffectAsync(action, result, recoveryHolder, target, definitelyNotApplied, ct);
 
         ItemState? newT;
         try
@@ -394,7 +378,7 @@ internal sealed partial class ActionRunner
         {
             // Settled but not performed: never satisfy a child dependency or commit a sync baseline.
             return await SettleAsync(new ActionResult(action.ActionId, Outcome.Skipped, null, null,
-                recoveryHolder.Reference, ProviderNameRefusedException.Detail) { ProviderNameRefused = true })
+                recoveryHolder.Reference, ProviderNameRefusedException.Detail) { ProviderNameRefused = true }, definitelyNotApplied: true)
                 .ConfigureAwait(false);
         }
         catch (ProviderWriteBlockedException e) when (e.Code == "insufficient_space")
@@ -434,7 +418,8 @@ internal sealed partial class ActionRunner
         }
         catch (ProviderWriteThrottledException e)
         {
-            return await SettleAsync(Skipped(action, e.Message)).ConfigureAwait(false);
+            return await SettleAsync(Skipped(action, e.Message),
+                definitelyNotApplied: action.Kind == ActionKind.Delete && action.Rule == 6).ConfigureAwait(false);
         }
         catch (ExpectedTargetMismatchException e)
         {

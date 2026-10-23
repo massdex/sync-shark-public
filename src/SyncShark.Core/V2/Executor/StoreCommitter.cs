@@ -178,6 +178,10 @@ internal sealed class StoreCommitter
         }
     }
 
+    internal bool TargetUsesDropboxHistory(SyncAction action) => _store.Pair(_pairId) is { } pair &&
+        string.Equals((action.Target == Side.A ? pair.A : pair.B).Provider, ProviderIds.Dropbox,
+            StringComparison.OrdinalIgnoreCase);
+
     /// <summary>Reuses grouped intent writes for provider evidence, keeping SQL and transaction ownership in Storage.</summary>
     internal ProviderEffectContext CreateProviderContext(SyncAction action) => new(action,
         new ProviderEffectOwner(this, _pairId,

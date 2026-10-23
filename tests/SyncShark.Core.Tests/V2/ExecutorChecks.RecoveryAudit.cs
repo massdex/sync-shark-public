@@ -9,6 +9,7 @@ internal static partial class ExecutorChecks
         await RecoveryAudit_ThousandEntryLostAckAsync(root);
         await RecoveryAudit_DeleteJobRestartAsync(root);
         await ProviderCheckpoint_ReconcileKeepsPending();
+        await RunChecks.HistoryThrottleRecoveryAsync(root);
         Console.WriteLine("v2 recovery audit checks passed.");
     }
 
@@ -60,13 +61,25 @@ internal static partial class ExecutorChecks
             Require(store.Baselines("p1").Count == 1, "delete restart fixture has a confirmed baseline");
             await RemoveSourceAsync(source, victim.Path);
             store.RecordIntent("p1", action);
+            var retained = await writer.PreserveAsync(victim, action.ActionId, default);
+            store.RecordRecovery("p1", action.ActionId, action.Path, retained);
+            ActionResult? refusal = null;
             ProviderEffectContext.Current.Value = new ProviderEffectContext(checkpoint =>
             {
                 store.RecordIntent("p1", action with { ProviderEffect = checkpoint });
                 // Stop at the exact durable job boundary, before a poll or result can be recorded.
                 if (checkpoint.Kind == "delete-job") throw new IOException("injected process boundary");
                 return Task.CompletedTask;
-            });
+            })
+            {
+                RevalidateDelete = async () =>
+                {
+                    refusal = await DeleteSourceGuard.CheckEvidenceAsync(action, source, original, false, default,
+                        isStateDamage: StorageFailureClassifier.IsStateDamage);
+                    return new(refusal is null ? true : null, refusal?.Reason);
+                },
+                RefuseDelete = _ => Task.FromResult(refusal)
+            };
             try
             {
                 try { await writer.DeleteAsync(action, default); }

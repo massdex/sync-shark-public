@@ -217,6 +217,9 @@ internal static partial class DropboxChecks
             "refused decision reports Skipped, neither a successful effect nor a synthetic failure");
         Require(report.DecisionFailureReason?.Contains("disallowed_name", StringComparison.Ordinal) == true,
             "unapplied decision explanation identifies the exact provider refusal");
+        Require(report.Uncertain == 0 && fx.Store.UnresolvedIntents("p1").Count == 0 &&
+            fx.Store.Baselines("p1").Count == 0 && await fx.B.ObserveAsync("tie.txt", CancellationToken.None) == target,
+            "definite refusal with intact history-backed victim leaves no uncertain intent or synced baseline");
         fx.Reopen();
         fx.ClearEffects();
         await fx.NextAsync(true);
@@ -295,7 +298,7 @@ internal static partial class DropboxChecks
         {
             _root = root;
             WriterA = new(A);
-            WriterB = new(B);
+            WriterB = new(B, dropboxHistory: true);
             Store = SqliteStateStore.Open(root, _settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             Store.SavePair(_pair);
             CreateRun();
@@ -332,7 +335,7 @@ internal static partial class DropboxChecks
 
     // Refusal is injected at the provider boundary, not in Executor/SyncRun/store. Like Dropbox Put,
     // this writer attempts implicit parent creation; logging before refusal catches those attempts too.
-    private sealed class ProviderFollowupWriter(FakeEndpoint inner) : IEndpointWriter, ISourceAbsenceProbe
+    private sealed class ProviderFollowupWriter(FakeEndpoint inner, bool dropboxHistory = false) : IEndpointWriter, ISourceAbsenceProbe
     {
         public HashSet<string> Refused { get; } = new(StringComparer.OrdinalIgnoreCase);
         public System.Collections.Concurrent.ConcurrentQueue<(string Kind, string Path)> Effects { get; } = new();
@@ -358,8 +361,13 @@ internal static partial class DropboxChecks
         { Effect("move", action.Path); return inner.MoveAsync(action, ct); }
         public Task DeleteAsync(SyncAction action, CancellationToken ct)
         { Effect("delete", action.Path); return inner.DeleteAsync(action, ct); }
-        public Task<RecoveryRef> PreserveAsync(ItemState victim, string actionId, CancellationToken ct)
-        { Effects.Enqueue(("preserve", victim.Path)); return inner.PreserveAsync(victim, actionId, ct); }
+        public async Task<RecoveryRef> PreserveAsync(ItemState victim, string actionId, CancellationToken ct)
+        {
+            Effects.Enqueue(("preserve", victim.Path));
+            var recovery = await inner.PreserveAsync(victim, actionId, ct);
+            // Dropbox preservation keeps the target in place and records its path/revision, not an archive URI.
+            return dropboxHistory ? recovery with { Location = victim.Path } : recovery;
+        }
         public Task<ItemState?> ObserveAsync(string path, CancellationToken ct) => inner.ObserveAsync(path, ct);
         public Task<ItemState?> ObserveSourceMetadataAsync(string path, CancellationToken ct) =>
             inner.ObserveSourceMetadataAsync(path, ct);
