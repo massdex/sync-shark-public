@@ -173,13 +173,21 @@ internal static partial class RunChecks
             store.AddNotices([new(pair, 40, NoticeKind.Info, path, "cannot read this item", key)]);
             var generic = store.OpenNotices(pair).Single(n => n.Path == path);
             Require(NoticeChoices.Options(generic).Select(option => option.Choice).SequenceEqual(
-                new[] { NoticeChoices.RepairHelp, NoticeChoices.RetryNow, NoticeChoices.Ignore }),
-                "unreadable and undiscovered item blockers have why, Retry and Ignore");
+                // CI39907099426 measured both reasons: repair-help,retry-now,ignore,exclude (E9).
+                new[] { NoticeChoices.RepairHelp, NoticeChoices.RetryNow, NoticeChoices.Ignore, NoticeChoices.Exclude }),
+                "unreadable and undiscovered blockers offer why, Retry, cause-only Ignore and explicit exclusion");
             await run.ApplyRetryNoticeChoiceAsync(pair, generic.NoticeId!, NoticeChoices.RetryNow, default);
             Require(store.SyncRetryAt(pair, path)?.RetryAfter == DateTimeOffset.MinValue, "generic Retry schedules the item");
+            var savedDebt = System.Text.Json.JsonSerializer.Serialize(store.SyncRetryAt(pair, path));
             await run.ApplyRetryNoticeChoiceAsync(pair, generic.NoticeId!, NoticeChoices.Ignore, default);
+            Require(!store.Pair(pair)!.Excluded.Contains(path) && await fx.A.ObserveAsync(path, default) == before &&
+                System.Text.Json.JsonSerializer.Serialize(store.SyncRetryAt(pair, path)) == savedDebt &&
+                store.NoticeById(pair, generic.NoticeId!) is { Closed: false } &&
+                store.OpenNotices(pair).All(n => n.NoticeId != generic.NoticeId),
+                "generic Ignore preserves file and retry debt while suppressing only the cause");
+            await run.ApplyRetryNoticeChoiceAsync(pair, generic.NoticeId!, NoticeChoices.Exclude, default);
             Require(store.Pair(pair)!.Excluded.Contains(path) && await fx.A.ObserveAsync(path, default) == before,
-                "generic Ignore excludes the path without deleting its file");
+                "explicit Stop syncing excludes the path without deleting its file");
         }
         Require(NoticeChoices.Options(new(pair, 40, NoticeKind.Info, "pending.txt", "pending evidence", "deletion-evidence-pending"))
             .All(option => option.Choice != NoticeChoices.DeleteReviewed), "pending evidence never offers deletion authority");

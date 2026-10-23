@@ -32,6 +32,23 @@ internal static partial class LocalInventoryChecks
             LocalChecks.Seed(directory, "reviewed/new.txt", "unreviewed");
             LocalChecks.Require(!await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(action, pair, store, inventory, default),
                 "real local new child vetoes on " + side);
+            var consentPair = pair with { IgnoreRules = ["FileExtension:tmp"] };
+            LocalChecks.Seed(directory, "consented/original.tmp", "data");
+            var consentRows = new List<ItemState>();
+            await inventory.ReadSubtreeAsync("consented", page => { consentRows.AddRange(page); return Task.CompletedTask; }, default);
+            var proposed = new SyncAction("consent", 23, ActionKind.Delete, side, "consented", null, null,
+                consentRows.Single(item => item.Path == "consented"), true, null)
+                { CarriedIgnoredBudget = new CarriedIgnoredContent(1, 0, 4), FrozenVictimSignature = FolderDelete.Signature([]) };
+            var consent = await DeleteSourceGuard.RecordRemovalConsentAsync(proposed, consentPair, store, inventory, default);
+            LocalChecks.Require(consent.RemovalReviewChoice && consent.FrozenRemovalSignature is not (null or "unproven") &&
+                await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(consent, consentPair, store, inventory, default),
+                "consent freezes complete carried observation together with authority on " + side);
+            LocalChecks.Seed(directory, "consented/late.tmp", "later");
+            LocalChecks.Require(!await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(consent, consentPair, store, inventory, default),
+                "carried file added after consent holds whole removal on " + side);
+            var incompleteConsent = await DeleteSourceGuard.RecordRemovalConsentAsync(proposed, consentPair, store, inventory, default);
+            LocalChecks.Require(incompleteConsent.FrozenRemovalSignature == "unproven",
+                "undisclosed carried contents cannot acquire a consent signature on " + side);
             // Wide tree crosses page boundaries without opening content (empty directories).
             for (var i = 0; i < 513; i++) Directory.CreateDirectory(Path.Combine(directory, "wide", "d" + i));
             var count = 0;

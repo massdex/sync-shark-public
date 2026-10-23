@@ -282,7 +282,8 @@ public sealed partial class SqliteStateStore
     {
         var hold = notice.Quarantine!;
         ItemState? Retained(ItemState? item, RootDef root) => item is null ? null :
-            RootNo(root.RootId, transaction) is { } number ? _reads.AtKey(number, item.Path, transaction).FirstOrDefault().Item ?? item : item;
+            RootNo(root.RootId, transaction) is { } number ? _reads.AtKey(number, item.Path, transaction)
+                .FirstOrDefault(row => row.Item?.ObjectId == item.ObjectId).Item ?? item : item;
         return notice with { Quarantine = hold with
         {
             Source = Retained(hold.Source, hold.Target == Side.A ? pair.B : pair.A),

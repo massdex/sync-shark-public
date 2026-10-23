@@ -282,19 +282,21 @@ internal static partial class RunChecks
         fx.Store.AddNotices([new Notice(fx.Pair.PairId, 0, NoticeKind.Info, "failed.txt", "Retry this item", "sync-retry")]);
         var notice = fx.Store.OpenNotices(fx.Pair.PairId).Single();
         var runtime = new V2CliRuntime(null, fx.Store, run, new EndpointRootProbe(fx.Provider), Path.GetTempPath());
-        var ignored = runtime.ResolveConflictAsync(fx.Pair.PairId, "failed.txt", NoticeChoices.Ignore, notice.NoticeId, 0, null, default);
+        // E9 / CI39907099426: only explicit Exclude is accepted as queued settings intent;
+        // Ignore is cause suppression and cannot be replayed as exclusion after notice resolution.
+        var excluded = runtime.ResolveConflictAsync(fx.Pair.PairId, "failed.txt", NoticeChoices.Exclude, notice.NoticeId, 0, null, default);
         try
         {
-            Require(!ignored.IsCompleted, "item Ignore waits behind the active run gate");
+            Require(!excluded.IsCompleted, "explicit item exclusion waits behind the active run gate");
             // A run may also resolve the original notice while the user's exclusion is queued.
             fx.Store.CloseNotice(notice.NoticeId!, "resolved");
         }
         finally { release.Set(); }
         await pending.WaitAsync(GateTimeout);
-        await ignored.WaitAsync(GateTimeout);
+        await excluded.WaitAsync(GateTimeout);
         var exclusions = fx.Store.Pair(fx.Pair.PairId)!.Excluded;
         Require(exclusions.Contains("generated") && exclusions.Contains("failed.txt"), "both run settings and queued exclusion survive");
-        Console.WriteLine("PASS ItemIgnoreWaitsForSettingsSave");
+        Console.WriteLine("PASS explicit item exclusion preserves concurrent settings and queued intent");
     }
 
     internal static async Task HistoryFailureDoesNotFailCompletedRunAsync()

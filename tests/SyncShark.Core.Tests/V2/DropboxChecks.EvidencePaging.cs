@@ -19,7 +19,12 @@ internal static partial class DropboxChecks
             sqlite.StoreDeletionEvidence(pair.PairId, RootId, batch.Select(i =>
                 new DeletionEvidenceRecord($"cached-{i:D5}", DateTimeOffset.UnixEpoch, "start", new string('a', 64))).ToArray());
         }
-        sqlite.ReplaceDeletionClassification(Root(), "start", new HashSet<string> { "cached-00000" }, new HashSet<string>());
+        // Complete listing classification includes every exact tombstone in the ancestor set too.
+        // Without it SQLite persists no tombstone (measured failure: tombstone-matched=0).
+        sqlite.ReplaceDeletionClassification(Root(), "start", new HashSet<string> { "cached-00000" },
+            new HashSet<string> { "cached-00000" });
+        Require(sqlite.ReadDeletionClassification(Root())!.Exact.Contains("cached-00000"),
+            "the cache-reuse fixture persists its exact deletion candidate");
         h.Wire.SeedChangePage("start", [], false, "next");
         var observed = DispatchProxy.Create<IStateStore, EvidenceReadProxy>();
         var proxy = (EvidenceReadProxy)(object)observed;

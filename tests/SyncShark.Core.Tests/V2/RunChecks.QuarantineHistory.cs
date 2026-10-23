@@ -4,6 +4,7 @@ internal static partial class RunChecks
 {
     private static async Task QuarantineHistoryAsync(string root)
     {
+        QuarantineReviewedBindingChecks(root);
         QuarantineSnapshotRenameChecks(root);
         await QuarantineBlockedFolderRunAsync(root);
         await QuarantineReusedNameSyncAsync(root);

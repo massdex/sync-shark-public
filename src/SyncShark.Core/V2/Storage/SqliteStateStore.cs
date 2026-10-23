@@ -713,9 +713,9 @@ public sealed partial class SqliteStateStore : IStateStore
         InStore(() =>
         {
             using var transaction = _connection.BeginTransaction();
-            var captured = prepared.Select(item => ValidateDefenderCapture(item,
-                item.Pair is { } pair ? RetainedDefenderNotice(item.Original, pair, transaction) : item.Original,
-                transaction)).ToArray();
+            // Explicit reviews retain their own entity/version binding. The validation owner
+            // rejects raced optional hashes; a current path occupant cannot replace the review.
+            var captured = prepared.Select(item => ValidateDefenderCapture(item, item.Original, transaction)).ToArray();
             var now = NowMs();
             foreach (var notice in captured)
                 _notices.Add(transaction, RequirePair(notice.PairId), notice, now);

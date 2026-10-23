@@ -125,6 +125,20 @@ internal static class DeleteSourceGuard
         IStateStore store, IInventorySource inventory, CancellationToken ct) =>
         (await ObserveReviewedRemovalAsync(action, pair, store, inventory, ct).ConfigureAwait(false)).Signature;
 
+    // Publish consent and its complete proof as one action value. Callers persist that value
+    // in one intent/retry write; a missing observation never gains authority from a later retry.
+    internal static async Task<SyncAction> RecordRemovalConsentAsync(SyncAction action, PairDef pair,
+        IStateStore store, IInventorySource inventory, CancellationToken ct)
+    {
+        if (action.Kind != ActionKind.Delete) return action;
+        if (!FolderDelete.Expands(action) || action.FrozenRemovalSignature is not null)
+            return action with { RemovalReviewChoice = true };
+        var budget = action.CarriedIgnoredBudget;
+        var signature = await CaptureDisclosedRemovalAsync(action, pair, store, inventory,
+            budget?.Files ?? 0, budget?.Folders ?? 0, budget?.Bytes ?? 0, ct).ConfigureAwait(false);
+        return action with { RemovalReviewChoice = true, FrozenRemovalSignature = signature ?? "unproven" };
+    }
+
     internal static async Task<string?> CaptureDisclosedRemovalAsync(SyncAction action, PairDef pair,
         IStateStore store, IInventorySource inventory, long files, long folders, long bytes, CancellationToken ct)
     {

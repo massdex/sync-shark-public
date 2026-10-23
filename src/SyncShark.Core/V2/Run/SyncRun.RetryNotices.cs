@@ -346,7 +346,7 @@ public sealed partial class SyncRun
                 // automatic reviewed propagation skip Recovery for identical content.
                 var actions = choice == NoticeChoices.DeleteReviewed
                     ? proposed.Select(action => action.Kind == ActionKind.Delete
-                        ? action with { RecoveryFirst = true, RemovalReviewChoice = true } : action).ToArray()
+                        ? action with { RecoveryFirst = true } : action).ToArray()
                     : proposed
                     .Where(action => action.Kind == ActionKind.Delete && action.ExpectedTarget is not null)
                     .Select(action => action with
@@ -356,6 +356,9 @@ public sealed partial class SyncRun
                         Source = action.ExpectedTarget, ExpectedTarget = null, RecoveryFirst = false,
                         OppositeAbsent = false, FrozenVictimSignature = null, ProviderEffect = null
                     }).ToArray();
+                if (choice == NoticeChoices.DeleteReviewed)
+                    for (var i = 0; i < actions.Length; i++)
+                        actions[i] = await RecordRemovalConsentAsync(pair, actions[i], token).ConfigureAwait(false);
                 _store.SaveSyncRetry(pairId, retry with
                 {
                     Kind = "reviewed-choice", ReviewedActions = actions, ProposedActions = null,
