@@ -10,7 +10,7 @@ internal static class DefenderReview
     internal const string ReviewChanged = "review-changed";
     internal const string SharedReleaseCause = NoticeVocabulary.DefenderSharedReleaseCause;
 
-    internal static string SharedReleaseKey(string rootId, string objectId) => "defender-held-release:" + rootId + ":" + objectId;
+    internal static string SharedReleaseKey(string rootId, string objectId) => DefenderReviewKeys.SharedReleaseKey(rootId, objectId);
 
     internal static DefenderSharedRelease SharedRelease(IStateStore store, string rootId, string pairId, ItemState item)
     {
@@ -24,13 +24,13 @@ internal static class DefenderReview
     }
 
     /// <summary>A user's Keep held is rechecked against Defender history at most this often (or when the user acts).</summary>
-    internal static readonly TimeSpan KeepRecheck = TimeSpan.FromDays(7);
+    internal static readonly TimeSpan KeepRecheck = DefenderReviewKeys.KeepRecheck;
 
-    internal static string HeldBatch(string rootId) => "held:" + rootId;
+    internal static string HeldBatch(string rootId) => DefenderReviewKeys.HeldBatch(rootId);
 
-    internal static string ReviewKey(string rootId, string batch) => "defender-history-review:" + rootId + ":" + batch;
+    internal static string ReviewKey(string rootId, string batch) => DefenderReviewKeys.ReviewKey(rootId, batch);
 
-    internal static string HeldKey(string rootId) => "defender-held:" + rootId;
+    internal static string HeldKey(string rootId) => DefenderReviewKeys.HeldKey(rootId);
 
     internal static RootDef LocalRoot(PairDef pair, string rootId) => pair.A.RootId == rootId ? pair.A : pair.B;
 

@@ -7,22 +7,29 @@ also use 300, per declaration/file, NOT an invented aggregate partial limit.
 Attributes are excluded from function spans, as in the audit's scan_long.py.
 No automatic exemption from a comment: justifications still require review.
 
-M5/M6 (standards 2.1/2.2/2.4): per-file heuristic counts reuse the markers in
+M5/M6 (standards 2.1/2.2/2.4): repository-wide heuristic counts reuse the markers in
 swarm/scripts/classify.py and scan_tunables.py behind strings.csv/tunables.csv.
 They include exception text, CLI vocabulary, literal durations, tunable-named
 initializers/defaults, threshold/call literals and global settings reads.
-Counts avoid brittle text identities and never store literal values. They are
-an approximation, not semantic proof: replacement within a count is invisible.
-Microsoft.Data.* is forbidden outside a Storage directory. T1 owns other edges.
+Strings, tunables and Microsoft.Data references use repository totals; per-file
+changes are informational only. Existing per-file baseline slices are retained
+for provenance; updates only remove/lower slices to match the new total. Counts
+avoid brittle text identities and never store literal values. Replacement within
+a count is invisible. Microsoft.Data.* is counted outside Storage. T1 owns edges.
 
 The baseline was seeded once from 832e0009. There is deliberately no bootstrap
 CLI. --update-baseline is atomic and refuses ALL additions or increases. Source
-is processed one file at a time; baseline comparison is a sorted streaming merge.
-Keys use file/type/signature, never line numbers. '~' splits long identifiers to
+is processed one file at a time; a temporary SQLite index orders the comparison.
+Members use project/namespace/type/signature, never file paths or line numbers.
+Class sizes pair descending per-type declaration sizes; new/larger slots fail.
+File categories follow one-to-one Git renames from 832e0009 (history required).
+Baseline paths remain provenance only for members; remove-only updates retain
+original spelling so rename lineage survives subsequent runs. '~' splits identifiers to
 respect the repository privacy guard without storing literal text or hash IDs.
 """
 import argparse
 import collections
+from contextlib import closing
 import importlib.util
 import json
 import os
@@ -30,6 +37,8 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+import sqlite3
+import subprocess
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
@@ -180,8 +189,13 @@ def file_rows(path, relative):
     masked = lex.mask(source, spans)
     declarations = sorted(type_declarations(masked), key=lambda t: t[2])
     rows = {}
+    namespace = re.search(r'\bnamespace\s+([\w.]+)\s*[;{]', masked)
+    project = relative.split('/')[1] if len(relative.split('/')) > 2 else ''
+    type_prefix = project + ':' + (namespace[1] + '.' if namespace else '')
 
     def add(category, owner, signature, value):
+        if category in ('long-member', 'class-size'):
+            owner = type_prefix + owner
         key = tuple(safe_key(x) for x in (relative, category, owner, signature))
         if key in rows:
             raise ValueError('ambiguous declaration key: ' + ' | '.join(key))
@@ -277,24 +291,101 @@ def write_row(stream, row):
     stream.write(json.dumps({'key': row[0], 'value': row[1]}, ensure_ascii=True) + '\n')
 
 
+BASE_REVISION = '832e0009'
+COUNTED = ('user-strings', 'magic-tunables', 'data-outside-storage')
+COUNTED_SQL = '(' + ','.join("'" + category + "'" for category in COUNTED) + ')'
+
+
+def rename_paths(root):
+    """Only Git's one-to-one rename pairs may carry a file allowance forward."""
+    probe = subprocess.run(['git', '-C', str(root), 'rev-parse', '--is-inside-work-tree'],
+                           capture_output=True, text=True)
+    if probe.returncode:
+        return {}
+    result = subprocess.run(['git', '-C', str(root), 'diff', '--name-status', '-z',
+                             '--find-renames=50%', BASE_REVISION, '--', 'src'],
+                            capture_output=True, check=True)
+    fields = iter(result.stdout.decode('utf-8').split('\0'))
+    renamed = {}
+    for status in fields:
+        if not status:
+            break
+        path = next(fields)
+        if status.startswith('R'):
+            destination = next(fields)
+            renamed[safe_key(destination)] = safe_key(path)
+    return renamed
+
+
+def canonical_rows(rows, connection, table, renames=None):
+    """Disk-backed ordering: source files stream; no repository-sized Python maps.
+
+    Class-size is a multiset of oversized declarations of the same type. Pair
+    largest with largest, so partial moves cannot create or enlarge an allowance.
+    Member identity is project/namespace/type/signature, independent of its file.
+    Baseline file spelling is retained for remove-only updates and rename lineage.
+    """
+    connection.execute('CREATE TABLE ' + table + ' (identity TEXT, value INTEGER, original TEXT, category TEXT)')
+    for key, value in rows:
+        path, category, owner, signature = key
+        if category in COUNTED:
+            identity = ('@total', category, '', '')
+        elif category in ('long-member', 'class-size'):
+            identity = ('@type', category, owner, signature)
+        else:
+            identity = ((renames or {}).get(path, path), category, owner, signature)
+        connection.execute('INSERT INTO ' + table + ' VALUES (?, ?, ?, ?)',
+                           (json.dumps(identity), value, json.dumps(key), category))
+    connection.commit()
+    previous = None
+    rank = 0
+    for identity, value, original in connection.execute(
+            'SELECT identity, value, original FROM ' + table + ' WHERE category NOT IN ' + COUNTED_SQL +
+            ' UNION ALL SELECT identity, SUM(value), MIN(original) FROM ' + table +
+            ' WHERE category IN ' + COUNTED_SQL + ' GROUP BY identity ORDER BY identity, value DESC, original'):
+        key = tuple(json.loads(identity))
+        rank = rank + 1 if identity == previous else 0
+        if rank and key[1] == 'long-member':
+            raise ValueError('ambiguous type/member identity: ' + identity)
+        previous = identity
+        if key[1] == 'class-size':
+            key = key[:3] + ('declaration-' + str(rank).zfill(6),)
+        yield key, value, tuple(json.loads(original))
+
+
 def compare(root, baseline, update=False):
-    current = iter(scan(root))
-    old = iter(baseline_rows(baseline))
+    with tempfile.TemporaryDirectory(prefix='spec-ratchet-index-') as directory:
+        with closing(sqlite3.connect(str(Path(directory) / 'index.sqlite'))) as connection:
+            renames = rename_paths(root)
+            current = iter(canonical_rows(scan(root), connection, 'current_rows', renames))
+            old = iter(canonical_rows(baseline_rows(baseline), connection, 'old_rows'))
+            return compare_rows(current, old, baseline, update, connection)
+
+
+def compare_rows(current, old, baseline, update, connection):
     a, b = next(current, None), next(old, None)
     failures = improved = 0
     totals = collections.Counter()
+    remaining = collections.Counter()
+    for original, delta in connection.execute(
+            'SELECT original, SUM(delta) FROM ('
+            'SELECT original, value AS delta FROM current_rows WHERE category IN ' + COUNTED_SQL +
+            ' UNION ALL SELECT original, -value AS delta FROM old_rows WHERE category IN ' + COUNTED_SQL +
+            ') GROUP BY original HAVING SUM(delta) != 0 ORDER BY original'):
+        print('INFO file delta', ' | '.join(json.loads(original)), '{:+d}'.format(delta))
     pending = None
     try:
         if update:
+            connection.execute('CREATE TABLE lowered (original TEXT PRIMARY KEY, value INTEGER)')
             pending = tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', newline='\n',
                                                  dir=baseline.parent, prefix='.spec-ratchet-', delete=False)
         while a is not None or b is not None:
-            if b is None or (a is not None and order_key(a) < order_key(b)):
+            if b is None or (a is not None and json.dumps(a[0]) < json.dumps(b[0])):
                 print('NEW', ' | '.join(a[0]), a[1])
                 failures += 1
                 totals[a[0][1]] += 1
                 a = next(current, None)
-            elif a is None or order_key(b) < order_key(a):
+            elif a is None or json.dumps(b[0]) < json.dumps(a[0]):
                 print('improved', ' | '.join(b[0]), str(b[1]) + ' -> 0')
                 improved += 1
                 b = next(old, None)
@@ -307,9 +398,25 @@ def compare(root, baseline, update=False):
                     print('improved', ' | '.join(a[0]), str(b[1]) + ' -> ' + str(a[1]))
                     improved += 1
                 if pending is not None:
-                    write_row(pending, a)
+                    if a[0][1] in COUNTED:
+                        remaining[a[0][1]] = a[1]
+                    else:
+                        connection.execute('INSERT INTO lowered VALUES (?, ?)', (json.dumps(b[2]), a[1]))
                 a, b = next(current, None), next(old, None)
         if pending is not None:
+            for key, value in baseline_rows(baseline):
+                if key[1] in COUNTED:
+                    # Historical per-file entries are allowance slices, not present
+                    # locations. Keep/lower them in order; never add or raise one.
+                    retained = min(value, remaining[key[1]])
+                    remaining[key[1]] -= retained
+                    if retained:
+                        write_row(pending, (key, retained))
+                    continue
+                lowered = connection.execute('SELECT value FROM lowered WHERE original=?',
+                                             (json.dumps(key),)).fetchone()
+                if lowered is not None:
+                    write_row(pending, (key, lowered[0]))
             pending.close()
             if failures:
                 print('REFUSED baseline update: additions/increases are forbidden')
@@ -334,7 +441,8 @@ def main():
     args = parser.parse_args()
     try:
         return compare(args.root.resolve(), args.baseline.resolve(), args.update_baseline)
-    except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError) as error:
+    except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError,
+            subprocess.SubprocessError) as error:
         print('ERROR:', error, file=sys.stderr)
         return 2
 

@@ -43,6 +43,14 @@ internal static partial class DropboxChecks
                     rig.A, rig.B, CancellationToken.None);
                 Require(pending.All(result => result.Outcome == Outcome.Uncertain),
                     "failed checks/feed reads never prove deletion or authorize replay");
+                var saved = rig.Store.UnresolvedIntents("p1").Single(action => action.ProviderEffect?.Kind == "whole-folder-group");
+                var savedGroup = JsonNode.Parse(saved.ProviderEffect!.Id)!.AsObject();
+                var savedProvider = JsonNode.Parse(savedGroup["ProviderState"]!.GetValue<string>())!.AsObject();
+                Require(savedProvider["JobId"]?.GetValue<string>() == "delete-job-1" &&
+                    savedProvider["SubmittedAt"]!.GetValue<DateTimeOffset>() == provider["SubmittedAt"]!.GetValue<DateTimeOffset>(),
+                    "every failed recovery retains the submitted job identity and original escalation age");
+                Require(savedProvider["JobUnavailable"]!.GetValue<bool>() == (tag != "unexpected_error"),
+                    "only structured unavailable-job answers switch to feed recovery");
             }
             Require(rig.Store.OpenNotices("p1").Count(notice => notice.ReasonKey == ExecutionReasons.StuckProviderJob.Key &&
                     notice.Detail.Contains("delete-job-1", StringComparison.Ordinal)) == 1,

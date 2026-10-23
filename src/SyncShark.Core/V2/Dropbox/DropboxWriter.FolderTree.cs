@@ -23,7 +23,7 @@ public sealed partial class DropboxWriter
         Dictionary<string, string>? SettledUnrestored = null, string[]? Unobserved = null,
         Dictionary<string, string?>? RestoreStarted = null, Dictionary<string, DateTimeOffset>? RestoreRetryAfter = null,
         Dictionary<string, string?>? RestoreRequested = null,
-        Dictionary<string, int>? RestoreAttempts = null);
+        Dictionary<string, int>? RestoreAttempts = null, bool JobUnavailable = false);
 
     // Explicit user authority only: retain the exact submitted revision, not a fresh latest revision.
     string IFolderTreeDeleter.AuthorizeRestoreAgain(string providerState, string folderPath) =>
@@ -118,15 +118,15 @@ public sealed partial class DropboxWriter
                     updated => checkpoint(JsonSerializer.Serialize(updated)));
             if (recovery.Completed is null)
             {
-                if (recovery.JobId is not null)
+                if (recovery.JobId is not null && !recovery.JobUnavailable)
                 {
                     var job = await _client.ReconcileFolderDeleteJobAsync(recovery.JobId, trees.Count, ct);
                     if (!job.Unavailable && job.Completed is null)
                         throw new InvalidDataException("The whole-folder delete job is still pending.");
-                    recovery = recovery with { JobId = job.Unavailable ? null : recovery.JobId, Completed = job.Completed };
+                    recovery = recovery with { JobUnavailable = job.Unavailable, Completed = job.Completed };
                     await checkpoint(JsonSerializer.Serialize(recovery));
                 }
-                if (recovery.JobId is null)
+                if (recovery.JobId is null || recovery.JobUnavailable)
                 {
                     var (after, _) = await ReadFeedAsync(recovery.Middle, ct);
                     var latest = new Dictionary<string, DropboxChange>(StringComparer.OrdinalIgnoreCase);

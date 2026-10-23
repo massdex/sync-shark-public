@@ -84,28 +84,7 @@ internal sealed partial class NoticeTable
             notice.NoticeId is { } reviewId && ById(pairNo, reviewId, transaction) is { } review &&
             review.Notice.Quarantine is not null && review.Notice.Rule == notice.Rule && PairPath.Same(review.Notice.Path, notice.Path))
             return;
-        // A blocked conflict successor owns its explanation and Retry-only policy, not the generic
-        // path retry (whose Ignore would silently abandon the established conflict).
-        if (notice.ReasonKey == ExecutionReasons.ConflictCopyBlocked)
-            CloseResolved(transaction, pairNo,
-                ShortId.Make("n", notice.PairId, "40", RowCodec.Key(notice.Path), "sync-retry"), "superseded");
-        if (notice.ReasonKey is "content-unconfirmed" or "sync-retry" &&
-            StoreSchema.Scalar(_connection, transaction,
-                "SELECT 1 FROM notice INDEXED BY nt_pair_reason WHERE pair_no=$p AND reason_key=$reason " +
-                "AND path_key=$key AND " + NoticeTable.ActionableSql("state") + " LIMIT 1;",
-                ("$p", pairNo), ("$key", RowCodec.Key(notice.Path)), ("$reason", ExecutionReasons.ConflictCopyBlocked)) is not null)
-            return;
-        // The uncertain-delete explanation owns this failure, regardless of publication order.
-        // Aggregated rows still own the per-item explanation behind their summary.
-        if (notice.ReasonKey == InterruptedDelete.UnverifiedReason)
-            CloseResolved(transaction, pairNo,
-                ShortId.Make("n", notice.PairId, "40", RowCodec.Key(notice.Path), "sync-retry"), "superseded");
-        if (notice.ReasonKey is "content-unconfirmed" or "sync-retry" &&
-            StoreSchema.Scalar(_connection, transaction,
-                "SELECT 1 FROM notice INDEXED BY nt_pair_reason WHERE pair_no=$p AND reason_key='interrupted-delete-unverified' " +
-                "AND path_key=$key AND " + ActionableSql("state") + " LIMIT 1;",
-                ("$p", pairNo), ("$key", RowCodec.Key(notice.Path))) is not null)
-            return;
+        if (SuppressDedicatedRetry(transaction, pairNo, notice)) return;
         // An unreadable item owns its exact scan debt. Fold generic scan failures into that row,
         // refreshing scheduling evidence even while the cause is suppressed instead of duplicating it.
         if (notice.ReasonKey == "unreadable")
@@ -285,11 +264,11 @@ internal sealed partial class NoticeTable
         if (reasonKey is not null) command.Parameters.AddWithValue("$reason", reasonKey);
         if (defenderRoot is not null)
         {
-            var prefix = DefenderReview.ReviewKey(defenderRoot, "");
-            command.Parameters.AddWithValue("$held", DefenderReview.HeldKey(defenderRoot));
+            var prefix = DefenderReviewKeys.ReviewKey(defenderRoot, "");
+            command.Parameters.AddWithValue("$held", DefenderReviewKeys.HeldKey(defenderRoot));
             command.Parameters.AddWithValue("$prefix", prefix);
             command.Parameters.AddWithValue("$end", prefix + char.MaxValue);
-            var shared = DefenderReview.SharedReleaseKey(defenderRoot, "");
+            var shared = DefenderReviewKeys.SharedReleaseKey(defenderRoot, "");
             command.Parameters.AddWithValue("$shared", shared);
             command.Parameters.AddWithValue("$sharedEnd", shared + char.MaxValue);
         }

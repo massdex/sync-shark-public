@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import sys
+import subprocess
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
@@ -27,7 +28,7 @@ class RatchetChecks(unittest.TestCase):
         self.source = self.root / 'src' / 'Example.cs'
         self.baseline = self.root / 'baseline.jsonl'
         self.put(long_method())
-        with self.baseline.open('w', encoding='utf-8') as stream:
+        with self.baseline.open('w', encoding='utf-8', newline='\n') as stream:
             for row in ratchet.scan(self.root):
                 ratchet.write_row(stream, row)
 
@@ -97,7 +98,7 @@ class RatchetChecks(unittest.TestCase):
 
     def test_shortened_method_lowers_baseline(self):
         self.put(long_method(extra=2))
-        with self.baseline.open('w', encoding='utf-8') as stream:
+        with self.baseline.open('w', encoding='utf-8', newline='\n') as stream:
             for row in ratchet.scan(self.root):
                 ratchet.write_row(stream, row)
         self.put(long_method())
@@ -108,7 +109,7 @@ class RatchetChecks(unittest.TestCase):
 
     def test_long_local_function_cannot_hide_inside_a_shrinking_outer(self):
         self.put(long_method(extra=20))
-        with self.baseline.open('w', encoding='utf-8') as stream:
+        with self.baseline.open('w', encoding='utf-8', newline='\n') as stream:
             for row in ratchet.scan(self.root):
                 ratchet.write_row(stream, row)
         self.put('    public void Run() {\n' + long_method('Local').replace('public ', '') + '    }\n')
@@ -121,6 +122,91 @@ class RatchetChecks(unittest.TestCase):
                  '        Work();\n' * 45 + '    } } }\n')
         keys = [row[0] for row in ratchet.scan(self.root)]
         self.assertFalse(any('.in' in key[2] or '.is' in key[2] for key in keys))
+
+    def git_baseline(self):
+        def git(*args):
+            return subprocess.check_output(['git', '-C', str(self.root), *args], text=True).strip()
+        git('init', '-q')
+        git('add', 'src')
+        git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+            'commit', '-q', '-m', 'Fixture')
+        old = ratchet.BASE_REVISION
+        ratchet.BASE_REVISION = git('rev-parse', 'HEAD')
+        self.addCleanup(setattr, ratchet, 'BASE_REVISION', old)
+        return git
+
+    def test_pure_rename_passes(self):
+        git = self.git_baseline()
+        git('mv', 'src/Example.cs', 'src/Example.Moved.cs')
+        self.assertEqual(0, self.check()[0])
+        before = self.baseline.read_bytes()
+        self.assertEqual(0, self.check(update=True)[0])
+        self.assertEqual(before, self.baseline.read_bytes())
+
+    def test_rename_with_growth_fails(self):
+        git = self.git_baseline()
+        git('mv', 'src/Example.cs', 'src/Example.Moved.cs')
+        self.source = self.root / 'src' / 'Example.Moved.cs'
+        self.put(long_method(extra=1))
+        self.assertEqual(1, self.check()[0])
+
+    def test_member_move_to_partial_file_passes(self):
+        self.put('')
+        (self.root / 'src' / 'Example.Part.cs').write_text(
+            'namespace Example;\npublic partial class Example\n{\n' + long_method() + '}\n', encoding='utf-8')
+        self.assertEqual(0, self.check()[0])
+
+    def test_counted_file_rename_preserves_ceiling(self):
+        self.put('void Text() { Console.WriteLine("Please retry this operation."); }\n')
+        with self.baseline.open('w', encoding='utf-8', newline='\n') as stream:
+            for row in ratchet.scan(self.root):
+                ratchet.write_row(stream, row)
+        git = self.git_baseline()
+        git('mv', 'src/Example.cs', 'src/Example.Moved.cs')
+        self.assertEqual(0, self.check()[0])
+        self.source = self.root / 'src' / 'Example.Moved.cs'
+        self.put('void Text() { Console.WriteLine("Please retry this operation."); '
+                 'Console.WriteLine("Please inspect the next operation."); }\n')
+        self.assertEqual(1, self.check()[0])
+
+    def seed_current(self):
+        with self.baseline.open('w', encoding='utf-8', newline='\n') as stream:
+            for row in ratchet.scan(self.root):
+                ratchet.write_row(stream, row)
+
+    def test_constant_moved_between_files_passes(self):
+        constant = '    const int RetryLimit = 20;\n'
+        self.put(constant)
+        self.seed_current()
+        before = self.baseline.read_bytes()
+        self.put('')
+        (self.root / 'src' / 'SettingsKeys.cs').write_text(
+            'class SettingsKeys {\n' + constant + '}\n', encoding='utf-8')
+        code, output = self.check(update=True)
+        self.assertEqual(0, code)
+        self.assertIn('INFO file delta', output)
+        self.assertEqual(before, self.baseline.read_bytes())
+
+    def test_added_constant_anywhere_fails(self):
+        self.put('    const int RetryLimit = 20;\n')
+        self.seed_current()
+        (self.root / 'src' / 'SettingsKeys.cs').write_text(
+            'class SettingsKeys { const int BatchLimit = 50; }', encoding='utf-8')
+        self.assertEqual(1, self.check()[0])
+
+    def test_string_moved_to_catalogue_improves_total(self):
+        self.put('void Text() { Console.WriteLine("Please retry this operation."); }\n')
+        self.seed_current()
+        before = dict(ratchet.baseline_rows(self.baseline))
+        self.put('void Text() { Console.WriteLine(EdgeMessages.Text("retry")); }\n')
+        (self.root / 'src' / 'messages.json').write_text(
+            '{"retry": "Please retry this operation."}', encoding='utf-8')
+        code, output = self.check(update=True)
+        self.assertEqual(0, code)
+        self.assertIn('improved @total | user-strings', output)
+        self.assertNotIn('user-strings', self.baseline.read_text())
+        for key, value in ratchet.baseline_rows(self.baseline):
+            self.assertLessEqual(value, before[key])
 
     def test_long_names_are_privacy_safe_and_reversible(self):
         name = 'Long' * 15

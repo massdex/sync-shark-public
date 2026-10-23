@@ -15,6 +15,7 @@ internal static partial class RunChecks
         await DeferredEvidence_ChoicesRetainedAsync();
         await DeferredEvidence_TokenlessCancellationStaysPendingAsync();
         await DeferredEvidence_CallerCancellationEscapesAsync();
+        await DeferredEvidence_AnsweredEffectFailureKeepsRetryNoticeAsync();
         await DeferredEvidence_UnreviewedStaysPendingAsync();
         await DeferredEvidence_NewFolderUsesOrdinaryPlannerAsync();
         await DeferredEvidence_NestedFolderAndCachedChildAsync();
@@ -272,7 +273,35 @@ internal static partial class RunChecks
             fx.Store.UnresolvedNotices(fx.Pair.PairId).Count(notice =>
                 notice.Path == "held.txt" && notice.ReasonKey == "deletion-evidence-pending") == 1,
             "unanswered evidence preserves the survivor with one pending notice and no remote effect");
+        Require(fx.Store.UnresolvedNotices(fx.Pair.PairId).Count(notice => notice.Path == "held.txt") == 1,
+            "unanswered held evidence has exactly one open notice of any kind");
         Console.WriteLine("PASS DeferredEvidence_TokenlessCancellationStaysPending");
+    }
+
+    private static async Task DeferredEvidence_AnsweredEffectFailureKeepsRetryNoticeAsync()
+    {
+        var fx = Build();
+        using var deadline = new CancellationTokenSource(GateTimeout);
+        fx.A.Seed("held.txt", "local");
+        var evidence = new DeferredInventory(fx.B);
+        fx.Provider.AddInventory(fx.Pair.B, evidence);
+        fx.WriterB.PutError = new IOException("Upload unavailable after evidence answered");
+        var run = fx.Run();
+        var plan = await run.PreviewFirstSyncAsync(fx.Pair.PairId, new RecordingProgress(), deadline.Token);
+        Require(plan.HeldDeletions.Count == 1, "effect-failure fixture starts as held evidence");
+        var report = await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), deadline.Token, ReviewedHeld(plan));
+        var notices = fx.Store.UnresolvedNotices(fx.Pair.PairId).Where(notice => notice.Path == "held.txt").ToArray();
+        Require(evidence.Started.Task.IsCompleted && report.Failed == 1 && report.Done == 0 &&
+            fx.Store.SyncRetryAt(fx.Pair.PairId, "held.txt") is { ReviewedActions: { Count: > 0 } },
+            "answered evidence reaches an effect whose failure remains durable retry work");
+        Require(notices.Length == 1 && notices[0].ReasonKey == "sync-retry" &&
+            notices[0].Detail.Contains("Upload unavailable after evidence answered", StringComparison.Ordinal) &&
+            !notices.Any(notice => notice.ReasonKey == "deletion-evidence-pending"),
+            "answered evidence with a failed effect has exactly one generic effect retry notice, not an evidence notice");
+        Require(await fx.A.ObserveAsync("held.txt", deadline.Token) is not null &&
+            await fx.B.ObserveAsync("held.txt", deadline.Token) is null,
+            "failed restore preserves the survivor without claiming the remote effect succeeded");
+        Console.WriteLine("PASS DeferredEvidence_AnsweredEffectFailureKeepsRetryNotice");
     }
 
     private static async Task DeferredEvidence_CallerCancellationEscapesAsync()

@@ -28,6 +28,9 @@ public sealed record V2Settings(
 {
     internal const long DefaultUploadPayloadBudgetBytes = 256L * 1024 * 1024;
 
+    /// <summary>Maximum identities examined per rehash gate lease, including ineligible identities.</summary>
+    public int StoreRehashPageRows { get; init; } = 128;
+
     /// <summary>Shared background gap-verification byte budget; never used for foreground transfers.</summary>
     public long LocalGapBytesPerSecond { get; init; } = 30_000_000;
     /// <summary>User-input quiet time required for background gap IO; battery operation also pauses it.</summary>

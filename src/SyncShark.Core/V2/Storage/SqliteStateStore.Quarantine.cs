@@ -131,7 +131,7 @@ public sealed partial class SqliteStateStore
         StoreSchema.Execute(_connection, null,
             "UPDATE defender_deferral SET consent=$consent,batch=$next,updated=MAX(updated,$now) WHERE batch=$batch AND consent=$pending;",
             ("$consent", (long)(proceed ? DefenderConsent.Proceed : DefenderConsent.Keep)),
-            ("$next", proceed ? null : DefenderReview.HeldBatch(rootId)), ("$now", _clock.GetUtcNow().UtcTicks),
+            ("$next", proceed ? null : DefenderReviewKeys.HeldBatch(rootId)), ("$now", _clock.GetUtcNow().UtcTicks),
             ("$batch", batch), ("$pending", (long)DefenderConsent.Pending)));
 
     public void ReopenDefenderBatch(string closedBatch, string? batch) => InStore(() =>
@@ -152,12 +152,12 @@ public sealed partial class SqliteStateStore
         var excluded = pairId is null ? [] : PairRecord(pairId)?.Excluded ?? [];
         if (excluded.Count == 0)
             return (long)StoreSchema.Scalar(_connection, null, "SELECT COUNT(*) " + HeldFrom + HeldWhere + ";",
-                ("$root", root), ("$held", DefenderReview.HeldBatch(rootId)), ("$keep", (long)DefenderConsent.Keep))!;
+                ("$root", root), ("$held", DefenderReviewKeys.HeldBatch(rootId)), ("$keep", (long)DefenderConsent.Keep))!;
         // Stream only actual held rows; never materialize the root inventory to count one binding.
         using var cmd = StoreSchema.Command(_connection, null,
             "SELECT d.path,f.name " + HeldFrom + "JOIN dir d ON d.dir_no=f.dir_no " + HeldWhere + ";");
         cmd.Parameters.AddWithValue("$root", root);
-        cmd.Parameters.AddWithValue("$held", DefenderReview.HeldBatch(rootId));
+        cmd.Parameters.AddWithValue("$held", DefenderReviewKeys.HeldBatch(rootId));
         cmd.Parameters.AddWithValue("$keep", (long)DefenderConsent.Keep);
         using var reader = cmd.ExecuteReader();
         long count = 0;
@@ -175,7 +175,7 @@ public sealed partial class SqliteStateStore
             "SELECT d.path,f.name " + HeldFrom + "JOIN dir d ON d.dir_no=f.dir_no " + HeldWhere + " ORDER BY q.object_id;"))
         {
             cmd.Parameters.AddWithValue("$root", root);
-            cmd.Parameters.AddWithValue("$held", DefenderReview.HeldBatch(rootId));
+            cmd.Parameters.AddWithValue("$held", DefenderReviewKeys.HeldBatch(rootId));
             cmd.Parameters.AddWithValue("$keep", (long)DefenderConsent.Keep);
             using var reader = cmd.ExecuteReader();
             while (paths.Count < limit && reader.Read())
@@ -195,7 +195,7 @@ public sealed partial class SqliteStateStore
             "UPDATE defender_deferral SET consent=$proceed,batch=NULL,updated=MAX(updated,$now) " +
             "WHERE batch=$held AND consent=$keep AND ($id IS NULL OR object_id=$id);",
             ("$proceed", (long)DefenderConsent.Proceed), ("$now", _clock.GetUtcNow().UtcTicks),
-            ("$held", DefenderReview.HeldBatch(rootId)), ("$keep", (long)DefenderConsent.Keep), ("$id", objectId));
+            ("$held", DefenderReviewKeys.HeldBatch(rootId)), ("$keep", (long)DefenderConsent.Keep), ("$id", objectId));
         return (int)StoreSchema.Changes(_connection, null);
     });
 
@@ -208,7 +208,7 @@ public sealed partial class SqliteStateStore
                 !pair.Excluded.Any(prefix => PairPath.IsSelfOrUnder(item.Path, prefix)))) return false;
         }
         StoreSchema.Execute(_connection, null, "DELETE FROM defender_deferral WHERE object_id=$id AND batch=$held AND consent=$keep;",
-            ("$id", objectId), ("$held", DefenderReview.HeldBatch(rootId)), ("$keep", (long)DefenderConsent.Keep));
+            ("$id", objectId), ("$held", DefenderReviewKeys.HeldBatch(rootId)), ("$keep", (long)DefenderConsent.Keep));
         return StoreSchema.Changes(_connection, null) == 1;
     });
 
@@ -226,7 +226,7 @@ public sealed partial class SqliteStateStore
             cmd.Parameters.AddWithValue("$root", root);
             cmd.Parameters.AddWithValue("$limit", limit);
             cmd.Parameters.AddWithValue("$keep", (long)DefenderConsent.Keep);
-            cmd.Parameters.AddWithValue("$due", (_clock.GetUtcNow() - DefenderReview.KeepRecheck).UtcTicks);
+            cmd.Parameters.AddWithValue("$due", (_clock.GetUtcNow() - DefenderReviewKeys.KeepRecheck).UtcTicks);
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {

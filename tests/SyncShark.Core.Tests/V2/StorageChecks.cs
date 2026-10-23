@@ -19,6 +19,7 @@ internal static partial class StorageChecks
         IntentHorizonMigrationChecks(root);
         DeferredAliasContinuationChecks(root);
         await JournalSizingChecks.RunAsync(root);
+        await RehashGateChecks(root);
         OpenFreshReopen(root);
         OpenDamagedRoots(root);
         PrepareStorageChecks(root);

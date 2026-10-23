@@ -61,9 +61,17 @@ internal sealed class EngineLayoutSourceMap
         var depth = 0;
         var namespaceDepth = 0;
         var namespacePending = false;
+        var parentheses = 0;
+        var brackets = 0;
         for (var i = 0; i < tokens.Count; i++)
         {
             var token = tokens[i];
+            if (token == "(") parentheses++;
+            if (token == ")") parentheses--;
+            if (token == "[") brackets++;
+            if (token == "]") brackets--;
+            // Contextual keywords in parameters or attributes are identifiers, not declarations.
+            if (parentheses != 0 || brackets != 0) continue;
             if (token == "namespace") namespacePending = true;
             if (token == ";") namespacePending = false;
             if (token == "{") { depth++; if (namespacePending) { namespaceDepth = depth; namespacePending = false; } }

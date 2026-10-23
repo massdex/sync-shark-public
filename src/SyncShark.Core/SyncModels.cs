@@ -601,8 +601,6 @@ public sealed record SyncRunResult(string PairId, IReadOnlyList<SyncDecision> De
     public bool Stopped => Outcome is not null ? Outcome == V2.RunOutcomes.Stopped : Decisions.Any(item => item.Kind == SyncDecisionKind.Stopped);
 }
 
-public sealed record SyncDownloadResult(string FileId, string Revision, long Size, string ContentHash);
-
 public sealed record SyncArchiveResult(string FileId, string Revision, string RecoveryPath, long Size, string ContentHash);
 
 public sealed record SyncLocalArchiveResult(string RecoveryPath, uint VolumeSerialNumber, ulong FileId, long Size,
@@ -795,13 +793,6 @@ public static class SyncRemoteExactLookup
         return matches[0];
     }
 }
-
-/// <summary>
-/// Provider evidence for an exact remote path's current deletion. A null timestamp is not
-/// deletion authority; Reason explains unsupported, unavailable or inconclusive evidence.
-/// </summary>
-public sealed record SyncRemoteDeletionEvidence(DateTimeOffset? DeletedUtc, string Reason,
-    bool LookupFailed = false, string? ContentHash = null, bool PermanentFailure = false, bool Answered = false);
 
 public interface ISyncRemoteStore : IPilotRemoteStore
 {

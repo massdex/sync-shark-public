@@ -606,11 +606,11 @@ internal sealed class ActionRunner
             keys.Add(new(write.TransferResourceKey, SyncProviderOperation.Write));
         if ((file || metadata) && source is ISyncTransferResourceEndpoint read)
             keys.Add(new(read.TransferResourceKey, SyncProviderOperation.Read));
-        var scope = _admission.ForOperations(keys);
+        var acquire = _admission.ForOperationAdmission(keys);
         while (true)
         {
             ct.ThrowIfCancellationRequested();
-            if (scope.TryAcquire(bytes, file) is { } lease) return lease;
+            if (acquire(bytes, file) is { } lease) return lease;
             await Task.Delay(_admissionRetryDelay, ct).ConfigureAwait(false);
         }
     }

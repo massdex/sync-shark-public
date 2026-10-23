@@ -1,4 +1,4 @@
-namespace Massdex.SyncShark.V2;
+﻿namespace Massdex.SyncShark.V2;
 
 public sealed partial class SqliteStateStore
 {
@@ -53,38 +53,6 @@ public sealed partial class SqliteStateStore
             "SELECT 1 FROM local_rehash q WHERE q.root_no=(SELECT root_no FROM root WHERE root_id=$id) AND " + NotGapOwnedSql + " AND " +
             "EXISTS(SELECT 1 FROM file_state f WHERE f.root_no=q.root_no AND f.object_id=q.object_id AND " +
             VerificationNeededSql + " AND " + VerificationEligibleSql + ") LIMIT 1;", ("$id", rootId)) is not null);
-
-    // Separate readers prevent publication and the concurrent indexer rotating each other's work.
-    public IReadOnlyList<ItemState> RehashCandidates(string rootId, int limit, long through, bool? needsVerification) => InStore(() =>
-    {
-        var root = RootNo(rootId);
-        if (root is null || limit <= 0) return Array.Empty<ItemState>();
-        var ids = new List<string>();
-        using (var cmd = StoreSchema.Command(_connection, null,
-            "SELECT q.object_id FROM local_rehash q INDEXED BY rehash_retry WHERE q.root_no=$r AND q.last_attempt<=$through AND " +
-            (needsVerification is true ? NotGapOwnedSql + " AND q.retry_after<=$now AND " : "") +
-            "EXISTS(SELECT 1 FROM file_state f WHERE f.root_no=q.root_no AND f.object_id=q.object_id" +
-            (needsVerification is true ? " AND " + VerificationNeededSql + " AND " + VerificationEligibleSql :
-             needsVerification is false ? " AND NOT " + VerificationNeededSql : "") + ") " +
-            "ORDER BY q.last_attempt,q.object_id LIMIT $limit;"))
-        {
-            cmd.Parameters.AddWithValue("$r", root.Value);
-            cmd.Parameters.AddWithValue("$limit", limit);
-            cmd.Parameters.AddWithValue("$through", through);
-            if (needsVerification is true) cmd.Parameters.AddWithValue("$now", NowMs());
-            using var reader = cmd.ExecuteReader();
-            while (reader.Read()) ids.Add(reader.GetString(0));
-        }
-        using (var tx = _connection.BeginTransaction())
-        {
-            foreach (var id in ids)
-                StoreSchema.Execute(_connection, tx,
-                    "UPDATE local_rehash SET last_attempt=$order WHERE root_no=$r AND object_id=$o;",
-                    ("$r", root.Value), ("$o", id), ("$order", NextRehashOrder(root.Value, tx, through)));
-            tx.Commit();
-        }
-        return ids.Select(id => _reads.ByObject(root.Value, id)!).ToArray();
-    });
 
     public void RequireRehash(string rootId, ItemState item, string reason) => RequireRehashBatch(rootId, [item], reason);
 

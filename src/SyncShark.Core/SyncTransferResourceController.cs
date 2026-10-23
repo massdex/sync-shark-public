@@ -122,7 +122,7 @@ public sealed class SyncTransferResourceController
     internal SyncTransferSchedulingScope ForOperations(IEnumerable<SyncProviderBudgetKey> keys,
         Func<SyncTransferResourceStatus, Task>? report = null) => new(this,
             keys.Where(key => !string.IsNullOrWhiteSpace(key.Provider)).Distinct().ToArray(), report);
-
+    internal Func<long, bool, Lease?> ForOperationAdmission(IEnumerable<SyncProviderBudgetKey> keys) => ForOperations(keys).TryAcquire;
     internal Lease? TryAcquire(SyncProviderBudgetKey[] keys, long bytes, bool file, bool inspection = false)
     {
         if (inspection && file) throw new ArgumentException("Inspection cannot be a transferred file.", nameof(inspection));

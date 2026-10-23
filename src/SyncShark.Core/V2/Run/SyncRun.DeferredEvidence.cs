@@ -23,12 +23,8 @@ public sealed partial class SyncRun
             if (_store.SyncRetryAt(pairId, path) is { Held: not null, ReprobeEvidence: true, Kind: not "decision" } retry)
                 restored.Add((path, retry));
         if (restored.Count == 0) return;
-        var oldRetries = _store.UnresolvedNotices(pairId).Where(notice => notice.ReasonKey == "sync-retry")
-            .ToLookup(notice => notice.Path, StringComparer.OrdinalIgnoreCase);
         foreach (var (path, retry) in restored)
         {
-            foreach (var old in oldRetries[path])
-                if (old.NoticeId is not null) _store.CloseNotice(old.NoticeId, "evidence-pending");
             WriteNotices([new Notice(pairId, 4, NoticeKind.Info, path,
                 "Deletion evidence is pending: " + (string.IsNullOrWhiteSpace(retry.LastError) ? "The provider could not confirm deletion history." : retry.LastError) +
                 " Retry or Ignore this item; other files continue. If history remains unavailable, choose how to resolve the survivor.", "deletion-evidence-pending")]);

@@ -35,6 +35,21 @@ internal static partial class StorageChecks
             store.CloseNotice(newer, NoticeChoices.Ignore);
             store.SavePairIncluded(pair, pair with { Excluded = [] });
             Require(store.OpenNotices("p1").Any(n => n.NoticeId == newer), "re-including clears actionable Ignore suppression");
+            foreach (var evidenceFirst in new[] { false, true })
+            {
+                var path = evidenceFirst ? "Evidence/first" : "Evidence/last";
+                var retry = FailureRetryOwner.RetryNotice("p1", path, "probe incomplete");
+                var pending = new Notice("p1", 4, NoticeKind.Info, path, "History pending", "deletion-evidence-pending");
+                store.AddNotices(evidenceFirst ? [pending, retry] : [retry, pending]);
+                store.AddNotices([retry, pending]);
+                var open = store.UnresolvedNotices("p1").Where(notice => notice.Path == path).ToArray();
+                Require(open.Length == 1 && open[0].ReasonKey == "deletion-evidence-pending",
+                    "evidence pending supersedes generic retry in either publication order without duplicate notices");
+                store.CloseNotice(open[0].NoticeId!, "resolved");
+                store.AddNotices([retry with { Detail = "Effect failed after history resolved" }]);
+                Require(store.UnresolvedNotices("p1").Single(notice => notice.Path == path).ReasonKey == "sync-retry",
+                    "resolved evidence ownership permits a later effect retry notice");
+            }
         }
         using (var archive = new SqliteConnection(new SqliteConnectionStringBuilder
             { DataSource = SqliteStateStore.DatabasePath(folder), Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString()))

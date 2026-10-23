@@ -79,8 +79,17 @@ internal sealed class DependencyChecks
         return type.IsGenericType ? type.GetGenericTypeDefinition() : type;
     }
 
-    private static bool Neutral(Type type) => type.Name.StartsWith('<') &&
-        type.IsDefined(typeof(CompilerGeneratedAttribute), false);
+    private static bool Neutral(Type type)
+    {
+        type = Top(type);
+        if (type.Name.StartsWith('<') && type.IsDefined(typeof(CompilerGeneratedAttribute), false)) return true;
+        // These collection-expression helpers do not carry CompilerGeneratedAttribute.
+        // They remain inspected Neutral definitions, never unrestricted framework types.
+        return type.Namespace == null && type.IsSealed && type.IsNotPublic &&
+            type.IsGenericTypeDefinition && type.GetGenericArguments().Length == 1 &&
+            (type.Name is "<>z__ReadOnlyArray`1" or "<>z__ReadOnlySingleElementList`1") &&
+            type.GetInterfaces().Any(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IReadOnlyList<>));
+    }
 
     private static bool Allowed(string from, string to) => from == to || to == "Contracts" ||
         from == "Edge" || from == "Run" && to != "Edge";
@@ -311,7 +320,7 @@ internal sealed class DependencyChecks
         "DeleteSourceGuard", "DeleteSource", "EffectResolver", "EffectReasons", "ExecutionReasons",
         "RecoveryRestoreHold", "RunOutcomes", "NoticeChoices", "NoticeVocabulary", "JournalSizing",
         "JournalPolicy", "JournalSizingState", "VerificationBudget", "VerificationPolicy", "DefenderExclusions",
-        "DefenderReview", "StorageNotices", "OwnedPointerProof", "QuarantineFailure",
+        "DefenderReview", "DefenderReviewKeys", "StorageNotices", "OwnedPointerProof", "QuarantineFailure",
         "SyncProviders", "ProviderIds", "ProviderTransientFailure", "SyncIgnoreKind", "PilotEntryKind",
         "DropboxOAuthError", "SyncCloudFileAvailability"
     };
@@ -377,6 +386,18 @@ internal sealed class DependencyChecks
         Require(ownershipErrors.Any(e => e.Contains("crosses folders")), "cross-folder partial");
         Require(EngineLayoutSourceMap.Declarations("﻿namespace A; [Flags] public enum Flag { A } ").SequenceEqual(["Flag"]), "flags/BOM");
         Require(EngineLayoutSourceMap.Declarations("namespace A; public readonly record struct Row(int X);").SequenceEqual(["Row"]), "record struct");
+        const string primary = "namespace A; [Tag(record = true)] internal class DependencyChecks(Action<int> record, (int X, int Y) pair) {}";
+        Require(EngineLayoutSourceMap.Declarations(primary).SequenceEqual(["DependencyChecks"]), "primary-constructor record parameter and attribute");
+        ownershipErrors.Clear();
+        _ = new EngineLayoutSourceMap([new("DependencyChecks.cs", primary)], [typeof(DependencyChecks)], (_, e) => ownershipErrors.Add(e));
+        Require(ownershipErrors.Count == 0, "primary-constructor ownership");
+        var extraRecord = primary + " internal record Extra(int Value);";
+        Require(EngineLayoutSourceMap.Declarations(extraRecord).SequenceEqual(["DependencyChecks", "Extra"]), "extra top-level record detection");
+        _ = new EngineLayoutSourceMap([new("DependencyChecks.cs", extraRecord)], [typeof(DependencyChecks)], (_, e) => ownershipErrors.Add(e));
+        Require(ownershipErrors.Any(e => e.Contains("expected one top-level declaration")), "extra top-level record fails ownership");
+        var legacy = new DependencyChecks(core, new());
+        legacy.Reference(typeof(SyncProviders), "Planning", "real legacy fixture");
+        Require(legacy.failures.ContainsKey("Planning -> Legacy"), "real legacy reference remains forbidden");
         var mapped = new DependencyChecks(core, new() { [typeof(V2.ItemState)] = "Local" });
         mapped.Reference(typeof(List<V2.ItemState>), "Planning", "generic-only fixture");
         Require(mapped.failures.ContainsKey("Planning -> Local"), "generic argument ownership");
@@ -419,6 +440,29 @@ internal sealed class DependencyChecks
         var neutral = new DependencyChecks(anonymous.Assembly, new());
         neutral.Inspect(anonymous, "Neutral");
         Require(neutral.failures.Count == 0, "neutral helper traversal");
+        foreach (var (wrapper, name) in new[]
+        {
+            (SingleElementProbe(1).GetType(), "<>z__ReadOnlySingleElementList`1"),
+            (ReadOnlyArrayProbe(1).GetType(), "<>z__ReadOnlyArray`1")
+        })
+        {
+            var definition = wrapper.GetGenericTypeDefinition();
+            Require(definition.Name == name && Neutral(definition) && Neutral(wrapper), "exact collection-expression helper");
+            var support = new DependencyChecks(wrapper.Assembly, new());
+            foreach (var type in wrapper.Assembly.GetTypes().Where(t => Top(t) == definition))
+            {
+                Require(Neutral(type), "nested collection support ownership");
+                support.Inspect(type, "Neutral");
+            }
+            support.Reference(wrapper, "Planning", "BCL-element collection fixture");
+            Require(support.failures.Count == 0, "collection helper full traversal");
+            var closed = new DependencyChecks(wrapper.Assembly, new() { [typeof(DependencyChecks)] = "Local" });
+            closed.Reference(definition.MakeGenericType(typeof(DependencyChecks)), "Planning", "owned-element collection fixture");
+            Require(closed.failures.ContainsKey("Planning -> Local"), "neutral wrapper cannot hide generic argument ownership");
+            closed.Reference(typeof(DependencyChecks), "Neutral", "neutral owner fixture");
+            Require(closed.failures.ContainsKey("Neutral -> Local"), "neutral cannot reference engine owners");
+        }
+        Require(!Neutral(typeof(List<>)), "ordinary collection is not compiler support");
         var iterator = IteratorProbe().GetType();
         var generated = new DependencyChecks(core, new() { [typeof(DependencyChecks)] = "Planning" });
         generated.Inspect(iterator, "Planning");
@@ -433,6 +477,9 @@ internal sealed class DependencyChecks
         try { action(); }
         catch (Microsoft.Data.Sqlite.SqliteException) { throw; }
     }
+
+    private static IReadOnlyList<T> SingleElementProbe<T>(T value) => [value];
+    private static IReadOnlyList<T> ReadOnlyArrayProbe<T>(T value) => [value, value];
 
     private static IEnumerable<int> IteratorProbe() { yield return 1; }
 }

@@ -759,7 +759,6 @@ public sealed partial class SyncRun : ISyncRun
             var report = WithReconciliation(BuildReport(pairId, approved, tally, ct.IsCancellationRequested), reconcile);
             completedReport = report with
             {
-                // Completion hands pending evidence to ordinary sync; it does not settle those items.
                 Deferred = _store.FirstSyncDone(pairId) ? execution.Pending.Count + dropped + unfinished.Length : deferred,
                 DeletionEvidencePending = execution.Pending,
                 ReviewedDeletionEvidencePendingCount = approved.HeldDeletions
