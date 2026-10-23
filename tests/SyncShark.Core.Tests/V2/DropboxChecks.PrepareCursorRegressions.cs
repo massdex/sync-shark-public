@@ -180,7 +180,12 @@ internal static partial class DropboxChecks
                 var listsBeforeRetry = h.Wire.ListRequests.Count(request => request.Recursive);
                 var feedsBeforeRetry = h.Wire.ContinueCursors.Count;
                 // Rebuild inventory/runtime: the historical released rows survive, but their phantom live rows do not.
-                var (_, retryRun) = PrepareCursorRuntime(h, local, pair, store, productRoot);
+                // RQ-032/RQ-130, docs/design/retry-resume-rewind.md: a rebuilt runtime does not
+                // bypass the unrelated copy's durable backoff. Retry at its exact persisted deadline.
+                var retry = store.SyncRetryAt(pair.PairId, "ordinary.txt");
+                Require(retry is not null, "released-evidence fixture retains the unrelated copy retry");
+                var (_, retryRun) = PrepareCursorRuntime(h, local, pair, store, productRoot,
+                    new LocalChecks.FixedClock(retry!.RetryAfter));
                 var retried = await retryRun.IncrementalAsync(pair.PairId, new Progress<RunProgress>(), CancellationToken.None);
                 Require(h.Wire.ListRequests.Count(request => request.Recursive) == listsBeforeRetry &&
                     h.Wire.ContinueCursors.Skip(feedsBeforeRetry).FirstOrDefault() == checkpoint &&

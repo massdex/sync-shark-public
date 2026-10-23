@@ -2,8 +2,34 @@ namespace Massdex.SyncShark.V2;
 
 internal static partial class RunChecks
 {
+    private static void NoticeFoldParityChecks()
+    {
+        using var memory = new InMemoryStateStore();
+        using var sqlite = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "notice-fold-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System);
+        foreach (var store in new IStateStore[] { memory, sqlite })
+        {
+            var fx = Build(suppliedStore: store);
+            foreach (var retryFirst in new[] { false, true })
+            {
+                var path = retryFirst ? "retry-first.txt" : "planner-first.txt";
+                var observation = new Notice(fx.Pair.PairId, 30, NoticeKind.Info, path, "comparison unconfirmed", "content-unconfirmed");
+                var retry = new Notice(fx.Pair.PairId, 40, NoticeKind.Info, path, "exact executor failure; Retry or Ignore", "sync-retry");
+                store.AddNotices(retryFirst ? [retry, observation] : [observation, retry]);
+                var canonical = store.UnresolvedNotices(fx.Pair.PairId).Single(n => n.Path == path);
+                Require(canonical.ReasonKey == "sync-retry" && canonical.Detail == retry.Detail,
+                    "both stores retain one canonical retry explanation in either publication order");
+                store.CloseNotice(canonical.NoticeId!, NoticeChoices.Ignore);
+                store.AddNotices([observation]);
+                Require(store.OpenNotices(fx.Pair.PairId).All(n => n.Path != path) &&
+                    store.UnresolvedNotices(fx.Pair.PairId).Single(n => n.Path == path).NoticeId == canonical.NoticeId,
+                    "planner republish cannot duplicate or resurface an ignored canonical retry");
+            }
+        }
+    }
+
     internal static async Task BlockerActionChecksAsync()
     {
+        NoticeFoldParityChecks();
         foreach (var name in new[] { "CON", "COM1.txt", "bad:name?.txt", "trailing. ", "<>|", "..." })
             Require(PilotPath.IsWindowsTransferPath(BlockerNames.Suggest(name)), "safe suggestion for " + name);
         foreach (var name in new[] { "../escape", "Other/Child", "CON.txt", "same.txt", "", "bad?name" })

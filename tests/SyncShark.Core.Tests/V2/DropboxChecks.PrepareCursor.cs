@@ -119,8 +119,8 @@ internal static partial class DropboxChecks
             Require(store.Cursor(RootId) == appliedCursor,
                 "a failed item retains the successfully refreshed safe cursor after first-sync completion");
             h.Wire.SeedChangePage(appliedCursor, [], false, appliedCursor);
-            // The next block reopens SQLite and rebuilds runtime/inventory. Its first feed resumes the
-            // refreshed PENDING cursor, while the successful root cursor must remain uncommitted.
+            // The next block reopens SQLite and rebuilds runtime/inventory. Its first feed resumes
+            // the committed refreshed cursor; the failed copy still obeys its persisted retry deadline.
         }
         var listingsBeforeApply = h.Wire.ListRequests.Count;
         var callsBeforeApply = h.Wire.Calls.Count;
@@ -129,7 +129,15 @@ internal static partial class DropboxChecks
         using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System))
         {
             // No prepare inventory, run, runtime or open store survives this boundary.
-            var (runtime, run) = PrepareCursorRuntime(h, local, pair, store, productRoot);
+            // RQ-032/RQ-130, docs/design/retry-resume-rewind.md: reopen preserves backoff.
+            TimeProvider time = TimeProvider.System;
+            if (scenario == "failed-apply")
+            {
+                var retry = store.SyncRetryAt(pair.PairId, "after-prepare.txt");
+                Require(retry is not null, "failed-apply: failed copy retry survives SQLite reopen");
+                time = new LocalChecks.FixedClock(retry!.RetryAfter);
+            }
+            var (runtime, run) = PrepareCursorRuntime(h, local, pair, store, productRoot, time);
             if (scenario == "unchanged")
             {
                 var refused = false;
@@ -170,9 +178,10 @@ internal static partial class DropboxChecks
             }
             if (scenario is "remote-add" or "reset" or "failed-apply")
             {
-                Require(await local.ObserveAsync("after-prepare.txt", CancellationToken.None) is not null &&
-                    store.Live(RootId, ["after-prepare.txt"]).Count == 1,
-                    scenario + ": the postprepare Dropbox addition reaches local and the retained inventory");
+                Require(await local.ObserveAsync("after-prepare.txt", CancellationToken.None) is not null,
+                    scenario + ": the postprepare Dropbox addition reaches local");
+                Require(store.Live(RootId, ["after-prepare.txt"]).Count == 1,
+                    scenario + ": the postprepare Dropbox addition remains in retained inventory");
             }
             if (scenario == "local-delete")
             {
@@ -258,14 +267,23 @@ internal static partial class DropboxChecks
         var listsBefore = h.Wire.ListRequests.Count;
         using (var store = SqliteStateStore.Open(stateRoot, StorageChecks.Fast, TimeProvider.System))
         {
-            var (_, run) = PrepareCursorRuntime(h, local, pair, store, productRoot);
+            // The retained copy is eligible at its exact durable deadline, not immediately on reopen
+            // (RQ-032/RQ-130, docs/design/retry-resume-rewind.md).
+            var retry = store.SyncRetryAt(pair.PairId, "queued.txt");
+            Require(retry is not null, "race: queued download retry survives SQLite reopen");
+            var (_, run) = PrepareCursorRuntime(h, local, pair, store, productRoot,
+                new LocalChecks.FixedClock(retry!.RetryAfter));
             var retried = await run.IncrementalAsync(pair.PairId, new Progress<RunProgress>(), CancellationToken.None);
-            Require(retried.Failed == 0 && store.FirstSyncDone(pair.PairId) &&
-                h.Wire.ContinueCursors.Skip(feedsBefore).FirstOrDefault() == "race-list-drained" &&
-                h.Wire.ListRequests.Count == listsBefore && store.Cursor(RootId) == "race-retried" &&
-                await local.ObserveAsync("queued.txt", CancellationToken.None) is not null &&
-                await local.ObserveAsync("between-list-and-refresh.txt", CancellationToken.None) is not null,
-                "reopened retry catches the listing-to-checkpoint race through delta and completes both downloads");
+            Require(retried.Failed == 0, "race: reopened retry succeeds at the persisted deadline");
+            Require(store.FirstSyncDone(pair.PairId), "race: reopened retry preserves first-sync completion");
+            Require(h.Wire.ContinueCursors.Skip(feedsBefore).FirstOrDefault() == "race-list-drained",
+                "race: reopened retry starts at the last fully drained cursor");
+            Require(h.Wire.ListRequests.Count == listsBefore, "race: reopened retry never relists");
+            Require(store.Cursor(RootId) == "race-retried", "race: reopened retry commits the advanced delta cursor");
+            Require(await local.ObserveAsync("queued.txt", CancellationToken.None) is not null,
+                "race: reopened retry completes the retained download at its deadline");
+            Require(await local.ObserveAsync("between-list-and-refresh.txt", CancellationToken.None) is not null,
+                "race: reopened retry catches and downloads the listing-to-checkpoint addition");
         }
     }
 

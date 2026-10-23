@@ -47,6 +47,12 @@ public static class FailureRetryOwner
         return new(next, now.AddSeconds(delay));
     }
 
+    /// <summary>Attaching evidence to sleeping debt is not another attempt. Due failures advance normally.</summary>
+    public static State ReportedFailure(SyncRetry? prior, DateTimeOffset now, bool retainSleeping,
+        bool countAttempt = true) => retainSleeping && prior is not null && !IsDue(prior.RetryAfter, now)
+            ? new(prior.Attempts, prior.RetryAfter)
+            : Failed(prior?.Attempts ?? 0, now, countAttempt);
+
     /// <summary>One generic failure explanation, with a cause independent of changing attempt text.</summary>
     public static Notice RetryNotice(string pairId, string path, string cause, int attempts = 0,
         bool folderInspection = false, string? explanation = null) => new(pairId, 40, NoticeKind.Info, path,
@@ -86,16 +92,19 @@ public static class FailureRetryOwner
     public static SyncRetry SaveFailedRetry(IStateStore store, string pairId, string path,
         string? reason, SyncRetry? old, DateTimeOffset now)
     {
-        var state = Failed(old?.Attempts ?? 0, now, old is not { ReprobeEvidence: true });
         var cause = reason ?? (old?.LastError is { Length: > 0 } previous
             ? previous : "The item could not be confirmed or applied.");
+        var kind = reason is null && old is not null ? KindOf(old) : ClassifyCause(cause);
+        var state = ReportedFailure(old, now,
+            retainSleeping: kind == FailureKind.ContentProof && old is not null && KindOf(old) == FailureKind.ContentProof,
+            countAttempt: old is not { ReprobeEvidence: true });
         var retry = (old ?? new SyncRetry(path, "sync", 0, "", DateTimeOffset.MinValue)) with
         {
             Attempts = state.Attempts,
             DeleteBlockedDetail = null,
             DeleteBlockedDeferred = false,
             LastError = cause,
-            FailureKind = reason is null && old is not null ? KindOf(old) : ClassifyCause(cause),
+            FailureKind = kind,
             RetryAfter = state.RetryAfter
         };
         store.SaveSyncRetry(pairId, retry);

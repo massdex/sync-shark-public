@@ -328,7 +328,8 @@ public sealed partial class SyncRun
                 "The reviewed effect could not be completed in this run.";
             var conflictSuccessor = reviewed[path].FirstOrDefault(action =>
                 action.ConflictTransitionKey is not null && !action.SuppressReconciledBaseline);
-            var failure = FailureRetryOwner.Failed(prior?.Attempts ?? 0, _time.GetUtcNow(),
+            // Parking adds reviewed authority, not another failure occurrence or a renewed deadline.
+            var failure = FailureRetryOwner.ReportedFailure(prior, _time.GetUtcNow(), retainSleeping: true,
                 countAttempt: !(evidenceUnavailable && held.ContainsKey(path)));
             _store.SaveSyncRetry(pair.PairId, new(path, "first-sync", failure.Attempts, reason, failure.RetryAfter,
                 Held: held.GetValueOrDefault(path), ReviewedActions: reviewed[path].ToArray(),

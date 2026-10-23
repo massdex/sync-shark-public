@@ -964,26 +964,42 @@ internal static partial class RunChecks
         var listingA = new ScriptedInventory(fx.A) { Hashless = true, FailHashes = true };
         var listingB = new ScriptedInventory(fx.B) { Hashless = true, FailHashes = true };
         fx.Provider.AddInventory(fx.Pair.A, listingA).AddInventory(fx.Pair.B, listingB);
-        var run = fx.Run();
+        var clock = new CompletionClock();
+        var run = new SyncRun(fx.Store, fx.Executor, fx.Provider, Settings, clock);
         var applied = await FirstSyncAsync(run, fx);
-        Console.WriteLine($"UNCONFIRMED CONTENT MEASUREMENT outcome={applied.Outcome}; done={applied.Done}; deferred={applied.Deferred}; contentUnconfirmed={applied.ContentUnconfirmedCount}; firstSyncDone={fx.Store.FirstSyncDone(fx.Pair.PairId)}; openUnconfirmed={OpenUnconfirmed(fx)}; retry={System.Text.Json.JsonSerializer.Serialize(fx.Store.SyncRetryAt(fx.Pair.PairId, "x.txt"))}; notices={string.Join(",", fx.Store.OpenNotices(fx.Pair.PairId).Select(notice => notice.ReasonKey))}");
-        Require(applied.Done == 0 && fx.Store.FirstSyncDone(fx.Pair.PairId) && OpenUnconfirmed(fx) == 1 &&
+        Console.WriteLine($"UNCONFIRMED CONTENT MEASUREMENT outcome={applied.Outcome}; done={applied.Done}; deferred={applied.Deferred}; contentUnconfirmed={applied.ContentUnconfirmedCount}; firstSyncDone={fx.Store.FirstSyncDone(fx.Pair.PairId)}; openUnconfirmed={OpenContentIssues(fx)}; retry={System.Text.Json.JsonSerializer.Serialize(fx.Store.SyncRetryAt(fx.Pair.PairId, "x.txt"))}; notices={string.Join(",", fx.Store.OpenNotices(fx.Pair.PairId).Select(notice => notice.ReasonKey))}");
+        Require(applied.Done == 0 && fx.Store.FirstSyncDone(fx.Pair.PairId) && OpenContentIssues(fx) == 1 &&
             fx.Store.SyncRetryAt(fx.Pair.PairId, "x.txt") is { Attempts: 1 },
             "decision 85: unconfirmed content completes first sync with a durable retry and visible notice");
+        var parked = fx.Store.SyncRetryAt(fx.Pair.PairId, "x.txt")!;
+        // Core no-duplicate-notice rule: NoticeTable folds rule-30 planner uncertainty into
+        // rule-40 sync-retry, retaining the actionable failure rather than a second issue.
+        Require(fx.Store.OpenNotices(fx.Pair.PairId).Single(notice => notice.Path == "x.txt") is
+            { Rule: 40, ReasonKey: "sync-retry" } issue &&
+            issue.Detail.Contains(parked.LastError, StringComparison.Ordinal),
+            "the single canonical retry notice explains the unconfirmed content failure");
+        Require(parked.RetryAfter > clock.Now, "unconfirmed failure retains a future retry deadline");
+        clock.Now = parked.RetryAfter.AddTicks(-1);
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        Require(fx.Store.SyncRetryAt(fx.Pair.PairId, "x.txt") is { Attempts: 1 } sleeping &&
+            sleeping.RetryAfter == parked.RetryAfter && OpenContentIssues(fx) == 1 &&
+            fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0,
+            "before the deadline unconfirmed debt and notice remain unchanged without endpoint effects");
+        clock.Now = parked.RetryAfter;
         await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
         Require(fx.Store.SyncRetryAt(fx.Pair.PairId, "x.txt") is { Attempts: 2 },
-            "unconfirmed item is retried on the next ordinary run");
+            "unconfirmed item retries at its exact deadline and counts one new failed attempt");
         Require(fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0 &&
             (await MapAsync(fx.A))["x.txt"] == Hash("same") && (await MapAsync(fx.B))["x.txt"] == Hash("same"),
             "unconfirmed content is never overwritten or deleted on either side");
-        Require(OpenUnconfirmed(fx) == 1, "failed retries keep one open notice for the same problem");
+        Require(OpenContentIssues(fx) == 1, "failed retries keep one open notice for the same problem");
         listingA.FailHashes = listingB.FailHashes = false;
         var retry = fx.Store.SyncRetryAt(fx.Pair.PairId, "x.txt")!;
-        fx.Store.SaveSyncRetry(fx.Pair.PairId, retry with { RetryAfter = DateTimeOffset.MinValue });
+        clock.Now = retry.RetryAfter;
         var report = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
         Require(report.Done == 1 && fx.Store.Baselines(fx.Pair.PairId).Count == 1,
             "a run with no changes re-hashes the unconfirmed row and adopts it");
-        Require(OpenUnconfirmed(fx) == 0, "the content-not-confirmed notice closes once the row resolves");
+        Require(OpenContentIssues(fx) == 0, "both planner and canonical retry notices are absent once the row resolves");
         Console.WriteLine("PASS Incremental_UnconfirmedContentReplanned");
     }
 
@@ -1006,8 +1022,9 @@ internal static partial class RunChecks
             "equal no-action replan closes the indexed source guard notice");
     }
 
-    private static int OpenUnconfirmed(Fixture fx) =>
-        fx.Store.OpenNotices(fx.Pair.PairId).Count(notice => notice.ReasonKey == PlanNotices.ContentUnconfirmed.Key);
+    private static int OpenContentIssues(Fixture fx) =>
+        fx.Store.OpenNotices(fx.Pair.PairId).Count(notice =>
+            notice.Path == "x.txt" && notice.ReasonKey is "sync-retry" or "content-unconfirmed");
 
     // Review 5: convergence through the real engine. A run applies a move, a delete, a file-to-folder replacement
     // and a keep-both; the next run, which re-reads those writes, has nothing left to do and raises nothing.

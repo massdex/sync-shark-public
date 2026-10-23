@@ -318,16 +318,17 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
                     .Where(choice => choice.Prefix.Length > 0 && !rebuildables.Detected.Any(choice.Matches))
                     .Select(choice => $"rebuildables '{choice.Id}' under '{choice.Prefix}/' matched no folders: check the prefix")
                     .ToArray();
+                var removalReport = await FreezeRemovalReportsAsync(pair, plan, ct);
                 FirstSyncChoicesState.Save(_productRoot, pairId, choices, effects,
                     FolderDelete.VictimKeys(_store, pair, plan), rebuildables.Selected, plan.HeldDeletions,
                     matched: plan.MatchedBothSides, warnings: warnings,
-                    carriedIgnoredDeletes: await FreezeRemovalReportsAsync(pair, plan, ct), store: _store,
+                    carriedIgnoredDeletes: removalReport, store: _store,
                     inventoryCursors: plan.InventoryCursors.Select(entry =>
                         new FirstSyncChoicesState.StoredInventoryCursor(entry.Key, entry.Value)).ToArray(),
                     inventoryScope: plan.InventoryScope);
                 RaiseRebuildableRuleNotices(pair, choices.Rebuildables, rebuildables.Detected);
                 return Preparation(pair, plan, effects, FirstSyncChoices.Digest(choices, rebuildables.Selected, plan.HeldDeletions),
-                    RebuildableReport(rebuildables.Detected, choices.Rebuildables, rebuildables.Selected)) with { Warnings = warnings };
+                    RebuildableReport(rebuildables.Detected, choices.Rebuildables, rebuildables.Selected), removalReport) with { Warnings = warnings };
             }
             catch (SyncRunRefusedException error)
             {
@@ -342,7 +343,7 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
 
     private SyncCliPreparationData Preparation(PairDef pair, Plan plan,
         IReadOnlyList<SyncCliChoiceEffectData> effects, string digest,
-        IReadOnlyList<SyncCliRebuildableData> rebuildables)
+        IReadOnlyList<SyncCliRebuildableData> rebuildables, IReadOnlyList<SyncCliCarriedIgnoredData> removalReport)
     {
         var pairId = pair.PairId;
         var localOnly = plan.Actions.Count(action => action.Kind != ActionKind.Hold && action.Target == Side.B);
@@ -360,7 +361,7 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
             FileBytes(DatabaseFile), FileBytes(DatabaseFile), FileBytes(DatabaseFile + "-wal"),
             FileBytes(DatabaseFile + "-wal"), false, _store.FirstSyncDone(pairId),
             effects, digest, rebuildables)
-        { CarriedIgnoredDeletes = CarriedIgnoredReport(pair, plan),
+        { CarriedIgnoredDeletes = removalReport,
             HeldDeletionCount = plan.HeldDeletions.Count, DeletionEvidenceResolved = plan.DeletionEvidenceResolved,
             HeldDeletionExamples = plan.HeldDeletions.Take(50)
                 .Select(held => new SyncCliHeldDeletionData(held.Path, FirstSyncChoices.SideText(held.Local),

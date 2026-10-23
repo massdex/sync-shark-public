@@ -916,6 +916,19 @@ internal sealed class InMemoryStateStore : IStateStore
             // nothing; raising it after it was closed reopens it.
             foreach (var notice in n)
             {
+                // Storage adapters supply facts/effects; the production owner decides the fold.
+                if (RetryNoticeFold.SuppressIncoming(notice,
+                    () => SyncRetryAt(notice.PairId, notice.Path)?.DeleteBlockedDetail is not null,
+                    () => _notices.Any(known => known.PairId == notice.PairId &&
+                        known.Rule == 40 && known.ReasonKey == "sync-retry" &&
+                        PairPath.Same(known.Path, notice.Path) && !_closedNotices.ContainsKey(known.NoticeId!)),
+                    () =>
+                    {
+                        foreach (var old in _notices.Where(known => known.PairId == notice.PairId &&
+                            known.Rule == 30 && known.ReasonKey == "content-unconfirmed" &&
+                            PairPath.Same(known.Path, notice.Path) && !_closedNotices.ContainsKey(known.NoticeId!)))
+                            CloseNotice(old.NoticeId!, "superseded-by-retry");
+                    })) continue;
                 // A notice that carries its own durable id — explicitly, or derived for one Recovery item — is the
                 // same problem even when its reason transitions (pending -> ready); update that row in place.
                 string? identity = NoticeChoices.IsRecoveryRestoreNotice(notice) &&

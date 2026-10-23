@@ -2,8 +2,33 @@ namespace Massdex.SyncShark.V2;
 
 internal static partial class StorageChecks
 {
+    private static void ContentProofAttemptHasOneOwner(string root)
+    {
+        using var store = SqliteStateStore.Open(Fresh(root, "content-proof-attempt"), Fast, new TestClock());
+        store.SavePair(Pair("p1"));
+        var first = FailureRetryOwner.SaveFailedRetry(store, "p1", "item.txt", "Hash: side A unavailable", null, T0);
+        var second = FailureRetryOwner.SaveFailedRetry(store, "p1", "item.txt", "Hash: side B unavailable",
+            store.SyncRetryAt("p1", "item.txt"), first.RetryAfter.AddTicks(-1));
+        var parked = FailureRetryOwner.ReportedFailure(second, first.RetryAfter.AddTicks(-1), retainSleeping: true);
+        Require(first.Attempts == 1 && second.Attempts == 1 && parked.Attempts == 1 &&
+            second.RetryAfter == first.RetryAfter && parked.RetryAfter == first.RetryAfter &&
+            second.LastError == "Hash: side B unavailable",
+            "both content sides and parking share one attempt and unchanged deadline while refreshing cause");
+        var next = FailureRetryOwner.SaveFailedRetry(store, "p1", "item.txt", "Hash: unavailable again",
+            store.SyncRetryAt("p1", "item.txt"), first.RetryAfter);
+        Require(next.Attempts == 2 && next.RetryAfter == first.RetryAfter.AddSeconds(20),
+            "a new content failure at the exact deadline advances once with growing backoff");
+        var nextSide = FailureRetryOwner.SaveFailedRetry(store, "p1", "item.txt", "Hash: second side again", next,
+            first.RetryAfter.AddTicks(1));
+        Require(nextSide.Attempts == 2 && nextSide.RetryAfter == next.RetryAfter &&
+            FailureRetryOwner.ReportedFailure(nextSide, first.RetryAfter.AddTicks(1), retainSleeping: true) ==
+                new FailureRetryOwner.State(2, next.RetryAfter),
+            "second-side report and parking cannot recount the later scheduled attempt");
+    }
+
     private static void ContentProofSummaryIncludesSleepingDebt(string root)
     {
+        ContentProofAttemptHasOneOwner(root);
         var directory = Fresh(root, "content-proof-summary");
         var causes = new[] { "Hash: unreadable", "Hash deferred after repeated transport failures: unavailable",
             "Content proof is unavailable, paused, changed, or deferred to indexing; the item remains unsynced." };

@@ -101,7 +101,9 @@ internal static partial class AutoSyncChecks
             rig.Paused = false;
             rig.Auto.Kick(null);
             await rig.ParkedAsync(AutoStatus.Waiting);
+            rig.Diagnostic("resume-before-quiet-advance");
             rig.Clock.Advance(Settings.ChangeQuietWindow);
+            rig.Diagnostic("resume-after-quiet-advance");
             await rig.ParkedAsync(AutoStatus.Idle);
             Require(rig.Run.Runs("p1") == 1, "Kick after resume gives one run");
         }
@@ -486,10 +488,31 @@ internal static partial class AutoSyncChecks
         }
 
         /// <summary>Waits until the pair shows the status and every loop is parked on one timer and its watches.</summary>
-        public Task ParkedAsync(AutoStatus status, string pairId = "p1") => Until(() =>
-            Status(pairId) == status && Clock.ActiveTimers == _pairIds.Length &&
-            (status is not (AutoStatus.Idle or AutoStatus.Waiting) || WatchesParked(pairId) || State(pairId).RetryAt is not null),
-            pairId + " parks as " + status);
+        public async Task ParkedAsync(AutoStatus status, string pairId = "p1")
+        {
+            try
+            {
+                await Until(() => Status(pairId) == status && Clock.ActiveTimers == _pairIds.Length &&
+                    (status is not (AutoStatus.Idle or AutoStatus.Waiting) || WatchesParked(pairId) || State(pairId).RetryAt is not null),
+                    pairId + " parks as " + status);
+            }
+            catch
+            {
+                Diagnostic("park-timeout expected=" + status, pairId);
+                throw;
+            }
+        }
+
+        public void Diagnostic(string phase, string pairId = "p1")
+        {
+            Console.Error.WriteLine($"AUTO-PARK phase={phase} pair={pairId} state={Status(pairId)} runs={Run.Runs(pairId)} " + Clock.DiagnosticSnapshot());
+            try
+            {
+                Console.Error.WriteLine("AUTO-PARK A=[" + Watches.Latest("a-" + pairId).DiagnosticSnapshot() +
+                    "] B=[" + Watches.Latest("b-" + pairId).DiagnosticSnapshot() + "]");
+            }
+            catch (Exception error) { Console.Error.WriteLine("AUTO-PARK watches unavailable: " + error.Message); }
+        }
 
         /// <summary>Waits until every loop holds a timer again after the clock moved.</summary>
         public Task SettledAsync() => Until(() => Clock.ActiveTimers == _pairIds.Length, "loops settle");

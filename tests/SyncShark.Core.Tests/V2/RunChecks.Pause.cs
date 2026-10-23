@@ -351,6 +351,7 @@ internal static partial class RunChecks
         for (var i = 0; i < 12; i++) fx.A.Seed($"{i:D2}.txt", "data");
         second.A.Seed("second-run.txt", "two");
         var saved = false;
+        var secondPutsAtPause = -1;
         fx.WriterB.PutFailure = _ =>
         {
             if (saved) return null;
@@ -372,6 +373,7 @@ internal static partial class RunChecks
                 PauseUntilResumed = account is null,
                 AccountPauses = account is null ? [] : [new SyncAccountPause(account, true, null, TimeZoneInfo.Local.Id)]
             }).GetAwaiter().GetResult();
+            secondPutsAtPause = second.Writer.Puts;
             var before = Volatile.Read(ref reads);
             for (var i = 0; i < 10_000; i++) PairPause.Check();
             clock.Advance(1);
@@ -396,6 +398,11 @@ internal static partial class RunChecks
             "mid-pair pause is durable in the requested scope");
         if (account is null or PauseAccount)
         {
+            Console.Error.WriteLine($"SCOPE-MID account={account ?? "global"} readError={readError?.GetType().Name ?? "none"} " +
+                $"items={result.Items.Count} p1puts={fx.WriterB.Puts} p2putsAtPause={secondPutsAtPause} p2puts={second.Writer.Puts} reads={Volatile.Read(ref reads)} " +
+                "outcomes=[" + string.Join(";", result.Items.Select(item =>
+                    $"{item.Pair.Id}:{item.Result?.Outcome ?? "null"}:failure={item.FailureType ?? "none"}")) +
+                "] summaries=[" + string.Join(";", summaries) + "]");
             Require(result.Items.Count == 1 && summaries.Single().Contains("(" + RunOutcomes.Paused + ")",
                 StringComparison.Ordinal) && fx.WriterB.Puts > 0 && fx.WriterB.Puts < 12,
                 "durable scope pause stops pair 1 at a safe point after the two-second refresh");

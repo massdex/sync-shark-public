@@ -118,21 +118,14 @@ internal sealed partial class NoticeTable
         }
         // Rule 30's unconfirmed comparison and rule 40's retry are one pending item, not two issues.
         // Fold old rows lazily by exact primary key; no scan, migration or schema bump is required.
-        if (notice.ReasonKey is "content-unconfirmed" or "sync-retry")
-        {
-            // The deletion hold already owns this item's explanation (possibly behind a pair summary).
-            if (StoreSchema.Scalar(_connection, transaction,
+        if (RetryNoticeFold.SuppressIncoming(notice,
+            () => StoreSchema.Scalar(_connection, transaction,
                 "SELECT 1 FROM sync_retry WHERE pair_no=$p AND path_key=$key AND json_extract(json,'$.DeleteBlockedDetail') IS NOT NULL;",
-                ("$p", pairNo), ("$key", RowCodec.Key(notice.Path))) is not null) return;
-            var canonicalId = ShortId.Make("n", notice.PairId, "40", RowCodec.Key(notice.Path), "sync-retry");
-            var retryOpen = ById(pairNo, canonicalId, transaction) is { Closed: false };
-            if (notice.ReasonKey == "sync-retry" || retryOpen)
-                CloseWhere(transaction, "superseded-by-retry",
-                    "notice_id=$old AND " + NoticeTable.ActionableSql("state") + ";",
-                    ("$old", ShortId.Make("n", notice.PairId, "30", RowCodec.Key(notice.Path), "content-unconfirmed")));
-            // A generic planner observation must not erase a more specific executor diagnosis.
-            if (notice.ReasonKey == "content-unconfirmed" && retryOpen) return;
-        }
+                ("$p", pairNo), ("$key", RowCodec.Key(notice.Path))) is not null,
+            () => ById(pairNo, ShortId.Make("n", notice.PairId, "40", RowCodec.Key(notice.Path), "sync-retry"), transaction) is { Closed: false },
+            () => CloseWhere(transaction, "superseded-by-retry",
+                "notice_id=$old AND " + ActionableSql("state") + ";",
+                ("$old", ShortId.Make("n", notice.PairId, "30", RowCodec.Key(notice.Path), "content-unconfirmed"))))) return;
         var noticeId = Id(notice);
         // Keep dismisses one rule until that rule itself changes (its category or prefix changes the id).
         if (notice.RebuildableRule is not null && IsKeptRule(transaction, pairNo, noticeId)) return;
