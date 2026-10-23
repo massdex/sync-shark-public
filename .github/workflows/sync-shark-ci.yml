@@ -130,11 +130,12 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # Suites are grouped into shards so one CI run uses six runner slots instead of
+  # Suites are grouped into shards so one CI run uses more runner slots instead of
   # one per suite. Shards are balanced by measured duration; `dropbox` (6.8 min)
-  # runs alone, and the other five shards hold about 7 minutes of suites each.
-  # Every shard runs all of its suites even when one fails, then fails the job if
-  # any suite failed.
+  # runs alone, and the other shards hold about 7 minutes of suites each. Shards
+  # 7-9 close the suite/CI flag-coverage gap and are balanced by estimate until
+  # they have measured durations. Every shard runs all of its suites even when one
+  # fails, then fails the job if any suite failed.
   tests:
     name: tests (${{ matrix.label }})
     needs: build
@@ -346,6 +347,138 @@ jobs:
                 flag: --v2-review-deletes-checks
                 takes-root: false
                 drive: c
+          # Shards 7-9 run the 29 correctness suites that previously had no CI entry.
+          # Child processes (*-child), benchmarks/million-scale runs and suites that
+          # need an F: drive or a manual selector stay out; the suites that already
+          # run inside a covered suite are not repeated here.
+          - label: 'shard-7: local, hotfix-gap, ignored-child, localwatch, download-kill, recovery-kill'
+            suites:
+              # These use real NTFS journal evidence, so their roots stay on C:
+              # (runner.temp is on the runner's D: volume, which has no journal).
+              - suite: local
+                flag: --v2-local-checks
+                takes-root: true
+                drive: c
+              - suite: hotfix-gap
+                flag: --v2-hotfix-gap-checks
+                takes-root: true
+                drive: c
+              - suite: ignored-child
+                flag: --v2-ignored-child-checks
+                takes-root: false
+                drive: c
+              - suite: localwatch
+                flag: --v2-localwatch-checks
+                takes-root: true
+                drive: c
+              # Both parents launch *-child helper processes from the test exe;
+              # the child flags themselves are never shard entries.
+              - suite: download-kill
+                flag: --v2-download-kill-checks
+                takes-root: true
+                drive: c
+              - suite: recovery-kill
+                flag: --v2-recovery-kill-checks
+                takes-root: true
+                drive: c
+          - label: 'shard-8: recovery-audit, slowdelete, heldperf, monitor, dropboxwatch'
+            suites:
+              - suite: recovery-audit
+                flag: --v2-recovery-audit
+                takes-root: true
+                drive: c
+              # A case argument is required; "all" runs every delete-recovery case.
+              - suite: slowdelete
+                flag: --v2-slowdelete-checks
+                takes-root: true
+                extra-args: [all]
+                drive: c
+              - suite: heldperf
+                flag: --v2-heldperf-checks
+                takes-root: true
+                drive: c
+              - suite: monitor
+                flag: --v2-monitor-checks
+                takes-root: true
+                drive: c
+              - suite: dropboxwatch
+                flag: --v2-dropboxwatch-checks
+                takes-root: false
+                drive: c
+          - label: 'shard-9: coverage, coverage-fix, mkdir-gate, provider-followups, dropbox-ignore, delete-review-notice, narrowing, contract, core-switch, instrumentation, memory, indexing-signal, storage-unicode, prepared-match-exclusion, linked-exclusion-triple, deferred-intake-bound, gap-promotion-handoff, gap-promotion-bound'
+            suites:
+              - suite: coverage
+                flag: --v2-coverage-checks
+                takes-root: true
+                drive: c
+              - suite: coverage-fix
+                flag: --v2-coverage-fix-checks
+                takes-root: true
+                drive: c
+              - suite: mkdir-gate
+                flag: --v2-mkdir-gate-checks
+                takes-root: true
+                drive: c
+              - suite: provider-followups
+                flag: --v2-provider-followups-checks
+                takes-root: true
+                drive: c
+              - suite: dropbox-ignore
+                flag: --v2-dropbox-ignore-checks
+                takes-root: true
+                drive: c
+              - suite: delete-review-notice
+                flag: --v2-delete-review-notice-checks
+                takes-root: true
+                drive: c
+              - suite: narrowing
+                flag: --v2-narrowing-checks
+                takes-root: false
+                drive: c
+              - suite: contract
+                flag: --v2-contract-checks
+                takes-root: false
+                drive: c
+              - suite: core-switch
+                flag: --v2-core-switch-checks
+                takes-root: false
+                drive: c
+              - suite: instrumentation
+                flag: --v2-instrumentation-checks
+                takes-root: false
+                drive: c
+              - suite: memory
+                flag: --v2-memory-checks
+                takes-root: false
+                drive: c
+              - suite: indexing-signal
+                flag: --v2-indexing-signal-checks
+                takes-root: true
+                drive: c
+              - suite: storage-unicode
+                flag: --v2-storage-unicode-checks
+                takes-root: false
+                drive: c
+              - suite: prepared-match-exclusion
+                flag: --v2-prepared-match-exclusion-checks
+                takes-root: false
+                drive: c
+              - suite: linked-exclusion-triple
+                flag: --v2-linked-exclusion-triple-checks
+                takes-root: false
+                drive: c
+              - suite: deferred-intake-bound
+                flag: --v2-deferred-intake-bound-checks
+                takes-root: false
+                drive: c
+              - suite: gap-promotion-handoff
+                flag: --v2-gap-promotion-handoff-checks
+                takes-root: false
+                drive: c
+              - suite: gap-promotion-bound
+                flag: --v2-gap-promotion-bound-checks
+                takes-root: true
+                drive: c
     steps:
       - name: Download test binaries
         uses: actions/download-artifact@v4
@@ -382,6 +515,8 @@ jobs:
               if (-not (Test-Path $exe)) { throw "Test executable not found: $exe" }
               $testArgs = @($s.flag)
               if ($s.'takes-root') { $testArgs += $root }
+              # A few suites take a case selector after the root (e.g. slowdelete).
+              if ($s.'extra-args') { $testArgs += $s.'extra-args' }
               Write-Host "Running: $exe $($testArgs -join ' ')"
               & $exe @testArgs
               $code = $LASTEXITCODE

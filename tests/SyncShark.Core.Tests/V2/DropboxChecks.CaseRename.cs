@@ -21,7 +21,8 @@ internal static partial class DropboxChecks
         var source = (await remote.ObserveAsync("doc.txt", CancellationToken.None))!;
         var basis = new Baseline(pair.PairId, "case-key", original, source with { Path = "Doc.txt" }, 1);
         var options = new PlanOptions(TimeSpan.FromSeconds(2), false,
-            new LabelRule("{name} [{side}]{ext}", "s", TimeSpan.Zero, "A", "B"), 10);
+            new LabelRule("{name} [{side}]{ext}", "s", TimeSpan.Zero, "A", "B"), 10)
+        { ObservedAt = new DateTimeOffset(2025, 1, 2, 0, 0, 0, TimeSpan.Zero) };
         var plan = Planner.Decide(pair.PairId, 2,
             [new PlanRow(basis, original, source, new Evidence(false, false, false, false))], options);
         Require(plan.Actions.Single().Kind == ActionKind.Move, "Dropbox case change plans a local Move");
@@ -42,6 +43,11 @@ internal static partial class DropboxChecks
         var changedLocal = (await writer.ObserveAsync("dOc.txt", CancellationToken.None))!;
         var newerRemote = source with { Mtime = new DateTimeOffset(2025, 1, 1, 0, 0, 0, TimeSpan.Zero) };
         var conflictBase = saved with { A = changedLocal with { Path = "Doc.txt" }, B = newerRemote with { Path = "Doc.txt" } };
+        Require(ModificationTime.IsPlausible(changedLocal.Mtime, options.ObservedAt) &&
+            ModificationTime.IsPlausible(newerRemote.Mtime, options.ObservedAt) &&
+            Content.SameContent(changedLocal, newerRemote) == true &&
+            newerRemote.Mtime - changedLocal.Mtime > options.TieWindow,
+            "case-conflict fixture has equal content and plausible non-tied metadata times");
         var tied = Planner.Decide(pair.PairId, 4,
             [new PlanRow(conflictBase with { B = conflictBase.B with { Mtime = changedLocal.Mtime } },
                 changedLocal, newerRemote with { Mtime = changedLocal.Mtime }, new Evidence(false, false, false, false))], options);
