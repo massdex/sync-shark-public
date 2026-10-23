@@ -14,30 +14,28 @@ public sealed partial class SqliteStateStore : ILocalWalkStore
     bool ILocalWalkStore.GapInventoryPending(string rootId) => GapInventoryPending(rootId);
 
     // Unfinished observations never enter file_state, generation completion, or deletion coverage.
-    internal string BeginLocalWalk(RootDef root, string options, NtfsUsnCheckpoint? current) => InStore(() =>
+    internal string BeginLocalWalk(RootDef root, string options, NtfsUsnCheckpoint? current)
     {
         var binding = JsonSerializer.Serialize(root) + "\n" + options;
-        using var tx = _connection.BeginTransaction();
-        string? savedCursor = null;
-        using (var command = StoreSchema.Command(_connection, tx,
-            "SELECT cursor FROM local_walk WHERE root_id=$r AND binding=$b;"))
+        var savedCursor = InStore(() => StoreSchema.Scalar(_connection, null,
+            "SELECT cursor FROM local_walk WHERE root_id=$r AND binding=$b;",
+            ("$r", root.RootId), ("$b", binding)) as string);
+        // The root walk gate serializes Begin/Save/Forget, not the store-wide gate.
+        // An expired/unavailable journal or interrupted cleanup requires a fresh walk.
+        if (savedCursor is not null && current is not null && !current.RequiresFullReconciliation(savedCursor))
+            return savedCursor;
+        ForgetLocalWalk(root.RootId);
+        var cursor = current?.Cursor ?? string.Empty;
+        InStore(() =>
         {
-            command.Parameters.AddWithValue("$r", root.RootId);
-            command.Parameters.AddWithValue("$b", binding);
-            savedCursor = command.ExecuteScalar() as string;
-        }
-        // An expired/unavailable journal cannot cover edits in already scanned directories.
-        if (savedCursor is null || current is null || current.RequiresFullReconciliation(savedCursor))
-        {
-            savedCursor = current?.Cursor ?? string.Empty;
-            StoreSchema.Execute(_connection, tx, "DELETE FROM local_walk_page WHERE root_id=$r;", ("$r", root.RootId));
+            using var tx = _connection.BeginTransaction();
             StoreSchema.Execute(_connection, tx,
                 "INSERT INTO local_walk VALUES($r,$b,$c) ON CONFLICT(root_id) DO UPDATE SET binding=$b,cursor=$c;",
-                ("$r", root.RootId), ("$b", binding), ("$c", savedCursor));
-        }
-        tx.Commit();
-        return savedCursor;
-    });
+                ("$r", root.RootId), ("$b", binding), ("$c", cursor));
+            tx.Commit();
+        });
+        return cursor;
+    }
 
     internal bool HasLocalWalk(string root) => InStore(() =>
         (long)StoreSchema.Scalar(_connection, null,
@@ -87,11 +85,32 @@ public sealed partial class SqliteStateStore : ILocalWalkStore
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> _localWalkGates = new();
     internal SemaphoreSlim LocalWalkGate(string root) => _localWalkGates.GetOrAdd(root, _ => new(1, 1));
 
-    internal void ForgetLocalWalk(string root) => InStore(() =>
+    // Keep the header AND count marker until every payload has been reclaimed. A crash
+    // between pages leaves an incomplete checkpoint, never a truncated successful replay:
+    // LocalWalkPageCount detects the missing prefix (including a missing final page).
+    // The caller holds LocalWalkGate(root), as for Begin/Save, throughout this operation.
+    internal const int LocalWalkCleanupPageRows = 32;
+    internal const string LocalWalkCleanupPageSql =
+        "DELETE FROM local_walk_page WHERE root_id=$r AND ordinal IN " +
+        "(SELECT ordinal FROM local_walk_page WHERE root_id=$r AND ordinal>=0 ORDER BY ordinal LIMIT $n);";
+
+    internal void ForgetLocalWalk(string root)
     {
-        using var tx = _connection.BeginTransaction();
-        StoreSchema.Execute(_connection, tx, "DELETE FROM local_walk_page WHERE root_id=$r;", ("$r", root));
-        StoreSchema.Execute(_connection, tx, "DELETE FROM local_walk WHERE root_id=$r;", ("$r", root));
-        tx.Commit();
-    });
+        while (InStore(() =>
+        {
+            using var tx = _connection.BeginTransaction();
+            // Also reject legacy checkpoints without a count marker on the next Begin.
+            StoreSchema.Execute(_connection, tx, "UPDATE local_walk SET binding='' WHERE root_id=$r;", ("$r", root));
+            StoreSchema.Execute(_connection, tx, LocalWalkCleanupPageSql,
+                ("$r", root), ("$n", LocalWalkCleanupPageRows));
+            var removed = StoreSchema.Changes(_connection, tx);
+            if (removed < LocalWalkCleanupPageRows)
+            {
+                StoreSchema.Execute(_connection, tx, "DELETE FROM local_walk_page WHERE root_id=$r AND ordinal=-1;", ("$r", root));
+                StoreSchema.Execute(_connection, tx, "DELETE FROM local_walk WHERE root_id=$r;", ("$r", root));
+            }
+            tx.Commit();
+            return removed == LocalWalkCleanupPageRows;
+        })) { }
+    }
 }
