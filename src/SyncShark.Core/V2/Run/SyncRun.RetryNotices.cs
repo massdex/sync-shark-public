@@ -206,7 +206,7 @@ public sealed partial class SyncRun
             {
                 // E9: suppression belongs to notice lifecycle, never to an exclusion or retry pause.
                 _store.CloseNotice(noticeId, choice);
-                return NoticeChoices.IgnoreResult;
+                return NoticeChoices.Result(choice, notice);
             }
             if (notice.ReasonKey is RecoveryRestorePending or RecoveryRestoreReady)
             {
@@ -229,11 +229,6 @@ public sealed partial class SyncRun
                 // Dismiss the message, not the upload hold; do not exclude the pair's root.
                 _store.CloseNotice(noticeId, choice);
                 return "Notice ignored. Uploads remain suspended until a quota check finds free space. No files were excluded or deleted.";
-            }
-            if (notice.ReasonKey == "permanent-boundary" && choice == NoticeChoices.Ignore)
-            {
-                _store.CloseNotice(noticeId, choice);
-                return "Information dismissed. The ownership boundary remains protected; no files were excluded, changed or marked synced.";
             }
             if (NoticeChoices.IsVerificationSummary(notice) && choice == NoticeChoices.ShowRemaining)
                 return ShowHeldIntentItems(pair, input);

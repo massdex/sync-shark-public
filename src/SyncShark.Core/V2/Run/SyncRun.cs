@@ -990,8 +990,12 @@ public sealed partial class SyncRun : ISyncRun
         var rebuildableRetries = retries.SelectMany(item => item.ReviewedActions ?? [])
             .Where(action => action.RebuildableRemove).Select(action => action.Path)
             .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        var retryPair = pair with { Excluded = pair.Excluded.Where(path => !rebuildableRetries.Contains(path,
-            StringComparer.OrdinalIgnoreCase)).ToArray() };
+        var reviewedRemovalScopes = retries.SelectMany(item => item.ReviewedActions ?? [])
+            .Where(DeleteSourceGuard.ReviewedRemoval).Select(action => action.Path)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        // All due reviewed-removal kinds may cross their own exact exclusion; only rebuildable
+        // removals receive rebuildable selection authority. Child exclusions remain protected.
+        var retryPair = pair with { Excluded = pair.Excluded.Where(path => !reviewedRemovalScopes.Contains(path)).ToArray() };
         var retrySelection = RebuildableSelection.Sides(pair) is { } retrySides
             ? new RebuildableSelection(retrySides.Cloud, rebuildableRetries) : null;
         plan = await ApplyReviewedRetriesAsync(pair, plan, retries, ct);

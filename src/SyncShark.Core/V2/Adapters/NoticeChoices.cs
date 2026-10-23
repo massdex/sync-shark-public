@@ -395,7 +395,9 @@ public static class NoticeChoices
     }
     public const string IgnoreResult = "Notice ignored for this cause. The item stays protected and unsynced; retries continue. No exclusions changed.";
 
-    public static string Result(string choice, Notice notice) => choice == RepairHelp
+    public static string Result(string choice, Notice notice) => choice == Ignore && notice.ReasonKey == "permanent-boundary"
+        ? "Information dismissed. The ownership boundary remains protected; no files were excluded, changed or marked synced."
+        : choice == RepairHelp
         ? notice.Detail + " The notice stays open. Retry re-observes this item; Ignore suppresses this cause while protected retries continue. Stop syncing this file is a separate explicit choice."
         : Result(choice);
 

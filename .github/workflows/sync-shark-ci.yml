@@ -8,10 +8,10 @@ on:
       - 'ci/**'
   workflow_dispatch:
 
-# One run per branch: a new commit cancels the run it supersedes.
+# Every public snapshot completes independently; no superseded run cancellation.
 concurrency:
-  group: sync-shark-ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: sync-shark-ci-${{ github.ref }}-${{ github.run_id }}
+  cancel-in-progress: false
 
 env:
   CONFIGURATION: Debug
