@@ -24,6 +24,7 @@
     <Compile Include="../SyncShark.Core.Tests/FilesOnDemandNativePartialChecks.cs" Link="FilesOnDemandNativePartialChecks.cs" />
     <Compile Include="../SyncShark.Core.Tests/OwnedPointerProofChecks.cs" Link="OwnedPointerProofChecks.cs" />
     <Compile Include="../SyncShark.Core.Tests/V2/InMemoryStateStore.cs" Link="InMemoryStateStore.cs" />
+    <Compile Include="../SyncShark.Core.Tests/V2/InMemoryStateStore.DedicatedRetry.cs" Link="InMemoryStateStore.DedicatedRetry.cs" />
     <Compile Include="../SyncShark.Core.Tests/V2/NewPointerNativeChecks.cs" Link="NewPointerNativeChecks.cs" />
     <Compile Include="../SyncShark.Core.Tests/V2/NewPointerDownloadChecks.cs" Link="NewPointerDownloadChecks.cs" />
     <Compile Include="../SyncShark.Core.Tests/CloudFilesLifetimeChecks.cs" Link="CloudFilesLifetimeChecks.cs" />
