@@ -13,6 +13,12 @@ using Massdex.SyncShark;
 using Microsoft.Data.Sqlite;
 #pragma warning disable CS8321
 
+if (args is ["--engine-layout-checks"])
+    return Massdex.SyncShark.EngineChecks.DependencyChecks.Run();
+
+if (args is ["--engine-layout-report"])
+    return Massdex.SyncShark.EngineChecks.DependencyChecks.Run(reportOnly: true);
+
 // Before any fixture file I/O, including child-process modes below: expose Cloud Files placeholder
 // attributes for the whole test host. Non-Windows hosts make no native call.
 WindowsPlaceholderCompatibility.Expose();

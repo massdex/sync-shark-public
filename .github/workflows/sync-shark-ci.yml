@@ -82,6 +82,9 @@ jobs:
         shell: pwsh
         run: |
           dotnet build 'tests/SyncShark.Core.Tests/SyncShark.Core.Tests.csproj' -c $env:CONFIGURATION --nologo -p:NoWarn=CA1416
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # switch to --engine-layout-checks (enforcing) when ENGINE-LAYOUT-METER total=0
+          & "tests/SyncShark.Core.Tests/bin/$env:CONFIGURATION/net8.0/SyncShark.Core.Tests.exe" --engine-layout-report
           exit $LASTEXITCODE
 
       # The standalone Files On-Demand project is the native acceptance runner and
