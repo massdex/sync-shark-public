@@ -210,7 +210,7 @@ internal static partial class LocalJournalChecks
                 var watch = System.Diagnostics.Stopwatch.StartNew();
                 var page = store.AdmitDeferredPlanning(pair.PairId, DateTime.UtcNow.Ticks);
                 best = Math.Min(best, watch.Elapsed.TotalMilliseconds);
-                LocalChecks.Require(page.Count == 256, "scale sample admits and rotates a complete bounded page");
+                LocalChecks.Require(page.Count == 2048, "scale sample admits and rotates a complete bounded page");
             }
             return best;
         }
@@ -223,9 +223,9 @@ internal static partial class LocalJournalChecks
         var largePageMs = PageMilliseconds();
         Console.WriteLine($"1M deferral creation: elapsed-ms={createWatch.ElapsedMilliseconds}; page-10k-ms={smallPageMs}; page-1m-ms={largePageMs}");
         LocalChecks.Require(largePageMs <= Math.Max(1000, smallPageMs * 4),
-            "a 256-entity admission at one million stays near its 10k page cost, not proportional to queue length");
+            "a 2048-entity admission at one million stays near its 10k page cost, not proportional to queue length");
         var queued = store.CountDeferredPlanning(pair.PairId);
-        var maximumPasses = (queued + 255) / 256;
+        var maximumPasses = (queued + 2047) / 2048;
         var drained = 0;
         var passes = 0;
         var drainWatch = System.Diagnostics.Stopwatch.StartNew();
@@ -234,7 +234,7 @@ internal static partial class LocalJournalChecks
         while (drained < queued && passes < maximumPasses)
         {
             var page = store.AdmitDeferredPlanning(pair.PairId, DateTime.UtcNow.Ticks);
-            LocalChecks.Require(page.Count > 0 && page.Count <= 256, "each simulated run obeys bounded intake (RQ-032/140)");
+            LocalChecks.Require(page.Count > 0 && page.Count <= 2048, "each simulated run obeys bounded intake (RQ-032/140)");
             drained += page.Count;
             passes++;
             store.AcknowledgeDeferredPlanning(pair.PairId, page, _ => true);

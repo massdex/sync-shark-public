@@ -99,7 +99,7 @@ internal static class PlanningDeferredChecks
             LocalChecks.Require(store.CountDeferredPlanning(pair.PairId) == 0,
                 "an existing retry is not duplicated as planning debt");
             store.ClearSyncRetry(pair.PairId, cloud.Path);
-            var many = Enumerable.Range(0, 1025).Select(n => (pair.B.RootId,
+            var many = Enumerable.Range(0, 8193).Select(n => (pair.B.RootId,
                 cloud with { ObjectId = $"deferred-{n:D6}", Path = $"Pending/{n}" }));
             store.DeferPlanning(pair.PairId, many);
             var drained = 0;
@@ -107,11 +107,11 @@ internal static class PlanningDeferredChecks
             {
                 var page = store.AdmitDeferredPlanning(pair.PairId, DateTime.UtcNow.Ticks);
                 drained += page.Count;
-                LocalChecks.Require(page.Count <= 256, "drain memory stays page bounded");
+                LocalChecks.Require(page.Count <= 2048, "drain memory stays page bounded");
                 store.AcknowledgeDeferredPlanning(pair.PairId, page, _ => true);
             }
-            LocalChecks.Require(drained == 1025 && store.CountDeferredPlanning(pair.PairId) == 0,
-                "bounded repeated run intakes visit all due work, not just the first 256 (RQ-032/140)");
+            LocalChecks.Require(drained == 8193 && store.CountDeferredPlanning(pair.PairId) == 0,
+                "bounded repeated run intakes visit all due work, not just the first 2048 (RQ-032/140)");
             using var connection = new SqliteConnection($"Data Source={SqliteStateStore.DatabasePath(folder)};Pooling=False");
             connection.Open();
             AssertSeek(connection);

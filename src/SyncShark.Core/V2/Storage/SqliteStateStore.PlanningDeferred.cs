@@ -98,12 +98,12 @@ public sealed partial class SqliteStateStore
     });
 
     // Hard run bounds: one oldest-first page, never the whole queue.
-    private const int DeferredIntakeEntityCap = 256;
-    private const int DeferredIntakePathCap = 1024;
+    private const int DeferredIntakeEntityCap = 2048;
+    private const int DeferredIntakePathCap = 8192;
 
     /// <summary>
-    /// One run's bounded intake: oldest first through the pair/version/root/id index, 256 entities
-    /// and 1024 alias paths at most. Admission rotates the admitted versions behind every unadmitted
+    /// One run's bounded intake: oldest first through the pair/version/root/id index, 2048 entities
+    /// and 8192 alias paths at most. Admission rotates the admitted versions behind every unadmitted
     /// eligible row (below the run cutoff) in the same transaction, so held work cannot starve later
     /// entities across runs or restarts; the returned rotated version matches the existing exact
     /// acknowledgement. Read-only callers pass <c>rotate: false</c> and write nothing.

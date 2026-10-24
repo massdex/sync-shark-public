@@ -6,12 +6,12 @@ namespace Massdex.SyncShark.V2;
 internal static partial class RunChecks
 {
     // The storage owner's hard run bounds (SqliteStateStore.AdmitDeferredPlanning).
-    private const int DeferredIntakeEntities = 256;
-    private const int DeferredIntakePaths = 1024;
+    private const int DeferredIntakeEntities = 2048;
+    private const int DeferredIntakePaths = 8192;
 
     /// <summary>
     /// Bounded deferred intake (RQ-032, RQ-150). One run reads one oldest-first indexed page of
-    /// queued verification work, admits at most 256 entities and 1024 alias paths in all, and
+    /// queued verification work, admits at most 2048 entities and 8192 alias paths in all, and
     /// rotates the admitted versions behind the unadmitted queue in the same transaction so a
     /// permanently held prefix cannot starve later entries across runs or restarts. The returned
     /// rotated version is what the existing exact acknowledgement retires; a newer hold survives.
@@ -21,6 +21,7 @@ internal static partial class RunChecks
     internal static async Task DeferredIntakeBoundAsync()
     {
         DeferredIntakeStoreChecks();
+        DeferredIntakeMillion();
         DeferredIntakeFairnessChecks();
         DeferredIntakeAliasCapChecks();
         await DeferredIntakePreviewAsync();
@@ -54,7 +55,7 @@ internal static partial class RunChecks
             Require(page.All(row => oldest.Contains(row.ObjectId)),
                 "intake takes the oldest queued entities first, served by the version index");
             Require(page.Sum(row => row.Paths.Count) <= DeferredIntakePaths,
-                "one run materializes at most 1024 alias paths in all");
+                "one run materializes at most 8192 alias paths in all");
             Require(page.All(row => row.Version > cutoff && row.Version > before[row.ObjectId]),
                 "admitted versions rotate behind the unadmitted queue in the intake transaction");
             var persisted = DeferredVersions(folder);
@@ -90,7 +91,7 @@ internal static partial class RunChecks
         try
         {
             var pair = IntakePair();
-            const int backlog = 600;
+            const int backlog = 4800;
             HashSet<string> firstPage;
             using (var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
             {
@@ -146,14 +147,14 @@ internal static partial class RunChecks
             var pair = IntakePair();
             using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             store.SavePair(pair);
-            var aliases = Enumerable.Range(0, 1025).Select(n => new ItemState($"Alias/{n:D5}", ItemKind.File,
+            var aliases = Enumerable.Range(0, 8193).Select(n => new ItemState($"Alias/{n:D5}", ItemKind.File,
                 "aliased-object", null, new string('a', 64), 1, DateTimeOffset.UnixEpoch, ItemFlags.None)).ToArray();
             SeedRoot(store, pair.B, Side.B, aliases);
             var anchor = new ItemState("Anchor", ItemKind.File, "anchor-object", null, new string('b', 64),
                 1, DateTimeOffset.UnixEpoch, ItemFlags.None);
             SeedRoot(store, pair.A, Side.A, [anchor]);
             // 9f22aed0 reserves one slot for the queued spelling before reading current aliases.
-            // Use a distinct former spelling so this exact-cap fixture contains 1024 unique paths.
+            // Use a distinct former spelling so this exact-cap fixture contains 8192 unique paths.
             store.DeferPlanning(pair.PairId, new[] { (pair.B.RootId, aliases[0] with { Path = "Former/alias" }) });
             var page = store.AdmitDeferredPlanning(pair.PairId, DeferredVersions(folder).Values.Max() + 1);
             Require(page.Count == 1 && page[0].Paths.Count == DeferredIntakePaths && !page[0].AllAliases,
@@ -200,7 +201,7 @@ internal static partial class RunChecks
             await FirstSyncAsync(run, fx);
             // A real persisted backlog. No protection is active, so preview planning cannot
             // legitimately re-defer anything: any version change would be intake rotation.
-            store.DeferPlanning(fx.Pair.PairId, Enumerable.Range(0, 300).Select(n =>
+            store.DeferPlanning(fx.Pair.PairId, Enumerable.Range(0, 2400).Select(n =>
                 (fx.Pair.B.RootId, new ItemState($"Queued/File-{n:D4}", ItemKind.File, $"queued-{n:D4}", null,
                     new string('a', 64), 1, DateTimeOffset.UnixEpoch, ItemFlags.None))));
             var before = DeferredVersions(folder);
@@ -222,7 +223,7 @@ internal static partial class RunChecks
         {
             using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
-            const int backlog = 300;
+            const int backlog = 2400;
             fx.A.Seed("Anchor", "same");
             fx.B.Seed("Anchor", "same");
             for (var n = 0; n < backlog; n++)

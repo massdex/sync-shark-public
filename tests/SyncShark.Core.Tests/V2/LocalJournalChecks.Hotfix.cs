@@ -145,14 +145,16 @@ internal static partial class LocalJournalChecks
         var gaps = (ILocalGapStore)store;
         gaps.BeginGap("root-local", "0000000000000001:100", 50, true);
         var oldEpoch = gaps.GapEpoch("root-local")!;
-        var now = new NtfsUsnCheckpoint(1, 0, 100 + LocalInventory.MaximumReplayBytes + 1, 0);
+        var now = new NtfsUsnCheckpoint(1, 0, 100 + JournalReplayWindow.ReplayWindowBytes + 1, 0);
         inventory.WalkCheckpointForTest = () => (now, false);
         inventory.JournalReadForTest = (string _, NtfsUsnCheckpoint from, NtfsUsnCheckpoint through,
             out IReadOnlyList<NtfsUsnChange> changes, out string? failure, out NtfsUsnReadFailure kind, CancellationToken ct) =>
-        { throw new InvalidOperationException("oversized replay must be rejected before journal IO"); };
-        var delta = await inventory.ChangesSinceAsync("0000000000000001:100", store.BeginGeneration("root-local", "delta"), _ => true, default);
-        LocalChecks.Require(delta.CursorInvalid && store.Cursor("root-local") == now.Cursor && store.GapInventoryPending("root-local"),
-            "oversized replay is preflighted without journal IO and publishes a protected checkpoint");
+        { changes = []; failure = null; kind = NtfsUsnReadFailure.Transient; return true; };
+        var delta = await inventory.ChangesSinceAsync(new NtfsUsnCheckpoint(1, 0, 100, 0).Cursor,
+            store.BeginGeneration("root-local", "delta"), _ => true, default);
+        LocalChecks.Require(!delta.CursorInvalid && delta.CursorAfter == now.Cursor &&
+            gaps.GapEpoch("root-local")!.Epoch == oldEpoch.Epoch,
+            "oversized same-journal history replays without creating another protected epoch");
         var fresh = await inventory.FullAsync(store.BeginGeneration("root-local", "full"), _ => true, null!, default);
         LocalChecks.Require(fresh.Items.Count() == 1 && gaps.GapEpoch("root-local")!.Boundary == oldEpoch.Boundary,
             "one fresh walk preserves the oldest content-proof boundary");

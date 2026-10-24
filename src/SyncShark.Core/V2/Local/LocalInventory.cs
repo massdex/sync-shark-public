@@ -34,9 +34,7 @@ public sealed partial class LocalInventory : IInventorySource
     internal LocalGapWorker? GapWorker { get; set; }
     internal ILocalGapIo? GapIo { get; set; }
     internal const int VerificationPublicationPages = 4;
-    internal const long MaximumReplayBytes = 64L * 1024 * 1024;
     internal Action<long, long>? VerificationProgress { get; set; }
-    internal static bool ReplayTooLarge(long from, long through) => through > from && through - from > MaximumReplayBytes;
 
     /// <summary>Binds one local root; the saved root object id must parse into its NTFS identity.</summary>
     public LocalInventory(RootDef root, Side side, IStateStore known,
@@ -182,8 +180,11 @@ public sealed partial class LocalInventory : IInventorySource
         finally { gate?.Release(); }
     }
 
+    internal Action? FullInventoryForTest { get; set; }
+
     private async Task<Snapshot> FullCoreAsync(long gen, Func<string, bool> include, IProgress<string> p, CancellationToken ct)
     {
+        FullInventoryForTest?.Invoke();
         var rootId = _root.RootId;
         if (_pairId is not null && (WalkCheckpointForTest is null || CapacityQueryForTest is not null)) ObserveCapacity(null);
         PairPause.Check();
@@ -193,17 +194,6 @@ public sealed partial class LocalInventory : IInventorySource
             NtfsUsnCheckpoint.TryParseCursor(_known.Cursor(rootId), out var savedJournal, out var savedNext) &&
             checkpoint.RequiresFullReconciliation(_known.Cursor(rootId)))
             BeginJournalGap(rootId, savedJournal, savedNext, checkpoint);
-        if (checkpoint is not null && sql?.GapInventoryPending(rootId) == true &&
-            NtfsUsnCheckpoint.TryParseCursor(_known.Cursor(rootId), out var replayJournal, out var replayNext) &&
-            replayJournal == checkpoint.JournalId && ReplayTooLarge(replayNext, checkpoint.NextUsn))
-        {
-            // Re-protect the skipped interval BEFORE the one fresh metadata walk. A new
-            // epoch invalidates old discharges; the store preserves the oldest proof boundary.
-            ((ILocalGapStore)sql).BeginGap(rootId, checkpoint.Cursor, replayNext, true,
-                "catch-up replay byte budget exceeded; fresh inventory with per-file protection");
-            sql.ForgetLocalWalk(rootId);
-            RunTrace.Emit($"local catch-up bounded ({rootId}): fresh protected walk, no oversized journal replay");
-        }
         if (checkpoint is null) { sql?.ForgetLocalWalk(rootId); sql = null; }
         var options = JsonSerializer.Serialize(new { _settings.ReplaceOnlineOnlyStubs,
             ProductOwned = _productOwnedPaths.OrderBy(path => path, StringComparer.Ordinal).ToArray() });
@@ -623,10 +613,12 @@ public sealed partial class LocalInventory : IInventorySource
         if (kind == NtfsUsnReadFailure.OverLimit)
         {
             if (_pairId is not null && (WalkCheckpointForTest is null || CapacityQueryForTest is not null)) ObserveCapacity(cursor, overflow: true);
-            // This range will only grow: retrying the same cursor can never shrink it.
-            (_known as ILocalGapStore)?.BeginGap(rootId, through.Cursor, next, trustFileUsn: true,
-                "journal read exceeded bounded range; journal intact, metadata rescan required");
-            return Invalid(gen, rootId, cursor, "journal range over limit: metadata rescan and trusted per-file verification");
+            // The window planner has exhausted its minimum range. Retain the existing
+            // protected whole-root fallback and let the shared index-failure owner notify.
+            var detail = "journal range over limit: metadata rescan and trusted per-file verification; " + reason;
+            (_known as ILocalGapStore)?.BeginGap(rootId, through.Cursor, next, trustFileUsn: true, detail);
+            _known.RecordIndexFailure(rootId, detail);
+            return Invalid(gen, rootId, cursor, detail);
         }
         return RetryJournal(gen, rootId, cursor, reason);
     }

@@ -1,5 +1,4 @@
 using System.Buffers.Binary;
-using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
@@ -23,12 +22,9 @@ public static partial class NtfsUsnJournal
     };
     private const uint FsctlReadUsnJournal = 0x000900bb;
     private const uint FsctlReadUnprivilegedUsnJournal = 0x000903ab;
-    private const int MaximumRetainedChanges = 100_000;
     internal const string RangeLimitExceeded = "The bounded NTFS change range was exceeded.";
-    private static readonly ConcurrentDictionary<string, VolumeChanges> Volumes =
-        new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>One bounded journal reader/cache per volume, shared by every pair on that volume.
+    /// <summary>Bounded journal reads without retaining earlier windows in a volume cache.
     /// Full 64-bit file references retain the NTFS sequence number; recycled MFT slots are not identities.
     /// No journal creation, elevation, hydration, or write access is requested.</summary>
     public static bool TryReadChanges(string rootPath, NtfsUsnCheckpoint from, NtfsUsnCheckpoint through,
@@ -42,6 +38,21 @@ public static partial class NtfsUsnJournal
     internal static bool TryReadChanges(string rootPath, NtfsUsnCheckpoint from, NtfsUsnCheckpoint through,
         out IReadOnlyList<NtfsUsnChange> changes, out string? failure, out NtfsUsnReadFailure kind, CancellationToken cancellationToken)
     {
+        if (!TryReadChanges(rootPath, from, through, out changes, out failure, out kind, out var consumed, cancellationToken)) return false;
+        if (consumed == through.NextUsn) return true;
+        // Legacy callers cannot publish a partial boundary. Fail closed, never silently
+        // authorize their requested checkpoint when the reader stopped short of it.
+        changes = [];
+        failure = RangeLimitExceeded;
+        kind = NtfsUsnReadFailure.OverLimit;
+        return false;
+    }
+
+    internal static bool TryReadChanges(string rootPath, NtfsUsnCheckpoint from, NtfsUsnCheckpoint through,
+        out IReadOnlyList<NtfsUsnChange> changes, out string? failure, out NtfsUsnReadFailure kind,
+        out long consumed, CancellationToken cancellationToken)
+    {
+        consumed = from.NextUsn;
         kind = NtfsUsnReadFailure.Transient;
         failure = null;
         changes = [];
@@ -50,47 +61,30 @@ public static partial class NtfsUsnJournal
         if (from.NextUsn == through.NextUsn) return true;
         var volume = Path.GetPathRoot(Path.GetFullPath(rootPath));
         if (volume is null || volume.Length < 2 || volume[1] != ':') { failure = "root is not a local drive"; return false; }
-        var cache = Volumes.GetOrAdd(volume, _ => new VolumeChanges());
-        lock (cache)
+        try
         {
-            try
-            {
-                var reuse = cache.JournalId == through.JournalId && from.NextUsn >= cache.Start &&
-                            from.NextUsn <= cache.End && through.NextUsn >= cache.End;
-                var start = reuse ? cache.End : from.NextUsn;
-                using var handle = OpenReadOnlyVolume("\\\\.\\" + char.ToUpperInvariant(volume[0]) + ":");
-                if (handle.IsInvalid) { failure = "volume open failed: Windows error " + Marshal.GetLastWin32Error(); return false; }
-                var added = ReadChanges(handle, start, through.NextUsn, through.JournalId, cancellationToken);
-                if (!TryReadCheckpoint(rootPath, out var verified) || verified!.JournalId != through.JournalId ||
-                    verified.RequiresFullReconciliation(from.Cursor)) { failure = "journal coverage changed during read"; return false; }
-                if (!reuse) { cache.Changes.Clear(); cache.Start = from.NextUsn; }
-                cache.Changes.AddRange(added);
-                cache.End = through.NextUsn;
-                cache.JournalId = through.JournalId;
-                // Return the caller's complete range before bounding the reusable tail.
-                changes = cache.Changes.Where(change => change.Usn >= from.NextUsn &&
-                    change.Usn < through.NextUsn).ToArray();
-                if (cache.Changes.Count > MaximumRetainedChanges)
-                {
-                    cache.Changes.RemoveRange(0, cache.Changes.Count - MaximumRetainedChanges);
-                    cache.Start = cache.Changes[0].Usn;
-                }
-                return true;
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
-                                              OverflowException or ArgumentException)
-            {
-                kind = ClassifyReadFailure(exception);
-                failure = LastReadFailure = exception.Message;
-                cache.Changes.Clear(); cache.JournalId = 0;
-                return false;
-            }
+            using var handle = OpenReadOnlyVolume("\\\\.\\" + char.ToUpperInvariant(volume[0]) + ":");
+            if (handle.IsInvalid) { failure = "volume open failed: Windows error " + Marshal.GetLastWin32Error(); return false; }
+            var added = ReadChanges(handle, from.NextUsn, through.NextUsn, through.JournalId, out var end, cancellationToken);
+            if (!TryReadCheckpoint(rootPath, out var verified) || verified!.JournalId != through.JournalId ||
+                verified.RequiresFullReconciliation(from.Cursor)) { failure = "journal coverage changed during read"; return false; }
+            changes = added;
+            consumed = end;
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                          OverflowException or ArgumentException)
+        {
+            kind = ClassifyReadFailure(exception);
+            failure = LastReadFailure = exception.Message;
+            return false;
         }
     }
 
     private static IReadOnlyList<NtfsUsnChange> ReadChanges(SafeFileHandle volume, long start, long end,
-        ulong journalId, CancellationToken cancellationToken)
+        ulong journalId, out long consumed, CancellationToken cancellationToken)
     {
+        consumed = start;
         var input = new byte[40];
         BinaryPrimitives.WriteUInt32LittleEndian(input.AsSpan(8), uint.MaxValue);
         BinaryPrimitives.WriteUInt64LittleEndian(input.AsSpan(32), journalId);
@@ -110,9 +104,40 @@ public static partial class NtfsUsnJournal
                 throw new IOException("The complete NTFS change range is unavailable (Windows error " + Marshal.GetLastWin32Error() + ").");
             var next = BinaryPrimitives.ReadInt64LittleEndian(output);
             if (next <= cursor) throw new IOException("The NTFS cursor did not advance.");
-            result.AddRange(ParseChanges(output.AsSpan(8, count - 8), start, end));
+            result.AddRange(ParseWindow(output.AsSpan(8, count - 8), cursor, end, next, out var recordEnd));
             if (result.Count > 250_000) throw new RangeLimitException();
-            cursor = next;
+            consumed = Math.Max(consumed, recordEnd);
+            // The kernel continuation is authoritative only if this buffer was consumed in full.
+            if (next > end) break;
+            consumed = cursor = next;
+        }
+        return result;
+    }
+
+    // A requested window end can bisect a record. Leave that record for the next read,
+    // reporting the actual consumed boundary rather than the requested byte offset.
+    internal static IReadOnlyList<NtfsUsnChange> ParseWindow(ReadOnlySpan<byte> data, long start, long end,
+        long continuation, out long consumed)
+    {
+        consumed = start;
+        var result = new List<NtfsUsnChange>();
+        while (!data.IsEmpty)
+        {
+            if (data.Length < 60) throw new PermanentRecordException("An NTFS change record is truncated.");
+            var length = BinaryPrimitives.ReadUInt32LittleEndian(data);
+            if (length < 60 || length > data.Length)
+                throw new PermanentRecordException("An NTFS change record is malformed.");
+            var rest = data[(int)length..];
+            if (!rest.IsEmpty && rest.Length < 60) throw new PermanentRecordException("An NTFS change record is truncated.");
+            // Unprivileged journal reads may redact names, so returned RecordLength is
+            // not an authoritative on-disk USN stride. Use the next record's USN or
+            // the kernel continuation, never usn + returned RecordLength.
+            var next = rest.IsEmpty ? continuation : BinaryPrimitives.ReadInt64LittleEndian(rest[24..]);
+            if (next > end) break;
+            if (next <= consumed) throw new IOException("The NTFS cursor did not advance.");
+            result.AddRange(ParseChanges(data[..(int)length], start, end));
+            consumed = next;
+            data = rest;
         }
         return result;
     }
@@ -142,14 +167,6 @@ public static partial class NtfsUsnJournal
             data = data[length..];
         }
         return result;
-    }
-
-    private sealed class VolumeChanges
-    {
-        public ulong JournalId;
-        public long Start;
-        public long End;
-        public List<NtfsUsnChange> Changes { get; } = [];
     }
 
     [DllImport("kernel32.dll", EntryPoint = "DeviceIoControl", SetLastError = true)]

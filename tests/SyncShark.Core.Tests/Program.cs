@@ -43,6 +43,13 @@ if (args is ["--v2-outcome-ownership-checks"])
     return 0;
 }
 
+if (args is ["--v2-journal-window-checks", var journalWindowRoot])
+{
+    await Massdex.SyncShark.V2.LocalJournalChecks.ReplayWindowsAsync(Path.GetFullPath(journalWindowRoot));
+    await Massdex.SyncShark.V2.RunChecks.JournalWindowRunAsync(Path.Combine(Path.GetFullPath(journalWindowRoot), "run"));
+    return 0;
+}
+
 if (args is ["--v2-hotfix-gap-checks", var hotfixGapRoot])
 {
     await Massdex.SyncShark.V2.LocalJournalChecks.HotfixChecksAsync(Path.GetFullPath(hotfixGapRoot));

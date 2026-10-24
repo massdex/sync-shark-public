@@ -8,7 +8,7 @@ internal static partial class StorageChecks
     {
         var folder = Fresh(root, "deferred-alias-continuation");
         var pair = Pair("p1");
-        var aliases = Enumerable.Range(0, 2100).Select(n => new ItemState($"Aliases/{n:D5}", ItemKind.File,
+        var aliases = Enumerable.Range(0, 16800).Select(n => new ItemState($"Aliases/{n:D5}", ItemKind.File,
             "shared-identity", null, new string('a', 64), 1, T0, ItemFlags.None)).ToArray();
         using (var store = SqliteStateStore.Open(folder, Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
@@ -33,13 +33,13 @@ internal static partial class StorageChecks
             Require(preview.SelectMany(x => x.Paths).SequenceEqual(repeat.SelectMany(x => x.Paths)),
                 "v25 to v26 migration retains debt; repeated previews never advance its alias cursor");
             var page = store.AdmitDeferredPlanning(pair.PairId, DateTime.UtcNow.Ticks);
-            Require(page.Sum(x => x.Paths.Count) <= 1024, "alias continuation stays within each run's path budget");
+            Require(page.Sum(x => x.Paths.Count) <= 8192, "alias continuation stays within each run's path budget");
             observed.UnionWith(page.SelectMany(x => x.Paths));
             store.AcknowledgeDeferredPlanning(pair.PairId, page, _ => true);
         }
         using (var store = SqliteStateStore.Open(folder, Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
-            Require(observed.Count == 2100 && store.CountDeferredPlanning(pair.PairId) == 0,
+            Require(observed.Count == 16800 && store.CountDeferredPlanning(pair.PairId) == 0,
                 "cold-reopened bounded slices reach every alias and retire only the full settled cycle");
             store.DeferPlanning(pair.PairId, [(pair.A.RootId, aliases[0])]);
             var stale = store.AdmitDeferredPlanning(pair.PairId, DateTime.UtcNow.Ticks);

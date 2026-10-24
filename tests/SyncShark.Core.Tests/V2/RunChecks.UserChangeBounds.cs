@@ -44,9 +44,9 @@ internal static partial class RunChecks
             await worker.HashPage(fx.Pair.A, epoch, default);
             Require(io.Attempts.Count == 1024, "hashed candidates still consume the 1024-row window; later ready rows are not scanned");
             var admitted = fx.Run().AdmitPlanningPage(fx.Pair.PairId);
-            Require(admitted.Count == 256 && admitted.Sum(row => row.Paths.Count) <= 1024 &&
-                admitted.Count(row => row.Reason == SqliteStateStore.UserChangeReason) == 128 &&
-                admitted.Where(row => row.Reason == SqliteStateStore.UserChangeReason).Sum(row => row.Paths.Count) <= 512,
+            Require(admitted.Count == 2048 && admitted.Sum(row => row.Paths.Count) <= 8192 &&
+                admitted.Count(row => row.Reason == SqliteStateStore.UserChangeReason) == 1024 &&
+                admitted.Where(row => row.Reason == SqliteStateStore.UserChangeReason).Sum(row => row.Paths.Count) <= 4096,
                 "planning reserves half of both budgets for bulk while retaining the total caps");
             Require(store.UrgentPending(fx.Pair.PairId) == 2200, "rotation cannot erase urgency");
             await worker.HashPage(fx.Pair.A, epoch, default);

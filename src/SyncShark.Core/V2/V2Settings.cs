@@ -34,6 +34,9 @@ public sealed record V2Settings(
     internal static readonly TimeSpan ProviderReacquireDelay = TimeSpan.FromMilliseconds(25);
     internal static readonly TimeSpan ProviderPauseCheckInterval = TimeSpan.FromSeconds(1);
 
+    /// <summary>Maximum journal replay windows per inventory call; remaining history resumes next run.</summary>
+    public int LocalReplayWindowsPerRun { get; init; } = 8;
+
     // Journal metadata admission bounds; no file-content reads occur under these leases.
     internal const int JournalRecordsPerPage = 256;
     internal static readonly TimeSpan JournalStoreSlice = TimeSpan.FromMilliseconds(200);
