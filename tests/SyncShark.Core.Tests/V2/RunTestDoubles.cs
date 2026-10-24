@@ -379,9 +379,12 @@ internal sealed class RecordingStore : IStateStore
         _inner.UpdateSyncRetry(pairId, path, update);
     }
     public string? FailSaveRetryPath { get; set; }
+    /// <summary>Durable retry upserts attempted through this store; proves a sleeping row is not rewritten.</summary>
+    public int SaveRetryCalls { get; private set; }
     public void SaveSyncRetry(string pairId, SyncRetry retry)
     {
         if (retry.Path == FailSaveRetryPath) throw new IOException("injected retry persistence failure");
+        SaveRetryCalls++;
         _inner.SaveSyncRetry(pairId, retry);
     }
     public void ClearSyncRetry(string pairId, string path) => _inner.ClearSyncRetry(pairId, path);

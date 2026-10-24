@@ -23,7 +23,10 @@ public sealed partial class SyncRun
     }
 
     private static DateTimeOffset? ScanRetryFloor(BothScan scan, string path) => new[] { scan.A, scan.B }
-        .Where(side => side.IncompleteSubtrees.Contains(path, StringComparer.OrdinalIgnoreCase))
+        // Only RetainFailedInventory sets InventoryFailure, and only for the root; check it before the
+        // O(F) subtree search so a throttle floor never adds a second scan per failed path.
+        .Where(side => side.InventoryFailure is not null &&
+            side.IncompleteSubtrees.Contains(path, StringComparer.OrdinalIgnoreCase))
         .Select(side => FailureRetryOwner.ThrottleCause(side.InventoryFailure)?.RetryAt).Max();
 
     private static SyncRetry WithScanFloor(SyncRetry retry, DateTimeOffset? floor) => retry with

@@ -211,7 +211,10 @@ public sealed partial class SyncRun
             }
             if (previous?.RetryAfter > _time.GetUtcNow())
             {
-                _store.SaveSyncRetry(pair.PairId, WithScanFloor(previous, floor));
+                // A sleeping retry is unchanged unless a new provider floor pushes its deadline later.
+                // Rewriting it every run would be up to one upsert per escalated row per run.
+                if (floor is not null && floor > previous.RetryAfter)
+                    _store.SaveSyncRetry(pair.PairId, WithScanFloor(previous, floor));
                 continue;
             }
             var failureState = FailureRetryOwner.Failed(previous?.Attempts ?? 0, _time.GetUtcNow());
