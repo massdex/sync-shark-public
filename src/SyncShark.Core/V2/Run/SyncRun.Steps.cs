@@ -1352,8 +1352,8 @@ public sealed partial class SyncRun
         IEnumerable<SqliteStateStore.DeferredPlanning>? deferredPlanning = null)
     {
         var unsettled = new SortedSet<string>(tally.DuplicatePaths, StringComparer.OrdinalIgnoreCase);
-        foreach (var notice in plan.Notices)
-            if (notice.Rule != RehashProtection.Rule) unsettled.Add(notice.Path);
+        foreach (var notice in plan.Notices) // Summaries are display-only; explicit paths and typed root holds remain.
+            if (notice.Path.Length > 0 || PlanNotices.HasPathScope(notice)) unsettled.Add(notice.Path);
         foreach (var action in plan.SkippedActions.Concat(plan.Actions.Where(a => !tally.WasDone(a.ActionId))))
         {
             unsettled.Add(action.Path);

@@ -21,6 +21,7 @@ internal static partial class RunChecks
         await Group(nameof(HashFallbackBreakerAsync), HashFallbackBreakerAsync, failures);
         await Group(nameof(PlanningDeferredReplaysNextRunAsync), PlanningDeferredReplaysNextRunAsync, failures);
         await Group(nameof(PairSummaryDoesNotHoldSiblingsAsync), PairSummaryDoesNotHoldSiblingsAsync, failures);
+        await Group(nameof(SettlementNoticeScopeAsync), SettlementNoticeScopeAsync, failures);
         await Group(nameof(HeldRetriesSurviveAsync), HeldRetriesSurviveAsync, failures);
         await Group(nameof(ReleasedSurvivor_FlaggedAsync), ReleasedSurvivor_FlaggedAsync, failures);
         await Group(nameof(HeldIntentsDoNotStarveAsync), HeldIntentsDoNotStarveAsync, failures);
