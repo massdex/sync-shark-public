@@ -8,7 +8,6 @@ internal static partial class DropboxChecks
 {
     private static async Task FolderTreeChecksAsync()
     {
-        await LocalSourceReappearanceChecksAsync();
         await FolderTreeDispatchReappearedAsync(false);
         await FolderTreeDispatchReappearedAsync(true);
         await FolderTreeMissingProofAsync();
@@ -26,6 +25,9 @@ internal static partial class DropboxChecks
         await FolderTreeUnknownKindAsync();
         await FolderTreeRecoveryChecksAsync();
         await FolderTreeReviewFixChecksAsync();
+        // These checks deliberately throttle the process-wide Dropbox delete-job gate.
+        // Keep them after the existing tree checks so their admission history cannot affect those fixtures.
+        await LocalSourceReappearanceChecksAsync();
     }
 
     private sealed record TreeRig(Harness H, InMemoryStateStore Store, Executor Executor, FakeEndpoint A,
@@ -267,6 +269,8 @@ internal static partial class DropboxChecks
             rig.H.Wire.DeleteBatchSizes.Count == FolderDelete.WholeFolderMinimum - 2 &&
             rig.H.Wire.Calls.Contains("/2/files/delete_v2"),
             "a folder below the threshold keeps the per-item path: one conditional delete per file, then empty folders");
+        foreach (var result in results.Where(result => result.Outcome != Outcome.Done))
+            Console.WriteLine($"FolderTreeBelowThreshold action={result.ActionId}; outcome={result.Outcome}; reason={result.Reason}");
         Require(results.All(result => result.Outcome == Outcome.Done) && !rig.H.Wire.Calls.Contains("/2/files/restore"),
             "the per-item path completes unchanged");
     }
