@@ -11,7 +11,10 @@ internal static partial class RunChecks
             IgnoreRules = ["FolderName:.git", "FileName:ignored.txt", "FileExtension:.tmp"] };
         store.SavePair(pair);
         store.SavePair(pair with { PairId = "nested-pair", A = pair.A with
-            { RootId = "nested-root", RootPath = Path.Combine(pair.A.RootPath, "Nested") } });
+            { RootId = "nested-root", RootPath = Path.Combine(pair.A.RootPath, "Nested"), RootObjectId = "nested-source" },
+            B = pair.B with { RootId = "nested-remote", RootPath = "/NestedDestination", RootObjectId = "nested-destination" } });
+        Require(PairAdmission.DecideSaved(pair, store.Pairs()) is null,
+            "nested fixture has distinct root identities and destinations, not an exact-root collision");
         string[] filtered = ["Parent/Child/item.txt", "Parent/.git/config", "ignored.txt", "scratch.tmp",
             "Owned/item.txt", ".syncshark-control-test/item.txt", "Nested/item.txt"];
         foreach (var path in filtered)

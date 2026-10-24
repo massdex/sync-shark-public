@@ -7,6 +7,7 @@ namespace Massdex.SyncShark.V2;
 internal sealed partial class DropboxWire
 {
     private object[]? _deleteJobEntries;
+    private int _deleteJobSequence;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, object[]> _deleteJobs = new(StringComparer.Ordinal);
 
     internal Action? AfterDeleteWriteRefusal { get; set; }
@@ -31,11 +32,12 @@ internal sealed partial class DropboxWire
         using var document = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
         var entries = document.RootElement.GetProperty("entries");
         LastDeleteBatchPaths = entries.EnumerateArray().Select(entry => entry.GetProperty("path").GetString()!).ToList();
-        LastDeleteBatchSize = entries.GetArrayLength();
-        DeleteBatchSizes.Add(LastDeleteBatchSize);
+        var batchSize = entries.GetArrayLength();
+        LastDeleteBatchSize = batchSize;
+        lock (DeleteBatchSizes) DeleteBatchSizes.Add(batchSize);
         DeleteBatchEntered?.TrySetResult();
         if (ReleaseDeleteBatch is { } release) await release.Task.WaitAsync(ct);
-        if (LastDeleteBatchSize is < 1 or > 1000) return Error(HttpStatusCode.BadRequest);
+        if (batchSize is < 1 or > 1000) return Error(HttpStatusCode.BadRequest);
         var results = new List<object>();
         foreach (var entry in entries.EnumerateArray())
         {
@@ -69,7 +71,8 @@ internal sealed partial class DropboxWire
                 _items[node.Relative] = node;
                 RaceDeleteBatchPath = null;
             }
-            if (node is null || node.Folder || !string.Equals(node.Rev, LastDeleteParentRev, StringComparison.Ordinal))
+            // LastDeleteParentRev is telemetry shared by concurrent requests, not this entry's condition.
+            if (node is null || node.Folder || !string.Equals(node.Rev, parentRev.GetString(), StringComparison.Ordinal))
             {
                 results.Add(new Dictionary<string, object>
                 {
@@ -83,14 +86,15 @@ internal sealed partial class DropboxWire
                 [".tag"] = "success", ["metadata"] = Metadata(node)
             });
         }
-        _deleteJobEntries = results.ToArray();
-        var jobId = "delete-job-" + (_deleteJobs.Count + 1);
-        _deleteJobs[jobId] = _deleteJobEntries;
+        var completed = results.ToArray();
+        _deleteJobEntries = completed;
+        var jobId = "delete-job-" + Interlocked.Increment(ref _deleteJobSequence);
+        _deleteJobs[jobId] = completed;
         DeleteBatchDiagnostics?.Enqueue($"submitted job={jobId}; async={DeleteBatchAsyncJob}; " +
-            $"request={document.RootElement.GetRawText()}; outcomes={JsonSerializer.Serialize(_deleteJobEntries)}");
+            $"request={document.RootElement.GetRawText()}; outcomes={JsonSerializer.Serialize(completed)}");
         return DeleteBatchAsyncJob
             ? Json(new Dictionary<string, object> { [".tag"] = "async_job_id", ["async_job_id"] = jobId })
-            : CompletedDeleteBatch();
+            : Json(new Dictionary<string, object> { [".tag"] = "complete", ["entries"] = completed });
     }
 
     private async Task<HttpResponseMessage> CheckDeleteBatchAsync(HttpRequestMessage request, CancellationToken ct)
@@ -112,9 +116,4 @@ internal sealed partial class DropboxWire
             [".tag"] = "complete", ["entries"] = _deleteJobs.GetValueOrDefault(jobId) ?? _deleteJobEntries ?? []
         });
     }
-
-    private HttpResponseMessage CompletedDeleteBatch() => Json(new Dictionary<string, object>
-    {
-        [".tag"] = "complete", ["entries"] = _deleteJobEntries ?? []
-    });
 }

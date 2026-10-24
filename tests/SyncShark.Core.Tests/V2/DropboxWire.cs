@@ -21,7 +21,8 @@ internal sealed partial class DropboxWire : HttpMessageHandler
 
     private sealed record ChangePage(object[] Entries, bool HasMore, string Next);
 
-    private readonly Dictionary<string, Node> _items = new(StringComparer.OrdinalIgnoreCase);
+    private readonly IDictionary<string, Node> _items =
+        new System.Collections.Concurrent.ConcurrentDictionary<string, Node>(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Node> _history = new(StringComparer.Ordinal);
     public string? LastDownloadRevision { get; private set; }
     public string? LastUploadExpectedRevision { get; private set; }

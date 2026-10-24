@@ -26,7 +26,12 @@ internal static partial class RunChecks
             LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default,
             isStateDamage: StorageFailureClassifier.IsStateDamage));
         await fx.Run().PreviewFirstSyncAsync(pair.PairId, new RecordingProgress(), default);
-        await inventory.VerifyIndexingPassAsync(default);
+        var paused = await inventory.VerifyIndexingPassAsync(default);
+        Require(paused == 0, "paused indexing cannot verify the retained file");
+        inventory.GapIo = new LocalGapIo(store, Settings, new HashSet<string>(), () => false);
+        var verified = await inventory.VerifyIndexingPassAsync(default);
+        Require(verified == 1 && store.Live(root.RootId, ["retained.txt"]).Single().Hash is not null,
+            "fixture verifies its one retained file before expecting a copy plan");
         var debt = store.CountDeferredPlanning(pair.PairId);
         checkpoint = start with { NextUsn = start.NextUsn + JournalReplayWindow.ReplayWindowBytes * 7 / 2 };
         // Discard both prepares, as if publication failed. No pending/effect cursor is supplied.
@@ -34,6 +39,9 @@ internal static partial class RunChecks
         Require(store.Cursor(root.RootId) is null && store.CountDeferredPlanning(pair.PairId) == debt,
             "prepare across 3.5 windows cannot commit a cursor or intermediate planning debt");
         var recovered = await fx.Run().PreviewFirstSyncAsync(pair.PairId, new RecordingProgress(), default);
+        Console.WriteLine($"Journal prepare: paused={paused}; verified={verified}; cursor={store.Cursor(root.RootId) ?? "null"}; " +
+            $"debt={store.CountDeferredPlanning(pair.PairId)}; unavailable={recovered.RunUnavailable}; " +
+            $"actions={string.Join(",", recovered.Actions.Select(a => a.Path + ":" + a.Kind))}");
         Require(store.Cursor(root.RootId) is null && recovered.Actions.Any(action => action.Path == "retained.txt"),
             "prepare after lost publication still plans retained observed-but-unapplied files");
         Console.WriteLine("PASS first-sync prepare retains unexecuted observations across window boundaries");

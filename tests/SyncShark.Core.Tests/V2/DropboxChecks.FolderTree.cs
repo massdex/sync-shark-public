@@ -17,7 +17,8 @@ internal static partial class DropboxChecks
         await FolderTreeAddedAfterScanAsync();
         await FolderTreeEditedAfterScanAsync();
         await FolderTreeFeedFailureAsync();
-        await FolderTreeBelowThresholdAsync();
+        await FolderTreeBelowThresholdAsync(false);
+        await FolderTreeBelowThresholdAsync(true);
         await FolderTreeRunsFirstAsync();
         await FolderTreePollAllowsUploadCommitAsync();
         await FolderTreeEditDuringJobNoticeAsync();
@@ -261,10 +262,12 @@ internal static partial class DropboxChecks
             "the intents stay for reconcile and the delete is never replayed");
     }
 
-    private static async Task FolderTreeBelowThresholdAsync()
+    private static async Task FolderTreeBelowThresholdAsync(bool asyncJobs)
     {
         using var rig = await TreeRigAsync(FolderDelete.WholeFolderMinimum - 2);
+        rig.H.Wire.DeleteBatchAsyncJob = asyncJobs;
         var results = await rig.ApplyAsync(rig.Plan());
+        Console.WriteLine($"FolderTreeBelowThreshold async={asyncJobs}; results={results.Count}; done={results.Count(result => result.Outcome == Outcome.Done)}; batches={rig.H.Wire.DeleteBatchSizes.Count}");
         Require(rig.H.Wire.WholeFolderDeletes == 0 &&
             rig.H.Wire.DeleteBatchSizes.Count == FolderDelete.WholeFolderMinimum - 2 &&
             rig.H.Wire.Calls.Contains("/2/files/delete_v2"),
