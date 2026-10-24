@@ -4,8 +4,7 @@ internal static partial class DropboxChecks
 {
     private static async Task SourceAbsenceBatchAsync()
     {
-        var clock = new ResilienceChecks.Clock();
-        using var fixture = new Harness(limiter: ResilienceChecks.Limiter(clock));
+        using var fixture = new Harness();
         var writer = fixture.Writer();
         fixture.Wire.SeedFile("a.txt", "a");
         fixture.Wire.SeedFile("b.txt", "b");
@@ -52,6 +51,7 @@ internal static partial class DropboxChecks
         }
         fixture.Wire.MutateMetadataResponse = null;
 
+        var clock = new ResilienceChecks.Clock();
         fixture.Client.ReadRetryTime = clock;
         fixture.Client.ReadTransientBudget = TimeSpan.FromSeconds(3);
         fixture.Client.ReadRetryDelay = (delay, token) =>

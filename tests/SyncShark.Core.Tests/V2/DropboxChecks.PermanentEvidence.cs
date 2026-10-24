@@ -49,10 +49,10 @@ internal static partial class DropboxChecks
     {
         foreach (var status in new[] { HttpStatusCode.TooManyRequests, HttpStatusCode.ServiceUnavailable })
         {
-            var clock = new ResilienceChecks.Clock();
-            using var h = new Harness(limiter: ResilienceChecks.Limiter(clock));
+            using var h = new Harness();
             h.Wire.SeedDeletedEntry("held.txt");
             h.Wire.RevisionResponseOverride = new { is_deleted = false, entries = Array.Empty<object>() };
+            var clock = new ResilienceChecks.Clock();
             var delays = new List<TimeSpan>();
             h.Client.ReadRetryTime = clock;
             h.Client.ReadRetryDelay = (delay, ct) =>

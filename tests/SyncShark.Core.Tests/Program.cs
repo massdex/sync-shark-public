@@ -189,19 +189,12 @@ if (args is ["--upload-payload-regression"])
     return 0;
 }
 
-if (args is ["--v2-throttle-budget-checks"])
-{
-    await DropboxThrottleBudgetChecks.RunAsync();
-    return 0;
-}
-
 if (args is ["--resilience-checks"])
 {
     await ResilienceChecks.RunAsync();
     await ReadStallChecks.RunAsync();
     await RootVerifyTimeoutChecks.RunAsync();
     await DropboxDownloadRetryChecks.RunAsync();
-    await DropboxThrottleBudgetChecks.RunAsync();
     await Massdex.SyncShark.V2.RunChecks.HashCheckpointsAsync();
     await Massdex.SyncShark.V2.RunChecks.HashCheckpointBatchAsync();
     return 0;

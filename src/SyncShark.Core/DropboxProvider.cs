@@ -237,10 +237,9 @@ public sealed partial class DropboxPilotClient(
     private string TransferResourceKey => "dropbox:" + expectedConnection.Normalize().ConnectionId;
     private Task<HttpResponseMessage> SendResourceRequestAsync(HttpRequestMessage request,
         HttpCompletionOption option, CancellationToken token, Action? onSending = null,
-        SyncProviderOperation operation = SyncProviderOperation.Write, Func<Task>? beforeSending = null,
-        bool deferProviderCooldown = false) =>
+        SyncProviderOperation operation = SyncProviderOperation.Write, Func<Task>? beforeSending = null) =>
         SyncProviderRequestPacing.SendAsync(_transferLimiter, new(TransferResourceKey, operation), false, httpClient, request, option, token, onSending, beforeSending,
-            errorBodyIdleTimeout: ReadStallTimeout, deferProviderCooldown: deferProviderCooldown);
+            errorBodyIdleTimeout: ReadStallTimeout);
 
     internal static string? RecoverySpoolRootForTest { get; set; }
 

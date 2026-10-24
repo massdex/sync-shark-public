@@ -145,7 +145,7 @@ internal sealed partial class ActionRunner
         }
         catch (HttpRequestException e)
         {
-            return await CommitAsync(action, FailureRetryOwner.WithCause(Failed(action, Describe(e)), e)).ConfigureAwait(false);
+            return await CommitAsync(action, Failed(action, Describe(e)) with { FailureHResult = e.HResult }).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -455,10 +455,10 @@ internal sealed partial class ActionRunner
             NativeIoDiagnostic.LogOnce($"pair={_pairId}; relative={action.Path}", e);
             // An access failure is not committed: the intent stays unresolved and the next run observes it. After a
             // durable download checkpoint the same holds for any other failure, so resume keeps the provenance.
-            return await SettleAsync(FailureRetryOwner.WithCause(recoveryHolder.CheckpointRecorded ||
+            return await SettleAsync(recoveryHolder.CheckpointRecorded ||
                 target is IProviderEffectReconciler effectReconciler && effectReconciler.CanResumeProviderEffect(_committer.LatestAction(action))
                 ? Uncertain(action, e)
-                : Failed(action, Describe(e)), e)).ConfigureAwait(false);
+                : Failed(action, Describe(e)) with { FailureHResult = e.HResult }).ConfigureAwait(false);
         }
 
         var done = DoneResult(action, newT, recoveryHolder.Reference);
@@ -559,7 +559,7 @@ internal sealed partial class ActionRunner
         catch (Exception e) when (e is not OperationCanceledException && FailureRetryOwner.ScopeOf(e, ct, isStateDamage: _isStateDamage) == FailureRetryOwner.FailureScope.Item)
         {
             NativeIoDiagnostic.LogOnce($"pair={_pairId}; relative={action.Path}", e);
-            return (null, FailureRetryOwner.WithCause(Failed(action, RecoveryFailed + Describe(e)), e));
+            return (null, Failed(action, RecoveryFailed + Describe(e)) with { FailureHResult = e.HResult });
         }
     }
 

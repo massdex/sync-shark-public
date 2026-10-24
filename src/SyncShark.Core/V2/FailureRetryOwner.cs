@@ -13,17 +13,7 @@ public static class FailureRetryOwner
     public static bool IsDue(DateTimeOffset retryAfter, DateTimeOffset now) => now >= retryAfter;
 
     public enum FailureScope { Item, Endpoint, Stop, State }
-    public enum FailureKind { Other, ContentProof, ProviderThrottle }
-
-    internal static State NotBefore(State state, DateTimeOffset? floor) =>
-        floor is { } until && until > state.RetryAfter ? state with { RetryAfter = until } : state;
-
-    internal static ActionResult WithCause(ActionResult result, Exception error) => result with
-    {
-        FailureHResult = error.HResult,
-        FailureKind = error is ProviderThrottleExhaustedException ? FailureKind.ProviderThrottle : null,
-        RetryNotBefore = (error as ProviderThrottleExhaustedException)?.RetryAt
-    };
+    public enum FailureKind { Other, ContentProof }
 
     // Legacy JSON has no typed kind. Keep raw-cause compatibility in this one owner.
     public static FailureKind ClassifyCause(string cause) =>
@@ -106,12 +96,11 @@ public static class FailureRetryOwner
 
     /// <summary>Persist a pair/path failure using the existing durable retry adapter.</summary>
     public static SyncRetry SaveFailedRetry(IStateStore store, string pairId, string path,
-        string? reason, SyncRetry? old, DateTimeOffset now,
-        FailureKind? failureKind = null, DateTimeOffset? retryNotBefore = null)
+        string? reason, SyncRetry? old, DateTimeOffset now)
     {
         var cause = reason ?? (old?.LastError is { Length: > 0 } previous
             ? previous : "The item could not be confirmed or applied.");
-        var kind = failureKind ?? (reason is null && old is not null ? KindOf(old) : ClassifyCause(cause));
+        var kind = reason is null && old is not null ? KindOf(old) : ClassifyCause(cause);
         var state = ReportedFailure(old, now,
             retainSleeping: kind == FailureKind.ContentProof && old is not null && KindOf(old) == FailureKind.ContentProof,
             countAttempt: old is not { ReprobeEvidence: true });
@@ -122,7 +111,7 @@ public static class FailureRetryOwner
             DeleteBlockedDeferred = false,
             LastError = cause,
             FailureKind = kind,
-            RetryAfter = NotBefore(state, retryNotBefore).RetryAfter
+            RetryAfter = state.RetryAfter
         };
         store.SaveSyncRetry(pairId, retry);
         return retry;

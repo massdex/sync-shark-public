@@ -40,17 +40,6 @@ public sealed class SyncTransferResourceController
     // Below the reduce threshold new work halves; below the minimum the window is one file.
     private const long ReduceBelowAvailableBytes = 512L * 1024 * 1024;
     private const long MinimumWindowAvailableBytes = 256L * 1024 * 1024;
-    // A throttled provider window recovers by additive increase after a throttle-free interval; a throttle
-    // still decreases it multiplicatively (halved, one reduction per cooldown episode). The incident that
-    // motivated this showed the old single-step recovery snapping a halved 64-file window back to 128 about
-    // 30 seconds after the cooldown, which reproduced the same 429 burst roughly two minutes later. Eight
-    // admissions per 30-second quiet interval (one sixteenth of the 128-file Performance working window)
-    // restores a halved 128-file window over eight quiet intervals instead of one.
-    private const int ProviderRecoveryIncrement = 8;
-    private static readonly TimeSpan ProviderRecoveryInterval = TimeSpan.FromSeconds(30);
-    // A parked waiver re-checks admission at this cadence; it never sleeps for the whole provider cooldown
-    // while holding a slot.
-    private static readonly TimeSpan ProviderReacquireDelay = TimeSpan.FromMilliseconds(25);
     private readonly object _gate = new();
     private readonly TimeProvider _time;
     private readonly Func<SyncResourcePressure> _pressure;
@@ -140,67 +129,30 @@ public sealed class SyncTransferResourceController
         lock (_gate)
         {
             CheckPressure();
+            var now = _time.GetUtcNow();
+            // Only the scanner's explicit read-only path uses this allowance.
+            // Non-file effects (moves/deletes/directories) keep ordinary admission.
+            // Recovery is local to inspection; it never resets learned transfer limits.
+            if (_active >= (inspection ? InspectionWindow : Math.Min(_window, Ceiling))) return null;
+            foreach (var key in keys)
+            {
+                var budget = Provider(key);
+                if (budget.CooldownUntil > now || budget.Active >= budget.Window) return null;
+            }
             var reserved = Math.Max(_settings.TransferReservationFloorBytes,
                 file ? Math.Min(Math.Max(0, bytes), TransferMemoryAllowanceBytes) : 0);
-            if (!CanAdmitLocked(keys, inspection, reserved)) return null;
-            AdmitLocked(keys, file, inspection, reserved, resetSample: true);
+            var available = Math.Max(0, Math.Min(_lastPressure.AvailableBytes - MemoryReserveBytes,
+                _lastPressure.FreeCommitBytes - CommitReserveBytes));
+            // Always allow one bounded stream to make progress; subsequent streams fit the actual buffer budget.
+            if (_active > 0 && reserved > Math.Max(0, available - _reservedBytes)) return null;
+            _reservedBytes += reserved;
+            // Exclude idle time between batches from the next throughput sample.
+            if (file && _activeTransfers == 0 && _completed + _failed == 0) _sampleStart = now;
+            _active++;
+            if (inspection) _activeInspections++;
+            if (file) { _activeTransfers++; _peak = Math.Max(_peak, _activeTransfers); }
+            foreach (var key in keys) Provider(key).Active++;
             return new Lease(this, keys, Math.Max(0, bytes), file, inspection, reserved);
-        }
-    }
-
-    // The one admission predicate: the aggregate window, every provider lane's cooldown/window, and the
-    // size-aware memory reservation. A parked waiver re-checks exactly these conditions before re-admitting.
-    private bool CanAdmitLocked(SyncProviderBudgetKey[] keys, bool inspection, long reserved)
-    {
-        var now = _time.GetUtcNow();
-        // Only the scanner's explicit read-only path uses this allowance.
-        // Non-file effects (moves/deletes/directories) keep ordinary admission.
-        // Recovery is local to inspection; it never resets learned transfer limits.
-        if (_active >= (inspection ? InspectionWindow : Math.Min(_window, Ceiling))) return false;
-        foreach (var key in keys)
-        {
-            var budget = Provider(key);
-            if (budget.CooldownUntil > now || budget.Active >= budget.Window) return false;
-        }
-        var available = Math.Max(0, Math.Min(_lastPressure.AvailableBytes - MemoryReserveBytes,
-            _lastPressure.FreeCommitBytes - CommitReserveBytes));
-        // Always allow one bounded stream to make progress; subsequent streams fit the actual buffer budget.
-        return _active <= 0 || reserved <= Math.Max(0, available - _reservedBytes);
-    }
-
-    private void AdmitLocked(SyncProviderBudgetKey[] keys, bool file, bool inspection, long reserved,
-        bool resetSample)
-    {
-        _reservedBytes += reserved;
-        // Exclude idle time between batches from the next throughput sample.
-        if (resetSample && file && _activeTransfers == 0 && _completed + _failed == 0)
-            _sampleStart = _time.GetUtcNow();
-        _active++;
-        if (inspection) _activeInspections++;
-        if (file) { _activeTransfers++; _peak = Math.Max(_peak, _activeTransfers); }
-        foreach (var key in keys) Provider(key).Active++;
-    }
-
-    // Re-admits a lease that was parked for a server-requested cooldown. Same predicate, never a second copy.
-    private bool TryReacquireLocked(Lease lease)
-    {
-        CheckPressure();
-        if (!CanAdmitLocked(lease.Keys, lease.Inspection, lease.ReservedBytes)) return false;
-        AdmitLocked(lease.Keys, lease.File, lease.Inspection, lease.ReservedBytes, resetSample: false);
-        return true;
-    }
-
-    // Releases a parked lease's admission accounting without completing it. The lease is re-admitted by
-    // Lease.ReacquireAsync once the cooldown has passed and a slot is available.
-    private void Park(Lease lease)
-    {
-        lock (_gate)
-        {
-            _active--;
-            _reservedBytes -= lease.ReservedBytes;
-            if (lease.Inspection) _activeInspections--;
-            foreach (var key in lease.Keys) Provider(key).Active--;
-            if (lease.File) _activeTransfers--;
         }
     }
 
@@ -208,15 +160,12 @@ public sealed class SyncTransferResourceController
     {
         lock (_gate)
         {
-            if (lease.Holding)
-            {
-                _active--;
-                _reservedBytes -= lease.ReservedBytes;
-                if (lease.Inspection) _activeInspections--;
-                foreach (var key in lease.Keys) Provider(key).Active--;
-                if (lease.File) _activeTransfers--;
-            }
+            _active--;
+            _reservedBytes -= lease.ReservedBytes;
+            if (lease.Inspection) _activeInspections--;
+            foreach (var key in lease.Keys) Provider(key).Active--;
             if (!lease.File) return;
+            _activeTransfers--;
             if (success)
             {
                 _completed++; _bytes += lease.Bytes;
@@ -377,13 +326,12 @@ public sealed class SyncTransferResourceController
     {
         if (!_providers.TryGetValue(key, out var value)) _providers[key] = value = new ProviderBudget();
         var now = _time.GetUtcNow();
-        // Regrow on lookup so queued admissions recover even when no request completes. Additive increase,
-        // never a jump back to the previous window: a throttle-free interval buys one fixed step only.
+        // Regrow on lookup so queued admissions recover even when no request completes.
         if (value.RecoveryTarget > 0 && now >= value.NextRecoveryProbe && now >= value.CooldownUntil)
         {
-            value.Window = Math.Min(value.RecoveryTarget, value.Window + ProviderRecoveryIncrement);
+            value.Window = Math.Min(value.RecoveryTarget, value.Window * 2);
             value.Spacing = TimeSpan.FromMilliseconds(value.Spacing.TotalMilliseconds / 2);
-            value.NextRecoveryProbe = now + ProviderRecoveryInterval;
+            value.NextRecoveryProbe = now.AddSeconds(30);
             if (value.Window >= value.RecoveryTarget)
             {
                 value.Window = 1024; // The shared measured/memory window remains authoritative.
@@ -408,16 +356,10 @@ public sealed class SyncTransferResourceController
             var now = _time.GetUtcNow();
             var newEpisode = value.CooldownUntil <= now;
             var until = now + delay;
-            if (until > value.CooldownUntil)
-            {
-                value.CooldownUntil = until;
-                var changed = value.CooldownChanged;
-                value.CooldownChanged = new(TaskCreationOptions.RunContinuationsAsynchronously);
-                changed.TrySetResult();
-            }
+            if (until > value.CooldownUntil) value.CooldownUntil = until;
             // Recovery is time-based, not response-count based: a single slow download
             // must not need 32 completions to regain capacity. Never shorten Retry-After.
-            value.NextRecoveryProbe = value.CooldownUntil + ProviderRecoveryInterval;
+            value.NextRecoveryProbe = value.CooldownUntil.AddSeconds(30);
             // Concurrent requests can return the same throttling burst. Extend every
             // server deadline, but learn one reduction per cooldown episode, not one
             // per response: ten in-flight 429s must not collapse a healthy window to1.
@@ -444,55 +386,6 @@ public sealed class SyncTransferResourceController
         }
     }
 
-    /// <summary>
-    /// Every positive server cooldown leaves the read attempt. Even short cooldowns must not spend the
-    /// transient budget; ordinary request spacing (not a server cooldown) stays in the pacing seam.
-    /// </summary>
-    internal static bool DefersForCooldown(TimeSpan cooldown) => cooldown > TimeSpan.Zero;
-
-    /// <summary>
-    /// Waits one server-requested provider cooldown, the single cooldown path (RQ-090). This wait is never
-    /// charged to a read's transient-failure budget, and the caller's admission lease and executor worker
-    /// slot are released for the whole wait and re-admitted afterwards. The cooldown itself still gates
-    /// every request: re-admission and the next send both re-check <see cref="ProviderDelay"/>.
-    /// </summary>
-    internal async Task WaitForCooldownAsync(TimeSpan delay, string route,
-        Func<TimeSpan, CancellationToken, Task>? delayAsync, CancellationToken token,
-        SyncProviderBudgetKey? key = null, TimeSpan? maxBackoff = null)
-    {
-        if (delay <= TimeSpan.Zero) return;
-        token.ThrowIfCancellationRequested();
-        // The request is backing off, so it must not occupy capacity other work can use. Release the
-        // admission slot (and the executor worker slot, which is released once and stays released) and
-        // re-admit after the cooldown; a cancelled wait leaves the lease parked for its owner to finish.
-        var lease = Lease.Current.Value;
-        var staging = SyncEffectStaging.Current.Value;
-        lease?.Park();
-        staging?.Release();
-        await SyncByteProgressStream.ReportPacerAsync(route).ConfigureAwait(false);
-        var started = _time.GetUtcNow();
-        var until = started + delay;
-        for (var remaining = delay; remaining > TimeSpan.Zero;)
-        {
-            token.ThrowIfCancellationRequested();
-            V2.PairPause.Check();
-            ProviderThrottlePolicy.CheckWait(started, _time.GetUtcNow(), remaining,
-                maxBackoff ?? ProviderThrottlePolicy.DefaultMaxBackoff, route);
-            var slice = remaining < TimeSpan.FromSeconds(1) ? remaining : TimeSpan.FromSeconds(1);
-            if (delayAsync is not null) await delayAsync(slice, token).ConfigureAwait(false);
-            else await Task.Delay(slice, _time, token).ConfigureAwait(false);
-            remaining = until - _time.GetUtcNow();
-            if (key is { } budgetKey && ProviderDelay(budgetKey) > remaining)
-                remaining = ProviderDelay(budgetKey);
-        }
-        token.ThrowIfCancellationRequested();
-        if (lease is not null) await lease.ReacquireAsync(delayAsync, _time, token, maxBackoff, route).ConfigureAwait(false);
-    }
-
-    internal void CheckCooldownBound(SyncProviderBudgetKey[] keys) =>
-        ProviderThrottlePolicy.CheckDelay(keys.Select(ProviderDelay).DefaultIfEmpty().Max(),
-            ProviderThrottlePolicy.DefaultMaxBackoff, "admission", _time.GetUtcNow());
-
     internal string? ProviderLimitReason(SyncProviderBudgetKey[] keys)
     {
         lock (_gate)
@@ -502,8 +395,7 @@ public sealed class SyncTransferResourceController
                 : null;
     }
 
-    internal async Task WaitForRequestAsync(SyncProviderBudgetKey key, CancellationToken token, string route = "provider",
-        bool deferProviderCooldown = false)
+    internal async Task WaitForRequestAsync(SyncProviderBudgetKey key, CancellationToken token, string route = "provider")
     {
         token.ThrowIfCancellationRequested();
         var ticket = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -520,61 +412,31 @@ public sealed class SyncTransferResourceController
         {
             var reported = !previous.IsCompleted;
             if (reported) await SyncByteProgressStream.ReportPacerAsync(route);
-            while (!previous.IsCompleted)
-            {
-                Task changed;
-                lock (_gate) { CheckCooldown(); changed = Provider(key).CooldownChanged.Task; }
-                try { await Task.WhenAny(previous, changed).WaitAsync(TimeSpan.FromSeconds(1), _time, token).ConfigureAwait(false); }
-                catch (TimeoutException) { } // Cooperative pause check; no reserved request time.
-            }
             await previous.WaitAsync(token).ConfigureAwait(false);
             // Only the oldest live ticket checks the slot. Re-check after every wait:
             // a concurrent response may extend the cooldown.
             while (true)
             {
-                CheckCooldown();
+                token.ThrowIfCancellationRequested();
                 TimeSpan wait;
-                Task changed;
                 lock (_gate)
                 {
-                    CheckCooldown();
                     var value = Provider(key); var now = _time.GetUtcNow();
                     var next = value.CooldownUntil > value.NextRequest ? value.CooldownUntil : value.NextRequest;
                     wait = next - now;
-                    changed = value.CooldownChanged.Task;
                     if (wait <= TimeSpan.Zero) { value.NextRequest = now + value.Spacing; return; }
                 }
-                ProviderThrottlePolicy.CheckDelay(wait, ProviderThrottlePolicy.DefaultMaxBackoff, route, _time.GetUtcNow());
+                if (wait > TimeSpan.FromMinutes(5))
+                    throw new HttpRequestException($"Provider requires {wait.TotalSeconds:N0} seconds of backoff. This request was not sent; retry after the cooldown.");
                 if (!reported)
                 {
                     reported = true;
                     await SyncByteProgressStream.ReportPacerAsync(route);
                 }
-                try { await changed.WaitAsync(wait > TimeSpan.FromSeconds(1) ? TimeSpan.FromSeconds(1) : wait, _time, token).ConfigureAwait(false); }
-                catch (TimeoutException) { }
+                await Task.Delay(wait > TimeSpan.FromSeconds(5) ? TimeSpan.FromSeconds(5) : wait, _time, token).ConfigureAwait(false);
             }
-        }
-        catch (OperationCanceledException)
-        {
-            // A read's attempt deadline may race the cooldown wake-up. Hand the cooldown back to the
-            // retry owner, which checks the user's token separately; server waiting is not transport time.
-            CheckCooldown();
-            throw;
         }
         finally { ticket.TrySetResult(); }
-
-        void CheckCooldown()
-        {
-            V2.PairPause.Check();
-            var cooldown = ProviderDelay(key);
-            if (deferProviderCooldown && DefersForCooldown(cooldown))
-            {
-                Lease.Current.Value?.Park();
-                SyncEffectStaging.Current.Value?.Release();
-                throw new ProviderCooldownDeferredException(cooldown, route, _time.GetUtcNow() + cooldown);
-            }
-            token.ThrowIfCancellationRequested();
-        }
     }
 
     internal sealed class Lease(SyncTransferResourceController owner, SyncProviderBudgetKey[] keys, long bytes,
@@ -584,50 +446,12 @@ public sealed class SyncTransferResourceController
         // file that has finished transferring can free it early. Completing twice is a no-op.
         internal static readonly AsyncLocal<Lease?> Current = new();
         private int _closed;
-        private int _holding = 1;
         private readonly IDisposable? _measurement = V2.RunInstrumentation.Current?.Admitted();
         internal SyncProviderBudgetKey[] Keys => keys;
         internal long Bytes => bytes;
         internal long ReservedBytes => reservedBytes;
         internal bool File => file;
         internal bool Inspection => inspection;
-        /// <summary>Whether this lease currently accounts for an admission slot.</summary>
-        internal bool Holding => Volatile.Read(ref _holding) == 1;
-
-        /// <summary>
-        /// Releases the admission slot for a server-requested cooldown without completing the lease. The
-        /// owner still completes it normally, so its throughput/failure result is unchanged.
-        /// </summary>
-        internal void Park()
-        {
-            if (Volatile.Read(ref _closed) != 0) return;
-            if (Interlocked.Exchange(ref _holding, 0) == 0) return;
-            owner.Park(this);
-        }
-
-        /// <summary>Re-admits a parked lease once the cooldown has passed and a slot is available.</summary>
-        internal async Task ReacquireAsync(Func<TimeSpan, CancellationToken, Task>? delayAsync,
-            TimeProvider time, CancellationToken token, TimeSpan? maxBackoff = null, string route = "admission")
-        {
-            var started = time.GetUtcNow();
-            while (Volatile.Read(ref _holding) == 0 && Volatile.Read(ref _closed) == 0)
-            {
-                token.ThrowIfCancellationRequested();
-                V2.PairPause.Check();
-                ProviderThrottlePolicy.CheckWait(started, time.GetUtcNow(), keys.Select(owner.ProviderDelay).DefaultIfEmpty().Max(),
-                    maxBackoff ?? ProviderThrottlePolicy.DefaultMaxBackoff, route);
-                bool admitted;
-                lock (owner._gate) admitted = Volatile.Read(ref _closed) == 0 && owner.TryReacquireLocked(this);
-                if (admitted)
-                {
-                    Volatile.Write(ref _holding, 1);
-                    return;
-                }
-                if (delayAsync is not null) await delayAsync(ProviderReacquireDelay, token).ConfigureAwait(false);
-                else await Task.Delay(ProviderReacquireDelay, time, token).ConfigureAwait(false);
-            }
-        }
-
         internal void Complete(bool success)
         {
             if (Interlocked.Exchange(ref _closed, 1) != 0) return;
@@ -640,7 +464,6 @@ public sealed class SyncTransferResourceController
     private sealed class ProviderBudget
     {
         internal Task RequestTail = Task.CompletedTask;
-        internal TaskCompletionSource CooldownChanged = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal int Active, RecoveryTarget, Window = 1024;
         internal DateTimeOffset CooldownUntil, NextRequest, NextRecoveryProbe;
         internal TimeSpan Spacing;
@@ -724,7 +547,9 @@ internal sealed class SyncTransferSchedulingScope(SyncTransferResourceController
         => TryAcquireCore(0, file: false, inspection: true);
     private SyncTransferResourceController.Lease? TryAcquireCore(long bytes, bool file, bool inspection)
     {
-        controller.CheckCooldownBound(keys);
+        var delay = keys.Select(controller.ProviderDelay).DefaultIfEmpty().Max();
+        if (delay > TimeSpan.FromMinutes(5))
+            throw new HttpRequestException($"Provider requires {delay.TotalSeconds:N0} seconds of backoff. Remaining files are deferred, not sent early.");
         return controller.TryAcquire(keys, bytes, file, inspection);
     }
     internal async Task ReportAsync()

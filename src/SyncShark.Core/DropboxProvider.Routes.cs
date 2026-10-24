@@ -145,12 +145,11 @@ public sealed partial class DropboxPilotClient
     }
 
     private async Task<HttpResponseMessage> SendOnceAsync(HttpRequestMessage request,
-        CancellationToken cancellationToken, SyncProviderOperation operation = SyncProviderOperation.Write,
-        bool deferProviderCooldown = false)
+        CancellationToken cancellationToken, SyncProviderOperation operation = SyncProviderOperation.Write)
     {
         Interlocked.Increment(ref _providerCallCount);
         return await SendResourceRequestAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken,
-            operation: operation, deferProviderCooldown: deferProviderCooldown);
+            operation: operation);
     }
 
     private async Task<DropboxRouteResult> ReadSuccessAsync(DropboxRouteCall call, HttpResponseMessage response,

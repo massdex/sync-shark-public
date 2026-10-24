@@ -550,30 +550,18 @@ internal static class AdaptiveResourceChecks
         Require(Admissions(throttled) == reduced,
             mode + " capacity cannot regrow before the sustained quiet interval");
         clock.Advance(1);
-        var regrown = reduced + 8;
-        Require(Admissions(throttled) == regrown,
-            mode + " one throttle-free interval adds a fixed step, never a jump back to the previous window");
+        var recovered = initial;
+        Require(Admissions(throttled) == recovered,
+            mode + " 30 quiet seconds double capacity without requiring successful responses");
         for (var response = 0; response < 320; response++) controller.ProviderSucceeded(new("dropbox:burst", SyncProviderOperation.Read));
-        Require(Admissions(throttled) == regrown,
-            mode + " a probe cannot repeat within the same quiet interval");
-        for (var step = regrown + 8; step < initial; step += 8)
-        {
-            clock.Advance(30);
-            Require(Admissions(throttled) == step,
-                mode + " each further quiet interval adds the same fixed step (expected " + step + ")");
-        }
-        clock.Advance(30);
-        Require(Admissions(throttled) == initial,
-            mode + " additive recovery reaches the previous window only after its full number of quiet intervals");
-        for (var response = 0; response < 320; response++) controller.ProviderSucceeded(new("dropbox:burst", SyncProviderOperation.Read));
-        Require(Admissions(throttled) == initial,
+        Require(Admissions(throttled) == recovered,
             mode + " a probe cannot repeat within the same quiet interval");
         controller.ProviderThrottled(new("dropbox:burst", SyncProviderOperation.Read), TimeSpan.FromSeconds(10));
         for (var response = 0; response < 9; response++)
             controller.ProviderThrottled(new("dropbox:burst", SyncProviderOperation.Read), TimeSpan.FromSeconds(10));
         clock.Advance(10);
-        Require(Admissions(throttled) == Math.Max(1, initial / 2),
-            mode + " a genuinely new throttling episode makes one additional multiplicative reduction, not none or ten");
+        Require(Admissions(throttled) == recovered / 2,
+            mode + " a genuinely new throttling episode makes one additional reduction, not none or ten");
         Require(controller.Snapshot().ActiveFiles == 0,
             mode + " burst rejection and probing release every exact admission without revoking live work");
 
@@ -744,15 +732,12 @@ internal static class AdaptiveResourceChecks
             clock.Advance(10);
         }
         Require(Count(writes) == 1, "separate write episodes reduce only the write window to one");
-        for (var expected = 1 + 8; expected < 16; expected += 8)
+        for (var expected = 2; expected <= 16; expected *= 2)
         {
             clock.Advance(30);
             Require(Count(writes) == expected && Count(reads) == 16,
-                "each quiet write interval adds one fixed step back toward its previous window without any successful responses");
+                "quiet write budget doubles back to its previous window without any successful responses");
         }
-        clock.Advance(30);
-        Require(Count(writes) == 16 && Count(reads) == 16,
-            "additive recovery reaches the write lane's previous window");
         controller.ProviderThrottled(read, TimeSpan.FromSeconds(10));
         Require(Count(reads) == 0 && Count(writes) == 16,
             "a read throttle stops reads without reducing write admission");
@@ -860,8 +845,9 @@ internal static class AdaptiveResourceChecks
             var limiter = new SyncTransferRateLimiter(new());
             var client = new DropboxPilotClient(http, new Tokens(), "/Fixture", dropboxBinding, transferLimiter: limiter);
             try { await client.VerifyRootIdentityAsync(); throw new Exception("long Dropbox delay should defer"); }
-            // Long throttles retain HTTP 429 plus a typed deferred cause and the server deadline.
-            catch (ProviderThrottleExhaustedException error)
+            // JSON reads preserve the original provider refusal when Retry-After exceeds the
+            // read budget; the contract is HTTP 429 and no early retry, not the word "deferred".
+            catch (DropboxApiException error)
             {
                 Require(error.StatusCode == HttpStatusCode.TooManyRequests,
                     "Dropbox long-backoff read preserves the original HTTP 429 refusal");
