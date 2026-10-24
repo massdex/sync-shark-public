@@ -6,20 +6,19 @@ namespace Massdex.SyncShark;
 // Request pacing is independent of file concurrency. This seam never retries a
 // request: each adapter retains its existing read-only/effect replay boundary.
 internal static class SyncProviderRequestPacing
-{
-    // The route path of a request, and nothing else: never the token, the headers or the body.
+{    // The route path of a request, and nothing else: never the token, the headers or the body.
     internal static string RouteOf(HttpRequestMessage request) => request.RequestUri?.AbsolutePath ?? "request";
 
     internal static async Task<HttpResponseMessage> SendAsync(SyncTransferRateLimiter limiter,
         SyncProviderBudgetKey key, bool google, HttpClient client, HttpRequestMessage request,
         HttpCompletionOption option, CancellationToken token, Action? onSending = null,
-        Func<Task>? beforeSending = null, TimeSpan? errorBodyIdleTimeout = null)
+        Func<Task>? beforeSending = null, TimeSpan? errorBodyIdleTimeout = null,
+        bool deferProviderCooldown = false)
     {
         var route = RouteOf(request);
         var errorBodyIdle = errorBodyIdleTimeout ?? SyncResponseBody.DefaultIdleTimeout;
-        // The account's cooldown wait is announced by the single cooldown path (SyncTransferResourceController), which
-        // owns the actual sleep loop, so this seam only waits.
-        await limiter.Resources.WaitForRequestAsync(key, token, route).ConfigureAwait(false);
+        await limiter.Resources.WaitForRequestAsync(key, token, route,
+            deferProviderCooldown && !google).ConfigureAwait(false);
         if (beforeSending is not null) await beforeSending().ConfigureAwait(false);
         onSending?.Invoke();
         // The request joins the run's in-flight table, so its own sweeper names the route if it waits too long (RQ-090).

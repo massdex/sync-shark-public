@@ -24,7 +24,8 @@ internal static class DropboxDownloadRetryChecks
                 "account-id", "root-namespace", "home-namespace", DropboxProviderConfiguration.ContentAccess,
                 DropboxProviderConfiguration.RequiredScopes);
             var clock = new ResilienceChecks.Clock();
-            var client = new DropboxPilotClient(http, new FixedTokenSource(), "/Pilot", binding, "id:pilot-folder")
+            var client = new DropboxPilotClient(http, new FixedTokenSource(), "/Pilot", binding, "id:pilot-folder",
+                transferLimiter: ResilienceChecks.Limiter(clock))
             {
                 ReadTransientBudget = TimeSpan.FromSeconds(4), ReadRetryTime = clock,
                 // A body read that sends no bytes is aborted after a short idle bound, never hung.
@@ -56,8 +57,9 @@ internal static class DropboxDownloadRetryChecks
             {
                 Require(handler.Attempts == 2, mode + ": one bounded retry only");
                 Require(destination.ToArray().SequenceEqual(mode == "range" ? bytes.Take(4) : bytes), mode + ": exact bytes");
-                Require(notices.Any(item => item.Path == "wire.txt" && item.Phase.Contains("retry", StringComparison.Ordinal)),
-                    mode + ": live log identifies the exact waiting file");
+                Require(notices.Any(item => item.Path == "wire.txt" && (mode == "rate"
+                        ? item.Phase == "Provider cooldown" : item.Phase.Contains("retry", StringComparison.Ordinal))),
+                    mode + ": live log identifies the exact waiting file and distinguishes throttle from transport retry");
                 Require(client.ProviderCallCount >= handler.Attempts, mode + ": download requests counted");
             }
             else if (mode == "exhausted")
@@ -102,7 +104,8 @@ internal static class DropboxDownloadRetryChecks
                 "account-id", "root-namespace", "home-namespace", DropboxProviderConfiguration.ContentAccess,
                 DropboxProviderConfiguration.RequiredScopes);
             var clock = new ResilienceChecks.Clock();
-            var client = new DropboxPilotClient(http, new FixedTokenSource(), "/Pilot", binding, "id:pilot-folder")
+            var client = new DropboxPilotClient(http, new FixedTokenSource(), "/Pilot", binding, "id:pilot-folder",
+                transferLimiter: ResilienceChecks.Limiter(clock))
             {
                 ReadTransientBudget = TimeSpan.FromSeconds(4), ReadRetryTime = clock,
                 ReadRetryDelay = (delay, ct) => { ct.ThrowIfCancellationRequested(); clock.Advance(delay); return Task.CompletedTask; }

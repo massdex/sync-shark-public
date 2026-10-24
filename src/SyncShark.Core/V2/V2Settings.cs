@@ -26,6 +26,14 @@ public sealed record V2Settings(
     TimeSpan AutoRetryDelay,
     TimeSpan MinSafetyPoll)
 {
+    // Bounded provider pacing and read recovery; fixed defaults shared by the existing owners.
+    internal const int ProviderThrottleMaximumRetries = 32;
+    internal static readonly TimeSpan ProviderThrottleMaxBackoff = TimeSpan.FromMinutes(5);
+    internal const int ProviderRecoveryIncrement = 8;
+    internal static readonly TimeSpan ProviderRecoveryInterval = TimeSpan.FromSeconds(30);
+    internal static readonly TimeSpan ProviderReacquireDelay = TimeSpan.FromMilliseconds(25);
+    internal static readonly TimeSpan ProviderPauseCheckInterval = TimeSpan.FromSeconds(1);
+
     // Journal metadata admission bounds; no file-content reads occur under these leases.
     internal const int JournalRecordsPerPage = 256;
     internal static readonly TimeSpan JournalStoreSlice = TimeSpan.FromMilliseconds(200);

@@ -50,7 +50,7 @@ internal sealed class SyncProviderAccountVerificationScope : IAsyncDisposable
                 // Only a successfully completed task authorizes reuse. A failed
                 // flight remains a refusal for this batch, never a success receipt.
                 // The next batch/token must validate again. No unowned None task.
-                try { flight = verify(_lifetime.Token); }
+                try { flight = VerifyUnleasedAsync(verify); }
                 catch (Exception error) { flight = Task.FromException(error); }
                 generations.Add(key, flight);
             }
@@ -58,6 +58,23 @@ internal sealed class SyncProviderAccountVerificationScope : IAsyncDisposable
         // Cancelling a single waiter does not cancel other admitted file workers.
         // Cancelling the owning batch does cancel the actual HTTP request.
         return flight.WaitAsync(waiterToken);
+    }
+
+    private async Task VerifyUnleasedAsync(Func<CancellationToken, Task> verify)
+    {
+        // A shared prerequisite belongs to the batch, never to its initiating waiter's capacity.
+        // Clear both ambient owners only in this async flow; waiter cancellation cannot close a
+        // lease the flight would later try to re-admit, nor release another worker's gate.
+        var lease = SyncTransferResourceController.Lease.Current.Value;
+        var staging = SyncEffectStaging.Current.Value;
+        SyncTransferResourceController.Lease.Current.Value = null;
+        SyncEffectStaging.Current.Value = null;
+        try { await verify(_lifetime.Token).ConfigureAwait(false); }
+        finally
+        {
+            SyncTransferResourceController.Lease.Current.Value = lease;
+            SyncEffectStaging.Current.Value = staging;
+        }
     }
 
     public ValueTask DisposeAsync()

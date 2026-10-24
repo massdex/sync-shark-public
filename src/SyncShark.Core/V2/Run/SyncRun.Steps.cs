@@ -434,13 +434,13 @@ public sealed partial class SyncRun
                 var conflictSuccessor = action.ConflictTransitionKey is not null && !action.SuppressReconciledBaseline
                     ? action : null;
                 if (result.Outcome is Outcome.Uncertain or Outcome.Failed)
-                    SaveFailedRetry(pair, action.Path, result.Reason, retry, conflictSuccessor);
+                    SaveFailedRetry(pair, action.Path, result.Reason, retry, conflictSuccessor, result);
                 else if (result.Outcome == Outcome.Done)
                     _store.ClearSyncRetry(pair.PairId, action.Path);
                 else if (result.Outcome is Outcome.Skipped or Outcome.Refused)
                 {
                     if (conflictSuccessor is not null && _store.IntentById(pair.PairId, action.ActionId) is not null)
-                        SaveFailedRetry(pair, action.Path, result.Reason, retry, conflictSuccessor);
+                        SaveFailedRetry(pair, action.Path, result.Reason, retry, conflictSuccessor, result);
                     else if (conflictSuccessor is not null)
                         _store.ClearSyncRetry(pair.PairId, action.Path);
                     else if (retry is not null) _store.SaveSyncRetry(pair.PairId, retry with { RetryAfter = DateTimeOffset.MinValue });

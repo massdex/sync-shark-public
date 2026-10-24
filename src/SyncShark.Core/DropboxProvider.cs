@@ -235,12 +235,6 @@ public sealed partial class DropboxPilotClient(
 
     string ISyncTransferResourceEndpoint.TransferResourceKey => TransferResourceKey;
     private string TransferResourceKey => "dropbox:" + expectedConnection.Normalize().ConnectionId;
-    private Task<HttpResponseMessage> SendResourceRequestAsync(HttpRequestMessage request,
-        HttpCompletionOption option, CancellationToken token, Action? onSending = null,
-        SyncProviderOperation operation = SyncProviderOperation.Write, Func<Task>? beforeSending = null) =>
-        SyncProviderRequestPacing.SendAsync(_transferLimiter, new(TransferResourceKey, operation), false, httpClient, request, option, token, onSending, beforeSending,
-            errorBodyIdleTimeout: ReadStallTimeout);
-
     internal static string? RecoverySpoolRootForTest { get; set; }
 
     public long ProviderCallCount => Interlocked.Read(ref _providerCallCount);
