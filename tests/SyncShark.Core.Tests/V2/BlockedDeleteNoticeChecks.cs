@@ -52,7 +52,8 @@ internal static class BlockedDeleteNoticeChecks
         var blocked = store.SyncRetryAt(pair.PairId, "Parent/000")!;
         var saveFailure = typeof(SyncRun).GetMethod("SaveFailedRetry",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
-        saveFailure.Invoke(run, [pair, "Parent/000", "Upload permission denied", blocked, null]);
+        // Reflection requires every argument, including the optional typed failure payload.
+        saveFailure.Invoke(run, [pair, "Parent/000", "Upload permission denied", blocked, null, null]);
         store.RefreshBlockedDeleteNotice(pair.PairId);
         var failed = store.SyncRetryAt(pair.PairId, "Parent/000")!;
         LocalChecks.Require(failed.DeleteBlockedDetail is null && !failed.DeleteBlockedDeferred &&

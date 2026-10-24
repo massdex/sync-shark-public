@@ -560,7 +560,7 @@ public sealed partial class SyncRun
         {
             try
             {
-                var scan = await ScanSideCoreAsync(pair, side, throttle, ct, inventoryCursors, firstSync);
+                var scan = await ScanWithIdentityRefreshAsync(pair, side, throttle, ct, inventoryCursors, firstSync);
                 return scan;
             }
             catch (Exception error) when (ScopeFailure(error, ct) &&

@@ -82,6 +82,7 @@ internal static partial class LocalJournalChecks
         await RetiredNativeIdentityAsync(Path.Combine(folder, "native"));
         await ExecutorChecks.CachedIdentityDeleteRefusalAsync();
         await RunChecks.CachedIdentityRetryAsync(Path.Combine(folder, "run"));
+        await RunChecks.CachedIdentityRetryAsync(Path.Combine(folder, "full-replacement"), persistent: false);
         await RunChecks.CachedIdentityFairnessAsync(Path.Combine(folder, "fairness"));
         CachedIdentityReviewChecks(folder);
         Console.WriteLine("PASS cached identity replacement, durable guarded rediscovery, and delete refusal");

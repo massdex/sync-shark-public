@@ -34,7 +34,7 @@ public sealed partial class SyncRun
         var touched = new List<string>();
         var incomplete = new List<string>();
         var reasons = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        var remaining = 256;
+        var remaining = V2Settings.ScanRetryScopeLimit;
         var rootDebtSettles = false;
         foreach (var batch in _store.ReadSyncRetries(pair.PairId)
             .Where(retry => (retry.Kind == "scan" || retry.ReadRoots is { Count: > 0 }) &&

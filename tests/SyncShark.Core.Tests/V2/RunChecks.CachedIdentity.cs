@@ -2,7 +2,7 @@ namespace Massdex.SyncShark.V2;
 
 internal static partial class RunChecks
 {
-    internal static async Task CachedIdentityRetryAsync(string folder)
+    internal static async Task CachedIdentityRetryAsync(string folder, bool persistent = true)
     {
         var directory = Path.Combine(folder, "root");
         LocalChecks.Seed(directory, "item.txt", "original");
@@ -26,7 +26,16 @@ internal static partial class RunChecks
         fx.Provider.AddWriter(root, await LocalWriter.OpenAsync(root, Side.A, pair.PairId,
             LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default,
             isStateDamage: StorageFailureClassifier.IsStateDamage));
-        await CachedIdentityPersistentAsync(fx, pair, root, inventory, store, original);
+        if (persistent) await CachedIdentityPersistentAsync(fx, pair, root, inventory, store, original);
+        else
+        {
+            var gaps = (ILocalGapStore)store;
+            gaps.BeginGap(root.RootId, checkpoint.Cursor, 100, true);
+            await using var worker = new LocalGapWorker(gaps, new CachedOpenFailureIo(store), StorageFailureClassifier.IsStateDamage);
+            worker.Discover(root, gaps.GapEpoch(root.RootId)!, default);
+            await worker.HashPage(root, gaps.GapEpoch(root.RootId)!, default);
+            Require(store.GapInventoryPending(root.RootId), "replacement control must take full gap recovery");
+        }
         File.Move(Path.Combine(directory, original.Path), Path.Combine(folder, "retained.txt"));
         LocalChecks.Seed(directory, original.Path, "replacement");
         store.RequestSyncRetryNow(pair.PairId, original.Path);

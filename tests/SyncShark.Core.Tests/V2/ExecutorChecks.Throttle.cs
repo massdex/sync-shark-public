@@ -78,6 +78,35 @@ internal static partial class ExecutorChecks
             "ordinary provider failure does not acquire a throttle kind or deadline");
     }
 
+    private static void AssertAdmissionRetryNotice(InMemoryStateStore store, Executor executor,
+        SyncAction action, ActionResult result, ThrottleClock clock, DateTimeOffset retryAt)
+    {
+        var pair = Pair();
+        var run = new SyncRun(store, executor, new FakeEndpointProvider(), Settings(64), clock);
+        var saveFailure = typeof(SyncRun).GetMethod("SaveFailedRetry",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        saveFailure.Invoke(run, [pair, action.Path, result.Reason, null, null, result]);
+        var retry = store.SyncRetryAt(pair.PairId, action.Path)!;
+        Require(retry is { Attempts: 1, Kind: "sync", FailureKind: FailureRetryOwner.FailureKind.ProviderThrottle } &&
+            retry.RetryAfter == retryAt && retry.LastError == result.Reason,
+            "run failure owner retains the refused item as typed retry work at the provider deadline");
+        Require(!FailureRetryOwner.IsDue(retry.RetryAfter, retryAt.AddTicks(-1)) &&
+            FailureRetryOwner.IsDue(retry.RetryAfter, retryAt),
+            "refused work remains queued, not due before the cooldown and due at its exact deadline");
+        var notice = store.OpenNotices(pair.PairId).Single();
+        Require(notice.Path == action.Path && notice.ReasonKey == "sync-retry" &&
+            notice.CauseKey == result.Reason && notice.Detail.Contains(result.Reason!, StringComparison.Ordinal),
+            "shared notice owner reports the refused item's exact cause");
+        var choices = NoticeOptions.Options(notice);
+        Require(choices.Any(choice => choice.Choice == NoticeChoices.RetryNow) &&
+            choices.Any(choice => choice.Choice == NoticeChoices.Ignore),
+            "throttle retry notice offers Retry and Ignore without dropping the item");
+        saveFailure.Invoke(run, [pair, action.Path, result.Reason, retry, null, result]);
+        Require(store.OpenNotices(pair.PairId).Count == 1 &&
+            store.SyncRetryAt(pair.PairId, action.Path) is { Attempts: 2 } repeated && repeated.RetryAfter == retryAt,
+            "repeated failure reports preserve the provider deadline and deduplicate the notice");
+    }
+
     private sealed class ThrottleClock : TimeProvider
     {
         private long _ticks;

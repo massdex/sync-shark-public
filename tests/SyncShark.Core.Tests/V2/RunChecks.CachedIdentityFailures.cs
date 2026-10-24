@@ -13,8 +13,11 @@ internal static partial class RunChecks
         await worker.HashPage(root, gaps.GapEpoch(root.RootId)!, default);
         Require(io.HashCalls == 1 && CachedIdentityRefresh.Pending(store.SyncRetryAt(pair.PairId, original.Path)!),
             "discovery and hashing, not direct queue calls, persist the identity refresh");
+        Require(store.GapInventoryPending(root.RootId), "persistent-87 fixture must take full gap recovery");
         await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
-        var notice = store.OpenNotices(pair.PairId).Single(n => n.Path == original.Path && n.ReasonKey == "sync-retry");
+        var notices = store.OpenNotices(pair.PairId).Where(n => n.Path == original.Path && n.ReasonKey == "sync-retry").ToArray();
+        Require(notices.Length == 1, "full gap recovery must produce exactly one persistent-87 retry notice; found " + notices.Length);
+        var notice = notices[0];
         Require(store.SyncRetryAt(pair.PairId, original.Path) is { Attempts: 1, LastError: "open-failed(87)" } &&
             notice.Detail.Contains("87") && notice.Detail.Contains("Retry") && notice.Detail.Contains("Ignore") &&
             store.ProtectionBatch(root.RootId, ItemFlags.NeedsRehash, [original.Path])[0].Covered,

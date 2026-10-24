@@ -6,6 +6,8 @@ internal static class CachedIdentityRefresh
     internal const string PendingReason = "cached file identity changed; guarded path rediscovery pending";
 
     internal static bool Pending(SyncRetry retry) => retry.Kind == "scan" && retry.LastError == PendingReason;
+    internal static bool NeedsObservation(SyncRetry retry) => Pending(retry) ||
+        retry.Kind == "scan" && retry.LastError == OpenReason;
 
     /// <summary>Read debt a completed inventory may retire; a quiet refresh is not read debt.</summary>
     internal static bool InventoryDebt(SyncRetry retry) =>
@@ -38,7 +40,7 @@ internal static class CachedIdentityRefresh
             var old = before.FirstOrDefault(item => PairPath.Same(item.Path, scope));
             if (old is not null && after.TryGetValue(scope, out var current) && old.ObjectId == current.ObjectId &&
                 known.SyncRetryAt(pairId, scope) is { } retry && (Pending(retry) ||
-                 retry.Kind == "scan" && retry.LastError == OpenReason &&
+                 NeedsObservation(retry) &&
                  known.ProtectionBatch(rootId, ItemFlags.NeedsRehash, [scope])[0].Covered))
             {
                 failed.Add(scope);

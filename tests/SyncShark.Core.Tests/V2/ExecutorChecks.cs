@@ -422,16 +422,24 @@ internal static partial class ExecutorChecks
         var a = new FakeEndpoint(Side.A, "ra");
         var b = new FakeEndpoint(Side.B, "rb");
         var record = new RecordingWriter(b);
-        var admission = Admission();
+        var clock = new ThrottleClock();
+        var admission = new SyncTransferResourceController(new(ResourceMode: "Performance"), clock,
+            () => new SyncResourcePressure(0, .1, 8L << 30));
         var executor = new Executor(store, Settings(64), admission, isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
+        var retryAt = clock.GetUtcNow().AddMinutes(6);
         admission.ProviderThrottled(new(record.TransferResourceKey, SyncProviderOperation.Write), TimeSpan.FromMinutes(6));
         var action = Act(ActionKind.CopyNew, Side.B, "f0", source: a.Seed("f0", "v0"), key: "k0");
 
         var results = await Apply(executor, Plan(action), a, record);
         var result = results.Single();
-        Require(result.Outcome == Outcome.Failed && result.Reason!.StartsWith("HttpRequestException"),
-            "a long provider backoff fails the action: " + result.Reason);
-        Require(record.Puts == 0, "no effect was attempted during the backoff");
+        // Terminal throttle bounds retain a typed cause and deadline through the shared failure owner.
+        Require(result.ActionId == action.ActionId && result.Outcome == Outcome.Failed &&
+            result.FailureKind == FailureRetryOwner.FailureKind.ProviderThrottle && result.RetryNotBefore == retryAt &&
+            result.Reason!.StartsWith(nameof(ProviderThrottleExhaustedException), StringComparison.Ordinal),
+            "a long provider backoff returns the failed item with its typed cause and exact retry time: " + result.Reason);
+        Require(record.Puts == 0 && store.Baselines(Pair().PairId).Count == 0,
+            "no effect was attempted and the refused item was not marked synced");
+        AssertAdmissionRetryNotice(store, executor, action, result, clock, retryAt);
         var download = Act(ActionKind.CopyNew, Side.A, "download", source: b.Seed("download", "v1"), key: "k1");
         var downloaded = await Apply(executor, Plan(download), a, record);
         Require(downloaded.Single().Outcome == Outcome.Done,

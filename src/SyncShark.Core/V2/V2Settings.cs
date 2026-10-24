@@ -37,6 +37,7 @@ public sealed record V2Settings(
     // Journal metadata admission bounds; no file-content reads occur under these leases.
     internal const int JournalRecordsPerPage = 256;
     internal static readonly TimeSpan JournalStoreSlice = TimeSpan.FromMilliseconds(200);
+    internal const int ScanRetryScopeLimit = 256;
 
     // Diagnostic write batches bound commit latency without buffering a root-sized set.
     internal const int DefaultProvenanceBatchRows = 512;
