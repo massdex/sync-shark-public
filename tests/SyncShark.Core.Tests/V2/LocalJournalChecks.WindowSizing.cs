@@ -6,12 +6,12 @@ internal static partial class LocalJournalChecks
     {
         const long serial = 123;
         var learned = JournalReplayWindow.MinimumWindowBytes * 2;
-        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System))
+        using (var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SaveJournalWindowSize(serial, "F:", "root-a", learned);
             store.SaveJournalWindowSize(serial, "F:", "root-b", learned * 2);
         }
-        using var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System);
+        using var reopened = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var window = new JournalReplayWindow(reopened.JournalWindowSize(serial, "root-a"));
         var target = new NtfsUsnCheckpoint(1, 0, JournalReplayWindow.ReplayWindowBytes * 4, 0);
         LocalChecks.Require(window.Through(128, target).NextUsn == 128 + learned &&
