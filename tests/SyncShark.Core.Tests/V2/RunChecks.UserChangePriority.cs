@@ -21,7 +21,10 @@ internal static partial class RunChecks
             await FirstSyncAsync(fx.Run(), fx);
             SeedPriorityBacklog(store, fx.Pair);
             await MakePriorityChangesAsync(fx);
+            var fullA = fx.A.FullCalls;
+            var fullB = fx.B.FullCalls;
             var held = await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            Require(fx.A.FullCalls == fullA && fx.B.FullCalls == fullB, "incident changes arrive through provider deltas, not bulk inventories");
             var expected = new[] { "New/File", "Edit", "Renamed", "Destination/Moved", "Remote" };
             AssertUrgentProtected(store, fx, expected, held);
             AssertPriorityQueryPlans(store);
@@ -57,8 +60,16 @@ internal static partial class RunChecks
     private static void AssertUrgentProtected(SqliteStateStore store, Fixture fx, string[] expected, RunReport report)
     {
         var urgent = PriorityRows(store, fx.Pair.PairId);
-        Require(expected.All(path => urgent.Any(row => row.RootId == fx.Pair.A.RootId && row.Path == path)),
-            "run delta deferral retains local proof dependencies, including the remote overwrite dependency");
+        // A protected baseline can retain the former spelling after a rename or move.
+        // Intake resolves the entity's current aliases; the saved Path is not its identity.
+        foreach (var path in expected)
+        {
+            var item = store.Live(fx.Pair.A.RootId, [path]).Single();
+            Require(urgent.Any(row => row.RootId == fx.Pair.A.RootId && row.ObjectId == item.ObjectId && row.Paths.Contains(path)),
+                "run delta deferral retains the local proof dependency and current alias: " + path);
+        }
+        Require(urgent.Any(row => row.RootId == fx.Pair.A.RootId && row.Paths.Contains("Remote")),
+            "the remote overwrite delta prioritizes its unchanged local proof dependency");
         Require(expected.All(path => store.ProtectionBatch(fx.Pair.A.RootId, ItemFlags.NeedsRehash, [path])[0].Covered),
             "urgent scheduling never discharges verification protection");
         Require(report.UrgentPending == urgent.Count, "run summary reports pair urgentPending truthfully");

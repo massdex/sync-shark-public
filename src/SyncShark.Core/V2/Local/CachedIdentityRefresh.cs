@@ -9,6 +9,14 @@ internal static class CachedIdentityRefresh
     internal static bool NeedsObservation(SyncRetry retry) => Pending(retry) ||
         retry.Kind == "scan" && retry.LastError == OpenReason;
 
+    // Indexing can settle this failure before its next read deadline. Do not turn accepted
+    // content proof back into scan incompleteness; RecordScanRetries owns retirement/closure.
+    internal static bool Verified(IStateStore known, SyncRetry retry, string rootId) =>
+        !Pending(retry) && NeedsObservation(retry) &&
+        known.Live(rootId, [retry.Path]) is [{ Hash: not null } item] &&
+        (item.Flags & ItemFlags.NeedsRehash) == 0 &&
+        !known.ProtectionBatch(rootId, ItemFlags.NeedsRehash, [retry.Path])[0].Covered;
+
     /// <summary>Read debt a completed inventory may retire; a quiet refresh is not read debt.</summary>
     internal static bool InventoryDebt(SyncRetry retry) =>
         !Pending(retry) && (retry.Kind == "scan" || retry.ReadRoots is { Count: > 0 });

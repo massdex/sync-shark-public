@@ -19,6 +19,13 @@ internal static class PlanIds
         "a" + Hex16(pairId, gen.ToString(CultureInfo.InvariantCulture), rule.ToString(CultureInfo.InvariantCulture),
             kind.ToString(), SideText(target), path.ToLowerInvariant());
 
+    /// <summary>Baseline retirement is identity-scoped; all other effects retain their existing ids.</summary>
+    public static string ActionId(string pairId, long gen, int rule, ActionKind kind, Side target, string path,
+        string? objectKey) => kind == ActionKind.Forget
+        ? "a" + Hex16(pairId, gen.ToString(CultureInfo.InvariantCulture), rule.ToString(CultureInfo.InvariantCulture),
+            kind.ToString(), SideText(target), path.ToLowerInvariant(), objectKey ?? string.Empty)
+        : ActionId(pairId, gen, rule, kind, target, path);
+
     /// <summary>The text form of a side used to build ids.</summary>
     private static string SideText(Side side) => side == Side.A ? "A" : "B";
 

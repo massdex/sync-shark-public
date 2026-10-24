@@ -233,4 +233,10 @@ public sealed partial class SyncRun
     private static bool ScopeFailure(Exception error, CancellationToken ct) =>
         !ct.IsCancellationRequested && RunFailure(error, ct) &&
         !StorageFailureClassifier.IsStoreException(error);
+
+    private RunReport FailedRun(string pairId, IReadOnlyList<ActionResult> failures) =>
+        new(pairId, string.Empty, 0, failures.Count(result => result.Outcome == Outcome.Failed), 0, 0, 0, 0, 0, 0,
+            failures.Take(_settings.FailureSampleLimit).ToArray())
+        { AttemptFailed = true, Uncertain = failures.Count(result => result.Outcome == Outcome.Uncertain) };
+
 }

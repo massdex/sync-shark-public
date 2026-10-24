@@ -67,7 +67,7 @@ public sealed partial class SyncRun
         public int PendingVerification { get; init; }
     }
 
-    internal sealed class Tally(V2Settings? settings = null)
+    internal sealed partial class Tally(V2Settings? settings = null)
     {
         private readonly int _failureSampleLimit = (settings ?? V2Settings.Default).FailureSampleLimit;
         public int Done;
@@ -1276,7 +1276,7 @@ public sealed partial class SyncRun
     private async Task<Tally> ExecuteAsync(Plan plan, PairDef pair, ProgressThrottle throttle, CancellationToken ct, Tally tally)
     {
         plan = await AdmitReviewedRemovalsAsync(plan, pair, ct).ConfigureAwait(false);
-        var byId = plan.Actions.ToDictionary(action => action.ActionId, StringComparer.Ordinal);
+        var byId = IndexPlanActions(ref plan, pair, tally);
         tally.Plan(plan.Actions);
         tally.Plan(plan.SkippedActions);
         foreach (var action in plan.SkippedActions)
@@ -1347,7 +1347,7 @@ public sealed partial class SyncRun
     // so a clean sync of the path would otherwise close it before the user has seen it (notices design §1).
     private void CloseResolvedNotices(IReadOnlyList<Notice> open, Plan plan, Tally tally, Func<string, bool> evaluated)
     {
-        var unsettled = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var unsettled = new HashSet<string>(tally.DuplicatePaths, StringComparer.OrdinalIgnoreCase);
         foreach (var notice in plan.Notices) unsettled.Add(notice.Path);
         foreach (var action in plan.Actions)
         {
@@ -1383,7 +1383,7 @@ public sealed partial class SyncRun
         Func<string, bool> evaluated, Func<string, bool> includeA, Func<string, bool> includeB, CancellationToken ct,
         IEnumerable<SqliteStateStore.DeferredPlanning>? deferredPlanning = null)
     {
-        var unsettled = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        var unsettled = new SortedSet<string>(tally.DuplicatePaths, StringComparer.OrdinalIgnoreCase);
         foreach (var notice in plan.Notices)
             if (notice.Rule != RehashProtection.Rule) unsettled.Add(notice.Path);
         foreach (var action in plan.SkippedActions.Concat(plan.Actions.Where(a => !tally.WasDone(a.ActionId))))

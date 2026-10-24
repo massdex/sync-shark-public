@@ -25,6 +25,7 @@
     "discoveryCheck": "The fast discovery check"
   },
   "messages": {
+    "duplicate-plan-action": "The plan contains a duplicate action id. The additional action was not applied; retry to rebuild the plan",
     "planning-pair-mismatch": "Pair does not match the planning snapshot.",
     "guardedInventoryIncomplete": "The guarded inventory re-read could not completely observe this path.",
     "cachedContentOpenFailed": "content open failed: Windows error {0}",
@@ -35,7 +36,7 @@
     "progressNotShown": "Sync Shark could not show sync progress: {detail}",
     "runDiagnostics": "Throughput: {detail}",
     "progressAbandoned": "The window did not take the last sync progress in time; that progress was not shown.",
-    "firstSyncIncomplete": "First sync not complete: {detail} reviewed effects deferred â€” run prepare and apply again with the same choices."
+    "firstSyncIncomplete": "First sync not complete: {detail} reviewed effects deferred — run prepare and apply again with the same choices."
   },
   "monitor": {
     "kind": "continuous",

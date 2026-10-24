@@ -51,9 +51,9 @@ public sealed partial class SyncRun
             var scopes = batch.Where(retry => !(authoritativeReplay && retry.Path.Length == 0 && retry.Kind == "scan"))
                 .Where(retry => include(retry.Path)).Where(retry =>
             {
+                if (CachedIdentityRefresh.Verified(_store, retry, root.RootId)) return false;
                 if (remaining > 0 && retry.RetryAfter <= _time.GetUtcNow()) { remaining--; return true; }
-                // Quiet rediscovery is already protected; never materialize its root-sized suffix as failures.
-                if (!CachedIdentityRefresh.Pending(retry)) incomplete.Add(retry.Path);
+                if (!CachedIdentityRefresh.Pending(retry)) incomplete.Add(retry.Path); // Quiet work is already protected.
                 return false;
             }).Select(retry => retry.Path).ToArray();
             // Finding 3 (F4 memory): a root retry's job is planning coverage, not a second read. Plan

@@ -27,7 +27,7 @@ internal static partial class RunChecks
         Require(store.OpenNotices(pair.PairId).Count(n => n.Path == original.Path && n.ReasonKey == "sync-retry") == 1 &&
             store.OpenNotices(pair.PairId).Any(n => n.NoticeId == notice.NoticeId),
             "persistent 87 across due rereads keeps the same deduplicated notice");
-        await CachedIdentityProofRecoversAsync(fx, pair, root, store, original);
+        await CachedIdentityProofRecoversAsync(fx, pair, root, inventory, store, original);
         // A later cached open supplies fresh quiet work for the failed-reread check.
         await io.HashAsync(root, store.ByObject(root.RootId, original.ObjectId)!, default);
         inventory.BeforeTargetedRefreshLeaseForTest = () => throw new IOException("synthetic root unavailable");
@@ -39,9 +39,11 @@ internal static partial class RunChecks
     }
 
     private static async Task CachedIdentityProofRecoversAsync(Fixture fx, PairDef pair, RootDef root,
-        SqliteStateStore store, ItemState original)
+        LocalInventory inventory, SqliteStateStore store, ItemState original)
     {
         var gaps = (ILocalGapStore)store;
+        Require(!CachedIdentityRefresh.Verified(store, store.SyncRetryAt(pair.PairId, original.Path)!, root.RootId),
+            "unchanged identity without accepted content proof retains its failure debt");
         var id = LocalItems.ParseObjectId(original.ObjectId);
         var proof = new LocalGapProof(store.Cursor(root.RootId)!, new(id.Volume, id.FileId, 99,
             original.Size, original.Mtime.UtcDateTime.ToFileTimeUtc()));
@@ -49,12 +51,24 @@ internal static partial class RunChecks
         gaps.StageGapHash(root.RootId, gaps.GapEpoch(root.RootId)!, original, hash, proof);
         var result = gaps.GapResults(root.RootId, gaps.GapResultWatermark(root.RootId), 1).Single();
         Require(gaps.AcceptGapResult(root.RootId, result), "later valid content proof settles the original identity");
-        store.RequestSyncRetryNow(pair.PairId, original.Path);
-        await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
-        Require(store.ByObject(root.RootId, original.ObjectId) is not null &&
-            store.SyncRetryAt(pair.PairId, original.Path) is null &&
-            !store.OpenNotices(pair.PairId).Any(n => n.Path == original.Path && n.ReasonKey == "sync-retry"),
-            "later successful verification of the same identity closes its notice and retry");
+        var retry = store.SyncRetryAt(pair.PairId, original.Path)!;
+        Require(CachedIdentityRefresh.Verified(store, retry, root.RootId),
+            "accepted same-identity proof is visible to scan retry retirement");
+        foreach (var due in new[] { true, false })
+        {
+            store.SaveSyncRetry(pair.PairId, retry with { RetryAfter = DateTimeOffset.MaxValue });
+            store.AddNotices([FailureRetryOwner.RetryNotice(pair.PairId, original.Path, retry.LastError, retry.Attempts)]);
+            if (due) store.RequestSyncRetryNow(pair.PairId, original.Path);
+            var rereads = 0;
+            inventory.BeforeTargetedRefreshLeaseForTest = () => rereads++;
+            await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+            inventory.BeforeTargetedRefreshLeaseForTest = null;
+            Require(rereads == 0, "verified cached identity does not need another metadata reread");
+            Require(store.ByObject(root.RootId, original.ObjectId) is not null &&
+                store.SyncRetryAt(pair.PairId, original.Path) is null &&
+                !store.OpenNotices(pair.PairId).Any(n => n.Path == original.Path && n.ReasonKey == "sync-retry"),
+                "later successful verification of the same identity closes its notice and retry");
+        }
     }
 
     private sealed class CachedOpenFailureIo(IStateStore store) : ILocalGapIo, ILocalGapProbe

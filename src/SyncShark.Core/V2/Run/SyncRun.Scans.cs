@@ -25,6 +25,12 @@ public sealed partial class SyncRun
 
     internal sealed record BothScan(SideScan A, SideScan B)
     {
+        internal void PendingChanges(RunScope scope, IEnumerable<string> a, IEnumerable<string> b)
+        {
+            scope.UserChanges(A.UserChanges, B.UserChanges);
+            scope.PendingChanges(a, b, A.AllItemsChanged, B.AllItemsChanged);
+        }
+
         public bool AnyFull => A.Full || B.Full;
         public bool HasChanges => A.ChangePaths.Count > 0 || B.ChangePaths.Count > 0;
 

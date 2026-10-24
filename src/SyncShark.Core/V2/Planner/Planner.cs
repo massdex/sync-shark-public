@@ -22,7 +22,7 @@ public static partial class Planner
         {
             // Draft-owned actions have not escaped. Finalize only after all id-indexed post-passes,
             // without allocating a second record for every effect in a million-item plan.
-            action.FinalizeDraft(PlanIds.ActionId(pairId, gen, action.Rule, action.Kind, action.Target, action.Path),
+            action.FinalizeDraft(PlanIds.ActionId(pairId, gen, action.Rule, action.Kind, action.Target, action.Path, action.ObjectKey),
                 action.Kind == ActionKind.Delete && Cur(row, Opposite(action.Target)) is null);
             var decided = action.Rule == 27 && action.Kind == ActionKind.KeepBoth && row.Base is { } basis
                 ? action with { ConflictTransitionKey = basis.ObjectKey } : action;

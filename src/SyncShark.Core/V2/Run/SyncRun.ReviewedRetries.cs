@@ -99,7 +99,7 @@ public sealed partial class SyncRun
                 if (FolderDelete.Expands(action)) folders.Add(action.Path);
                 replacements.Add(action with
                 {
-                    ActionId = PlanIds.ActionId(pair.PairId, plan.Gen, action.Rule, action.Kind, action.Target, action.Path),
+                    ActionId = PlanIds.ActionId(pair.PairId, plan.Gen, action.Rule, action.Kind, action.Target, action.Path, action.ObjectKey),
                     ProviderEffect = null
                 });
             }

@@ -236,7 +236,11 @@ internal static partial class RunChecks
             var gaps = (ILocalGapStore)store;
             gaps.BeginGap(fx.Pair.A.RootId, "cursor", 1, false, "synthetic intake gap");
             for (var n = 0; n < backlog; n++) fx.B.Seed($"Folder/File-{n:D4}.txt", "changed during gap");
+            // Bulk inventory work, not provider deltas: deltas also queue their local proof
+            // dependencies as urgent. Keep this fixture testing the original bulk intake bound.
+            await run.RequestRescanAsync([fx.Pair.B.RootId], CancellationToken.None);
             await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
+            Require(store.UrgentPending(fx.Pair.PairId) == 0, "bulk rescan work carries no user-delta provenance");
             Require(store.CountDeferredPlanning(fx.Pair.PairId) == backlog,
                 "the production run queued one more-than-one-page backlog of real deferred entities");
 

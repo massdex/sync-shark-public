@@ -1081,6 +1081,12 @@ if (args is ["--v2-collision-baseline-checks"])
     return 0;
 }
 
+if (args is ["--v2-duplicate-action-checks"])
+{
+    await Massdex.SyncShark.V2.RunChecks.DuplicatePlanActionsAsync();
+    return 0;
+}
+
 if (args is ["--v2-planner-checks"])
 {
     await Massdex.SyncShark.V2.PlannerChecks.RunAsync();

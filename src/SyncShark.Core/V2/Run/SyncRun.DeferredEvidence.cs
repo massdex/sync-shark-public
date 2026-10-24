@@ -177,9 +177,10 @@ public sealed partial class SyncRun
         if (held.Count == 0)
         {
             Trace("0 held deletes skipped Recovery (identical to Dropbox history)");
-            return new(approved, await ExecuteAsync(approved, pair, throttle, ct, tally), unapproved.Concat(approved.RecoveryPending).Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
+            return new(approved, await ExecuteAsync(approved, pair, throttle, ct, tally), unapproved.Concat(approved.RecoveryPending).Concat(tally.DuplicatePaths).Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
         }
         approved = await AdmitReviewedRemovalsAsync(approved, pair, ct).ConfigureAwait(false);
+        var byId = IndexPlanActions(ref approved, pair, tally);
         var parkedFootprints = LinkExclusions.None.WithPending(OutstandingFootprints(pair.PairId));
         // RQ-141: one exclusion snapshot for the lane, not a root scan per action. Folder refreshes
         // invalidate it under the same gate as their writes. Retain every protection seen this run
@@ -243,7 +244,6 @@ public sealed partial class SyncRun
         var token = stop.Token;
         var ordinary = Task.Run(async () =>
         {
-            var byId = approved.Actions.ToDictionary(action => action.ActionId);
             await foreach (var result in _executor.ApplyAsync(approved, _endpoints.Writer(pair.A), _endpoints.Writer(pair.B), token))
             {
                 var action = byId.GetValueOrDefault(result.ActionId);
@@ -754,7 +754,7 @@ public sealed partial class SyncRun
         }
         Trace($"{skippedRecovery} held deletes skipped Recovery (identical to Dropbox history)");
         return new(approved with { Actions = actions, Notices = notices, SkippedActions = skipped }, tally,
-            pending.Order(StringComparer.Ordinal).ToArray(), evidenceUnavailable);
+            pending.Concat(tally.DuplicatePaths).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal).ToArray(), evidenceUnavailable);
     }
 
     private async Task<IReadOnlyList<ItemState>> RefreshDescendantsAsync(RootDef root, Side side,

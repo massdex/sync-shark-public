@@ -10,6 +10,7 @@ internal static partial class RunChecks
     public static async Task RunAsync()
     {
         var failures = new List<string>();
+        await Group(nameof(DuplicatePlanActionsAsync), DuplicatePlanActionsAsync, failures);
         await Group(nameof(ProvenanceAsync), ProvenanceAsync, failures);
         await Group(nameof(RehearsalAsync), RehearsalAsync, failures);
         await Group(nameof(HotfixCompletionChecksAsync), HotfixCompletionChecksAsync, failures);

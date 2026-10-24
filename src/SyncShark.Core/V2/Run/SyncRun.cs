@@ -920,7 +920,6 @@ public sealed partial class SyncRun : ISyncRun
         var scanner = new RunScope(_store, predicates.A, predicates.B, links, rules: PairInclude.IgnoreRules(pair),
             decisions: decisions, activeRetries: activeRetries,
             restoreProtection: incrementalRestore, persistDeferred: true, cancellationToken: ct);
-        scanner.UserChanges(scan.A.UserChanges, scan.B.UserChanges);
         retryPaths = retryPaths.Concat(recoveryTouched).Concat(retries.Select(item => item.Path))
             .Concat(deferredPlanning.SelectMany(item => item.Paths)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var rootDebtSettling = rootsComplete && (scan.A.RootDebtSettles || scan.B.RootDebtSettles);
@@ -942,7 +941,7 @@ public sealed partial class SyncRun : ISyncRun
                 .Select(item => item.ObjectId)).ToArray();
             var changesB = scan.B.ChangeObjectIds.Concat(deferredPlanning.Where(item => item.RootId == pair.B.RootId)
                 .Select(item => item.ObjectId)).ToArray();
-            scanner.PendingChanges(changesA, changesB, scan.A.AllItemsChanged, scan.B.AllItemsChanged);
+            scan.PendingChanges(scanner, changesA, changesB);
             var scope = scan.AnyFull ? scanner.LoadFull(pair) :
                 scanner.LoadTouched(pair, touched, changesA, changesB);
             inventory = scope;
@@ -1608,11 +1607,6 @@ public sealed partial class SyncRun : ISyncRun
         if (complete && side.ObservedCoverage is { } coverage && _store is SqliteStateStore sql)
             sql.SaveInventoryObservation(coverage, side.CursorAfter);
     }
-
-    private RunReport FailedRun(string pairId, IReadOnlyList<ActionResult> failures) =>
-        new(pairId, string.Empty, 0, failures.Count(result => result.Outcome == Outcome.Failed), 0, 0, 0, 0, 0, 0,
-            failures.Take(_settings.FailureSampleLimit).ToArray())
-        { AttemptFailed = true, Uncertain = failures.Count(result => result.Outcome == Outcome.Uncertain) };
 
     private static string Unverified(IReadOnlyList<ActionResult> uncertain) =>
         "Unresolved effects could not be verified: " +
