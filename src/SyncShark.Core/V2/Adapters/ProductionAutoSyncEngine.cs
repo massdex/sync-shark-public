@@ -72,7 +72,7 @@ public sealed class ProductionAutoSyncEngine : IAutoSyncHostEngine
                         states.TryGetValue(pair.PairId, out var state);
                         return new { pair.PairId, pair.Name, pair.Enabled, state = state?.Status.ToString() ?? "starting",
                             lastResult = _composition.Store.ReadRunHistory(pair.PairId, 1).FirstOrDefault(),
-                            lastChecked = state?.LastReport?.CompletedUtc,
+                            lastChecked = state?.LastReport?.CompletedUtc, urgentPending = _composition.Store is SqliteStateStore sql ? sql.UrgentPending(pair.PairId) : 0,
                             retryDeadline = state?.RetryAt, nextRun = state?.NextRunUtc, reason = state?.Reason };
                     }).ToArray() };
             case "enable":

@@ -20,6 +20,7 @@ public sealed record RunReport(string PairId, string Outcome, int Done, int Fail
 
     /// <summary>Pending intents protected by temporary verification/evidence holds, not failed effects.</summary>
     public int PendingVerification { get; init; }
+    public long UrgentPending { get; init; }
 
     /// <summary>Total failed or unconfirmed effects, independent of the retained examples.</summary>
     public int FailureCount => Failed + Uncertain;

@@ -234,7 +234,7 @@ internal static class StoreSchema
         DROP INDEX IF EXISTS planning_deferred_due;
         CREATE INDEX IF NOT EXISTS planning_deferred_pair ON planning_deferred(pair_no,root_no,object_id);
         CREATE INDEX IF NOT EXISTS planning_deferred_pair_version ON planning_deferred(pair_no,version,root_no,object_id);
-        """;
+        """ + SqliteStateStore.UserChangeIndexes;
 
     // v24: the independent index's wake detector asks MAX(version) for one root on every host pass.
     // Without this index that is a whole-root scan of the deferred set; with it SQLite walks the
@@ -707,7 +707,7 @@ internal static class StoreSchema
 
     private static readonly string[] ExpectedNames =
     [
-        "planning_deferred", "planning_deferred_pair", "planning_deferred_pair_version", "planning_deferred_root_version", "journal_volume", "dir", "root", "pair", "generation", "file_state", "tombstone", "sync_point", "pending_effect", "sync_retry", "sync_retry_due", "sync_retry_kind", "sync_retry_delete_blocked", "sync_retry_delete_review", "sync_retry_review_path", "nt_groupable_delete", "pe_uncertain_delete", "recovery",
+        "planning_deferred_user_pv", "planning_deferred_user_rv", "planning_deferred", "planning_deferred_pair", "planning_deferred_pair_version", "planning_deferred_root_version", "journal_volume", "dir", "root", "pair", "generation", "file_state", "tombstone", "sync_point", "pending_effect", "sync_retry", "sync_retry_due", "sync_retry_kind", "sync_retry_delete_blocked", "sync_retry_delete_review", "sync_retry_review_path", "nt_groupable_delete", "pe_uncertain_delete", "recovery",
         "notice", "notice_legacy_fold", "local_gap", "local_gap_item", "gap_ready", "gap_failed", "gap_waiting", "gap_results", "gap_metadata", "gap_retry_due", "local_rehash", "rehash_retry", "rehash_retry_due", "deletion_evidence", "dir_key", "dir_mapped_key", "fs_obj", "fs_flagged", "fs_refused", "sp_a_obj", "sp_b_obj", "sp_a_dir", "sp_b_dir",
 
         "removal_review", "pe_unresolved", "pe_intent_order", "rc_pair", "rc_page", "rc_path", "rc_path_missing", "nt_open", "nt_terminal", "nt_restore_page", "nt_restore_path", "nt_restore_path_ready",

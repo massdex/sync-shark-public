@@ -53,7 +53,7 @@ public static class SyncCliRegistry
         new("autosync install-startup", "autosync install-startup [--this-build]", SyncCliRequestKind.State, "explicit", "register stable installed logon startup; replace stale or legacy entries with a warning", "installed executable", "background-host", "--this-build", Mutating: true),
         new("autosync uninstall-startup", "autosync uninstall-startup", SyncCliRequestKind.State, "explicit", "remove per-user logon startup; running host unchanged", "installed executable", "background-host", None, Mutating: true),
         new("autosync stop", "autosync stop", SyncCliRequestKind.State, "explicit", "stop at a durable safe point", "running host", "background-host", None, Mutating: true),
-        new("autosync status", "autosync status", SyncCliRequestKind.State, "none", "host identity and pair scheduler state; never launches", "nothing", "background-host", None),
+        new("autosync status", "autosync status", SyncCliRequestKind.State, "none", "host identity, pair scheduler state and urgentPending; never launches", "nothing", "background-host", None),
         new("autosync enable", "autosync enable --pair <id>|--all", SyncCliRequestKind.State, "explicit", "enable a pair or automatic syncing globally", "running host", "background-host", "--pair,--all", Mutating: true),
         new("autosync disable", "autosync disable --pair <id>|--all", SyncCliRequestKind.State, "explicit", "disable a pair or automatic syncing globally", "running host", "background-host", "--pair,--all", Mutating: true),
         new("autosync interval", "autosync interval --minutes <1..1440>", SyncCliRequestKind.State, "explicit", "set the safety interval", "running host", "background-host", "--minutes", Mutating: true),

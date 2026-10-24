@@ -4,6 +4,7 @@ internal static partial class RunChecks
 {
     private static async Task PlanningDeferredReplaysNextRunAsync()
     {
+        await UserChangePriorityChecksAsync();
         await PlanningDeferredGapReplaysNextRunAsync();
         await PlanningDeferredEmptyPathAsync();
         await PlanningDeferredGapAndParentRetryAsync();
@@ -28,8 +29,8 @@ internal static partial class RunChecks
             fx.B.Seed("Held/File", "changed during gap");
             var held = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
             var deferred = store.AdmitDeferredPlanning(fx.Pair.PairId, DateTime.UtcNow.Ticks, rotate: false);
-            Require(deferred.Count == 1 && deferred[0].RootId == fx.Pair.B.RootId,
-                "SyncRun retains only the changed cloud entity under the local gap");
+            Require(deferred.Count == 2 && deferred.Select(row => row.RootId).ToHashSet().SetEquals([fx.Pair.A.RootId, fx.Pair.B.RootId]),
+                "SyncRun retains the changed cloud entity and its urgent local proof dependency under the gap");
             // Review rc3-1 finding 2a: planning_deferred rows are not sync_retry debt and are not counted by
             // IncrementalOutcome, so a run whose only outstanding work is deferral rows still reports Complete.
             Require(held.Deferred == 0 && store.CountSyncRetries(fx.Pair.PairId) == 0,

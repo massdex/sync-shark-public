@@ -252,7 +252,7 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
                 {
                     Outcome = report.Outcome,
                     Pending = report.Pending,
-                    IndexingRemainingByRoot = report.IndexingRemainingByRoot,
+                    IndexingRemainingByRoot = report.IndexingRemainingByRoot, UrgentPending = report.UrgentPending,
                     Deferred = report.Deferred,
                     Failed = report.Failed,
                     Deleted = report.Deleted,
@@ -490,7 +490,7 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
         {
             Outcome = report.Outcome,
             Pending = report.Pending,
-                IndexingRemainingByRoot = report.IndexingRemainingByRoot,
+                IndexingRemainingByRoot = report.IndexingRemainingByRoot, UrgentPending = report.UrgentPending,
             Failed = report.Failed,
             Stopped = string.Equals(report.Outcome, RunOutcomes.Stopped, StringComparison.Ordinal),
             NeedsVerification = report.Uncertain,

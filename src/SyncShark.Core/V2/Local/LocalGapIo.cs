@@ -9,6 +9,7 @@ namespace Massdex.SyncShark.V2;
 internal sealed class LocalGapIo(IStateStore known, V2Settings settings, IReadOnlySet<string> owned,
     Func<bool>? pauseOverride = null) : ILocalGapIo
 {
+    private const int ContentBufferBytes = 64 * 1024;
     private readonly object _rateGate = new();
     private double _nextRead;
 
@@ -107,10 +108,12 @@ internal sealed class LocalGapIo(IStateStore known, V2Settings settings, IReadOn
         return new(checkpoint.Cursor, proof);
     }
 
-    public async Task<LocalGapHashResult> HashAsync(RootDef root, ItemState item, CancellationToken ct)
+    public Task<LocalGapHashResult> HashAsync(RootDef root, ItemState item, CancellationToken ct) => HashAsync(root, item, false, ct);
+
+    public async Task<LocalGapHashResult> HashAsync(RootDef root, ItemState item, bool urgent, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        if (Paused) return new(LocalGapHashOutcome.Paused);
+        if (!urgent && Paused) return new(LocalGapHashOutcome.Paused);
         if (settings.LocalGapBytesPerSecond <= 0) return new(LocalGapHashOutcome.Disabled);
         if (LocalItems.IsExcluded(item.Path, LocalItems.ProductOwnedRelative(root.RootPath, owned)))
             return new(LocalGapHashOutcome.Unverifiable);
@@ -133,29 +136,36 @@ internal sealed class LocalGapIo(IStateStore known, V2Settings settings, IReadOn
         // during a large hash or its rate-limit waits. Next-run probing validates the path again.
         guard.Dispose();
         lease.Dispose();
-        using var stream = new FileStream(handle, FileAccess.Read, 64 * 1024, isAsync: false);
-        var buffer = ArrayPool<byte>.Shared.Rent(64 * 1024);
+        using var stream = new FileStream(handle, FileAccess.Read, ContentBufferBytes, isAsync: false);
+        var content = await ReadHashAsync(stream, urgent, ct).ConfigureAwait(false);
+        if (content is null) return new(LocalGapHashOutcome.Paused);
+        var after = FileProof(handle);
+        if (after is null || before != after || Checkpoint(root.RootPath) is not { } through ||
+            through.JournalId != checkpoint.JournalId || through.NextUsn < checkpoint.NextUsn || content.Value.Bytes != item.Size)
+            return new(LocalGapHashOutcome.Unverifiable);
+        if (ProbePath(root, item) is not { } pathProof || pathProof.File != after) return new(LocalGapHashOutcome.Unverifiable);
+        // Promotion checks this file's USN and metadata in the same journal on a later run.
+        return new(LocalGapHashOutcome.Verified, content.Value.Hash, new LocalGapProof(checkpoint.Cursor, after!));
+    }
+
+    private async Task<(string Hash, long Bytes)?> ReadHashAsync(FileStream stream, bool urgent, CancellationToken ct)
+    {
+        var buffer = ArrayPool<byte>.Shared.Rent(ContentBufferBytes);
         var hasher = new DropboxContentHash.BlockHasher();
         try
         {
             while (true)
             {
-                if (!await Budget(buffer.Length, ct).ConfigureAwait(false)) return new(LocalGapHashOutcome.Paused);
-                var count = await stream.ReadAsync(buffer.AsMemory(0, 64 * 1024), ct).ConfigureAwait(false);
-                if (Paused) return new(LocalGapHashOutcome.Paused);
+                if (!await Budget(buffer.Length, ct, urgent).ConfigureAwait(false)) return null;
+                var count = await stream.ReadAsync(buffer.AsMemory(0, ContentBufferBytes), ct).ConfigureAwait(false);
+                if (!urgent && Paused) return null;
                 if (count == 0) break;
                 hasher.Append(buffer.AsSpan(0, count));
                 AfterContentReadForCheck?.Invoke(hasher.TotalBytes);
             }
         }
         finally { ArrayPool<byte>.Shared.Return(buffer); }
-        var after = FileProof(handle);
-        if (after is null || before != after || Checkpoint(root.RootPath) is not { } through ||
-            through.JournalId != checkpoint.JournalId || through.NextUsn < checkpoint.NextUsn || hasher.TotalBytes != item.Size)
-            return new(LocalGapHashOutcome.Unverifiable);
-        if (ProbePath(root, item) is not { } pathProof || pathProof.File != after) return new(LocalGapHashOutcome.Unverifiable);
-        // Promotion checks this file's USN and metadata in the same journal on a later run.
-        return new(LocalGapHashOutcome.Verified, hasher.Finish(), new LocalGapProof(checkpoint.Cursor, after!));
+        return (hasher.Finish(), hasher.TotalBytes);
     }
 
     private LocalGapHashResult FailedOpen(RootDef root, ItemState item, int error, IDisposable guard, IDisposable lease)
@@ -165,7 +175,7 @@ internal sealed class LocalGapIo(IStateStore known, V2Settings settings, IReadOn
         return CachedIdentityRefresh.OpenFailure(known, root, item, error);
     }
 
-    internal async Task<bool> Budget(int bytes, CancellationToken ct)
+    internal async Task<bool> Budget(int bytes, CancellationToken ct, bool urgent = false)
     {
         double due;
         lock (_rateGate)
@@ -178,7 +188,7 @@ internal sealed class LocalGapIo(IStateStore known, V2Settings settings, IReadOn
         while (true)
         {
             ct.ThrowIfCancellationRequested();
-            if (Paused) return false;
+            if (!urgent && Paused) return false;
             var remaining = due - Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
             if (remaining <= 0) return true;
             await Task.Delay(TimeSpan.FromSeconds(Math.Min(remaining, 0.2)), ct).ConfigureAwait(false);

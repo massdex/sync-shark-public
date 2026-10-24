@@ -14,6 +14,8 @@ internal interface ILocalGapStore
     /// <summary>Run-start only: publishes staged metadata discharges and discovery frontier.</summary>
     void PromoteGapDiscovery(string rootId) { }
     IReadOnlyList<ItemState> GapHashPage(string rootId, LocalGapEpoch epoch, int limit);
+    IReadOnlyList<(ItemState Item, bool Urgent)> GapHashWorkPage(string rootId, LocalGapEpoch epoch, int limit, bool includeBulk) =>
+        includeBulk ? GapHashPage(rootId, epoch, limit).Select(item => (item, false)).ToArray() : [];
     void StageGapHash(string rootId, LocalGapEpoch epoch, ItemState item, string hash, LocalGapProof proof);
     long GapResultWatermark(string rootId);
     IReadOnlyList<LocalGapResult> GapResults(string rootId, long through, int limit, long after = 0);

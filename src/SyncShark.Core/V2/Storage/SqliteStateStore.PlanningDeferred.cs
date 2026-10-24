@@ -7,7 +7,7 @@ public sealed partial class SqliteStateStore
     // Entity-owned work, not a path hold: queued work must not protect itself forever.
     // Pair is a consumer of the entity's work; path is only its last observed spelling.
     internal sealed record DeferredPlanning(long Root, string ObjectId, string Path, long Version,
-        IReadOnlyList<string> Paths, bool AllAliases, string RootId = "", string Reason = "Waiting for content verification",
+        IReadOnlyList<string> Paths, bool AllAliases, string RootId = "", string Reason = VerificationWaitReason,
         long AliasDir = -1, string AliasKey = "", string AliasName = "", bool AliasUnsettled = false,
         long NextAliasDir = -1, string NextAliasKey = "", string NextAliasName = "");
 
@@ -38,9 +38,9 @@ public sealed partial class SqliteStateStore
         WHERE root_no=$root AND object_id=$id AND pair_no=$pair AND version=$version;
         """;
 
-    internal void DeferPlanning(string pairId, IEnumerable<(string Root, ItemState Item)> items)
+    internal void DeferPlanning(string pairId, IEnumerable<(string Root, ItemState Item)> items, bool urgent = false)
     {
-        foreach (var batch in items.Chunk(256))
+        foreach (var batch in items.Chunk(DeferredIntakeEntityCap))
             InStore(() =>
             {
                 var pair = PairNo(pairId);
@@ -49,7 +49,8 @@ public sealed partial class SqliteStateStore
                 var rows = batch.Select(row => new { root = RootNo(row.Root), id = row.Item.ObjectId, path = row.Item.Path })
                     .Where(row => row.root is not null).ToArray();
                 WritePlanningDirty(tx, pair.Value, System.Text.Json.JsonSerializer.Serialize(rows),
-                    "Waiting for content verification");
+                    urgent ? UserChangeReason : VerificationWaitReason);
+                if (urgent) foreach (var row in batch) RetainUrgentGap(tx, row.Root, row.Item);
                 tx.Commit();
             });
     }
@@ -72,9 +73,9 @@ public sealed partial class SqliteStateStore
             SELECT json_extract(value,'$.root'),json_extract(value,'$.id'),$p,
               json_extract(value,'$.path'),$version,$reason FROM json_each($rows) WHERE 1
             ON CONFLICT(root_no,object_id,pair_no) DO UPDATE SET
-              path=excluded.path,reason=excluded.reason,version=MAX(planning_deferred.version+1,excluded.version),
+              path=excluded.path,reason=CASE WHEN planning_deferred.reason=$user THEN planning_deferred.reason ELSE excluded.reason END,version=MAX(planning_deferred.version+1,excluded.version),
               alias_dir=-1,alias_key='',alias_name='',alias_unsettled=0;
-            """, ("$p", pair), ("$version", DateTime.UtcNow.Ticks), ("$reason", reason), ("$rows", rows));
+            """, ("$user", UserChangeReason), ("$p", pair), ("$version", DateTime.UtcNow.Ticks), ("$reason", reason), ("$rows", rows));
 
     // Read-only Show remaining projection. It does not admit aliases or acknowledge work.
     internal IReadOnlyList<DeferredPlanning> DeferredPlanningDisplayPage(string pairId, long afterRoot = -1, string afterId = "", long beforeVersion = long.MaxValue) => InStore(() =>
@@ -113,18 +114,8 @@ public sealed partial class SqliteStateStore
     {
         var pair = PairNo(pairId);
         if (pair is null) return (IReadOnlyList<DeferredPlanning>)Array.Empty<DeferredPlanning>();
-        var rows = new List<DeferredPlanning>();
         using var tx = _connection.BeginTransaction();
-        using (var command = StoreSchema.Command(_connection, tx, DeferredPlanningIntakeSql))
-        {
-            command.Parameters.AddWithValue("$p", pair.Value);
-            command.Parameters.AddWithValue("$before", beforeVersion);
-            command.Parameters.AddWithValue("$limit", DeferredIntakeEntityCap);
-            using var reader = command.ExecuteReader();
-            while (reader.Read()) rows.Add(new(reader.GetInt64(0), reader.GetString(1), reader.GetString(2),
-                reader.GetInt64(3), [], true, reader.GetString(4), reader.GetString(5),
-                reader.GetInt64(6), reader.GetString(7), reader.GetString(8), reader.GetInt64(9) != 0));
-        }
+        var rows = ReadPlanningIntake(tx, pair.Value, beforeVersion);
         var totalPaths = 0;
         var admitted = new List<DeferredPlanning>(rows.Count);
         foreach (var row in rows)

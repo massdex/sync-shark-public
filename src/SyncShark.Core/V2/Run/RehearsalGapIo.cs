@@ -20,10 +20,11 @@ internal sealed class RehearsalGapIo(ILocalGapIo real, RehearsalOverlay overlay,
     }
     public LocalGapProof? Probe(RootDef root, ItemState item) => Virtual(root, item, out var proof) ? proof : real.Probe(root, item);
     public ILocalGapProbe OpenProbes(RootDef root) => new Probes(this, root, real.OpenProbes(root));
-    public Task<LocalGapHashResult> HashAsync(RootDef root, ItemState item, CancellationToken ct)
+    public Task<LocalGapHashResult> HashAsync(RootDef root, ItemState item, CancellationToken ct) => HashAsync(root, item, false, ct);
+    public Task<LocalGapHashResult> HashAsync(RootDef root, ItemState item, bool urgent, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        if (!Virtual(root, item, out var proof)) return real.HashAsync(root, item, ct);
+        if (!Virtual(root, item, out var proof)) return real.HashAsync(root, item, urgent, ct);
         if (proof is null || !overlay.Try(root.RootId, item.Path, out var state) || state?.Hash is not { } hash)
             return Task.FromResult(new LocalGapHashResult(LocalGapHashOutcome.Unverifiable));
         return Task.FromResult(new LocalGapHashResult(LocalGapHashOutcome.Verified, hash, proof));

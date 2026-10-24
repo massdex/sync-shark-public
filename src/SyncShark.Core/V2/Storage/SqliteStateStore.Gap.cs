@@ -385,23 +385,17 @@ public sealed partial class SqliteStateStore : ILocalGapStore
         }
     }
 
-    IReadOnlyList<ItemState> ILocalGapStore.GapHashPage(string rootId, LocalGapEpoch epoch, int limit) => InStore(() =>
+    IReadOnlyList<ItemState> ILocalGapStore.GapHashPage(string rootId, LocalGapEpoch epoch, int limit) =>
+        ((ILocalGapStore)this).GapHashWorkPage(rootId, epoch, limit, true).Select(work => work.Item).ToArray();
+
+    IReadOnlyList<(ItemState Item, bool Urgent)> ILocalGapStore.GapHashWorkPage(string rootId, LocalGapEpoch epoch,
+        int limit, bool includeBulk) => InStore(() =>
     {
         var root = RootNo(rootId);
-        if (root is null || ReadGap(root)?.Epoch != epoch.Epoch) return Array.Empty<ItemState>();
+        if (root is null || ReadGap(root)?.Epoch != epoch.Epoch) return Array.Empty<(ItemState, bool)>();
         StageGapOrphans(root.Value, epoch.Epoch);
-        var ids = new List<string>();
-        using (var cmd = StoreSchema.Command(_connection, null,
-            "SELECT object_id FROM local_gap_item INDEXED BY gap_ready WHERE root_no=$r AND epoch=$e AND hash IS NULL AND retry_allowed=1 AND metadata_ready=0 AND retry_after<=$now " +
-            "ORDER BY last_attempt,object_id LIMIT $n;"))
-        {
-            cmd.Parameters.AddWithValue("$r", root.Value); cmd.Parameters.AddWithValue("$e", epoch.Epoch);
-            cmd.Parameters.AddWithValue("$n", Math.Clamp(limit, 1, 128));
-            cmd.Parameters.AddWithValue("$now", _clock.GetUtcNow().ToUnixTimeMilliseconds());
-            using var reader = cmd.ExecuteReader();
-            while (reader.Read()) ids.Add(reader.GetString(0));
-        }
-        var result = new List<ItemState>();
+        var ids = SelectGapWork(root.Value, epoch, Math.Clamp(limit, 1, 128), includeBulk, out var urgent);
+        var result = new List<(ItemState Item, bool Urgent)>();
         var current = ids.Select(id => (Id: id, Item: _reads.ByObject(root.Value, id))).ToArray();
         using var tx = _connection.BeginTransaction();
         foreach (var (id, item) in current)
@@ -415,7 +409,7 @@ public sealed partial class SqliteStateStore : ILocalGapStore
                 StoreSchema.Execute(_connection, tx,
                     "UPDATE local_gap_item SET last_attempt=$t,expected_json=$j WHERE root_no=$r AND object_id=$o;",
                     ("$r", root.Value), ("$o", id), ("$t", DateTime.UtcNow.Ticks), ("$j", JsonSerializer.Serialize(item)));
-                result.Add(item);
+                result.Add((item, urgent.Contains(id)));
             }
         }
         tx.Commit();

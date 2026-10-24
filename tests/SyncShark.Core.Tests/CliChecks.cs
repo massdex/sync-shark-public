@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -774,9 +774,9 @@ internal static partial class CliChecks
             Actions=new SyncActionJournalStatus(3,4096,2,3072,false,true,1,null) });
         EncodedResponseChecks();
         var normalReceipt = new SyncCliRunData("receipt-pair", "Receipt fixture", 1, 2, 3, 0, 1, false)
-        { RunId = "retained-receipt-run", Failed = 1, NotAttempted = 4, NeedsVerification = 2 };
+        { RunId = "retained-receipt-run", Failed = 1, NotAttempted = 4, NeedsVerification = 2, UrgentPending = 7 };
         var renderedReceipt = SyncCli.RenderHuman(normalReceipt);
-        Require(renderedReceipt.Contains("failed=1 not-attempted=4 needs-verification=2", StringComparison.Ordinal) &&
+        Require(renderedReceipt.Contains("urgentPending=7", StringComparison.Ordinal) && renderedReceipt.Contains("failed=1 not-attempted=4 needs-verification=2", StringComparison.Ordinal) &&
                 renderedReceipt.Contains("activity list --log --run retained-receipt-run", StringComparison.Ordinal),
             "normal human receipt preserves unresolved counters and the exact retained operation-log command");
         Require(!SyncCli.RenderHuman(normalReceipt with { RunId = null }).Contains("Retained run:", StringComparison.Ordinal),

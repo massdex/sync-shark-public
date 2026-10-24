@@ -9,6 +9,8 @@ internal static partial class FilesOnDemandCompatibilityChecks
 
     private static readonly IReadOnlyDictionary<string, string> ApprovedCoreShapes = new Dictionary<string, string>
     {
+        ["index|planning_deferred_user_pv"] = "CREATE INDEX planning_deferred_user_pv ON planning_deferred(pair_no,version,root_no,object_id) WHERE reason='" + Massdex.SyncShark.V2.SqliteStateStore.UserChangeReason + "'",
+        ["index|planning_deferred_user_rv"] = "CREATE INDEX planning_deferred_user_rv ON planning_deferred(root_no,version,object_id) WHERE reason='" + Massdex.SyncShark.V2.SqliteStateStore.UserChangeReason + "'",
         // INDEX24: per-root retry deadlines for gap items and rehash work (fdbce7fe).
         ["index|gap_retry_due"] = """CREATE INDEX gap_retry_due ON local_gap_item(root_no,retry_after) WHERE retry_after>0""",
         ["index|rehash_retry_due"] = """CREATE INDEX rehash_retry_due ON local_rehash(root_no,retry_after) WHERE retry_after>0""",

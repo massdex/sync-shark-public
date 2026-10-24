@@ -138,24 +138,6 @@ public sealed record SyncCliPlanData(string PairId, string PairName, bool FirstS
     [JsonIgnore] public SyncEndpointContext? PresentationContext { get; init; }
 }
 
-public sealed record SyncCliRunData(string PairId, string PairName, int Uploaded, int Downloaded, int Unchanged,
-    int Conflicts, int Blocked, bool Stopped)
-{
-    public string? RunId { get; init; }
-    public string? Outcome { get; init; }
-    public int Pending { get; init; }
-    public IReadOnlyDictionary<string, long> IndexingRemainingByRoot { get; init; } = new Dictionary<string, long>();
-    public int Deferred { get; init; }
-    public int Failed { get; init; }
-    public int NotAttempted { get; init; }
-    public int NeedsVerification { get; init; }
-    /// <summary>Files removed on a side (core v2 keeps the run's per-kind counts, .</summary>
-    public int Deleted { get; init; }
-    /// <summary>Files moved on a side.</summary>
-    public int Moved { get; init; }
-    /// <summary>Core v2 per-run throughput measurements; absent when collection is disabled.</summary>
-    public V2.RunDiagnostics? Diagnostics { get; init; }
-}
 
 /// <summary>
 /// One plan-only export: the CSV path, its plan generation and the rows written per marker kind, including
@@ -713,7 +695,7 @@ public static class SyncCli
                 break;
             case SyncCliRunData run:
                 if (run.Outcome == V2.RunOutcomes.Paused) text.AppendLine("Pair paused; use pairs resume to continue from checkpoints.");
-                text.AppendLine($"Pair '{run.PairName}' ({run.PairId}) outcome={run.Outcome ?? "legacy"}: pending={run.Pending} deferred={run.Deferred} uploaded={run.Uploaded} " +
+                text.AppendLine($"Pair '{run.PairName}' ({run.PairId}) outcome={run.Outcome ?? "legacy"}: pending={run.Pending} urgentPending={run.UrgentPending} deferred={run.Deferred} uploaded={run.Uploaded} " +
                                 $"downloaded={run.Downloaded} deleted={run.Deleted} moved={run.Moved} " +
                                 $"unchanged={run.Unchanged} conflicts={run.Conflicts} " +
                                 $"blocked={run.Blocked} failed={run.Failed} not-attempted={run.NotAttempted} " +

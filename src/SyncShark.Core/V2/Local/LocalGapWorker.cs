@@ -69,7 +69,7 @@ internal sealed partial class LocalGapWorker(ILocalGapStore store, ILocalGapIo i
                 }
                 var worked = false;
                 store.SetGapStatus(root.RootId, discovery, discovery ? "metadata discovery running" : io.PauseReason);
-                if ((discovery || !io.Paused) && store.GapEpoch(root.RootId) is { } epoch)
+                if (store.GapEpoch(root.RootId) is { } epoch)
                     worked = discovery ? Discover(root, epoch, ct) : await HashPage(root, epoch, ct).ConfigureAwait(false);
                 if (discovery && !worked && store.GapEpoch(root.RootId) is { DiscoveryDone: false })
                 {
@@ -185,7 +185,7 @@ internal sealed partial class LocalGapWorker(ILocalGapStore store, ILocalGapIo i
 
     internal async Task<bool> HashPage(RootDef root, LocalGapEpoch epoch, CancellationToken ct)
     {
-        var page = store.GapHashPage(root.RootId, epoch, 16);
+        var page = store.GapHashWorkPage(root.RootId, epoch, 16, includeBulk: !io.Paused);
         if (page.Count == 0) return false;
         using var availability = io.OpenProbes(root);
         if (availability.UnavailableReason is { } unavailable)
@@ -195,10 +195,10 @@ internal sealed partial class LocalGapWorker(ILocalGapStore store, ILocalGapIo i
             return false;
         }
         var completed = false;
-        foreach (var item in page)
+        foreach (var (item, urgent) in page)
         {
             ct.ThrowIfCancellationRequested();
-            if (io.Paused) return false;
+            if (!urgent && io.Paused) return false;
             try
             {
                 if (MetadataOnly(item) || io.Excluded(root, item))
@@ -208,7 +208,7 @@ internal sealed partial class LocalGapWorker(ILocalGapStore store, ILocalGapIo i
                 }
                 store.SetGapStatus(root.RootId, false, $"hashing {item.Path}; interrupted files restart from byte zero");
                 RunTrace.Emit($"local gap verification starting/restarting from byte zero: {item.Path}");
-                var result = await io.HashAsync(root, item, ct).ConfigureAwait(false);
+                var result = await io.HashAsync(root, item, urgent, ct).ConfigureAwait(false);
                 if (result is { Outcome: LocalGapHashOutcome.Verified, Hash: { } hash, Proof: { } proof })
                 {
                     store.StageGapHash(root.RootId, epoch, item, hash, proof);

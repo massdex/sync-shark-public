@@ -15,7 +15,7 @@ internal sealed partial class RunScope
     private readonly HashSet<string> _permanentA = new(StringComparer.Ordinal);
     private readonly HashSet<string> _permanentB = new(StringComparer.Ordinal);
     private PairDef? _deferredPair;
-    private readonly List<(string Root, ItemState Item)> _deferred = new(256);
+    private readonly List<(string Root, ItemState Item, bool Urgent)> _deferred = new(256);
     private bool _streamingProtection;
     private long _protectionBatches, _protectionTotal, _protectionStarted;
     private readonly IStateStore _store;
@@ -442,11 +442,11 @@ internal sealed partial class RunScope
     private void Defer(ItemState item, Side side, LinkExclusions links)
     {
         if (!_persistDeferred || _deferredPair is not { } pair || _store is not SqliteStateStore ||
-            (!(side == Side.A ? _allChangedA : _allChangedB) && !(side == Side.A ? _dirtyA : _dirtyB).Contains(item.ObjectId)) ||
+            (!(side == Side.A ? _allChangedA : _allChangedB) && !(side == Side.A ? _dirtyA : _dirtyB).Contains(item.ObjectId) && !IsUserChange(item, side)) ||
             !new[] { item.Path, DropboxNameMapping.MatchPath(item) }.Any(links.TouchesRehash) ||
             (side == Side.A ? _permanentA : _permanentB).Contains(item.ObjectId) || PermanentHold(item, links) ||
             _store.SyncRetryAt(pair.PairId, item.Path) is not null) return;
-        _deferred.Add(((side == Side.A ? pair.A : pair.B).RootId, item));
+        _deferred.Add(((side == Side.A ? pair.A : pair.B).RootId, item, IsUserChange(item, side)));
         if (_deferred.Count == 256) FlushDeferred();
     }
 
@@ -456,7 +456,8 @@ internal sealed partial class RunScope
         try
         {
             if (_store is SqliteStateStore store && _deferredPair is { } pair)
-                store.DeferPlanning(pair.PairId, _deferred);
+                foreach (var group in _deferred.GroupBy(row => row.Urgent))
+                    store.DeferPlanning(pair.PairId, group.Select(row => (row.Root, row.Item)), group.Key);
         }
         catch (Exception error)
         {

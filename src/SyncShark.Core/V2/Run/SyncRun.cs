@@ -920,6 +920,7 @@ public sealed partial class SyncRun : ISyncRun
         var scanner = new RunScope(_store, predicates.A, predicates.B, links, rules: PairInclude.IgnoreRules(pair),
             decisions: decisions, activeRetries: activeRetries,
             restoreProtection: incrementalRestore, persistDeferred: true, cancellationToken: ct);
+        scanner.UserChanges(scan.A.UserChanges, scan.B.UserChanges);
         retryPaths = retryPaths.Concat(recoveryTouched).Concat(retries.Select(item => item.Path))
             .Concat(deferredPlanning.SelectMany(item => item.Paths)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var rootDebtSettling = rootsComplete && (scan.A.RootDebtSettles || scan.B.RootDebtSettles);
@@ -1551,7 +1552,7 @@ public sealed partial class SyncRun : ISyncRun
         try
         {
             if (_store is SqliteStateStore store && store.Pair(report.PairId) is { } pair)
-                return report with { IndexingRemainingByRoot = new[] { pair.A, pair.B }
+                return report with { UrgentPending = store.UrgentPending(report.PairId), IndexingRemainingByRoot = new[] { pair.A, pair.B }
                     .Where(root => root.Provider == SyncProviders.Local).DistinctBy(root => root.RootId)
                     .ToDictionary(root => root.RootId, root => store.IndexingRemaining(root.RootId), StringComparer.Ordinal) };
         }
