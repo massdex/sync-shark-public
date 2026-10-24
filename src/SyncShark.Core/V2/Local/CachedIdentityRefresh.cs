@@ -7,6 +7,37 @@ internal static class CachedIdentityRefresh
 
     internal static bool Pending(SyncRetry retry) => retry.Kind == "scan" && retry.LastError == PendingReason;
 
+    /// <summary>Read debt a completed inventory may retire; a quiet refresh is not read debt.</summary>
+    internal static bool InventoryDebt(SyncRetry retry) =>
+        !Pending(retry) && (retry.Kind == "scan" || retry.ReadRoots is { Count: > 0 });
+
+    /// <summary>An unvisited refresh is protected work, not an observation failure for a notice.</summary>
+    internal static bool QuietUnvisited(SyncRetry? previous, string? diagnostic) =>
+        previous is not null && Pending(previous) && diagnostic is null;
+
+    /// <summary>Being due does not authorize effects for an unvisited guarded identity refresh.</summary>
+    internal static HashSet<string> ActiveRetryPaths(IEnumerable<SyncRetry> retries) =>
+        retries.Where(item => !Pending(item)).Select(item => item.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Retire each scope the re-read observed with no incomplete ancestor or descendant.</summary>
+    internal static void SettleObserved(IStateStore known, string pairId, IEnumerable<string> scopes,
+        IReadOnlyCollection<string> incomplete, string rootId)
+    {
+        foreach (var scope in scopes)
+            if (!incomplete.Any(path => path.Length == 0 ||
+                PairPath.IsSelfOrUnder(scope, path) || PairPath.IsSelfOrUnder(path, scope)))
+                Observed(known, pairId, scope, rootId);
+    }
+
+    /// <summary>An invalid cached-ID open queues rediscovery, or reports the unchanged unverifiable result.</summary>
+    internal static LocalGapHashResult OpenFailure(IStateStore known, RootDef root, ItemState item, int error)
+    {
+        if (TryQueue(known, root, item, "open-failed(" + error + ")"))
+            return new(LocalGapHashOutcome.IdentityChanged, Reason: PendingReason);
+        return new(LocalGapHashOutcome.Unverifiable, Reason: "content open failed: Windows error " + error,
+            QuarantineCode: error is 225 or 226 ? error : null);
+    }
+
     internal static void Observed(IStateStore known, string pairId, string path, string rootId) =>
         known.UpdateSyncRetry(pairId, path, retry =>
         {

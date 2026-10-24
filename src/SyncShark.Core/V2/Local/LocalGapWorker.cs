@@ -137,9 +137,7 @@ internal sealed partial class LocalGapWorker(ILocalGapStore store, ILocalGapIo i
                     VerificationBudget.RequiresHash(item, proof.File) ? "content-proof-required" :
                     !Matches(item, proof.File) ? "metadata-mismatch" :
                     proof.File.Usn >= epoch.Boundary ? "usn>=boundary" : "proved-unchanged";
-                if (epoch.TrustFileUsn && proof is null &&
-                    !(store is IStateStore known && CachedIdentityRefresh.TryQueue(known, root, item, reason)))
-                    failures.Add((item, reason));
+                if (UnqueuedDiscoveryFailure(epoch, proof, store, root, item, reason)) failures.Add((item, reason));
                 discovered.Add((item, reason != "proved-unchanged"));
                 Record(item, reason);
             }
@@ -178,6 +176,12 @@ internal sealed partial class LocalGapWorker(ILocalGapStore store, ILocalGapIo i
         ct.ThrowIfCancellationRequested();
         return page.Count > 0;
     }
+
+    /// <summary>A discovery failure is recorded only when no durable consumer accepted the refresh.</summary>
+    private static bool UnqueuedDiscoveryFailure(LocalGapEpoch epoch, LocalGapProof? proof, ILocalGapStore store,
+        RootDef root, ItemState item, string reason) =>
+        epoch.TrustFileUsn && proof is null &&
+        !(store is IStateStore known && CachedIdentityRefresh.TryQueue(known, root, item, reason));
 
     internal async Task<bool> HashPage(RootDef root, LocalGapEpoch epoch, CancellationToken ct)
     {

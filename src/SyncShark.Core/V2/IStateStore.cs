@@ -301,8 +301,6 @@ public partial interface IStateStore : IDisposable
     bool SyncRetryExists(string pairId, string path) => SyncRetryAt(pairId, path) is { } row && RetryProtectionDomain.Includes(row);
     void SaveSyncRetry(string pairId, SyncRetry retry);
     void ClearSyncRetry(string pairId, string path);
-    /// <summary>Merges background scan debt without overwriting concurrent reviewed retry authority.</summary>
-    void UpdateSyncRetry(string pairId, string path, Func<SyncRetry?, SyncRetry?> update);
     void RefreshInterruptedDeleteNotice(string pairId) { }
     void RefreshBlockedDeleteNotice(string pairId) { }
     BlockedDeletePage ReadBlockedDeletes(string pairId, string? after = null, int limit = 50) => new([], null);

@@ -18,7 +18,7 @@ internal static partial class LocalInventoryChecks
         LocalChecks.Require(snapshot.VerifyAbsence!(missing) == FileAbsence.Gone &&
             delta.DisplacementEvidence!.VerifyAbsence!(missing) == FileAbsence.Gone,
             "history-only complete listing retains its absence evidence after the scan is released");
-        LocalChecks.Require(delta.DisplacementEvidence.VerifyAbsence!(missing with { Path = "outside.txt" }) == FileAbsence.Unknown,
+        LocalChecks.Require(delta.DisplacementEvidence!.VerifyAbsence!(missing with { Path = "outside.txt" }) == FileAbsence.Unknown,
             "the delta absence callback does not grant evidence outside its explicit refreshed scope");
         GC.KeepAlive(snapshot);
         GC.KeepAlive(delta);

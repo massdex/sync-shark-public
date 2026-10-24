@@ -123,11 +123,7 @@ internal sealed class LocalGapIo(IStateStore known, V2Settings settings, IReadOn
         if (handle.IsInvalid)
         {
             var error = Marshal.GetLastWin32Error();
-            var reason = "open-failed(" + error + ")";
-            if (CachedIdentityRefresh.TryQueue(known, root, item, reason))
-                return new(LocalGapHashOutcome.IdentityChanged, Reason: CachedIdentityRefresh.PendingReason);
-            return new(LocalGapHashOutcome.Unverifiable, Reason: "content open failed: Windows error " + error,
-                QuarantineCode: error is 225 or 226 ? error : null);
+            return CachedIdentityRefresh.OpenFailure(known, root, item, error);
         }
         if (FileProof(handle) is not { } before || !LocalGapWorker.Matches(item, before))
             return new(LocalGapHashOutcome.Unverifiable, Reason: "file identity or journal proof unavailable");

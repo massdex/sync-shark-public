@@ -880,9 +880,7 @@ public sealed partial class SyncRun : ISyncRun
         ct.ThrowIfCancellationRequested();
         var deferredPlanning = AdmitPlanningPage(pairId);
         using var planningTiming = new RunBoundaryTiming("planning", _settings.EnableRunInstrumentation);
-        // Being due does not authorize effects for an unvisited guarded identity refresh.
-        var activeRetries = retries.Where(item => !CachedIdentityRefresh.Pending(item))
-            .Select(item => item.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var activeRetries = CachedIdentityRefresh.ActiveRetryPaths(retries);
         var retryHeld = retries.Where(item => item.Held is not null).Select(item => item.Held!).ToArray();
         var pendingEvidence = scan.A.PendingDeletionEvidence.Concat(scan.B.PendingDeletionEvidence)
             .GroupBy(entry => entry.Key, StringComparer.OrdinalIgnoreCase)

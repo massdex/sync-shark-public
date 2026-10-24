@@ -311,7 +311,6 @@ public sealed partial class LocalInventory : IInventorySource
             }
             ct.ThrowIfCancellationRequested();
             if (result.Outcome is LocalGapHashOutcome.Paused or LocalGapHashOutcome.Disabled) break;
-            if (result.Outcome == LocalGapHashOutcome.IdentityChanged) continue;
             if (result.QuarantineCode is { } code)
                 PersistQuarantine(new PilotDecision(item.Path, PilotDecisionKind.Blocked, result.Reason ?? "content reader reported quarantine")
                     { QuarantineCode = code, QuarantineFile = true });
@@ -319,7 +318,7 @@ public sealed partial class LocalInventory : IInventorySource
                 LocalGapWorker.Matches(item, proof.File) &&
                 _known.CompleteIndexingRehash(_root.RootId, item, hash, revision))
                 CompletePointerVerification(item);
-            else
+            else if (result.Outcome != LocalGapHashOutcome.IdentityChanged)
                 _known.FailIndexingRehash(_root.RootId, item, revision,
                     result.Reason ?? "content or stored identity changed during verification; retry on next indexing pass");
         }
