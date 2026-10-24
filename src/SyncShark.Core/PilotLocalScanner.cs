@@ -120,7 +120,7 @@ public sealed class PilotLocalScanner
         void RecordEntry(PilotLocalEntry entry)
         {
             pageEntries?.Add(entry);
-            AddEntry(entries, blockedCanonicalPaths, decisions, entry);
+            LocalScanEntries.AddEntry(entries, blockedCanonicalPaths, decisions, entry);
         }
         using var inspectionCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var inspectionToken = inspectionCancellation.Token;
@@ -285,7 +285,7 @@ public sealed class PilotLocalScanner
                 // Retry them on the next full walk, without discarding unrelated saved progress.
                 var replayDecisionStart = decisions.Count;
                 foreach (var entry in saved.Entries)
-                    AddEntry(entries, blockedCanonicalPaths, decisions, entry);
+                    LocalScanEntries.AddEntry(entries, blockedCanonicalPaths, decisions, entry);
                 // AddEntry reconstructs collision state, but the page already contains its exact decisions.
                 decisions.RemoveRange(replayDecisionStart, decisions.Count - replayDecisionStart);
                 decisions.AddRange(saved.Decisions);
@@ -660,7 +660,7 @@ public sealed class PilotLocalScanner
         catch (Exception) { /* Reporting does not change the completed scan. */ }
         rootLease.VerifyBinding();
         stopwatch.Stop();
-        return new PilotLocalScan(PublishEntries(entries), decisions, totalBytes, filesHashed,
+        return new PilotLocalScan(LocalScanEntries.PublishEntries(entries), decisions, totalBytes, filesHashed,
             Elapsed: stopwatch.Elapsed, PathsInspected: entriesFound, Incremental: refreshPaths is not null,
             Complete: complete);
         }
@@ -709,16 +709,16 @@ public sealed class PilotLocalScanner
         foreach (var entry in retained.Entries.Values)
         {
             if ((++processed & 0xFF) == 0) cancellationToken.ThrowIfCancellationRequested();
-            if (!RefreshedByScope(scope, entry.RelativePath, out var probes)) AddEntry(entries, blocked, decisions, entry);
+            if (!RefreshedByScope(scope, entry.RelativePath, out var probes)) LocalScanEntries.AddEntry(entries, blocked, decisions, entry);
             lookups += probes;
         }
         foreach (var entry in refreshed.Entries.Values)
         {
             if ((++processed & 0xFF) == 0) cancellationToken.ThrowIfCancellationRequested();
-            AddEntry(entries, blocked, decisions, entry);
+            LocalScanEntries.AddEntry(entries, blocked, decisions, entry);
         }
         scopeLookups = lookups;
-        return refreshed with { Entries = PublishEntries(entries), Decisions = decisions,
+        return refreshed with { Entries = LocalScanEntries.PublishEntries(entries), Decisions = decisions,
             TotalBytes = entries.Values.Where(entry => entry.Kind == PilotEntryKind.File).Sum(entry => entry.Size) };
     }
 
@@ -779,38 +779,6 @@ public sealed class PilotLocalScanner
             throw new IOException("The held source bytes changed during upload.");
         VerifyHandlePath(stream.SafeFileHandle, expected.FullPath, rootLease);
         rootLease.VerifyBinding();
-    }
-
-    // Keep just one canonical index during the walk. Published lookups retain their original
-    // spelling and OrdinalIgnoreCase contract; canonical keys never escape the scanner.
-    private static IReadOnlyDictionary<string, PilotLocalEntry> PublishEntries(
-        Dictionary<string, PilotLocalEntry> entries) => entries.Values.ToDictionary(
-            entry => entry.RelativePath, StringComparer.OrdinalIgnoreCase);
-
-    private static void AddEntry(IDictionary<string, PilotLocalEntry> entries,
-        ISet<string> blockedCanonicalPaths,
-        ICollection<PilotDecision> decisions, PilotLocalEntry entry)
-    {
-        var key = PilotPath.CanonicalComparisonKey(entry.RelativePath);
-        if (blockedCanonicalPaths.Contains(key))
-        {
-            decisions.Add(new PilotDecision(entry.RelativePath, PilotDecisionKind.Blocked,
-                "A case- or Unicode-normalization-colliding local name is not accepted."));
-            return;
-        }
-        if (entries.TryGetValue(key, out var existing) &&
-            !string.Equals(existing.RelativePath, entry.RelativePath, StringComparison.Ordinal))
-        {
-            var existingPath = existing.RelativePath;
-            entries.Remove(key);
-            decisions.Add(new PilotDecision(existingPath, PilotDecisionKind.Blocked,
-                "A case- or Unicode-normalization-colliding local name is not accepted."));
-            decisions.Add(new PilotDecision(entry.RelativePath, PilotDecisionKind.Blocked,
-                "A case- or Unicode-normalization-colliding local name is not accepted."));
-            blockedCanonicalPaths.Add(key);
-            return;
-        }
-        entries[key] = entry;
     }
 
     private static FileStream OpenExclusiveVerified(string fullPath, PilotDirectoryLease rootLease,

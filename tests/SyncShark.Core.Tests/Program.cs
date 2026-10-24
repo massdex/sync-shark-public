@@ -1381,6 +1381,12 @@ if (args is ["--v2-dates-checks", var datesRoot])
     return 0;
 }
 
+if (args is ["--v2-protection-million-checks", var protectionMillionRoot])
+{
+    Massdex.SyncShark.V2.ProtectionProjectionChecks.Million(Path.GetFullPath(protectionMillionRoot));
+    return 0;
+}
+
 if (args is ["--v2-planning-protection-checks", var protectionRoot])
 {
     Massdex.SyncShark.V2.PlanningProtectionChecks.Run(Path.GetFullPath(protectionRoot));

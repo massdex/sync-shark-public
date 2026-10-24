@@ -61,15 +61,22 @@ public sealed partial class SqliteStateStore
         finally { DisposePreserving(primary, iterator); }
     }
 
-    // Scoped to synchronous RunScope materialization, NEVER retained across hashing,
-    // planning awaits or execution. This does not pin the WAL for a long running plan.
+    // Copy one consistent set of protection inputs before RunScope materialization.
+    // Scope batches read only disk-backed TEMP tables, never pin the main WAL.
     internal PlanningProtection OpenPlanningProtection(PairDef pair)
     {
         var snapshot = DamageBoundary(() => OpenProtectionSnapshot(pair.A.RootId));
         try
         {
-            return DamageBoundary(() => new PlanningProtection(snapshot.Connection, snapshot.Transaction, snapshot.Root,
-            ProtectionRootNumber(snapshot.Connection, snapshot.Transaction, pair.B.RootId), _storageEnabled));
+            return DamageBoundary(() =>
+            {
+                var b = ProtectionRootNumber(snapshot.Connection, snapshot.Transaction, pair.B.RootId);
+                MaterializeProtectionSnapshot(snapshot.Connection, snapshot.Transaction, snapshot.Root, b, pair.PairId);
+                // Commit retains TEMP but releases main's WAL end mark before scope batches.
+                snapshot.Transaction.Commit();
+                snapshot.Transaction.Dispose();
+                return new PlanningProtection(snapshot.Connection, snapshot.Root, b, _storageEnabled, pair.PairId);
+            });
         }
         catch (Exception error)
         {
@@ -81,37 +88,54 @@ public sealed partial class SqliteStateStore
     internal sealed class PlanningProtection : IDisposable
     {
         private readonly SqliteConnection _connection;
-        private readonly SqliteTransaction _transaction;
         private readonly long? _a;
         private readonly long? _b;
         private readonly bool _storageEnabled;
 
-        internal PlanningProtection(SqliteConnection connection, SqliteTransaction transaction, long? a, long? b,
-        bool storageEnabled)
-        { _connection = connection; _transaction = transaction; _a = a; _b = b; _storageEnabled = storageEnabled; }
+        private readonly string _pairId;
+
+        internal PlanningProtection(SqliteConnection connection, long? a, long? b, bool storageEnabled, string pairId)
+        { _connection = connection; _a = a; _b = b; _storageEnabled = storageEnabled; _pairId = pairId; }
+
+        private void RequirePair(string pairId)
+        {
+            if (!StringComparer.Ordinal.Equals(pairId, _pairId))
+                throw new ArgumentException(MessageCatalog.Default.Message("planning-pair-mismatch"), nameof(pairId));
+        }
+
+        private object? PairNumber(string pairId)
+        {
+            RequirePair(pairId);
+            return StoreSchema.Scalar(_connection, null,
+                "SELECT pair_no FROM pair WHERE pair_id=$id;", ("$id", pairId));
+        }
+
+        internal long TempBytesForTest => Convert.ToInt64(StoreSchema.Scalar(_connection, null, "PRAGMA temp.page_count;")) *
+            Convert.ToInt64(StoreSchema.Scalar(_connection, null, "PRAGMA temp.page_size;"));
 
         internal ProtectionStream Stream() =>
-        new(_connection, _transaction, _a, _b, ItemFlags.NeedsRehash, _storageEnabled);
+        new(_connection, null, _a, _b, ItemFlags.NeedsRehash, _storageEnabled);
 
         internal IReadOnlyList<ProtectionMatch> Read(IReadOnlyList<string> paths)
         => DamageBoundary(() =>
         {
             if (paths.Count > 1024) throw new ArgumentOutOfRangeException(nameof(paths));
-            var a = ReadProtectionBatch(_connection, _transaction, _a, ItemFlags.NeedsRehash, paths, _storageEnabled);
-            var b = ReadProtectionBatch(_connection, _transaction, _b, ItemFlags.NeedsRehash, paths, _storageEnabled);
-            return a.Zip(b, (left, right) => new ProtectionMatch(left.Covered || right.Covered,
-            left.Contains || right.Contains)).ToArray();
+            return ReadPairProtection(_connection, null, _a, _b, ItemFlags.NeedsRehash, paths, _storageEnabled);
         });
 
-        // Read once from the same pinned snapshot as protection. Large backlogs retain
+        // Read once from the same materialized snapshot as protection. Large backlogs retain
         // the existing bounded fallback; ordinary retries never require per-item SQL.
         internal Func<string, bool, bool> RetryLookup(string pairId, IReadOnlySet<string> active,
-        bool restoredOnly, Action? onRead = null) => DamageBoundary(() => RetryPathIndex.Create(RetryPaths(pairId, restoredOnly), active,
-        (path, descendants) =>
+        bool restoredOnly, Action? onRead = null) => DamageBoundary(() =>
         {
-            onRead?.Invoke();
-            return RetryProtected(pairId, path, descendants, active, restoredOnly);
-        }));
+            RequirePair(pairId);
+            return RetryPathIndex.Create(RetryPaths(pairId, restoredOnly), active,
+                (path, descendants) =>
+                {
+                    onRead?.Invoke();
+                    return RetryProtected(pairId, path, descendants, active, restoredOnly);
+                });
+        });
 
         private IEnumerable<string> RetryPaths(string pairId, bool restoredOnly) =>
         DamageEnumeration(() => RetryPathsCore(pairId, restoredOnly));
@@ -125,7 +149,7 @@ public sealed partial class SqliteStateStore
             {
                 try
                 {
-                    command = StoreSchema.Command(_connection, _transaction,
+                    command = StoreSchema.Command(_connection, null,
                     "SELECT path_key FROM sync_retry WHERE pair_no=(SELECT pair_no FROM pair WHERE pair_id=$id)" +
                     RetryProtectionPredicate.Sql(restoredOnly) + ";");
                     command.Parameters.AddWithValue("$id", pairId);
@@ -151,13 +175,12 @@ public sealed partial class SqliteStateStore
         IReadOnlySet<string> active, bool restoredOnly)
         => DamageBoundary(() =>
         {
-            var pair = StoreSchema.Scalar(_connection, _transaction,
-            "SELECT pair_no FROM pair WHERE pair_id=$id;", ("$id", pairId));
+            var pair = PairNumber(pairId);
             if (pair is null) return false;
             var filter = RetryProtectionPredicate.Sql(restoredOnly);
             SqliteCommand Command(string sql)
             {
-                var command = StoreSchema.Command(_connection, _transaction, sql);
+                var command = StoreSchema.Command(_connection, null, sql);
                 command.Parameters.AddWithValue("$p", pair);
                 return command;
             }
@@ -204,29 +227,28 @@ public sealed partial class SqliteStateStore
             finally { DisposePreserving(cleanupPrimary1, range); }
         });
 
-        // Restore protection must share this planning read transaction. Consulting the live writer connection
+        // Restore protection shares the materialized planning snapshot. Consulting the live writer
         // here could expose the two halves of a pending-to-ready transition to opposite sides of the join.
         internal bool RecoveryRestoreProtected(string pairId, string path, bool descendants)
         => DamageBoundary(() =>
         {
-            var pair = StoreSchema.Scalar(_connection, _transaction,
-            "SELECT pair_no FROM pair WHERE pair_id=$id;", ("$id", pairId));
+            var pair = PairNumber(pairId);
             if (pair is null) return false;
             var pending = "SELECT 1 FROM notice WHERE pair_no=$p " +
             "AND reason_key='recovery-restore-pending' AND " + NoticeTable.ActionableSql("state") + " AND restore_hold=1 ";
             foreach (var ancestor in new[] { path }.Concat(PairPath.Ancestors(path)))
-            if (StoreSchema.Scalar(_connection, _transaction, pending + "AND path_key=$key LIMIT 1;",
+            if (StoreSchema.Scalar(_connection, null, pending + "AND path_key=$key LIMIT 1;",
             ("$p", pair), ("$key", PathKey.Of(ancestor))) is not null) return true;
             if (!descendants) return false;
             var key = PathKey.Of(path);
-            return StoreSchema.Scalar(_connection, _transaction,
+            return StoreSchema.Scalar(_connection, null,
             pending + "AND path_key >= $lo AND path_key < $hi LIMIT 1;", ("$p", pair),
             ("$lo", key.Length == 0 ? "" : key + "/"), ("$hi", key.Length == 0 ? "￿" : key + "0")) is not null;
         });
 
         public void Dispose()
         {
-            DisposePreserving(null, _transaction, _connection);
+            DisposePreserving(null, _connection);
         }
     }
 }

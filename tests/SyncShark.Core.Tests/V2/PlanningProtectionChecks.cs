@@ -19,6 +19,8 @@ internal static class PlanningProtectionChecks
         CheckLinkedClosure(Path.Combine(folder, "bounded-closure"), 70);
         PlanningDeferredChecks.Run(Path.Combine(folder, "planning-deferred"));
         ProtectionStreamChecks.Run(Path.Combine(folder, "protection-stream"));
+        ProtectionProjectionChecks.Run(Path.Combine(folder, "protection-projection"));
+        ProtectionCheckpointChecks.Run(Path.Combine(folder, "protection-checkpoint"));
         BlockedDeleteNoticeChecks.Run(Path.Combine(folder, "blocked-delete-notices"));
         DeleteReviewNoticeChecks.Run(Path.Combine(folder, "delete-review-notices"));
         Console.WriteLine("PASS immutable scope protection and real scan completeness: no false Delete/Forget");

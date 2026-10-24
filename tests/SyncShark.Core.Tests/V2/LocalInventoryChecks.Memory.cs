@@ -18,6 +18,8 @@ internal static partial class LocalInventoryChecks
         LocalChecks.Require(snapshot.VerifyAbsence!(missing) == FileAbsence.Gone &&
             delta.DisplacementEvidence!.VerifyAbsence!(missing) == FileAbsence.Gone,
             "history-only complete listing retains its absence evidence after the scan is released");
+        LocalChecks.Require(delta.DisplacementEvidence.VerifyAbsence!(missing with { Path = "outside.txt" }) == FileAbsence.Unknown,
+            "the delta absence callback does not grant evidence outside its explicit refreshed scope");
         GC.KeepAlive(snapshot);
         GC.KeepAlive(delta);
     }
@@ -28,7 +30,7 @@ internal static partial class LocalInventoryChecks
         var scan = new PilotLocalScan(new Dictionary<string, PilotLocalEntry>(), [], 0);
         var snapshot = inventory.BuildSnapshot(1, "root-local", "cursor", scan, _ => true);
         var delta = inventory.BuildDelta(1, "root-local", "cursor", "next", scan,
-            [""], _ => true, DateTimeOffset.UnixEpoch, []);
+            ["missing.txt"], _ => true, DateTimeOffset.UnixEpoch, []);
         return (snapshot, delta, new WeakReference(scan));
     }
 }

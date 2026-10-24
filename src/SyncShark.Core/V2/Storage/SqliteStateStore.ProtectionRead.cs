@@ -62,30 +62,32 @@ public sealed partial class SqliteStateStore
         (directory.Length > candidate.Length && directory[candidate.Length] == '/' &&
             directory.StartsWith(candidate, StringComparison.Ordinal));
 
+    private static (bool Gap, bool Done, string After) ReadProtectionGap(SqliteConnection connection,
+        SqliteTransaction? transaction, long root, ItemFlags flags)
+    {
+        if ((flags & ItemFlags.NeedsRehash) == 0) return (false, true, "");
+        using var command = StoreSchema.Command(connection, transaction,
+            "SELECT discovery_done,after_object FROM local_gap WHERE root_no=$r;");
+        command.Parameters.AddWithValue("$r", root);
+        using var reader = command.ExecuteReader();
+        return reader.Read() ? (true, reader.GetInt64(0) != 0, reader.GetString(1)) : (false, true, "");
+    }
+
+    private static IReadOnlyList<ProtectionMatch> ReadPairProtection(SqliteConnection connection,
+        SqliteTransaction? transaction, long? a, long? b, ItemFlags flags, IReadOnlyList<string> paths, bool storageEnabled) =>
+        ReadProtectionBatch(connection, transaction, a, flags, paths, storageEnabled)
+            .Zip(ReadProtectionBatch(connection, transaction, b, flags, paths, storageEnabled),
+                (left, right) => new ProtectionMatch(left.Covered || right.Covered, left.Contains || right.Contains)).ToArray();
+
     private static IReadOnlyList<ProtectionMatch> ReadProtectionBatch(SqliteConnection connection,
-        SqliteTransaction transaction, long? rootNumber, ItemFlags flags, IReadOnlyList<string> paths,
+        SqliteTransaction? transaction, long? rootNumber, ItemFlags flags, IReadOnlyList<string> paths,
         bool storageEnabled)
     {
         var result = new ProtectionMatch[paths.Count];
-        // The caller pins this snapshot at a store-call boundary before releasing _gate.
+        // Inputs are either a pinned transaction or the materialized TEMP snapshot.
         if (rootNumber is null) return result;
         var root = rootNumber.Value;
-        var gap = false;
-        var done = true;
-        var after = "";
-        if ((flags & ItemFlags.NeedsRehash) != 0)
-        {
-            using var gapCommand = StoreSchema.Command(connection, transaction,
-                "SELECT discovery_done,after_object FROM local_gap WHERE root_no=$r;");
-            gapCommand.Parameters.AddWithValue("$r", root);
-            using var gapReader = gapCommand.ExecuteReader();
-            if (gapReader.Read())
-            {
-                gap = true;
-                done = gapReader.GetInt64(0) != 0;
-                after = gapReader.GetString(1);
-            }
-        }
+        var (gap, done, after) = ReadProtectionGap(connection, transaction, root, flags);
         var keys = paths.Select(RowCodec.Key).ToArray();
         var ancestors = new List<object>();
         for (var n = 0; n < keys.Length; n++)
@@ -114,6 +116,14 @@ public sealed partial class SqliteStateStore
             for (var n = 0; n < keys.Length; n++)
                 if (keys[n].Length == 0) result[n] = new(false, contains);
         }
+        ReadProtectionDescendants(connection, transaction, root, flags, storageEnabled, gap, done, after, keys, result);
+        return result;
+    }
+
+    private static void ReadProtectionDescendants(SqliteConnection connection, SqliteTransaction? transaction,
+        long root, ItemFlags flags, bool storageEnabled, bool gap, bool done, string after,
+        string[] keys, ProtectionMatch[] result)
+    {
         var unresolved = Enumerable.Range(0, keys.Length)
             .Where(n => keys[n].Length != 0 && !result[n].Contains)
             .GroupBy(n => keys[n], StringComparer.Ordinal)
@@ -142,6 +152,5 @@ public sealed partial class SqliteStateStore
                 }
             }
         }
-        return result;
     }
 }

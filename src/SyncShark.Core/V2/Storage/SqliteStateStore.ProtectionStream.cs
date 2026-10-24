@@ -8,7 +8,7 @@ public sealed partial class SqliteStateStore
     internal sealed class ProtectionStream : IDisposable
     {
         private readonly SqliteConnection _connection;
-        private readonly SqliteTransaction _transaction;
+        private readonly SqliteTransaction? _transaction;
         private readonly Func<IReadOnlyList<string>, IReadOnlyList<ProtectionMatch>> _fallback;
         private bool _failed, _hasHeld;
         internal Action? ExactReadForTest { get; set; }
@@ -16,14 +16,12 @@ public sealed partial class SqliteStateStore
         internal int ResultQueries { get; private set; }
         internal int MaximumInputBatch { get; private set; }
 
-        internal ProtectionStream(SqliteConnection connection, SqliteTransaction transaction,
+        internal ProtectionStream(SqliteConnection connection, SqliteTransaction? transaction,
             long? a, long? b, ItemFlags flags, bool storageEnabled)
         {
             _connection = connection;
             _transaction = transaction;
-            _fallback = paths => ReadProtectionBatch(connection, transaction, a, flags, paths, storageEnabled)
-                .Zip(ReadProtectionBatch(connection, transaction, b, flags, paths, storageEnabled),
-                    (left, right) => new ProtectionMatch(left.Covered || right.Covered, left.Contains || right.Contains)).ToArray();
+            _fallback = paths => ReadPairProtection(connection, transaction, a, b, flags, paths, storageEnabled);
             try
             {
                 StoreSchema.Execute(connection, transaction,
@@ -52,12 +50,14 @@ public sealed partial class SqliteStateStore
                 RunPreparation.Report("Preparing protection scope: indexing held entities");
                 held.ExecuteNonQuery();
                 SourcePasses = 3;
-                _hasHeld = Convert.ToInt64(StoreSchema.Scalar(connection, transaction,
-                    "SELECT EXISTS(SELECT 1 FROM protection_held);")) != 0;
+                _hasHeld = HasHeld();
                 connection.CreateFunction<string, string>("protection_parent", path => RowCodec.Split(path).Parent, isDeterministic: true);
             }
             catch (Exception error) { Failed(error); }
         }
+
+        private bool HasHeld() => Convert.ToInt64(StoreSchema.Scalar(_connection, _transaction,
+            "SELECT EXISTS(SELECT 1 FROM protection_held);")) != 0;
 
         internal IReadOnlyList<ProtectionMatch> Read(IReadOnlyList<string> paths)
         {
