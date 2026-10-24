@@ -11,6 +11,7 @@ internal static partial class LocalJournalChecks
         await RunChecks.PausedWalkCatchesUpBeforePlanningAsync(Path.Combine(folder, "paused-prepare"));
         await HardLinksAsync(Path.Combine(folder, "hardlinks"));
         await RehashDebtAsync(Path.Combine(folder, "rehash"));
+        await UrgentRehashWhileActiveAsync(Path.Combine(folder, "urgent-rehash"));
         await RenameCasesAsync(Path.Combine(folder, "renames"));
         if (scale) await PhysicalFolderAsync(Path.Combine(folder, "physical"));
         await RunChecks.LocalPrepareCursorAsync(Path.Combine(folder, "prepare-store"));

@@ -11,6 +11,9 @@ public sealed partial class SqliteStateStore
         long AliasDir = -1, string AliasKey = "", string AliasName = "", bool AliasUnsettled = false,
         long NextAliasDir = -1, string NextAliasKey = "", string NextAliasName = "");
 
+    internal const string ObservationPlanningReason = "Waiting for planning after inventory observation";
+    internal const int SettleCandidateCap = V2Settings.SettleCandidateCap;
+
     // Pair-leading index supports both counting and ordered entity keyset seeks.
     internal const string DeferredPlanningDisplaySql = """
         SELECT d.root_no,d.object_id,d.path,d.version,r.root_id,d.reason
@@ -63,7 +66,7 @@ public sealed partial class SqliteStateStore
         var rows = System.Text.Json.JsonSerializer.Serialize(items.Select(item =>
             new { root, id = item.ObjectId, path = item.Path }));
         foreach (var pair in RootSides(root, tx).Select(binding => binding.PairNo).Distinct())
-            WritePlanningDirty(tx, pair, rows, "Waiting for planning after inventory observation");
+            WritePlanningDirty(tx, pair, rows, ObservationPlanningReason);
     }
 
     private void WritePlanningDirty(SqliteTransaction tx, long pair, string rows, string reason) =>
@@ -98,7 +101,7 @@ public sealed partial class SqliteStateStore
     });
 
     // Hard run bounds: one oldest-first page, never the whole queue.
-    private const int DeferredIntakeEntityCap = 2048;
+    internal const int DeferredIntakeEntityCap = 2048;
     private const int DeferredIntakePathCap = 8192;
 
     /// <summary>
@@ -179,7 +182,8 @@ public sealed partial class SqliteStateStore
     }
 
     internal void AcknowledgeDeferredPlanning(string pairId, IReadOnlyList<DeferredPlanning> page,
-        Func<string, bool> settled, Func<string, bool>? emptyPath = null) => InStore(() =>
+        Func<string, bool> settled, Func<string, bool>? emptyPath = null,
+        Action<DeferredPlanning>? acknowledged = null) => InStore(() =>
     {
         var pair = PairNo(pairId);
         if (pair is null) return;
@@ -190,13 +194,14 @@ public sealed partial class SqliteStateStore
         var rows = page.Select(row => new { Row = row, Settled = row.Paths.All(settled) ||
             (emptyPath is not null && row.Paths.All(emptyPath) && _reads.ByObject(row.Root, row.ObjectId) is null) }).ToArray();
         using var tx = _connection.BeginTransaction();
+        var retired = new List<DeferredPlanning>();
         foreach (var entry in rows)
         {
             var row = entry.Row;
             if (row.AllAliases && entry.Settled && !row.AliasUnsettled)
-                StoreSchema.Execute(_connection, tx,
-                    "DELETE FROM planning_deferred WHERE pair_no=$p AND root_no=$r AND object_id=$o AND version=$v;",
-                    ("$p", pair.Value), ("$r", row.Root), ("$o", row.ObjectId), ("$v", row.Version));
+            {
+                if (AcknowledgePlanningVersion(tx, pair.Value, row)) retired.Add(row);
+            }
             else
                 // Finish every bounded alias slice even if one alias is held. Keep a cycle's
                 // unresolved bit; only a complete successful cycle may retire the entity.
@@ -210,7 +215,19 @@ public sealed partial class SqliteStateStore
                     ("$held", !row.AllAliases && (row.AliasUnsettled || !entry.Settled) ? 1 : 0));
         }
         tx.Commit();
+        foreach (var row in retired) acknowledged?.Invoke(row);
     });
+
+    private bool AcknowledgePlanningVersion(SqliteTransaction tx, long pair, DeferredPlanning row)
+    {
+        using var delete = StoreSchema.Command(_connection, tx,
+            "DELETE FROM planning_deferred WHERE pair_no=$p AND root_no=$r AND object_id=$o AND version=$v;");
+        delete.Parameters.AddWithValue("$p", pair);
+        delete.Parameters.AddWithValue("$r", row.Root);
+        delete.Parameters.AddWithValue("$o", row.ObjectId);
+        delete.Parameters.AddWithValue("$v", row.Version);
+        return delete.ExecuteNonQuery() != 0;
+    }
 
     internal int CountDeferredPlanning(string pairId) => InStore(() => (int)Math.Min(int.MaxValue,
         Convert.ToInt64(StoreSchema.Scalar(_connection, null,

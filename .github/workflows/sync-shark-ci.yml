@@ -371,6 +371,14 @@ jobs:
                 flag: --v2-journal-window-checks
                 takes-root: true
                 drive: c
+              - suite: settle-planning
+                flag: --v2-settle-planning-checks
+                takes-root: false
+                drive: c
+              - suite: settle-window-million
+                flag: --v2-settle-window-million-checks
+                takes-root: false
+                drive: c
               - suite: ignored-child
                 flag: --v2-ignored-child-checks
                 takes-root: false

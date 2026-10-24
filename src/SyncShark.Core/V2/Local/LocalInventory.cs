@@ -276,13 +276,12 @@ public sealed partial class LocalInventory : IInventorySource
         var through = _known.RehashWatermark(_root.RootId);
         if (through == 0) return 0;
         var io = GapIo ??= new LocalGapIo(_known, _settings, _productOwnedPaths, time: _clock);
+        var urgentCount = 0;
         while (budget.CanStart)
         {
             ct.ThrowIfCancellationRequested();
-            if (io.Paused) break;
-            var page = _known.RehashCandidates(_root.RootId, 1, through, needsVerification: true);
-            if (page.Count == 0) break;
-            var item = page[0];
+            var (item, urgent) = NextVerificationItem(io, through, ref urgentCount);
+            if (item is null) break;
             if (!budget.Admit(item.Size)) break;
             VerificationProgress?.Invoke(budget.Items, backlog);
             var revision = _known.RehashRevision(_root.RootId, item.ObjectId);
@@ -292,7 +291,7 @@ public sealed partial class LocalInventory : IInventorySource
                 continue;
             }
             LocalGapHashResult result;
-            try { result = await io.HashAsync(_root, item, ct).ConfigureAwait(false); }
+            try { result = await io.HashAsync(_root, item, urgent, ct).ConfigureAwait(false); }
             catch (Exception error) when (IsRootUnavailable(error))
             {
                 // Root authority is unknown: retain the already-durable queue and stop this pass.
@@ -392,7 +391,7 @@ public sealed partial class LocalInventory : IInventorySource
             if (!budget.Admit(item.Size)) continue;
             var revision = _known.RehashRevision(_root.RootId, item.ObjectId);
             LocalGapHashResult proof;
-            try { proof = await io.HashAsync(_root, item, ct).ConfigureAwait(false); }
+            try { proof = await io.HashAsync(_root, item, budget.AdmitUrgent(_known.IsUserChange(_root.RootId, item.ObjectId)), ct).ConfigureAwait(false); }
             catch (Exception error) when (IsRootUnavailable(error))
             {
                 _known.FailIndexingRehash(_root.RootId, item, revision, error.Message);

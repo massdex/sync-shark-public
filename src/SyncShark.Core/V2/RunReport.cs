@@ -5,6 +5,12 @@ public sealed record RunReport(string PairId, string Outcome, int Done, int Fail
     int Downloaded, int Deleted, int Moved, int KeptBoth, IReadOnlyList<ActionResult> Failures)
 {
     public bool JournalBacklog { get; init; }
+
+    /// <summary>
+    /// Planning-deferred rows still queued after both intake lanes finished. The loop re-runs immediately only
+    /// when this stayed above zero and fell below the previous report's count: actual drain, never admission.
+    /// </summary>
+    public int PlanningBacklog { get; init; }
     internal bool CompletionFailed { get; init; }
     internal bool AttemptFailed { get; init; }
     internal bool Paused { get; init; }

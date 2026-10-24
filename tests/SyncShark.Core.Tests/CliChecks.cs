@@ -455,6 +455,9 @@ internal static partial class CliChecks
         Require(indexRun.Command == "index run" && indexRun.Value("--root") == "r00000000000000aa" &&
                 SyncCliRegistry.MutatesProductState(indexRun),
             "index run carries its exact root and documented confirmation");
+        Require(SyncCliRegistry.Rows.Single(row => row.Command == "index run").Effect.Contains(
+                "bounded user-change proofs bypass idle/AC, bulk proofs do not", StringComparison.Ordinal),
+            "index capability documents urgent proof without weakening bulk or pair pause");
         var indexStatus = SyncCliRegistry.Rows.Single(row => row.Command == "index status");
         Require(!indexStatus.Mutating && !indexStatus.RequiresRoot &&
                 SyncCliRegistry.Rows.Single(row => row.Command == "index run").RequiresRoot &&
@@ -481,6 +484,8 @@ internal static partial class CliChecks
         PairRemoveRegistryChecks();
         RecoverySelectionRegistryChecks();
         await CliDeadlineChecks.RunAsync();
+        Require(SyncCliRegistry.Rows.Single(row => row.Command == "autosync status").Effect.Contains(
+            "planningBacklog", StringComparison.Ordinal), "AutoSync status advertises its live planning backlog count");
         Require(SyncCliRegistry.Rows.Single(row => row.Command == "pairs edit").Effect.Contains(
                     "publishes atomically", StringComparison.Ordinal) &&
                 SyncCliRegistry.Rows.Single(row => row.Command == "pairs edit").Effect.Contains(

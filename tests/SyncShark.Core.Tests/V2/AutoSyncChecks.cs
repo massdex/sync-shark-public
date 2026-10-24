@@ -15,6 +15,7 @@ internal static partial class AutoSyncChecks
     {
         var clock = Stopwatch.StartNew();
         await JournalBacklog_ImmediateRunsAsync();
+        await PlanningBacklog_DrainSignalAsync();
         await Burst_OneRunAsync();
         await SteadyStream_RunsAtMaxDelayAsync();
         await SignalDuringRun_ExactlyOneMoreAsync();
@@ -44,16 +45,63 @@ internal static partial class AutoSyncChecks
     internal static async Task JournalBacklog_ImmediateRunsAsync()
     {
         await using var rig = new Rig(["p1"]);
-        for (var window = 0; window < 3; window++)
-            rig.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Complete) with { JournalBacklog = true });
+        rig.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Complete) with { JournalBacklog = true });
+        rig.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Complete) with { JournalBacklog = true });
         rig.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Complete));
         await rig.StartAsync(); // Startup consumes the existing quiet-window debounce.
         var before = rig.Clock.GetUtcNow();
-        await Until(() => rig.Run.Runs("p1") == 4, "journal suffix drains without timer advance or monitor signals");
+        await Until(() => rig.Run.Runs("p1") == 3, "journal suffix drains without timer advance or monitor signals");
         await rig.ParkedAsync(AutoStatus.Idle);
         Require(rig.Clock.GetUtcNow() == before && rig.State("p1").RetryAt is null,
-            "backlog drains immediately and clears its retry when caught up");
+            "journal backlog drains immediately and clears its retry when caught up");
         Pass("JournalBacklog_ImmediateRuns");
+    }
+
+    // A planning backlog re-runs immediately only when the remaining queue actually shrank. Admission
+    // (a full ordinary page) and held rows are not progress, so they must wait for the normal schedule.
+    internal static async Task PlanningBacklog_DrainSignalAsync()
+    {
+        // A held page of at least 2,048 rows with nothing settling: equal or rising counts never re-run.
+        await using (var held = new Rig(["p1"]))
+        {
+            held.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Complete) with { PlanningBacklog = 2500 });
+            held.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Complete) with { PlanningBacklog = 2500 });
+            held.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Complete) with { PlanningBacklog = 2600 });
+            await held.StartAsync();
+            await held.ParkedAsync(AutoStatus.Idle);
+            Require(held.Run.Runs("p1") == 1 && held.State("p1").RetryAt is null,
+                "a held planning page with no previous count waits for the normal schedule");
+            for (var expected = 2; expected <= 3; expected++)
+            {
+                held.Clock.Advance(SafetyPoll);
+                await held.ParkedAsync(AutoStatus.Waiting);
+                held.Clock.Advance(Settings.ChangeQuietWindow);
+                await held.ParkedAsync(AutoStatus.Idle);
+                Require(held.Run.Runs("p1") == expected && held.State("p1").RetryAt is null,
+                    "an equal or rising remaining count schedules no immediate re-run");
+            }
+            Require(held.Run.Runs("p1") == 3, "a page of 2,048+ held rows reaches the normal schedule every run");
+        }
+        // Actual drain (a lower remaining count with work left) re-runs immediately, with no clock movement.
+        await using (var drained = new Rig(["p1"]))
+        {
+            drained.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Complete) with { PlanningBacklog = 2500 });
+            drained.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Complete) with { PlanningBacklog = 1000 });
+            drained.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Complete));
+            await drained.StartAsync();
+            await drained.ParkedAsync(AutoStatus.Idle);
+            drained.Clock.Advance(SafetyPoll);
+            await drained.ParkedAsync(AutoStatus.Waiting);
+            drained.Clock.Advance(Settings.ChangeQuietWindow);
+            var at = drained.Clock.GetUtcNow();
+            // Run 2 reports 1000 rows against the previous 2500, so run 3 starts with no timer advance;
+            // run 3 reports an empty queue, which stops the drain.
+            await Until(() => drained.Run.Runs("p1") == 3, "a shrinking planning queue re-runs immediately");
+            await drained.ParkedAsync(AutoStatus.Idle);
+            Require(drained.Clock.GetUtcNow() == at && drained.State("p1").RetryAt is null,
+                "drain progress re-runs without a timer advance and stops when the queue empties");
+        }
+        Pass("PlanningBacklog_DrainSignal");
     }
 
     private static async Task Burst_OneRunAsync()

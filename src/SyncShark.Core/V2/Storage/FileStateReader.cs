@@ -17,9 +17,9 @@ internal sealed class FileStateReader
     // Driven from the temporary prefix tables (CROSS JOIN fixes the loop order): one primary-key range per folder,
     // one primary-key point lookup per prefix item; never a scan of the root.
     private const string LiveUnderSql =
-        $"SELECT {Columns} FROM tmp_dirs t CROSS JOIN file_state f JOIN dir d ON d.dir_no = f.dir_no " +
+        $"SELECT {Columns} FROM tmp_dirs t CROSS JOIN file_state f CROSS JOIN dir d ON d.dir_no = f.dir_no " +
         "WHERE f.root_no=$r AND f.dir_no = t.dir_no " +
-        $"UNION ALL SELECT {Columns} FROM tmp_items ti CROSS JOIN file_state f JOIN dir d ON d.dir_no = f.dir_no " +
+        $"UNION ALL SELECT {Columns} FROM tmp_items ti CROSS JOIN file_state f CROSS JOIN dir d ON d.dir_no = f.dir_no " +
         "WHERE f.root_no=$r AND f.dir_no = ti.dir_no AND f.name_key = ti.name_key ORDER BY 2, 3;";
 
     // The explicit nonzero predicate matches the partial index; the bit mask alone cannot imply it to SQLite.

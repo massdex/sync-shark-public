@@ -53,7 +53,7 @@ public static class SyncCliRegistry
         new("autosync install-startup", "autosync install-startup [--this-build]", SyncCliRequestKind.State, "explicit", "register stable installed logon startup; replace stale or legacy entries with a warning", "installed executable", "background-host", "--this-build", Mutating: true),
         new("autosync uninstall-startup", "autosync uninstall-startup", SyncCliRequestKind.State, "explicit", "remove per-user logon startup; running host unchanged", "installed executable", "background-host", None, Mutating: true),
         new("autosync stop", "autosync stop", SyncCliRequestKind.State, "explicit", "stop at a durable safe point", "running host", "background-host", None, Mutating: true),
-        new("autosync status", "autosync status", SyncCliRequestKind.State, "none", "host identity, pair scheduler state and urgentPending; never launches", "nothing", "background-host", None),
+        new("autosync status", "autosync status", SyncCliRequestKind.State, "none", "host identity, pair scheduler state, urgentPending and planningBacklog; never launches", "nothing", "background-host", None),
         new("autosync enable", "autosync enable --pair <id>|--all", SyncCliRequestKind.State, "explicit", "enable a pair or automatic syncing globally", "running host", "background-host", "--pair,--all", Mutating: true),
         new("autosync disable", "autosync disable --pair <id>|--all", SyncCliRequestKind.State, "explicit", "disable a pair or automatic syncing globally", "running host", "background-host", "--pair,--all", Mutating: true),
         new("autosync interval", "autosync interval --minutes <1..1440>", SyncCliRequestKind.State, "explicit", "set the safety interval", "running host", "background-host", "--minutes", Mutating: true),
@@ -304,7 +304,7 @@ public static class SyncCliRegistry
             SyncCliRequestKind.State, "yes",
             "one independent inventory indexing pass for exactly one retained local root; it runs beside a sync " +
             "run and never joins or blocks one, and a root whose every pair is paused or disabled is reported " +
-            "paused without resuming anything",
+            "paused without resuming anything; bounded user-change proofs bypass idle/AC, bulk proofs do not",
             "the product state or the running application and the exact local root",
             "direct|running-application", "--root,--yes,--timeout-seconds", LiveVerificationRequired: true,
             Mutating: true, RequiresYes: true, RequiresRoot: true),

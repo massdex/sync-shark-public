@@ -12,17 +12,18 @@ internal sealed class FakeEndpoint : IInventorySource, IEndpointWriter, ISourceA
     private readonly Side _side;
     private readonly string _rootId;
     private readonly object _gate = new();
-    private readonly Dictionary<string, Entry> _items = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, Entry> _items;
     private readonly List<Change> _log = new();
     private readonly Dictionary<string, byte[]> _recoveryBytes = new(StringComparer.Ordinal);
     private long _cursor;
     private long _version;
     private long _idCounter;
 
-    public FakeEndpoint(Side side, string rootId)
+    public FakeEndpoint(Side side, string rootId, bool caseSensitive = false)
     {
         _side = side;
         _rootId = rootId;
+        _items = new(caseSensitive ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase);
     }
 
     /// <summary>Fail this many upcoming writes without applying them.</summary>
@@ -301,7 +302,7 @@ internal sealed class FakeEndpoint : IInventorySource, IEndpointWriter, ISourceA
                     pending.RemoveAll(item => item.Kind == ChangeKind.Upsert &&
                         PairPath.IsUnder(item.Path, change.Path));
                 var existing = pending.FindIndex(item => item.Kind == ChangeKind.Upsert &&
-                    PairPath.Same(item.Path, change.Path));
+                    _items.Comparer.Equals(item.Path, change.Path));
                 if (existing >= 0) pending[existing] = change;
                 else pending.Add(change);
             }

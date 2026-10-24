@@ -372,7 +372,7 @@ internal static partial class PlannerChecks
         var row = Row(Base("k1", F("Doc.txt", "idA", "h1"), F("Doc.txt", "idB", "h1")),
             F("doc.txt", "idA", "h1"), F("Doc.txt", "idB", "h1"));
         var plan = Decide(row);
-        AssertActions(plan, new Exp(ActionKind.Move, Side.B, "doc.txt", "Doc.txt", false, 20, "doc.txt", "k1"));
+        AssertActions(plan, new Exp(ActionKind.Adopt, Side.B, "Doc.txt", null, false, 20, "doc.txt", "k1"));
         AssertNotices(plan);
     }
 }

@@ -21,6 +21,13 @@ internal sealed class VerificationBudget
     private readonly Func<TimeSpan> _elapsed;
     private long _bytes;
     internal int Items { get; private set; }
+    private int _urgentItems;
+    internal bool AdmitUrgent(bool userChange)
+    {
+        if (!userChange || _urgentItems >= VerificationPolicy.UrgentHashCap) return false;
+        _urgentItems++;
+        return true;
+    }
 
     internal VerificationBudget(Func<TimeSpan>? elapsed = null)
     {

@@ -37,24 +37,6 @@ public static partial class Planner
             return;
         }
         var same = Content.SameContent(row.A!, row.B!);
-        if (same == true && sA == RowState.Moved && sB == RowState.Moved &&
-            PairPath.Same(row.A!.Path, row.Base!.A.Path) &&
-            PairPath.Same(row.B!.Path, row.Base.B.Path) && !PathEqual(row.A.Path, row.B.Path))
-        {
-            // Both identities changed only spelling. Resolve metadata by newest time;
-            // ties remain a decision notice, never a destructive content operation.
-            if (!ModificationTime.IsPlausible(row.A.Mtime, ctx.Options.ObservedAt) ||
-                !ModificationTime.IsPlausible(row.B.Mtime, ctx.Options.ObservedAt) ||
-                (row.A.Mtime - row.B.Mtime).Duration() <= ctx.Options.TieWindow)
-                Hold(ctx, row, 20, PlanNotices.NeedDecision);
-            else
-            {
-                var winner = row.A.Mtime > row.B.Mtime ? Side.A : Side.B;
-                ChangedAgainstSame(ctx, row, winner, RowState.Moved, key);
-                AddNotice(ctx, 20, NoticeKind.AutoConflict, PrimaryPath(row), PlanNotices.AutoConflict);
-            }
-            return;
-        }
         if (same == true)
             AdoptAction(ctx, row, 3, Side.B, row.B!.Path, row.A!, row.B!, key);           // rule 3
         else if (same is null)
@@ -109,16 +91,15 @@ public static partial class Planner
                 return;
             case RowState.Moved:
                 var rule = curS.Kind == ItemKind.Folder ? 25 : PairPath.Same(curS.Path, curT.Path) ? 20 : 9;
-                if (PathEqual(ctx.Mapping.TargetPath(same, curS.Path), curT.Path))
+                if (PairPath.Same(ctx.Mapping.TargetPath(same, curS.Path), curT.Path))
                 {
-                    // Both endpoints already have the exact requested spelling.
-                    AdoptAction(ctx, row, rule, Side.B, row.B!.Path, row.A!, row.B!, key);
+                    SameLocation(ctx, row, rule, curS, curT, key);
                     return;
                 }
                 Emit(ctx, row, rule, ActionKind.Move, same, curS.Path, curT.Path, curS, curT, false, key); // rules 9/20/25
                 return;
             case RowState.MovedEdited:
-                if (PathEqual(ctx.Mapping.TargetPath(same, curS.Path), curT.Path))
+                if (PairPath.Same(ctx.Mapping.TargetPath(same, curS.Path), curT.Path))
                 {
                     // The content still needs propagating, but no move or invented target spelling does.
                     Emit(ctx, row, 28, ActionKind.Update, same, curT.Path, null, curS, curT, false, key);
@@ -133,6 +114,20 @@ public static partial class Planner
             default:
                 throw new InvalidOperationException("Planner: unhandled row");
         }
+    }
+
+    // Case-only spelling is the same location; adoption still requires content proof.
+    private static void SameLocation(Context ctx, PlanRow row, int rule,
+        ItemState source, ItemState current, string key)
+    {
+        var content = Content.SameContent(source, current);
+        if (content == true)
+            AdoptAction(ctx, row, rule, Side.B, row.B!.Path, row.A!, row.B!, key);
+        else if (content is null)
+            SkipUnconfirmedRow(ctx, row);
+        else
+            // Neither content changed against its own baseline: spelling is not winner authority.
+            Hold(ctx, row, 29, PlanNotices.NeedDecision);
     }
 
     /// <summary>Both sides changed to different places: copy each to the other side (rules 10 and 11).</summary>

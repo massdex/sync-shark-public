@@ -25,6 +25,7 @@
     "discoveryCheck": "The fast discovery check"
   },
   "messages": {
+    "planning-settled": "settled {0} of {1} candidates; rejected {3}; remaining planning backlog {2}",
     "duplicate-plan-action": "Sync Shark could not distinguish two planned changes for this item. The extra change was not applied. Retry rebuilds the plan.",
     "planning-pair-mismatch": "Pair does not match the planning snapshot.",
     "guardedInventoryIncomplete": "The guarded inventory re-read could not completely observe this path.",

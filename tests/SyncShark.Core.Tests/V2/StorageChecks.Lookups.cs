@@ -36,6 +36,9 @@ internal static partial class StorageChecks
             "no hot lookup scans file_state or sync_point");
         Require(!plans.Any(line => Regex.IsMatch(line, @"SEARCH (f|sp) USING PRIMARY KEY \((root_no|pair_no)=\?\)$")),
             "no hot lookup walks a whole root or pair through the leading key column");
+        Require(!plans.Any(line => line.StartsWith("LiveUnder:", StringComparison.Ordinal) &&
+                Regex.IsMatch(line, @"\bSCAN (d|dir)\b")),
+            "LiveUnder is driven by scoped temporary tables, never a directory scan");
         const string leafKey = @"SEARCH f USING PRIMARY KEY \(root_no=\? AND dir_no=\? AND name_key=\?\)";
         Require(plans.Any(line => line.StartsWith("Live:", StringComparison.Ordinal) && Regex.IsMatch(line, leafKey)),
             "Live's leaf lookup uses the stored leaf key");
@@ -68,7 +71,7 @@ internal static partial class StorageChecks
             "BaselinesTouching matches non-ASCII folders and items ignoring case");
     }
 
-    // A different object arriving at a path that differs only in case replaces the live one: never both live.
+    // An unobserved case variant can be displaced; distinct identities positively observed together both stay.
     private static void Upsert_CaseInsensitiveDestination(IStateStore store)
     {
         var gen = store.BeginGeneration("ra", "snapshot");
@@ -86,16 +89,18 @@ internal static partial class StorageChecks
             new Change(ChangeKind.Upsert, "id:u", "Äpfel/Über.txt", F("Äpfel/Über.txt", "id:u", "33"), null),
             new Change(ChangeKind.Upsert, "id:w", "äpfel/über.txt", F("äpfel/über.txt", "id:w", "44"), null),
         ], false, []));
-        RequireLive(store, "ra", F("DOCS/FILE.TXT", "id:y", "22"), F("äpfel/über.txt", "id:w", "44"));
+        RequireLive(store, "ra", F("DOCS/FILE.TXT", "id:y", "22"),
+            F("Äpfel/Über.txt", "id:u", "33"), F("äpfel/über.txt", "id:w", "44"));
         // B-126: a path-only Delete acts on its exact spelling; another spelling needs evidence from the inventory.
         var other = store.BeginGeneration("ra", "delta");
         store.WriteDelta(new Delta("ra", Side.A, other, "f", "g",
             [new Change(ChangeKind.Delete, "", "ÄPFEL", null, T0)], false, []));
-        RequireLive(store, "ra", F("DOCS/FILE.TXT", "id:y", "22"), F("äpfel/über.txt", "id:w", "44"));
+        RequireLive(store, "ra", F("DOCS/FILE.TXT", "id:y", "22"),
+            F("Äpfel/Über.txt", "id:u", "33"), F("äpfel/über.txt", "id:w", "44"));
         var delete = store.BeginGeneration("ra", "delta");
         store.WriteDelta(new Delta("ra", Side.A, delete, "g", "h",
             [new Change(ChangeKind.Delete, "", "äpfel", null, T0)], false, []));
-        RequireLive(store, "ra", F("DOCS/FILE.TXT", "id:y", "22"));
+        RequireLive(store, "ra", F("DOCS/FILE.TXT", "id:y", "22"), F("Äpfel/Über.txt", "id:u", "33"));
     }
 
     /// <summary>The all-Unicode path-key proof (~2 s), run on its own: <c>--v2-storage-unicode-checks</c>.</summary>

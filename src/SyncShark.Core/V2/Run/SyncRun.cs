@@ -901,17 +901,9 @@ public sealed partial class SyncRun : ISyncRun
             (retry is { Held: not null } or { Kind: "decision" or "deletion-evidence" } ||
              CachedIdentityRefresh.Pending(retry))).ToHashSet(StringComparer.OrdinalIgnoreCase);
         activeRetries.UnionWith(retryPaths.Where(path => !noticeHeldPaths.Contains(path)));
-        var fallbackReported = false;
-        void ReportRetryFallback()
-        {
-            if (fallbackReported) return;
-            fallbackReported = true;
-            try { progress.Report(new RunProgress(RunPhases.Comparing, null, 0, 0)
-                { Message = "Retry protection snapshot limit reached; using indexed lookups with a bounded folder cache." }); }
-            catch { /* Display failures never change protection. */ }
-        }
-        Func<string, bool, bool> retryProtection = RetryProtection.Create(_store, pairId, activeRetries, ReportRetryFallback);
-        void RefreshRetryProtection() => retryProtection = RetryProtection.Create(_store, pairId, activeRetries, ReportRetryFallback);
+        var retryProtectionFactory = RunRetryProtectionFactory(pairId, activeRetries, progress);
+        var retryProtection = retryProtectionFactory();
+        void RefreshRetryProtection() => retryProtection = retryProtectionFactory();
         var incrementalRestore = RecoveryProtection(pair);
         var links = Protection(pair, scan, before, decisions, activeRetries,
             noticeHeldPaths.Concat(retryHeld.Select(item => item.Path)),
@@ -958,11 +950,13 @@ public sealed partial class SyncRun : ISyncRun
             AddProviderNameRefusalNotice(pair);
             AdvanceCursors(scan);
             throttle.Flush();
+            var remainingPlanning = ReportSettledPlanning(pairId, 0, 0, progress);
             // Finding 1: an empty delta is still unfinished while retry debt exists (including a retry
             // sleeping on its backoff), so the early return goes through the same outcome rule as execution.
             return new(new Plan(pairId, 0, [], []), IncrementalOutcome(
                 WithReconciliation(new RunReport(pairId, string.Empty, 0, 0, 0, 0, 0, 0, 0, 0, [])
-                    { Deferred = retryCount, JournalBacklog = scan.JournalBacklog }, reconcile), []), null);
+                    { Deferred = retryCount, JournalBacklog = scan.JournalBacklog, PlanningBacklog = remainingPlanning },
+                    reconcile), []), null);
         }
 
         void refresh(HashRequest request) => inventory = scanner.RefreshHashes(pair, loadScope(), request);
@@ -971,7 +965,8 @@ public sealed partial class SyncRun : ISyncRun
         var rowEvaluated = EvaluatedPaths(rows);
         var mappingRetries = _store.UnresolvedNotices(pairId).Where(n => n.ReasonKey == "name-mapping-collision")
             .Select(n => n.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        bool evaluated(string path) => rowEvaluated(path) || mappingRetries.Contains(path);
+        var settleEvaluated = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        bool evaluated(string path) => rowEvaluated(path) || mappingRetries.Contains(path) || settleEvaluated.Contains(path);
         var deciding = DecideWithHashedCopiesAsync(pair, scan, rows,
             () => JoinRows(loadScope(), scan, false),
             pass => ExpandOccupancyOnce(pair, loadScope, scan,
@@ -982,6 +977,14 @@ public sealed partial class SyncRun : ISyncRun
         var (decided, _) = await deciding;
         deciding = null!;
         inventory = null;
+        var planningBacklog = 0;
+        var settlement = PlanSettlePage(pair, scan, links, deferredPlanning, touched, predicates.A, predicates.B, ct);
+        settleEvaluated.UnionWith(settlement.Rows.SelectMany(row => row.Paths));
+        deferredPlanning = deferredPlanning.Concat(settlement.Rows).ToArray();
+        decided = decided with { Actions = decided.Actions.Concat(settlement.Adopts).ToArray() };
+        // Both lanes retire through the same acknowledgement; drain is measured on the remaining
+        // queue, so ordinary-intake retirements count as progress exactly like settle-lane ones.
+        var settledCount = 0;
         var plan = WithLinksSummary(pair, current, decided);
         plan = plan with { Notices = plan.Notices.Concat(pendingEvidence.Select(entry =>
             new Notice(pairId, 19, NoticeKind.Info, entry.Key, entry.Value,
@@ -1035,7 +1038,8 @@ public sealed partial class SyncRun : ISyncRun
                 WriteNotices([PlanNotices.PlanBoundExceeded(pairId, count, bound)]);
                 throttle.Flush();
                 return PlanBoundReport(WithReconciliation(
-                    BuildReport(pairId, plan, new Tally(_settings), false), reconcile));
+                    BuildReport(pairId, plan, new Tally(_settings), false), reconcile)
+                    with { JournalBacklog = scan.JournalBacklog });
             }
             ClosePlanBoundNotice(pairId);
             var execution = await ExecuteMeasuredPlanAsync(plan, pair, throttle, reviewedDeletes, ct);
@@ -1062,7 +1066,10 @@ public sealed partial class SyncRun : ISyncRun
                 completion.Step(() => CloseAppliedDecisions(openNotices, plan, tally, decisions, resolvingNoticeId));
                 completion.Step(RefreshRetryProtection);
                 using (var acknowledgementTiming = new RunBoundaryTiming("acknowledgement", _settings.EnableRunInstrumentation))
-                    completion.Step(() => AcknowledgeVerifiedRehash(pair, scan, plan, tally, evaluated, predicates.A, predicates.B, ct, deferredPlanning));
+                    completion.Step(() => AcknowledgeVerifiedRehash(pair, scan, plan, tally, evaluated, predicates.A, predicates.B, ct, deferredPlanning,
+                        _ => settledCount++));
+                completion.Step(() => planningBacklog = ReportSettledPlanning(pairId, settledCount, deferredPlanning.Count,
+                    progress, settlement.Candidates - settlement.Rows.Count));
                 completion.Step(() => RaiseLinksSummary(pair, LeftAlone(pair)));
                 // Inventory settlement and cursor completion share one durable transaction.
                 if (retrySaved)
@@ -1072,13 +1079,8 @@ public sealed partial class SyncRun : ISyncRun
                 }
                 completion.Step(_store.Prune);
             }
-            completion.Step(() => throttle.Report(RunPhases.Finishing, null, tally.Done, 0));
-            completion.Step(() => throttle.Flush());
-            var report = WithReconciliation(BuildReport(pairId, plan, tally, ct.IsCancellationRequested), reconcile);
-            completion.Step(() => report = report with { Deferred = _store.CountSyncRetries(pairId), JournalBacklog = scan.JournalBacklog });
-            completion.Step(() => report = IncrementalOutcome(report,
-                pendingEvidence.Keys.Concat(unresolvedEvidence).Distinct(StringComparer.OrdinalIgnoreCase).ToArray()));
-            return completion.Finish(report);
+            return FinishIncrementalCompletion(completion, pairId, plan, tally, reconcile, pendingEvidence.Keys,
+                unresolvedEvidence, throttle, scan.JournalBacklog, planningBacklog, ct);
         }
     }
 

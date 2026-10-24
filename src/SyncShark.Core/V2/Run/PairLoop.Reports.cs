@@ -6,9 +6,10 @@ internal sealed partial class PairLoop
     // only leftover is held rows waits for the user's decision, not for a retry.
     private void AfterReport(RunReport report)
     {
+        var previous = _last;
         // The report carries its real completion instant, so the tray announces this run at its true time and can
         // order two completions without inventing a timestamp of its own.
-        if (_last is { Deferred: > 0 } previous && report.Deferred < previous.Deferred)
+        if (previous is { Deferred: > 0 } && report.Deferred < previous.Deferred)
             _backoff = TimeSpan.Zero; // A bounded backlog is draining; don't exponentially slow useful progress.
         _last = report with { CompletedUtc = _in.Time.GetUtcNow() };
         if (report.Outcome == RunOutcomes.StateDamaged)
@@ -32,7 +33,7 @@ internal sealed partial class PairLoop
         // SyncRun already recorded a returned report's failure. The host never counts or publishes it twice.
         if (report.CompletionFailed || report.Outcome == RunOutcomes.Failed || report.FailureCount > 0 || report.Failures.Count > 0 ||
             report.DeletionEvidencePending.Count > 0) ScheduleRetry();
-        else if (report.JournalBacklog)
+        else if (report.JournalBacklog || DrainedPlanning(report, previous))
         {
             _backoff = TimeSpan.Zero;
             _retryAt = _in.Time.GetUtcNow(); // Useful bounded progress, not a failure/backoff.
@@ -40,6 +41,12 @@ internal sealed partial class PairLoop
         else if (report.Deferred > 0) ScheduleRetry();
         else _backoff = TimeSpan.Zero;
     }
+
+    // Immediate re-run only on actual drain: the queue shrank since the previous report and work remains.
+    // A held page, an admission, or a first report with no previous count waits for the normal schedule.
+    private static bool DrainedPlanning(RunReport report, RunReport? previous) =>
+        report.PlanningBacklog > 0 && previous is { PlanningBacklog: > 0 } prior &&
+        report.PlanningBacklog < prior.PlanningBacklog;
 
     private void ScheduleRetry()
     {

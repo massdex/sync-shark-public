@@ -7,7 +7,7 @@ public sealed partial class SqliteStateStore
     internal const string VerificationWaitReason = "Waiting for content verification";
     // Persisted in partial-index predicates: changing this literal requires an index migration.
     internal const string UserChangeReason = "Waiting for verification of a recent change";
-    internal const int UrgentHashCap = 64;
+    internal const int UrgentHashCap = VerificationPolicy.UrgentHashCap;
     internal const int UrgentCandidateCap = 1024;
     internal const string UserChangeIndexes =
         "CREATE INDEX IF NOT EXISTS planning_deferred_user_pv ON planning_deferred(pair_no,version,root_no,object_id) WHERE reason='" + UserChangeReason + "';" +
@@ -106,6 +106,50 @@ public sealed partial class SqliteStateStore
             reader.GetInt64(6), reader.GetString(7), reader.GetString(8), reader.GetInt64(9) != 0));
         return rows;
     }
+
+    private static string UrgentRehashSql => $"""
+        WITH urgent AS MATERIALIZED (
+          SELECT object_id FROM planning_deferred INDEXED BY planning_deferred_user_rv
+          WHERE root_no=$r AND reason='{UserChangeReason}' ORDER BY version LIMIT $candidates
+        )
+        SELECT DISTINCT q.object_id FROM urgent u CROSS JOIN local_rehash q
+        WHERE q.root_no=$r AND q.object_id=u.object_id AND q.last_attempt<=$through AND q.retry_after<=$now
+          AND {NotGapOwnedSql} AND EXISTS(SELECT 1 FROM file_state f INDEXED BY fs_obj
+            WHERE f.root_no=q.root_no AND f.object_id=q.object_id
+              AND {VerificationNeededSql} AND {VerificationEligibleSql}) LIMIT $limit;
+        """;
+
+    public bool IsUserChange(string rootId, string objectId) => InStore(() =>
+        StoreSchema.Scalar(_connection, null,
+            "SELECT 1 FROM planning_deferred WHERE root_no=(SELECT root_no FROM root WHERE root_id=$r) " +
+            "AND object_id=$o AND reason=$reason LIMIT 1;",
+            ("$r", rootId), ("$o", objectId), ("$reason", UserChangeReason)) is not null);
+
+    public IReadOnlyList<ItemState> UrgentRehashCandidates(string rootId, int limit, long through) => InStore(() =>
+    {
+        var root = RootNo(rootId);
+        if (root is null || limit <= 0) return Array.Empty<ItemState>();
+        using var tx = _connection.BeginTransaction();
+        using var cmd = StoreSchema.Command(_connection, tx, UrgentRehashSql);
+        cmd.Parameters.AddWithValue("$r", root.Value);
+        cmd.Parameters.AddWithValue("$through", through);
+        cmd.Parameters.AddWithValue("$now", NowMs());
+        cmd.Parameters.AddWithValue("$candidates", UrgentCandidateCap);
+        cmd.Parameters.AddWithValue("$limit", Math.Min(limit, UrgentHashCap));
+        var ids = new List<string>();
+        using (var reader = cmd.ExecuteReader())
+            while (reader.Read()) ids.Add(reader.GetString(0));
+        var items = new List<ItemState>();
+        foreach (var id in ids)
+        {
+            StoreSchema.Execute(_connection, tx,
+                "UPDATE local_rehash SET last_attempt=$order WHERE root_no=$r AND object_id=$o;",
+                ("$r", root.Value), ("$o", id), ("$order", NextRehashOrder(root.Value, tx, through)));
+            items.Add(_reads.ByObject(root.Value, id, tx)!);
+        }
+        tx.Commit();
+        return items.ToArray();
+    });
 
     public long UrgentPending(string pairId) => InStore(() => Convert.ToInt64(StoreSchema.Scalar(_connection, null,
         "SELECT COUNT(*) FROM planning_deferred INDEXED BY planning_deferred_user_pv WHERE pair_no=$p AND reason='" + UserChangeReason + "';",

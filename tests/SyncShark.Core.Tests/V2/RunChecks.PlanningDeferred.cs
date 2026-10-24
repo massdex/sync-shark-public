@@ -4,6 +4,7 @@ internal static partial class RunChecks
 {
     private static async Task PlanningDeferredReplaysNextRunAsync()
     {
+        await SettlePlanningChecksAsync();
         await UserChangePriorityChecksAsync();
         await PlanningDeferredGapReplaysNextRunAsync();
         await PlanningDeferredEmptyPathAsync();

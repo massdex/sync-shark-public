@@ -10,6 +10,10 @@ internal static partial class RunChecks
     public static async Task RunAsync()
     {
         var failures = new List<string>();
+        await Group(nameof(CaseLocationAsync), CaseLocationAsync, failures);
+        await Group(nameof(CaseSensitiveRenameAndCreateAsync), CaseSensitiveRenameAndCreateAsync, failures);
+        await Group(nameof(MoveSettlementReportAsync), MoveSettlementReportAsync, failures);
+        await Group(nameof(MoveEditedBaselineProofAsync), MoveEditedBaselineProofAsync, failures);
         await Group(nameof(DuplicatePlanActionsAsync), DuplicatePlanActionsAsync, failures);
         await Group(nameof(ProvenanceAsync), ProvenanceAsync, failures);
         await Group(nameof(RehearsalAsync), RehearsalAsync, failures);
@@ -2169,12 +2173,12 @@ internal static partial class RunChecks
 
     private static Executor NewExecutor(IStateStore store) => new(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
 
-    private static Fixture Build(bool enabled = true, bool record = false, string pairId = "p1", IStateStore? suppliedStore = null, bool localLocal = false, string accountId = "acc", bool displayRoot = false)
+    private static Fixture Build(bool enabled = true, bool record = false, string pairId = "p1", IStateStore? suppliedStore = null, bool localLocal = false, string accountId = "acc", bool displayRoot = false, bool caseSensitiveA = false)
     {
         var inner = suppliedStore ?? new InMemoryStateStore();
         var recorder = record ? new RecordingStore(inner) : null;
         IStateStore store = recorder is not null ? recorder : inner;
-        var a = new FakeEndpoint(Side.A, "ra");
+        var a = new FakeEndpoint(Side.A, "ra", caseSensitiveA);
         var b = new FakeEndpoint(Side.B, "rb");
         var writerA = new CountingWriter(a);
         var writerB = new CountingWriter(b);

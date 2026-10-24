@@ -335,7 +335,8 @@ public sealed partial class SqliteStateStore : IStateStore
         var rootNoB = RootNoCreate(pair.B.RootId, transaction);
         StoreSchema.Execute(_connection, transaction,
             "INSERT INTO pair(pair_id, def_json, first_sync_done) VALUES($id, $json, 0) " +
-            "ON CONFLICT(pair_id) DO UPDATE SET def_json=excluded.def_json;",
+            "ON CONFLICT(pair_id) DO UPDATE SET def_json=json_set(excluded.def_json,'$.PlanningSettleCursor', " +
+            "json_extract(pair.def_json,'$.PlanningSettleCursor'));",
             ("$id", pair.PairId), ("$json", JsonSerializer.Serialize(pair, RowCodec.Json)));
         var pairNo = (long)StoreSchema.Scalar(_connection, transaction,
             "SELECT pair_no FROM pair WHERE pair_id=$id;", ("$id", pair.PairId))!;

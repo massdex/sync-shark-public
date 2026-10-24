@@ -46,6 +46,7 @@ if (args is ["--v2-outcome-ownership-checks"])
 if (args is ["--v2-journal-window-checks", var journalWindowRoot])
 {
     await Massdex.SyncShark.V2.AutoSyncChecks.JournalBacklog_ImmediateRunsAsync();
+    await Massdex.SyncShark.V2.AutoSyncChecks.PlanningBacklog_DrainSignalAsync();
     await Massdex.SyncShark.V2.LocalJournalChecks.ReplayWindowsAsync(Path.GetFullPath(journalWindowRoot));
     await Massdex.SyncShark.V2.RunChecks.JournalWindowRunAsync(Path.Combine(Path.GetFullPath(journalWindowRoot), "run"));
     return 0;
@@ -1303,6 +1304,18 @@ if (args is ["--v2-rehearsal-checks"])
 if (args is ["--v2-plan-only-checks"])
 {
     await Massdex.SyncShark.V2.RunChecks.PlanOnlyAsync();
+    return 0;
+}
+
+if (args is ["--v2-settle-window-million-checks"])
+{
+    Massdex.SyncShark.V2.RunChecks.SettleWindowMillion();
+    return 0;
+}
+
+if (args is ["--v2-settle-planning-checks"])
+{
+    await Massdex.SyncShark.V2.RunChecks.SettlePlanningChecksAsync();
     return 0;
 }
 

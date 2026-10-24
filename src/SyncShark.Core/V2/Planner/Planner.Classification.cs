@@ -53,8 +53,10 @@ public static partial class Planner
             }
             var sA = ClassifySide(row.A, row.Base?.A, row.Ev.DeletedA, row.Ev.KnownA);
             var sB = ClassifySide(row.B, row.Base?.B, row.Ev.DeletedB, row.Ev.KnownB);
-            var bothChanged = row.Base is null || (Changed(sA) && Changed(sB));
-            if (bothChanged && Comparable(row.A) && Comparable(row.B) && DropboxNameMapping.SamePlace(row.A!, row.B!) &&
+            // A spelling-only move needs cross-side proof, even when metadata matches its baseline.
+            var compareContent = row.Base is null || (Changed(sA) && Changed(sB)) ||
+                sA == RowState.Moved || sB == RowState.Moved;
+            if (compareContent && Comparable(row.A) && Comparable(row.B) && DropboxNameMapping.SamePlace(row.A!, row.B!) &&
                 Content.SameContent(row.A!, row.B!) is null)
             {
                 if (row.A!.Hash is null)

@@ -6,11 +6,19 @@ public sealed partial class SqliteStateStore
 {
     // These predicates probe one file/directory, never a candidate's whole subtree. Pending
     // obligations belong to the current entity, not the path saved in expected_json.
-    internal const string ProtectionHeldSql = """
-        ((f.flags!=0 AND (f.flags & $flags)!=0) OR ($gap=1 AND f.kind=0 AND
-          (($done=0 AND f.object_id>$after) OR EXISTS(SELECT 1 FROM local_gap_item gi
-            WHERE gi.root_no=f.root_no AND gi.object_id=f.object_id))))
+    // One owner: the alias is a parameter, so a caller inspecting a second file_state alias
+    // formats the same predicate instead of re-aliasing it by text substitution.
+    private const string ProtectionHeldTemplate = """
+        (({0}.flags!=0 AND ({0}.flags & $flags)!=0) OR ($gap=1 AND {0}.kind=0 AND
+          (($done=0 AND {0}.object_id>$after) OR EXISTS(SELECT 1 FROM local_gap_item gi
+            WHERE gi.root_no={0}.root_no AND gi.object_id={0}.object_id))))
         """;
+
+    internal static readonly string ProtectionHeldSql =
+        string.Format(System.Globalization.CultureInfo.InvariantCulture, ProtectionHeldTemplate, "f");
+
+    internal static string ProtectionHeldSqlFor(string alias) =>
+        string.Format(System.Globalization.CultureInfo.InvariantCulture, ProtectionHeldTemplate, alias);
 
     internal static readonly string ProtectionDirectSql = """
         WITH a AS (SELECT json_extract(value,'$.n') n,json_extract(value,'$.dir') d,
@@ -38,7 +46,7 @@ public sealed partial class SqliteStateStore
           SELECT 1 FROM file_state f NOT INDEXED WHERE f.root_no=$r AND f.dir_no=d.dir_no AND
         """ + ProtectionHeldSql + ");";
 
-    internal const string ProtectionRootSql = """
+    internal static readonly string ProtectionRootSql = """
         SELECT EXISTS(SELECT 1 FROM file_state f INDEXED BY fs_flagged
           WHERE f.root_no=$r AND f.flags!=0 AND (f.flags & $flags)!=0)
         OR ($gap=1 AND (($done=0 AND EXISTS(SELECT 1 FROM file_state f INDEXED BY fs_obj

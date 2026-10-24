@@ -2,6 +2,7 @@ namespace Massdex.SyncShark.V2;
 
 internal static class VerificationPolicy
 {
+    internal const int UrgentHashCap = 64;
     internal const ItemFlags BlockedFlags = ItemFlags.Ignored | ItemFlags.Link | ItemFlags.Placeholder | ItemFlags.Quarantined;
     // Recording authoritative writes, attempting a read, and acknowledging settled work have different
     // authority. Keep those explicit policies together rather than accidentally sharing the wrong mask.

@@ -60,21 +60,27 @@ public sealed class ProductionAutoSyncEngine : IAutoSyncHostEngine
             || PauseStateProjection.AccountPaused(saved, pair.B.AccountId, now);
     }
 
+    private object ReadStatus()
+    {
+        var states = _auto.States.ToDictionary(state => state.PairId, StringComparer.Ordinal);
+        return new { running = true, automationEnabled = _automation.Load().Enabled, intervalMinutes = _automation.Load().IntervalMinutes,
+            pairs = _composition.Store.Pairs().Select(pair =>
+            {
+                states.TryGetValue(pair.PairId, out var state);
+                return new { pair.PairId, pair.Name, pair.Enabled, state = state?.Status.ToString() ?? "starting",
+                    lastResult = _composition.Store.ReadRunHistory(pair.PairId, 1).FirstOrDefault(),
+                    lastChecked = state?.LastReport?.CompletedUtc, urgentPending = _composition.Store is SqliteStateStore sql ? sql.UrgentPending(pair.PairId) : 0,
+                    planningBacklog = _composition.Store is SqliteStateStore planning ? planning.CountDeferredPlanning(pair.PairId) : 0,
+                    retryDeadline = state?.RetryAt, nextRun = state?.NextRunUtc, reason = state?.Reason };
+            }).ToArray() };
+    }
+
     public async Task<object> ExecuteAsync(AutoSyncHostRequest request, CancellationToken cancellationToken)
     {
         switch (request.Command)
         {
             case "status":
-                var states = _auto.States.ToDictionary(state => state.PairId, StringComparer.Ordinal);
-                return new { running = true, automationEnabled = _automation.Load().Enabled, intervalMinutes = _automation.Load().IntervalMinutes,
-                    pairs = _composition.Store.Pairs().Select(pair =>
-                    {
-                        states.TryGetValue(pair.PairId, out var state);
-                        return new { pair.PairId, pair.Name, pair.Enabled, state = state?.Status.ToString() ?? "starting",
-                            lastResult = _composition.Store.ReadRunHistory(pair.PairId, 1).FirstOrDefault(),
-                            lastChecked = state?.LastReport?.CompletedUtc, urgentPending = _composition.Store is SqliteStateStore sql ? sql.UrgentPending(pair.PairId) : 0,
-                            retryDeadline = state?.RetryAt, nextRun = state?.NextRunUtc, reason = state?.Reason };
-                    }).ToArray() };
+                return ReadStatus();
             case "enable":
             case "disable":
                 await _preferencesGate.WaitAsync(cancellationToken).ConfigureAwait(false);

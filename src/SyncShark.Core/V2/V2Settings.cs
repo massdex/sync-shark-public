@@ -37,6 +37,10 @@ public sealed record V2Settings(
     /// <summary>Maximum journal replay windows per inventory call; remaining history resumes next run.</summary>
     public int LocalReplayWindowsPerRun { get; init; } = 8;
 
+    // Settle intake fences database work separately from retained planner candidates.
+    internal const int SettleCandidateCap = 8192;
+    internal const int SettleExaminationCap = 16384;
+
     // Journal metadata admission bounds; no file-content reads occur under these leases.
     internal const int JournalRecordsPerPage = 256;
     internal static readonly TimeSpan JournalStoreSlice = TimeSpan.FromMilliseconds(200);

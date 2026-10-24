@@ -9,6 +9,21 @@ public sealed partial class SyncRun
         return await ExecuteWithEvidenceAsync(plan, pair, throttle, reviewedDeletes, ct, allowUnreviewedEvidence: true);
     }
 
+    private Func<Func<string, bool, bool>> RunRetryProtectionFactory(string pairId,
+        IReadOnlySet<string> activeRetries, IProgress<RunProgress> progress)
+    {
+        var fallbackReported = false;
+        void ReportRetryFallback()
+        {
+            if (fallbackReported) return;
+            fallbackReported = true;
+            try { progress.Report(new RunProgress(RunPhases.Comparing, null, 0, 0)
+                { Message = "Retry protection snapshot limit reached; using indexed lookups with a bounded folder cache." }); }
+            catch { /* Display failures never change protection. */ }
+        }
+        return () => RetryProtection.Create(_store, pairId, activeRetries, ReportRetryFallback);
+    }
+
     // One oldest-first intake page. Apply rotates it; previews never mutate the queue.
     internal IReadOnlyList<SqliteStateStore.DeferredPlanning> AdmitPlanningPage(string pairId)
     {
