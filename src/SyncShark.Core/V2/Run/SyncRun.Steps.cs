@@ -1354,7 +1354,8 @@ public sealed partial class SyncRun
         var unsettled = new SortedSet<string>(tally.DuplicatePaths, StringComparer.OrdinalIgnoreCase);
         foreach (var notice in plan.Notices) // Summaries are display-only; explicit paths and typed root holds remain.
             if (notice.Path.Length > 0 || PlanNotices.HasPathScope(notice)) unsettled.Add(notice.Path);
-        foreach (var action in plan.SkippedActions.Concat(plan.Actions.Where(a => !tally.WasDone(a.ActionId))))
+        foreach (var action in plan.SkippedActions.Concat(plan.DeferredPlanningActions)
+                     .Concat(plan.Actions.Where(a => !tally.WasDone(a.ActionId))))
         {
             unsettled.Add(action.Path);
             if (action.FromPath is not null) unsettled.Add(action.FromPath);
