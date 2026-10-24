@@ -63,7 +63,7 @@ internal sealed partial class LocalGapWorker
         var current = probes.Probe(currentItem);
         if (current is null)
         {
-            if (CachedIdentityRefresh.TryQueue(known, root, currentItem, probes.LastOpenError))
+            if (CachedIdentityRefresh.TryQueue(known, root, currentItem, probes.LastOpenError, io.Time.GetUtcNow()))
                 store.DeferGapResult(root.RootId, result, CachedIdentityRefresh.PendingReason, recordFailure: false);
             else
                 store.DeferGapResult(root.RootId, result, probes.UnavailableReason ?? probes.LastFailureReason ??

@@ -123,16 +123,19 @@ public sealed partial class SqliteStateStore
         return json is null ? null : JsonSerializer.Deserialize<SyncRetry>(json, RowCodec.Json);
     });
 
-    public IReadOnlyList<SyncRetry> DueSyncRetries(string pairId, DateTimeOffset now, int limit) => InStore(() =>
+    public IReadOnlyList<SyncRetry> DueSyncRetries(string pairId, DateTimeOffset now, int limit, string? excludedScanReason = null) => InStore(() =>
     {
         var rows = new List<SyncRetry>();
         using var command = StoreSchema.Command(_connection, null,
             // The millisecond index narrows candidates only; exact authority is checked before LIMIT.
             "SELECT json FROM sync_retry WHERE pair_no=$p AND retry_after<=$now " +
-            "AND sync_retry_due(json_extract(json,'$.RetryAfter'),$nowTicks) ORDER BY retry_after,path_key LIMIT $limit;");
+            "AND sync_retry_due(json_extract(json,'$.RetryAfter'),$nowTicks) " +
+            "AND ($skip IS NULL OR NOT(json_extract(json,'$.Kind')='scan' AND json_extract(json,'$.LastError')=$skip)) " +
+            "ORDER BY retry_after,path_key LIMIT $limit;");
         command.Parameters.AddWithValue("$p", RequirePair(pairId));
         command.Parameters.AddWithValue("$now", now.ToUnixTimeMilliseconds());
         command.Parameters.AddWithValue("$nowTicks", now.UtcTicks);
+        command.Parameters.AddWithValue("$skip", (object?)excludedScanReason ?? DBNull.Value);
         command.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 256));
         using var reader = command.ExecuteReader();
         while (reader.Read()) rows.Add(JsonSerializer.Deserialize<SyncRetry>(reader.GetString(0), RowCodec.Json)!);

@@ -2,6 +2,7 @@ namespace Massdex.SyncShark.V2;
 
 internal interface ILocalGapIo
 {
+    TimeProvider Time => TimeProvider.System;
     bool Paused { get; }
     LocalGapProof? Probe(RootDef root, ItemState item);
     ILocalGapProbe OpenProbes(RootDef root) => new DelegatingGapProbe(this, root);

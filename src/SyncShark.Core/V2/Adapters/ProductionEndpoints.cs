@@ -89,7 +89,7 @@ public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatc
         _dropbox = dropbox ?? throw new ArgumentNullException(nameof(dropbox));
         if (store.SupportsIndexPlanning && store is ILocalGapStore gaps)
         {
-            _gapIo = new LocalGapIo(store, settings, paths.ProductOwnedPaths(paths.RecoveryRoot), contentPausedForTest);
+            _gapIo = new LocalGapIo(store, settings, paths.ProductOwnedPaths(paths.RecoveryRoot), contentPausedForTest, time);
             _gapWorker = new LocalGapWorker(gaps, _gapIo, StorageFailureClassifier.IsStateDamage);
             Indexing = new LocalIndexingRuns(store, (root, ct) => new LocalInventory(root, Side.A, store,
                 paths.ProductOwnedPaths(paths.RecoveryRoot),

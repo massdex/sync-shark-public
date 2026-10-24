@@ -3,6 +3,7 @@ namespace Massdex.SyncShark.V2;
 /// <summary>Gap verification reads the same virtual metadata as the foreground rehearsal inventory.</summary>
 internal sealed class RehearsalGapIo(ILocalGapIo real, RehearsalOverlay overlay, IStateStore store) : ILocalGapIo
 {
+    public TimeProvider Time => real.Time;
     public bool Paused => real.Paused;
     public string PauseReason => real.PauseReason;
     public bool Excluded(RootDef root, ItemState item) => real.Excluded(root, item);

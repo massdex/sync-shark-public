@@ -7,10 +7,12 @@ public sealed partial class SyncRun
         IReadOnlyDictionary<string, DateTimeOffset?> Deleted, IReadOnlyList<string> PreviousPaths)
     {
         internal bool AllItemsChanged { get; init; }
+        internal bool WalkObserved { get; init; } // Actual snapshot, not merely full planning coverage.
         internal IReadOnlyList<Change>? UserChanges { get; set; } = [];
         // Full also selects stored scope for hydrated deltas; only a returned full snapshot can establish this.
         public bool ScopedFullCoverage { get; init; }
         public IReadOnlyList<string> IncompleteSubtrees { get; init; } = [];
+        internal Exception? InventoryFailure { get; init; }
         public IReadOnlyDictionary<string, string> IncompleteReasons { get; init; } = new Dictionary<string, string>();
         public InventoryCoverage? ObservedCoverage { get; init; }
         public long RehashThrough { get; init; }

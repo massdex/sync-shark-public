@@ -25,11 +25,14 @@ internal static partial class LocalJournalChecks
             LocalChecks.Seed(rootPath, original.Path, "replacement");
             var gaps = (ILocalGapStore)store;
             gaps.BeginGap(root.RootId, cursor, 100, true);
-            await using var worker = new LocalGapWorker(gaps, new RetiredIdProbe(), StorageFailureClassifier.IsStateDamage);
+            var clock = new LocalChecks.FixedClock(DateTimeOffset.UnixEpoch);
+            await using var worker = new LocalGapWorker(gaps, new RetiredIdProbe { Time = clock }, StorageFailureClassifier.IsStateDamage);
             worker.Discover(root, gaps.GapEpoch(root.RootId)!, default);
             LocalChecks.Require(store.OpenNotices(pair.PairId).Count == 0 &&
                 store.SyncRetryAt(pair.PairId, original.Path) is { } retry && CachedIdentityRefresh.Pending(retry),
                 "retired cached ID queues durable guarded rediscovery without indexing notice");
+            LocalChecks.Require(store.SyncRetryAt(pair.PairId, original.Path)!.RetryAfter == clock.GetUtcNow(),
+                "discovery forwards the injected indexing clock to quiet retry admission");
             LocalChecks.Require(gaps.HasGapProtection(root.RootId) && store.ByObject(root.RootId, original.ObjectId) is not null,
                 "error 87 neither verifies nor removes the old entity");
             await using (var hashWorker = new LocalGapWorker(gaps, new ChangedIdentityHash(), StorageFailureClassifier.IsStateDamage))
@@ -98,6 +101,7 @@ internal static partial class LocalJournalChecks
 
     private sealed class RetiredIdProbe : ILocalGapIo, ILocalGapProbe
     {
+        public TimeProvider Time { get; init; } = TimeProvider.System;
         public bool Paused => true;
         public string? LastFailureReason => "open-failed(87)";
         public int? LastOpenError => 87;

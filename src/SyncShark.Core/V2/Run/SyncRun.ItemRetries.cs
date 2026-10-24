@@ -108,7 +108,7 @@ public sealed partial class SyncRun
         _store.RefreshBlockedDeleteNotice(pair.PairId);
     }
 
-    private void SaveFailedRetry(PairDef pair, string path, string? reason, SyncRetry? old,
+    internal void SaveFailedRetry(PairDef pair, string path, string? reason, SyncRetry? old,
         SyncAction? conflictSuccessor = null, ActionResult? failure = null, bool countAttempt = true)
     {
         if (old?.Kind == "decision") return;

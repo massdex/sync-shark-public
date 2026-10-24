@@ -537,7 +537,7 @@ public sealed partial class SyncRun : ISyncRun
         }
         CloseObservedRepairs(pair, scan);
         var current = LeftAlone(pair);
-        var restored = _store.DueSyncRetries(pairId, _time.GetUtcNow(), 256)
+        var restored = _store.DueSyncRetries(pairId, _time.GetUtcNow(), 256, CachedIdentityRefresh.PendingReason)
             .Where(retry => retry.ReprobeEvidence && retry.Held is not null &&
                 !pair.Excluded.Any(path => PairPath.IsSelfOrUnder(retry.Path, path))).ToArray();
         // Admit only due, prepare-matched evidence retries to ordinary planning. Their durable
@@ -875,7 +875,7 @@ public sealed partial class SyncRun : ISyncRun
         ResetRecoveryProtection();
         var current = LeftAlone(pair);
         var retryCount = _store.CountSyncRetries(pairId);
-        var retries = _store.DueSyncRetries(pairId, _time.GetUtcNow(), 256)
+        var retries = _store.DueSyncRetries(pairId, _time.GetUtcNow(), 256, CachedIdentityRefresh.PendingReason)
             .Where(retry => retry.Path.Length != 0 || retry.Kind != "run").ToArray();
         ct.ThrowIfCancellationRequested();
         var deferredPlanning = AdmitPlanningPage(pairId);
@@ -1331,7 +1331,7 @@ public sealed partial class SyncRun : ISyncRun
         "the local folder changed after the preview; affected effects were not applied");
 
     private IReadOnlySet<string> ActiveFirstSyncRetries(PairDef pair) =>
-        _store.DueSyncRetries(pair.PairId, _time.GetUtcNow(), 256)
+        _store.DueSyncRetries(pair.PairId, _time.GetUtcNow(), 256, CachedIdentityRefresh.PendingReason)
             .Where(retry => RetryProtectionDomain.Includes(retry) && retry.Held is null &&
                 !retry.ReprobeEvidence && retry.PendingNotice is null &&
                 retry.Kind is not ("decision" or "deletion-evidence" or "scan") &&

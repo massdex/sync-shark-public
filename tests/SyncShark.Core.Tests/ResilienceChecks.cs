@@ -11,17 +11,51 @@ internal static class ResilienceChecks
         public override long GetTimestamp() => Interlocked.Read(ref _ticks);
         public override DateTimeOffset GetUtcNow() => DateTimeOffset.UnixEpoch.AddTicks(GetTimestamp());
         internal void Advance(TimeSpan delay) => Interlocked.Add(ref _ticks, delay.Ticks);
-        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period) =>
+            new ClockTimer(this, callback, state, dueTime, period);
+
+        // Timer creation (and cancellation before firing) never spends virtual elapsed time.
+        // Real short pacing timers advance to their deadline only when they actually fire;
+        // overlapping timers advance to an absolute instant rather than adding their durations twice.
+        private sealed class ClockTimer : ITimer
         {
-            if (dueTime != Timeout.InfiniteTimeSpan) Advance(dueTime);
-            ThreadPool.QueueUserWorkItem(_ => callback(state));
-            return new CompletedTimer();
-        }
-        private sealed class CompletedTimer : ITimer
-        {
-            public bool Change(TimeSpan dueTime, TimeSpan period) => false;
-            public void Dispose() { }
-            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+            private readonly object _gate = new();
+            private readonly Clock _clock;
+            private readonly TimerCallback _callback;
+            private readonly object? _state;
+            private readonly Timer _timer;
+            private long _at, _period;
+            private bool _disposed;
+            internal ClockTimer(Clock clock, TimerCallback callback, object? state, TimeSpan due, TimeSpan period)
+            {
+                _clock = clock; _callback = callback; _state = state;
+                _timer = new Timer(Fire, null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+                Change(due, period);
+            }
+            public bool Change(TimeSpan dueTime, TimeSpan period)
+            {
+                lock (_gate)
+                {
+                    if (_disposed) return false;
+                    _at = dueTime == Timeout.InfiniteTimeSpan ? long.MaxValue : _clock.GetTimestamp() + dueTime.Ticks;
+                    _period = period.Ticks;
+                    return _timer.Change(dueTime, period);
+                }
+            }
+            private void Fire(object? unused)
+            {
+                lock (_gate)
+                {
+                    if (_disposed || _at == long.MaxValue) return;
+                    long before;
+                    do { before = _clock.GetTimestamp(); }
+                    while (before < _at && Interlocked.CompareExchange(ref _clock._ticks, _at, before) != before);
+                    _at = _period > 0 ? _at + _period : long.MaxValue;
+                }
+                _callback(_state);
+            }
+            public void Dispose() { lock (_gate) { _disposed = true; _timer.Dispose(); } }
+            public ValueTask DisposeAsync() { Dispose(); return ValueTask.CompletedTask; }
         }
     }
 

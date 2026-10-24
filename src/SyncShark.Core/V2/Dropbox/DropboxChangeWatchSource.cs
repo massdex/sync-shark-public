@@ -49,7 +49,16 @@ internal sealed class DropboxChangeWatchSource(
     internal void MarkBackoff(string rootId, int? seconds)
     {
         if (seconds is not { } value) return;
-        lock (_lock) State(rootId).NotBefore = clock.GetUtcNow() + TimeSpan.FromSeconds(value);
+        MarkBackoffUntil(rootId, clock.GetUtcNow() + TimeSpan.FromSeconds(value));
+    }
+
+    internal void MarkBackoffUntil(string rootId, DateTimeOffset deadline)
+    {
+        lock (_lock)
+        {
+            var state = State(rootId);
+            if (deadline > state.NotBefore) state.NotBefore = deadline;
+        }
     }
 
     /// <summary>The time before which this root must not be polled again.</summary>

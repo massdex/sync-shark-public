@@ -178,10 +178,10 @@ internal sealed partial class LocalGapWorker(ILocalGapStore store, ILocalGapIo i
     }
 
     /// <summary>A discovery failure is recorded only when no durable consumer accepted the refresh.</summary>
-    private static bool UnqueuedDiscoveryFailure(LocalGapEpoch epoch, LocalGapProof? proof, ILocalGapStore store,
+    private bool UnqueuedDiscoveryFailure(LocalGapEpoch epoch, LocalGapProof? proof, ILocalGapStore store,
         RootDef root, ItemState item, int? openError) =>
         epoch.TrustFileUsn && proof is null &&
-        !(store is IStateStore known && CachedIdentityRefresh.TryQueue(known, root, item, openError));
+        !(store is IStateStore known && CachedIdentityRefresh.TryQueue(known, root, item, openError, io.Time.GetUtcNow()));
 
     internal async Task<bool> HashPage(RootDef root, LocalGapEpoch epoch, CancellationToken ct)
     {

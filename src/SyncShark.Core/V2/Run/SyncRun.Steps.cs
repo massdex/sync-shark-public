@@ -559,21 +559,7 @@ public sealed partial class SyncRun
             catch (Exception error) when (ScopeFailure(error, ct) &&
                 (error is IOException or UnauthorizedAccessException or TimeoutException || ProviderTransientFailure.IsTransient(error, ct)))
             {
-                // RQ-032/034: a failed read is durable retry debt, never absence authority.
-                // Provider page/local-walk checkpoints belong to the inventory and are left intact.
-                // Do not cancel the other side: it can finish and retain its own progress.
-                var root = side == Side.A ? pair.A : pair.B;
-                var gen = _store.BeginGeneration(root.RootId, "full");
-                var cursor = inventoryCursors?.GetValueOrDefault(root.RootId) ?? _store.Cursor(root.RootId) ?? "";
-                var reason = "Inventory read incomplete: " + error.Message +
-                    " Progress is saved; restore connectivity or access and Retry to resume.";
-                _store.WriteSnapshot(new Snapshot(root.RootId, side, gen, cursor, [], [""]));
-                throttle.Report(RunPhases.Reading(root), reason, 0, 0);
-                return new SideScan(gen, cursor, false, true, [], [], NoDeletions, [])
-                {
-                    IncompleteSubtrees = [""],
-                    IncompleteReasons = new Dictionary<string, string> { [""] = reason }
-                };
+                return RetainFailedInventory(pair, side, throttle, inventoryCursors, error);
             }
         }
         catch (Exception error) { primaryError = error; throw; }
@@ -660,14 +646,14 @@ public sealed partial class SyncRun
             Trace($"scan {side}: full snapshot read done ({watch.ElapsedMilliseconds} ms); storing");
             StoreSnapshot(snapshot);
             if (RehearsalEndpoints.Unwrap(inventory) is LocalInventory && !string.IsNullOrEmpty(snapshot.CursorAfter))
-                return await CatchUpLocalWalkAsync(pair, side, inventory, snapshot, include, root, throttle, ct, fullChanges, allChanged, firstSync);
+                return (await CatchUpLocalWalkAsync(pair, side, inventory, snapshot, include, root, throttle, ct, fullChanges, allChanged, firstSync)) with { WalkObserved = true };
             await inventory.VerifyPendingAsync(include, _ => { }, ct);
             if (snapshot.IncompleteSubtrees.Count == 0) CloseHydrationFallback(pair, root);
             if (firstSync && snapshot.IncompleteSubtrees.Count == 0 && snapshot.CursorAfter is { } observedCursor)
                 observationStore?.SaveInventoryObservation(coverage, observedCursor);
             Trace($"scan {side}: snapshot stored ({watch.ElapsedMilliseconds} ms)");
             return new SideScan(gen, snapshot.CursorAfter, snapshot.IncompleteSubtrees.Count == 0, true, [], fullChanges.ToArray(),
-                NoDeletions, []) { AllItemsChanged = allChanged, ScopedFullCoverage = snapshot.IncompleteSubtrees.Count > 0 && !snapshot.IncompleteSubtrees.Contains(string.Empty), PendingDeletionEvidence = snapshot.PendingDeletionEvidence, IncompleteSubtrees = snapshot.IncompleteSubtrees, IncompleteReasons = snapshot.IncompleteReasons, ObservedCoverage = observationStore is null ? null : coverage, RehashThrough = _store.RehashWatermark(root.RootId) };
+                NoDeletions, []) { WalkObserved = true, AllItemsChanged = allChanged, ScopedFullCoverage = snapshot.IncompleteSubtrees.Count > 0 && !snapshot.IncompleteSubtrees.Contains(string.Empty), PendingDeletionEvidence = snapshot.PendingDeletionEvidence, IncompleteSubtrees = snapshot.IncompleteSubtrees, IncompleteReasons = snapshot.IncompleteReasons, ObservedCoverage = observationStore is null ? null : coverage, RehashThrough = _store.RehashWatermark(root.RootId) };
         }
         Trace($"scan {side}: resuming {(inventoryCursors is null ? "committed" : "pending")} inventory cursor");
         var deltaGen = _store.BeginGeneration(root.RootId, "delta");
@@ -734,14 +720,14 @@ public sealed partial class SyncRun
             Trace($"scan {side}: rescan snapshot read done ({watch.ElapsedMilliseconds} ms); storing");
             StoreSnapshot(rescan);
             if (RehearsalEndpoints.Unwrap(inventory) is LocalInventory && !string.IsNullOrEmpty(rescan.CursorAfter))
-                return await CatchUpLocalWalkAsync(pair, side, inventory, rescan, include, root, throttle, ct, fullChanges, allChanged, firstSync);
+                return (await CatchUpLocalWalkAsync(pair, side, inventory, rescan, include, root, throttle, ct, fullChanges, allChanged, firstSync)) with { WalkObserved = true };
             await inventory.VerifyPendingAsync(include, _ => { }, ct);
             if (rescan.IncompleteSubtrees.Count == 0) CloseHydrationFallback(pair, root);
             if (firstSync && rescan.IncompleteSubtrees.Count == 0 && rescan.CursorAfter is { } rescanCursor)
                 observationStore?.SaveInventoryObservation(coverage, rescanCursor);
             Trace($"scan {side}: rescan snapshot stored ({watch.ElapsedMilliseconds} ms)");
             return new SideScan(fullGen, rescan.CursorAfter, rescan.IncompleteSubtrees.Count == 0, true, [], fullChanges.ToArray(),
-                NoDeletions, []) { AllItemsChanged = allChanged, ScopedFullCoverage = rescan.IncompleteSubtrees.Count > 0 && !rescan.IncompleteSubtrees.Contains(string.Empty), PendingDeletionEvidence = rescan.PendingDeletionEvidence, IncompleteSubtrees = rescan.IncompleteSubtrees, IncompleteReasons = rescan.IncompleteReasons, ObservedCoverage = observationStore is null ? null : coverage, RehashThrough = _store.RehashWatermark(root.RootId) };
+                NoDeletions, []) { WalkObserved = true, AllItemsChanged = allChanged, ScopedFullCoverage = rescan.IncompleteSubtrees.Count > 0 && !rescan.IncompleteSubtrees.Contains(string.Empty), PendingDeletionEvidence = rescan.PendingDeletionEvidence, IncompleteSubtrees = rescan.IncompleteSubtrees, IncompleteReasons = rescan.IncompleteReasons, ObservedCoverage = observationStore is null ? null : coverage, RehashThrough = _store.RehashWatermark(root.RootId) };
         }
         var paths = new List<string>();
         var deleted = new Dictionary<string, DateTimeOffset?>(StringComparer.OrdinalIgnoreCase);

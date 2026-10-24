@@ -27,6 +27,8 @@ public static class DropboxCliErrors
                 return MapProvider(provider, route);
             case DropboxApiException api:
                 return new SyncCliException("operation_failed", api.SafeReason, SyncCliExitCode.Failed, api);
+            case Exception throttled when V2.FailureRetryOwner.ThrottleCause(throttled) is { } cause:
+                return MapThrottle(throttled, cause, route);
             case JsonException json:
                 return new SyncCliUsageException("The Dropbox response could not be parsed: " + json.Message);
             case IOException io:
@@ -37,6 +39,14 @@ public static class DropboxCliErrors
                 return new SyncCliException("operation_failed", SyncActivityText.Safe(error.Message),
                     SyncCliExitCode.Failed, error);
         }
+    }
+
+    private static SyncCliException MapThrottle(Exception error, ProviderThrottleExhaustedException cause, DropboxRoute? route)
+    {
+        var (code, exit) = Classify((int)System.Net.HttpStatusCode.TooManyRequests, cause.Message);
+        return new SyncCliException(code, SyncActivityText.Safe(cause.Message), exit, error,
+            new DropboxCliErrorData(route?.Name ?? cause.Route, (int)cause.StatusCode!,
+                SyncActivityText.Safe(cause.Message), null, false));
     }
 
     private static SyncCliException MapProvider(DropboxRouteException provider, DropboxRoute? route)

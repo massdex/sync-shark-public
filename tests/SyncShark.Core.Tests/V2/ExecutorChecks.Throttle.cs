@@ -43,10 +43,7 @@ internal static partial class ExecutorChecks
         Require(parked && progressed.Task.IsCompletedSuccessfully && results.All(r => r.Outcome == Outcome.Done),
             "a single executor worker releases its gate during cooldown so independent work completes");
         Require(admission.Snapshot().ActiveFiles == 0, "executor cooldown accounting is balanced");
-        // The run's existing successful-result owner clears retry debt after verified Done; the store
-        // closes that retry notice atomically, rather than introducing a throttle-specific closer.
-        store.ClearSyncRetry(Pair().PairId, "first");
-        Require(store.OpenNotices(Pair().PairId).Count == 0, "verified success closes the throttle retry notice");
+        // Notice closure is exercised through the real incremental Done path in RunChecks.ThrottleConsumersAsync.
 
         var deadline = clock.GetUtcNow().AddMinutes(1);
         writer.BeforePut = (_, _) => Task.FromException(new ProviderThrottleExhaustedException(deadline, "retry-bound", "read"));
@@ -72,6 +69,15 @@ internal static partial class ExecutorChecks
                 error.StatusCode == System.Net.HttpStatusCode.TooManyRequests && error.Cause == cause && error.Route == "read",
                 "provider contract preserves all throttle causes, HTTP status, HResult and exact retry deadline");
         }
+        var throttle = new ProviderThrottleExhaustedException(deadline, "wait-bound", "read");
+        foreach (var wrapped in new Exception[] { new IOException("stream", throttle),
+            new DropboxEffectUncertainException("unverified", new IOException("stream", throttle)) })
+        {
+            var result = FailureRetryOwner.WithCause(new("action", Outcome.Uncertain, null, null, null, wrapped.Message), wrapped);
+            Require(result.FailureKind == FailureRetryOwner.FailureKind.ProviderThrottle && result.RetryNotBefore == deadline &&
+                result.Outcome == Outcome.Uncertain && result.FailureHResult == wrapped.HResult,
+                "wrapped throttle retains its deadline without converting an uncertain effect to a safe replay");
+        }
         var ordinary = FailureRetryOwner.WithCause(new("action", Outcome.Failed, null, null, null, "transport"),
             new HttpRequestException("transport"));
         Require(ordinary.FailureKind is null && ordinary.RetryNotBefore is null,
@@ -85,7 +91,7 @@ internal static partial class ExecutorChecks
         var run = new SyncRun(store, executor, new FakeEndpointProvider(), Settings(64), clock);
         var saveFailure = typeof(SyncRun).GetMethod("SaveFailedRetry",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
-        saveFailure.Invoke(run, [pair, action.Path, result.Reason, null, null, result]);
+        ReflectionInvoke.WithDefaults(saveFailure, run, pair, action.Path, result.Reason, null, null, result);
         var retry = store.SyncRetryAt(pair.PairId, action.Path)!;
         Require(retry is { Attempts: 1, Kind: "sync", FailureKind: FailureRetryOwner.FailureKind.ProviderThrottle } &&
             retry.RetryAfter == retryAt && retry.LastError == result.Reason,
@@ -101,7 +107,7 @@ internal static partial class ExecutorChecks
         Require(choices.Any(choice => choice.Choice == NoticeChoices.RetryNow) &&
             choices.Any(choice => choice.Choice == NoticeChoices.Ignore),
             "throttle retry notice offers Retry and Ignore without dropping the item");
-        saveFailure.Invoke(run, [pair, action.Path, result.Reason, retry, null, result]);
+        ReflectionInvoke.WithDefaults(saveFailure, run, pair, action.Path, result.Reason, retry, null, result);
         Require(store.OpenNotices(pair.PairId).Count == 1 &&
             store.SyncRetryAt(pair.PairId, action.Path) is { Attempts: 2 } repeated && repeated.RetryAfter == retryAt,
             "repeated failure reports preserve the provider deadline and deduplicate the notice");

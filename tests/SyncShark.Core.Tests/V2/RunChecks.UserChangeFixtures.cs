@@ -28,7 +28,15 @@ internal static partial class RunChecks
               FROM file_state f WHERE f.root_no=(SELECT root_no FROM root WHERE root_id=$root);
             """, ("$root", pair.A.RootId), ("$pair", pair.PairId), ("$mtime", DateTimeOffset.UtcNow.UtcTicks));
         var gaps = (ILocalGapStore)store;
+        var providerCursor = store.Cursor(pair.A.RootId)!;
         gaps.BeginGap(pair.A.RootId, PriorityCheckpoint.Cursor, 100, false);
+        // BeginGap publishes its NTFS checkpoint as the root replay cursor. This fixture's
+        // FakeEndpoint uses numeric cursors, while gap proofs use the injected NTFS journal.
+        // Model the completed inventory handoff without replacing the provider's replay position.
+        var generation = store.BeginGeneration(pair.A.RootId, "fixture-gap-inventory");
+        store.CompleteGeneration(generation, providerCursor, true, settleInventory: true, cursorHeldForEvidence: false);
+        Require(store.Cursor(pair.A.RootId) == providerCursor && !store.GapInventoryPending(pair.A.RootId),
+            "gap fixture retains the provider cursor after its completed inventory handoff");
         var epoch = gaps.GapEpoch(pair.A.RootId)!;
         foreach (var page in store.Live(pair.A.RootId).Chunk(128))
             gaps.GapDiscoveredBatch(pair.A.RootId, epoch, page.Select(item => (item, true)).ToArray());

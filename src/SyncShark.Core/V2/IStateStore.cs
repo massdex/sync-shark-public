@@ -314,7 +314,7 @@ public partial interface IStateStore : IDisposable
     }
     void SuspendHeldRetry(string pairId, SyncRetry retry);
     SyncRetry? SyncRetryAt(string pairId, string path);
-    IReadOnlyList<SyncRetry> DueSyncRetries(string pairId, DateTimeOffset now, int limit);
+    IReadOnlyList<SyncRetry> DueSyncRetries(string pairId, DateTimeOffset now, int limit, string? excludedScanReason = null);
     int CountSyncRetries(string pairId);
     bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants, bool restoredOnly = false);
 

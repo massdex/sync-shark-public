@@ -146,6 +146,7 @@ internal static class FailureBoundaryChecks
         public bool AcceptGapResult(string rootId, LocalGapResult result) => false;
         public void RejectGapResult(string rootId, LocalGapResult result) { }
         public bool HasGapProtection(string rootId) => true;
+        public IReadOnlySet<string> GapObligations(string rootId, IReadOnlyList<string> objectIds) => objectIds.ToHashSet();
         public void RetireGapItem(string rootId, LocalGapEpoch epoch, ItemState item) { }
         public void SetGapStatus(string rootId, bool discovery, string status)
         { if (status.StartsWith("worker failed:", StringComparison.Ordinal)) FailureStatuses++; }

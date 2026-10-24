@@ -7,8 +7,9 @@ namespace Massdex.SyncShark.V2;
 
 /// <summary>Full-sharing, low-priority streaming IO. Metadata probes never open file contents.</summary>
 internal sealed class LocalGapIo(IStateStore known, V2Settings settings, IReadOnlySet<string> owned,
-    Func<bool>? pauseOverride = null) : ILocalGapIo
+    Func<bool>? pauseOverride = null, TimeProvider? time = null) : ILocalGapIo
 {
+    public TimeProvider Time => time ?? TimeProvider.System;
     private const int ContentBufferBytes = 64 * 1024;
     private readonly object _rateGate = new();
     private double _nextRead;
@@ -180,7 +181,7 @@ internal sealed class LocalGapIo(IStateStore known, V2Settings settings, IReadOn
     {
         guard.Dispose();
         lease.Dispose();
-        return CachedIdentityRefresh.OpenFailure(known, root, item, error);
+        return CachedIdentityRefresh.OpenFailure(known, root, item, error, Time.GetUtcNow());
     }
 
     internal async Task<bool> Budget(int bytes, CancellationToken ct, bool urgent = false)

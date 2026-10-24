@@ -354,7 +354,7 @@ internal sealed class RecordingStore : IStateStore
     }
     public bool SyncRetryExists(string pairId, string path) => _inner.SyncRetryExists(pairId, path);
     public SyncRetry? SyncRetryAt(string pairId, string path) => _inner.SyncRetryAt(pairId, path);
-    public IReadOnlyList<SyncRetry> DueSyncRetries(string pairId, DateTimeOffset now, int limit) => _inner.DueSyncRetries(pairId, now, limit);
+    public IReadOnlyList<SyncRetry> DueSyncRetries(string pairId, DateTimeOffset now, int limit, string? excludedScanReason = null) => _inner.DueSyncRetries(pairId, now, limit, excludedScanReason);
     public int CountSyncRetries(string pairId) => _inner.CountSyncRetries(pairId);
     public int RetryProtectionCalls { get; private set; }
     public bool HasActiveRestoredRetries(string pairId) => _inner.HasActiveRestoredRetries(pairId);

@@ -18,12 +18,23 @@ public static class FailureRetryOwner
     internal static State NotBefore(State state, DateTimeOffset? floor) =>
         floor is { } until && until > state.RetryAfter ? state with { RetryAfter = until } : state;
 
-    internal static ActionResult WithCause(ActionResult result, Exception error) => result with
+    internal static ProviderThrottleExhaustedException? ThrottleCause(Exception? error)
     {
-        FailureHResult = error.HResult,
-        FailureKind = error is ProviderThrottleExhaustedException ? FailureKind.ProviderThrottle : null,
-        RetryNotBefore = (error as ProviderThrottleExhaustedException)?.RetryAt
-    };
+        for (var cause = error; cause is not null; cause = cause.InnerException)
+            if (cause is ProviderThrottleExhaustedException throttle) return throttle;
+        return null;
+    }
+
+    internal static ActionResult WithCause(ActionResult result, Exception error)
+    {
+        var throttle = ThrottleCause(error);
+        return result with
+        {
+            FailureHResult = error.HResult,
+            FailureKind = throttle is not null ? FailureKind.ProviderThrottle : null,
+            RetryNotBefore = throttle?.RetryAt
+        };
+    }
 
     // Legacy JSON has no typed kind. Keep raw-cause compatibility in this one owner.
     public static FailureKind ClassifyCause(string cause) =>

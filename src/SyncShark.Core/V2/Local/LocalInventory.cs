@@ -285,7 +285,7 @@ public sealed partial class LocalInventory : IInventorySource
         VerificationProgress?.Invoke(0, backlog);
         var through = _known.RehashWatermark(_root.RootId);
         if (through == 0) return 0;
-        var io = GapIo ??= new LocalGapIo(_known, _settings, _productOwnedPaths);
+        var io = GapIo ??= new LocalGapIo(_known, _settings, _productOwnedPaths, time: _clock);
         while (budget.CanStart)
         {
             ct.ThrowIfCancellationRequested();
@@ -391,7 +391,7 @@ public sealed partial class LocalInventory : IInventorySource
     private async Task HashProofsAsync(IReadOnlyList<ItemState> rows, VerificationBudget budget,
         Dictionary<string, string> hashes, CancellationToken ct)
     {
-        var io = GapIo ??= new LocalGapIo(_known, _settings, _productOwnedPaths);
+        var io = GapIo ??= new LocalGapIo(_known, _settings, _productOwnedPaths, time: _clock);
         foreach (var item in rows)
         {
             ct.ThrowIfCancellationRequested();

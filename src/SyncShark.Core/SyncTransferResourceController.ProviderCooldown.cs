@@ -143,7 +143,9 @@ public sealed partial class SyncTransferResourceController
             while (!previous.IsCompleted)
             {
                 Task changed;
-                lock (_gate) { CheckRequestCooldown(key, token, route, deferProviderCooldown); changed = Provider(key).CooldownChanged.Task; }
+                TimeSpan cooldown;
+                lock (_gate) { cooldown = ProviderDelay(key); changed = Provider(key).CooldownChanged.Task; }
+                CheckRequestCooldown(cooldown, token, route, deferProviderCooldown);
                 try { await Task.WhenAny(previous, changed).WaitAsync(V2.V2Settings.ProviderPauseCheckInterval, _time, token).ConfigureAwait(false); }
                 catch (TimeoutException) { } // Cooperative pause check; no reserved request time.
             }
@@ -154,7 +156,7 @@ public sealed partial class SyncTransferResourceController
         {
             // A read's attempt deadline may race the cooldown wake-up. Hand the cooldown back to the
             // retry owner, which checks the user's token separately; server waiting is not transport time.
-            CheckRequestCooldown(key, token, route, deferProviderCooldown);
+            CheckRequestCooldown(ProviderDelay(key), token, route, deferProviderCooldown);
             throw;
         }
         finally { ticket.TrySetResult(); }
@@ -168,18 +170,25 @@ public sealed partial class SyncTransferResourceController
         // a concurrent response may extend the cooldown.
         while (true)
         {
-            CheckRequestCooldown(key, token, route, deferProviderCooldown);
-            TimeSpan wait;
+            CheckRequestCooldown(ProviderDelay(key), token, route, deferProviderCooldown);
+            TimeSpan wait, cooldown;
             Task changed;
             lock (_gate)
             {
-                CheckRequestCooldown(key, token, route, deferProviderCooldown);
+                cooldown = ProviderDelay(key);
                 var value = Provider(key); var now = _time.GetUtcNow();
                 var next = value.CooldownUntil > value.NextRequest ? value.CooldownUntil : value.NextRequest;
                 wait = next - now;
                 changed = value.CooldownChanged.Task;
-                if (wait <= TimeSpan.Zero) { value.NextRequest = now + value.Spacing; return; }
+                if (wait <= TimeSpan.Zero && !(deferProviderCooldown && DefersForCooldown(cooldown)))
+                {
+                    V2.PairPause.Check();
+                    token.ThrowIfCancellationRequested();
+                    value.NextRequest = now + value.Spacing;
+                }
             }
+            CheckRequestCooldown(cooldown, token, route, deferProviderCooldown);
+            if (wait <= TimeSpan.Zero) return;
             ProviderThrottlePolicy.CheckDelay(wait, ProviderThrottlePolicy.DefaultMaxBackoff, route, _time.GetUtcNow());
             if (!reported)
             {
@@ -191,15 +200,14 @@ public sealed partial class SyncTransferResourceController
         }
     }
 
-    private void CheckRequestCooldown(SyncProviderBudgetKey key, CancellationToken token, string route, bool deferProviderCooldown)
+    private static void CheckRequestCooldown(TimeSpan cooldown, CancellationToken token, string route, bool deferProviderCooldown)
     {
         V2.PairPause.Check();
-        var cooldown = ProviderDelay(key);
         if (deferProviderCooldown && DefersForCooldown(cooldown))
         {
             Lease.Current.Value?.Park();
             SyncEffectStaging.Current.Value?.Release();
-            throw new ProviderCooldownDeferredException(cooldown, route, _time.GetUtcNow() + cooldown);
+            throw new ProviderCooldownDeferredException(cooldown, route);
         }
         token.ThrowIfCancellationRequested();
     }

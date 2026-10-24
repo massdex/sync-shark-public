@@ -5,10 +5,9 @@ namespace Massdex.SyncShark;
 /// transient failure: the read waits the cooldown outside its transient-failure budget and outside the
 /// admission lease, then retries. The provider cooldown itself is never shortened.
 /// </summary>
-internal sealed class ProviderCooldownDeferredException(TimeSpan delay, string route, DateTimeOffset retryAt = default)
+internal sealed class ProviderCooldownDeferredException(TimeSpan delay, string route)
     : HttpRequestException($"Dropbox requires a {delay.TotalSeconds:N0} second cooldown before this read.")
 {
     internal TimeSpan Delay { get; } = delay;
     internal string Route { get; } = route;
-    internal DateTimeOffset RetryAt { get; } = retryAt;
 }

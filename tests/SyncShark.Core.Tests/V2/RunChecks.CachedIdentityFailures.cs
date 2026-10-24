@@ -51,6 +51,9 @@ internal static partial class RunChecks
         gaps.StageGapHash(root.RootId, gaps.GapEpoch(root.RootId)!, original, hash, proof);
         var result = gaps.GapResults(root.RootId, gaps.GapResultWatermark(root.RootId), 1).Single();
         Require(gaps.AcceptGapResult(root.RootId, result), "later valid content proof settles the original identity");
+        Require(store.ProtectionBatch(root.RootId, ItemFlags.NeedsRehash, [original.Path])[0].Covered &&
+            !gaps.GapObligations(root.RootId, [original.ObjectId]).Contains(original.ObjectId),
+            "root frontier still protects planning after the accepted entity obligation is gone");
         var retry = store.SyncRetryAt(pair.PairId, original.Path)!;
         Require(CachedIdentityRefresh.Verified(store, retry, root.RootId),
             "accepted same-identity proof is visible to scan retry retirement");
@@ -94,7 +97,7 @@ internal static partial class RunChecks
             TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.Seed("real.txt", "before");
-        var clock = new CompletionClock { Now = DateTimeOffset.UtcNow };
+        var clock = new CompletionClock { Now = DateTimeOffset.UnixEpoch.AddDays(1) };
         var run = new SyncRun(fx.Store, fx.Executor, fx.Provider, Settings, clock);
         await FirstSyncAsync(run, fx);
         fx.A.Seed("real.txt", "after");
@@ -105,13 +108,18 @@ internal static partial class RunChecks
         store.SaveSyncRetry(fx.Pair.PairId, retry with { RetryAfter = clock.Now.AddSeconds(-1) });
         var item = store.Live(fx.Pair.A.RootId, ["real.txt"]).Single();
         for (var i = 0; i < 6900; i++)
-            CachedIdentityRefresh.TryQueue(store, fx.Pair.A, item with { Path = "quiet-" + i }, 87);
-        clock.Now = DateTimeOffset.UtcNow.AddSeconds(1);
+            CachedIdentityRefresh.TryQueue(store, fx.Pair.A, item with { Path = "quiet-" + i }, 87, clock.Now);
+        Require(store.SyncRetryAt(fx.Pair.PairId, "quiet-0")!.RetryAfter == clock.Now, "quiet work uses the injected clock");
         Require(store.DueSyncRetries(fx.Pair.PairId, clock.Now, 256).First().Path == "real.txt",
             "6900 due quiet rows do not displace the older real retry");
+        store.SaveSyncRetry(fx.Pair.PairId, retry with { RetryAfter = clock.Now.AddSeconds(1) });
+        clock.Now = clock.Now.AddSeconds(2);
+        Require(store.DueSyncRetries(fx.Pair.PairId, clock.Now, 256, CachedIdentityRefresh.PendingReason).Single().Path == "real.txt",
+            "genuine retries due after a quiet burst retain their effect-retry slots");
         var report = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
         Require(report.Done == 1 && store.SyncRetryAt(fx.Pair.PairId, "real.txt") is null,
             "real failed retry runs and settles with 6900 quiet rows due");
         await MirrorAsync(fx);
+        await CachedIdentityReplayAsync(Path.Combine(folder, "replay"));
     }
 }

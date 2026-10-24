@@ -13,6 +13,7 @@ internal static class DropboxCliVerbChecks
         await PutAsync(Path.Combine(root, "put"));
         await BatchAsync(Path.Combine(root, "batch"));
         await ErrorsAsync(Path.Combine(root, "errors"));
+        await ThrottleExitsAsync(Path.Combine(root, "throttle"));
         await SpillAsync(Path.Combine(root, "spill"));
         await ReviewFixesAsync(Path.Combine(root, "review"));
         await RoundThreeAsync(Path.Combine(root, "round3"));
@@ -270,6 +271,27 @@ internal static class DropboxCliVerbChecks
             var batch = await Run(h, "dropbox", "rm", "--account", account, "--batch", "[{\"path\":\"/x\"}]", "--yes", "--json");
             Require(batch.Exit == 0 && !batch.Data!.Value.GetProperty("complete").GetBoolean(), "batch still running");
             Require(batch.Data!.Value.GetProperty("jobId").GetString() == "j2", "batch job id retained");
+        }
+    }
+
+    private static async Task ThrottleExitsAsync(string root)
+    {
+        foreach (var cause in new[] { "backoff-bound", "retry-bound" })
+        {
+            using var h = await DropboxCliHarness.CreateAsync(Path.Combine(root, cause));
+            const string route = "files/get_metadata";
+            if (cause == "backoff-bound")
+                h.Wire.Respond(route, HttpStatusCode.TooManyRequests, retryAfter: TimeSpan.FromMinutes(6));
+            else h.Wire.RespondFault(route, new ProviderThrottleExhaustedException(
+                DateTimeOffset.UtcNow.AddMinutes(1), cause, route));
+            var reply = await Run(h, "dropbox", "stat", "--account", h.Binding.ConnectionId,
+                "--path", "/item", "--json");
+            Require(reply.Exit == 3 && Error(reply) == "rate_limited", cause + " maps through the CLI to rate_limited / Busy");
+            Require(reply.Data!.Value.GetProperty("httpStatus").GetInt32() == 429 &&
+                reply.Data.Value.GetProperty("route").GetString() == route &&
+                !reply.Data.Value.GetProperty("effectUncertain").GetBoolean(),
+                "terminal throttle retains the read route and 429 error-data contract");
+            Require(reply.Sent.Length == 1, "terminal throttle does not silently replay the CLI command");
         }
     }
 

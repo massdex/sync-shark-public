@@ -42,7 +42,8 @@ public sealed partial class SyncRun
             .Chunk(64))
         {
             ct.ThrowIfCancellationRequested();
-            // Read-resilience F-R (approved in review-read-resilience-2): a provider replay from the
+            var verified = CachedIdentityRefresh.Verified(_store, batch, root.RootId);
+            // Read-resilience F-R: a provider replay from the
             // UNADVANCED cursor already covers the whole root, so root debt must not stay asleep after
             // it succeeds. A completed Dropbox feed and a local journal replay are authoritative;
             // other inventories keep the conservative read (a due retry re-reads, a sleeping one stays
@@ -51,7 +52,7 @@ public sealed partial class SyncRun
             var scopes = batch.Where(retry => !(authoritativeReplay && retry.Path.Length == 0 && retry.Kind == "scan"))
                 .Where(retry => include(retry.Path)).Where(retry =>
             {
-                if (CachedIdentityRefresh.Verified(_store, retry, root.RootId)) return false;
+                if (verified.Contains(retry.Path)) return false;
                 if (remaining > 0 && retry.RetryAfter <= _time.GetUtcNow()) { remaining--; return true; }
                 if (!CachedIdentityRefresh.Pending(retry)) incomplete.Add(retry.Path); // Quiet work is already protected.
                 return false;
@@ -186,6 +187,7 @@ public sealed partial class SyncRun
         foreach (var path in failed)
         {
             var previous = _store.SyncRetryAt(pair.PairId, path);
+            var floor = ScanRetryFloor(scan, path);
             // Preserve existing reviewed authority; the scan must not replace it.
             var diagnostic = scan.A.IncompleteReasons.GetValueOrDefault(path) ?? scan.B.IncompleteReasons.GetValueOrDefault(path);
             // A bounded pass can leave queued rediscovery unvisited; that is protected work.
@@ -204,17 +206,21 @@ public sealed partial class SyncRun
                 .Select(entry => entry.RootId).ToArray();
             if (previous is { Kind: not "scan" })
             {
-                _store.SaveSyncRetry(pair.PairId, previous with { ReadRoots = roots });
-                continue; // Keep its bespoke notice, authority, reason and scheduling intact.
+                _store.SaveSyncRetry(pair.PairId, WithScanFloor(previous with { ReadRoots = roots }, floor));
+                continue; // Keep bespoke notice, authority and reason; only extend its provider cooldown floor.
             }
-            if (previous?.RetryAfter > _time.GetUtcNow()) continue;
+            if (previous?.RetryAfter > _time.GetUtcNow())
+            {
+                _store.SaveSyncRetry(pair.PairId, WithScanFloor(previous, floor));
+                continue;
+            }
             var failureState = FailureRetryOwner.Failed(previous?.Attempts ?? 0, _time.GetUtcNow());
-            var updated = (previous ?? new SyncRetry(path, "scan", 0, "", DateTimeOffset.MinValue)) with
+            var updated = WithScanFloor((previous ?? new SyncRetry(path, "scan", 0, "", DateTimeOffset.MinValue)) with
             {
                 Attempts = failureState.Attempts, LastError = technical ?? reason, ReadRoots = roots,
-                DeleteBlockedDetail = null, DeleteBlockedDeferred = false,
+                DeleteBlockedDetail = null, DeleteBlockedDeferred = false, FailureKind = null,
                 RetryAfter = failureState.RetryAfter
-            };
+            }, floor);
             var suppressed = (aggregateTransient || keepTransientSummary) && path.Length > 0 &&
                 IsTransientObservation(scan, path);
             // The one pair notice represents these paths; never leave a queued per-file notice behind.
@@ -223,33 +229,36 @@ public sealed partial class SyncRun
             WriteNotices([FailureRetryOwner.RetryNotice(pair.PairId, path, updated.LastError, updated.Attempts,
                 explanation: reason + " Nothing in this subtree was synced or deleted.")]);
         }
-        if (storage is not null)
+        if (storage is not null) UpdateScanSummary(pair, storage, transientCount, summaryState, aggregateTransient);
+    }
+
+    private void UpdateScanSummary(PairDef pair, SqliteStateStore storage, int transientCount,
+        ObservationSummaryState summaryState, bool aggregateTransient)
+    {
+        if (transientCount == 0)
         {
-            if (transientCount == 0)
-            {
-                if (summaryState == ObservationSummaryState.Open)
-                    storage.CloseOwnedPointerObservationSummary(pair.PairId);
-                // An Ignore silences only the failures that were present when it was chosen. Once no transient
-                // failure remains, retire it so a later new outage is noticed instead of being suppressed forever.
-                else if (summaryState == ObservationSummaryState.Ignored)
-                    storage.ExpireIgnoredOwnedPointerObservationSummary(pair.PairId);
-            }
-            else if (aggregateTransient || summaryState == ObservationSummaryState.Open)
-            {
-                // Above the limit, or an existing summary standing for the remaining failures: refresh the one
-                // summary and remove every per-file notice.
-                storage.CloseOwnedPointerObservationNotices(pair.PairId, OwnedPointerProof.ObservationMessage);
-                WriteNotices([OwnedPointerObservationSummary(pair, transientCount)]);
-            }
+            if (summaryState == ObservationSummaryState.Open)
+                storage.CloseOwnedPointerObservationSummary(pair.PairId);
+            // An Ignore silences only the failures that were present when it was chosen. Once no transient
+            // failure remains, retire it so a later new outage is noticed instead of being suppressed forever.
             else if (summaryState == ObservationSummaryState.Ignored)
-            {
-                // The user silenced this pair cause; every per-entity retry keeps running silently.
-                storage.CloseOwnedPointerObservationNotices(pair.PairId, OwnedPointerProof.ObservationMessage);
-            }
-            // A run with no verification failures writes no item notice, so the scan itself retires a stale
-            // pointer-verification summary once every durable debt is settled.
-            storage.RetirePointerVerificationSummaries(pair.PairId);
+                storage.ExpireIgnoredOwnedPointerObservationSummary(pair.PairId);
         }
+        else if (aggregateTransient || summaryState == ObservationSummaryState.Open)
+        {
+            // Above the limit, or an existing summary standing for the remaining failures: refresh the one
+            // summary and remove every per-file notice.
+            storage.CloseOwnedPointerObservationNotices(pair.PairId, OwnedPointerProof.ObservationMessage);
+            WriteNotices([OwnedPointerObservationSummary(pair, transientCount)]);
+        }
+        else if (summaryState == ObservationSummaryState.Ignored)
+        {
+            // The user silenced this pair cause; every per-entity retry keeps running silently.
+            storage.CloseOwnedPointerObservationNotices(pair.PairId, OwnedPointerProof.ObservationMessage);
+        }
+        // A run with no verification failures writes no item notice, so the scan itself retires a stale
+        // pointer-verification summary once every durable debt is settled.
+        storage.RetirePointerVerificationSummaries(pair.PairId);
     }
 
     private static bool IsTransientObservation(BothScan scan, string path) =>

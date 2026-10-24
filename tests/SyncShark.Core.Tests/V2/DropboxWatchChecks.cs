@@ -29,6 +29,7 @@ internal static class DropboxWatchChecks
         await UnauthorizedLongpollFaultsAsync().ConfigureAwait(false);
         await TokenRefusalAsync().ConfigureAwait(false);
         await TransientRetryPacingAsync().ConfigureAwait(false);
+        await AccountCooldownAsync().ConfigureAwait(false);
         await CursorReplacedAfterConflictAsync().ConfigureAwait(false);
         await BackoffAfterChangesAsync().ConfigureAwait(false);
         await ConcurrentMultiRootAsync().ConfigureAwait(false);
@@ -179,6 +180,28 @@ internal static class DropboxWatchChecks
         var error = await FaultAsync(rig.Inventory().FullAsync(1, _ => true, null!, CancellationToken.None))
             .ConfigureAwait(false);
         Require(access ? error is EndpointAccessException : error is not EndpointAccessException, label);
+    }
+
+    internal static async Task AccountCooldownAsync()
+    {
+        var clock = new ManualClock();
+        using var rig = new WatchRig(clock);
+        var deadline = clock.GetUtcNow().AddMinutes(6);
+        rig.Limiter.Resources.ProviderThrottled(new("dropbox:" + Binding().Normalize().ConnectionId,
+            SyncProviderOperation.Read), TimeSpan.FromMinutes(6));
+        rig.Wire.Respond(Longpoll, HttpStatusCode.OK, "{\"changes\":true}");
+        using var stop = new CancellationTokenSource(Fires);
+        using var watch = await ArmedAsync(rig, stop.Token);
+        var wait = watch.ChangedAsync(stop.Token);
+        await UntilAsync(() => rig.Source.NotBefore(RootId) == deadline, stop.Token);
+        Require(!wait.IsCompleted && rig.Wire.Requests.Count == 0,
+            "account read cooldown leaves the watch alive with no longpoll sent");
+        clock.Advance(TimeSpan.FromMinutes(6) - TimeSpan.FromTicks(1));
+        Require(!await CompletesAsync(wait, Quiet) && rig.Wire.Requests.Count == 0,
+            "watch cannot poll one tick before the provider retry deadline");
+        clock.Advance(TimeSpan.FromTicks(1));
+        Require(await CompletesAsync(wait) && rig.Wire.Requests.Count == 1,
+            "the same watch resumes longpoll at the provider deadline without a fault or rebuild");
     }
 
     private static async Task TransientRetryPacingAsync()
@@ -481,7 +504,10 @@ internal static class DropboxWatchChecks
             Wire = new DropboxRouteWire();
             _http = new HttpClient(Wire);
             Store = new InMemoryStateStore();
-            Client = new DropboxPilotClient(_http, new SecretDropboxTokenSource(), "/Pilot", Binding());
+            Limiter = new SyncTransferRateLimiter(new SyncTransferSettings(), clock,
+                () => new SyncResourcePressure(0, .1, 8L << 30));
+            Client = new DropboxPilotClient(_http, new SecretDropboxTokenSource(), "/Pilot", Binding(),
+                transferLimiter: Limiter) { ReadRetryTime = clock };
             if (cursor is not null)
             {
                 var gen = Store.BeginGeneration(RootId, "snapshot");
@@ -494,6 +520,7 @@ internal static class DropboxWatchChecks
         internal InMemoryStateStore Store { get; }
         internal DropboxPilotClient Client { get; }
         internal DropboxChangeWatchSource Source { get; }
+        internal SyncTransferRateLimiter Limiter { get; }
 
         internal void SetCursor(string cursor)
         {

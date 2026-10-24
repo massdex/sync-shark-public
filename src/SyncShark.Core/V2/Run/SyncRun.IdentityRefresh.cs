@@ -16,7 +16,7 @@ public sealed partial class SyncRun
                 .Select(retry => retry.Path).Take(V2Settings.ScanRetryScopeLimit).ToArray() : [];
         IReadOnlyList<ItemState> before = scopes.Length == 0 ? [] : _store.Live(root.RootId, scopes);
         var scan = await ScanSideCoreAsync(pair, side, throttle, ct, inventoryCursors, firstSync);
-        if (!scan.Full || scopes.Length == 0) return scan;
+        if (!scan.WalkObserved || scopes.Length == 0) return scan;
         var incomplete = scan.IncompleteSubtrees.ToList();
         var reasons = new Dictionary<string, string>(scan.IncompleteReasons, StringComparer.OrdinalIgnoreCase);
         CachedIdentityRefresh.SettleObserved(_store, pair.PairId, scopes, scan.IncompleteSubtrees,

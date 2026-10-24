@@ -1096,7 +1096,7 @@ internal static partial class ExecutorChecks
 
         public IEnumerable<SyncRetry> ReadSyncRetries(string pairId) => _inner.ReadSyncRetries(pairId);
         public SyncRetry? SyncRetryAt(string pairId, string path) => _inner.SyncRetryAt(pairId, path);
-        public IReadOnlyList<SyncRetry> DueSyncRetries(string pairId, DateTimeOffset now, int limit) => _inner.DueSyncRetries(pairId, now, limit);
+        public IReadOnlyList<SyncRetry> DueSyncRetries(string pairId, DateTimeOffset now, int limit, string? excludedScanReason = null) => _inner.DueSyncRetries(pairId, now, limit, excludedScanReason);
         public int CountSyncRetries(string pairId) => _inner.CountSyncRetries(pairId);
         public bool HasActiveRestoredRetries(string pairId) => _inner.HasActiveRestoredRetries(pairId);
         public bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants, bool restoredOnly = false) => _inner.RetryProtected(pairId, path, active, descendants, restoredOnly);

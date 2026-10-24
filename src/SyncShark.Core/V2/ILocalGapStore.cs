@@ -22,6 +22,8 @@ internal interface ILocalGapStore
     bool AcceptGapResult(string rootId, LocalGapResult result);
     void RejectGapResult(string rootId, LocalGapResult result);
     bool HasGapProtection(string rootId);
+    /// <summary>Exact entity obligations only; excludes the lazy root discovery frontier and planning handoff.</summary>
+    IReadOnlySet<string> GapObligations(string rootId, IReadOnlyList<string> objectIds);
     void RetireGapItem(string rootId, LocalGapEpoch epoch, ItemState item);
     void SetGapStatus(string rootId, bool discovery, string status);
     string GapProgress(string rootId);

@@ -116,9 +116,9 @@ internal sealed class DropboxChangeWatch : IChangeWatch
             {
                 throw;
             }
-            catch (Exception exception) when (IsTransient(exception))
+            catch (Exception exception) when (ProviderTransientFailure.IsTransient(exception, ct))
             {
-                await Task.Delay(retry, _clock, ct).ConfigureAwait(false);
+                await BackoffAsync(exception, retry, ct).ConfigureAwait(false);
                 retry = Ceiling(retry);
             }
             catch (Exception exception)
@@ -141,15 +141,13 @@ internal sealed class DropboxChangeWatch : IChangeWatch
         return (DropboxCliOutput.Bool(root, "changes") ?? false, (int?)DropboxCliOutput.Long(root, "backoff"));
     }
 
-    // A transport failure with no status, or a read timeout, 429 or 5xx: worth retrying inside the wait.
-    private static bool IsTransient(Exception exception) => exception switch
+    private async Task BackoffAsync(Exception error, TimeSpan retry, CancellationToken ct)
     {
-        DropboxRouteException { StatusCode: HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests or
-            HttpStatusCode.InternalServerError or HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or
-            HttpStatusCode.GatewayTimeout } => true,
-        HttpRequestException { StatusCode: null } => true,
-        _ => false
-    };
+        if (FailureRetryOwner.ThrottleCause(error) is { } throttle)
+            _source.MarkBackoffUntil(_root.RootId, throttle.RetryAt > _clock.GetUtcNow()
+                ? throttle.RetryAt : _clock.GetUtcNow() + retry);
+        else await Task.Delay(retry, _clock, ct).ConfigureAwait(false);
+    }
 
     private TimeSpan Ceiling(TimeSpan current)
     {
