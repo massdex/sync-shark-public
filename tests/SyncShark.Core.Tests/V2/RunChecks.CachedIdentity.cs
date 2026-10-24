@@ -22,17 +22,19 @@ internal static partial class RunChecks
         store.WriteSnapshot(snapshot);
         store.CompleteGeneration(snapshot.Gen, checkpoint.Cursor, true);
         var original = store.Live(root.RootId, ["item.txt"]).Single();
-        File.Move(Path.Combine(directory, original.Path), Path.Combine(folder, "retained.txt"));
-        LocalChecks.Seed(directory, original.Path, "replacement");
-        CachedIdentityRefresh.TryQueue(store, root, original, "open-failed(87)");
         fx.Provider.AddInventory(root, inventory);
         fx.Provider.AddWriter(root, await LocalWriter.OpenAsync(root, Side.A, pair.PairId,
             LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default,
             isStateDamage: StorageFailureClassifier.IsStateDamage));
+        await CachedIdentityPersistentAsync(fx, pair, root, inventory, store, original);
+        File.Move(Path.Combine(directory, original.Path), Path.Combine(folder, "retained.txt"));
+        LocalChecks.Seed(directory, original.Path, "replacement");
+        store.RequestSyncRetryNow(pair.PairId, original.Path);
         await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
         Require(store.Live(root.RootId, [original.Path]).Single().ObjectId != original.ObjectId,
             "an empty journal still consumes the durable guarded identity refresh");
-        Require(store.SyncRetryAt(pair.PairId, original.Path) is not { Kind: "scan" } &&
+        Require(!store.OpenNotices(pair.PairId).Any(n => n.Path == original.Path && n.ReasonKey == "sync-retry") &&
+            store.SyncRetryAt(pair.PairId, original.Path) is not { Kind: "scan" } &&
             !store.OpenNotices(pair.PairId).Any(notice => notice.ReasonKey?.StartsWith(SqliteStateStore.IndexFailurePrefix) == true) &&
             File.ReadAllText(Path.Combine(directory, original.Path)) == "replacement",
             "real run retires only observed refresh debt without an indexing notice or source delete");

@@ -15,14 +15,14 @@ public sealed partial class SyncRun
 
     // Only an attempted, failed targeted re-read earns a user-facing reason; an absent cause keeps
     // the path incomplete without inventing one. The exact wording is stable for notice support.
-    private static void RecordIncomplete(IReadOnlyList<string> paths, IReadOnlyDictionary<string, string> causes,
+    private void RecordIncomplete(string pairId, IReadOnlyList<string> paths, IReadOnlyDictionary<string, string> causes,
         List<string> incomplete, Dictionary<string, string> reasons)
     {
         foreach (var path in paths)
         {
             incomplete.Add(path);
-            reasons[path] = causes.GetValueOrDefault(path) ??
-                "The guarded inventory re-read could not completely observe this path.";
+            var reason = CachedIdentityRefresh.RereadFailure(_store.SyncRetryAt(pairId, path), causes.GetValueOrDefault(path));
+            if (reason is not null) reasons[path] = reason;
         }
     }
 
@@ -72,15 +72,13 @@ public sealed partial class SyncRun
             if (scopes.Length == 0) continue;
             if (RehearsalEndpoints.Unwrap(inventory) is LocalInventory local)
             {
+                // Exact-path read: at most the 256 admitted scopes, never their descendants.
+                var before = _store.Live(root.RootId, scopes);
                 var reread = RehearsalEndpoints.Apply(inventory, await local.ChangesForPathsAsync(scopes, cursor, gen, include, ct), include);
                 if (reread.CursorInvalid)
                 {
-                    incomplete.AddRange(scopes);
-                    // Follow-up 3: carry the real cause (exception kind and message) so the notice
-                    // says why the reread failed instead of the generic "could not be completely read".
                     var reason = reread.IncompleteReasons.GetValueOrDefault(string.Empty) ?? local.LastFallbackReason;
-                    if (!string.IsNullOrWhiteSpace(reason))
-                        foreach (var scope in scopes) reasons[scope] = reason!;
+                    RecordIncomplete(pair.PairId, scopes, scopes.ToDictionary(path => path, _ => reason!), incomplete, reasons);
                     // A root-open failure means the scope was not observed, so the root debt is not settled.
                     if (scopes.Contains(string.Empty)) { rootSettles = false; rootDebtSettles = false; }
                     continue;
@@ -90,9 +88,9 @@ public sealed partial class SyncRun
                 // as the main scan's delta does, so a hidden change is never merely touched.
                 foreach (var change in reread.Changes)
                     if (change.ObjectId.Length > 0) changed(change.ObjectId);
-                RecordIncomplete(reread.IncompleteSubtrees, reread.IncompleteReasons, incomplete, reasons);
+                RecordIncomplete(pair.PairId, reread.IncompleteSubtrees, reread.IncompleteReasons, incomplete, reasons);
                 touched.AddRange(reread.Changes.Select(change => change.Path));
-                CachedIdentityRefresh.SettleObserved(_store, pair.PairId, scopes, reread.IncompleteSubtrees, root.RootId);
+                CachedIdentityRefresh.SettleObserved(_store, pair.PairId, scopes, reread.IncompleteSubtrees, root.RootId, before, incomplete, reasons);
                 if (reread.IncompleteSubtrees.Contains(string.Empty)) { rootSettles = false; rootDebtSettles = false; }
             }
             else if (RehearsalEndpoints.Unwrap(inventory) is DropboxInventory dropbox && _store is SqliteStateStore sql)

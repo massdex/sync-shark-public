@@ -82,6 +82,8 @@ internal static partial class LocalJournalChecks
         await RetiredNativeIdentityAsync(Path.Combine(folder, "native"));
         await ExecutorChecks.CachedIdentityDeleteRefusalAsync();
         await RunChecks.CachedIdentityRetryAsync(Path.Combine(folder, "run"));
+        await RunChecks.CachedIdentityFairnessAsync(Path.Combine(folder, "fairness"));
+        CachedIdentityReviewChecks(folder);
         Console.WriteLine("PASS cached identity replacement, durable guarded rediscovery, and delete refusal");
     }
 
@@ -97,6 +99,7 @@ internal static partial class LocalJournalChecks
     {
         public bool Paused => true;
         public string? LastFailureReason => "open-failed(87)";
+        public int? LastOpenError => 87;
         public ILocalGapProbe OpenProbes(RootDef root) => this;
         public LocalGapProof? Probe(RootDef root, ItemState item) => null;
         public LocalGapProof? Probe(ItemState item) => null;

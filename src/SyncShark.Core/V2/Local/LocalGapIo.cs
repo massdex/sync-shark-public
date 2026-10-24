@@ -64,16 +64,19 @@ internal sealed class LocalGapIo(IStateStore known, V2Settings settings, IReadOn
             : _volume.IsInvalid ? "volume identity handle unavailable; retry when the volume is accessible" : null;
 
         public string? LastFailureReason { get; private set; }
+        public int? LastOpenError { get; private set; }
 
         public LocalGapProof? Probe(ItemState item)
         {
             LastFailureReason = null;
+            LastOpenError = null;
             if (UnavailableReason is not null) { LastFailureReason = "journal-unavailable"; return null; }
             var identity = LocalItems.ParseObjectId(item.ObjectId);
             using var file = NtfsUsnJournal.OpenGapMetadata(_volume, identity.FileId);
             if (file.IsInvalid)
             {
-                LastFailureReason = "open-failed(" + Marshal.GetLastWin32Error() + ")";
+                LastOpenError = Marshal.GetLastWin32Error();
+                LastFailureReason = "open-failed(" + LastOpenError + ")";
                 return null;
             }
             if (!NtfsUsnJournal.TryReadFileUsn(file, out var proof, out var failure) || proof is null)
@@ -122,8 +125,7 @@ internal sealed class LocalGapIo(IStateStore known, V2Settings settings, IReadOn
         using var handle = NtfsUsnJournal.OpenGapContent(volume, fileIdentity.FileId);
         if (handle.IsInvalid)
         {
-            var error = Marshal.GetLastWin32Error();
-            return CachedIdentityRefresh.OpenFailure(known, root, item, error);
+            return FailedOpen(root, item, Marshal.GetLastWin32Error(), guard, lease);
         }
         if (FileProof(handle) is not { } before || !LocalGapWorker.Matches(item, before))
             return new(LocalGapHashOutcome.Unverifiable, Reason: "file identity or journal proof unavailable");
@@ -154,6 +156,13 @@ internal sealed class LocalGapIo(IStateStore known, V2Settings settings, IReadOn
         if (ProbePath(root, item) is not { } pathProof || pathProof.File != after) return new(LocalGapHashOutcome.Unverifiable);
         // Promotion checks this file's USN and metadata in the same journal on a later run.
         return new(LocalGapHashOutcome.Verified, hasher.Finish(), new LocalGapProof(checkpoint.Cursor, after!));
+    }
+
+    private LocalGapHashResult FailedOpen(RootDef root, ItemState item, int error, IDisposable guard, IDisposable lease)
+    {
+        guard.Dispose();
+        lease.Dispose();
+        return CachedIdentityRefresh.OpenFailure(known, root, item, error);
     }
 
     internal async Task<bool> Budget(int bytes, CancellationToken ct)

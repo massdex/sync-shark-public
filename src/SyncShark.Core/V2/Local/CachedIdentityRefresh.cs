@@ -5,7 +5,8 @@ internal static class CachedIdentityRefresh
 {
     internal const string PendingReason = "cached file identity changed; guarded path rediscovery pending";
 
-    internal static bool Pending(SyncRetry retry) => retry.Kind == "scan" && retry.LastError == PendingReason;
+    internal static bool Pending(SyncRetry retry) => retry.Kind == "scan" && Pending(retry.LastError);
+    internal static bool Pending(string reason) => reason == PendingReason;
 
     /// <summary>Read debt a completed inventory may retire; a quiet refresh is not read debt.</summary>
     internal static bool InventoryDebt(SyncRetry retry) =>
@@ -19,22 +20,42 @@ internal static class CachedIdentityRefresh
     internal static HashSet<string> ActiveRetryPaths(IEnumerable<SyncRetry> retries) =>
         retries.Where(item => !Pending(item)).Select(item => item.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>Retire each scope the re-read observed with no incomplete ancestor or descendant.</summary>
+    internal const string OpenReason = "open-failed(87)";
+    internal static string RereadReason => MessageCatalog.Default.Message("guardedInventoryIncomplete");
+
+    internal static string? RereadFailure(SyncRetry? previous, string? reason) =>
+        !string.IsNullOrWhiteSpace(reason) ? reason : previous is not null && Pending(previous) ? RereadReason : null;
+
+    /// <summary>Unchanged identity is a real failure, handed to the existing scan retry/notice owner.</summary>
     internal static void SettleObserved(IStateStore known, string pairId, IEnumerable<string> scopes,
-        IReadOnlyCollection<string> incomplete, string rootId)
+        IReadOnlyCollection<string> incomplete, string rootId, IReadOnlyList<ItemState> before,
+        List<string> failed, Dictionary<string, string> reasons)
     {
+        var after = known.Live(rootId, before.Select(item => item.Path)).ToDictionary(item => item.Path, StringComparer.OrdinalIgnoreCase);
         foreach (var scope in scopes)
-            if (!incomplete.Any(path => path.Length == 0 ||
-                PairPath.IsSelfOrUnder(scope, path) || PairPath.IsSelfOrUnder(path, scope)))
-                Observed(known, pairId, scope, rootId);
+        {
+            if (incomplete.Any(path => path.Length == 0 ||
+                PairPath.IsSelfOrUnder(scope, path) || PairPath.IsSelfOrUnder(path, scope))) continue;
+            var old = before.FirstOrDefault(item => PairPath.Same(item.Path, scope));
+            if (old is not null && after.TryGetValue(scope, out var current) && old.ObjectId == current.ObjectId &&
+                known.SyncRetryAt(pairId, scope) is { } retry && (Pending(retry) ||
+                 retry.Kind == "scan" && retry.LastError == OpenReason &&
+                 known.ProtectionBatch(rootId, ItemFlags.NeedsRehash, [scope])[0].Covered))
+            {
+                failed.Add(scope);
+                reasons[scope] = OpenReason;
+            }
+            else Observed(known, pairId, scope, rootId);
+        }
     }
 
     /// <summary>An invalid cached-ID open queues rediscovery, or reports the unchanged unverifiable result.</summary>
     internal static LocalGapHashResult OpenFailure(IStateStore known, RootDef root, ItemState item, int error)
     {
-        if (TryQueue(known, root, item, "open-failed(" + error + ")"))
+        if (TryQueue(known, root, item, error))
             return new(LocalGapHashOutcome.IdentityChanged, Reason: PendingReason);
-        return new(LocalGapHashOutcome.Unverifiable, Reason: "content open failed: Windows error " + error,
+        return new(LocalGapHashOutcome.Unverifiable,
+            Reason: string.Format(MessageCatalog.Default.Message("cachedContentOpenFailed"), error),
             QuarantineCode: error is 225 or 226 ? error : null);
     }
 
@@ -46,10 +67,12 @@ internal static class CachedIdentityRefresh
             return remaining.Length == 0 ? null : retry with { ReadRoots = remaining };
         });
 
-    internal static bool TryQueue(IStateStore known, RootDef root, ItemState item, string? reason)
+    internal static bool TryQueue(IStateStore known, RootDef root, ItemState item, string? reason) =>
+        TryQueue(known, root, item, reason == OpenReason ? 87 : null);
+
+    internal static bool TryQueue(IStateStore known, RootDef root, ItemState item, int? openError)
     {
-        // This exact diagnostic is emitted only by cached file-ID opens, not path opens or delete admission.
-        if (reason != "open-failed(87)") return false;
+        if (openError != 87) return false;
         // A probe may finish after inventory has already replaced its entity. Do not enqueue
         // obsolete work, but it is still not a verification failure for the replacement.
         if (known.ByObject(root.RootId, item.ObjectId) is null) return true;
@@ -59,7 +82,7 @@ internal static class CachedIdentityRefresh
             known.UpdateSyncRetry(pair.PairId, item.Path, prior =>
             {
                 if (prior is null) return new(item.Path, "scan", 0, PendingReason,
-                    DateTimeOffset.MinValue, ReadRoots: [root.RootId]);
+                    DateTimeOffset.UtcNow, ReadRoots: [root.RootId]);
                 if (prior.Kind == "scan" && prior.ReadRoots is null || prior.ReadRoots?.Contains(root.RootId) == true)
                     return prior;
                 // Keep reviewed authority, attempts, notices and deadlines owned by the existing retry.

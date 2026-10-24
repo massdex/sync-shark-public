@@ -30,9 +30,19 @@ internal sealed class RehearsalGapIo(ILocalGapIo real, RehearsalOverlay overlay,
     }
     private sealed class Probes(RehearsalGapIo owner, RootDef root, ILocalGapProbe real) : ILocalGapProbe
     {
-        public LocalGapProof? Probe(ItemState item) => owner.Virtual(root, item, out var proof) ? proof : real.Probe(item);
+        public LocalGapProof? Probe(ItemState item)
+        {
+            LastFailureReason = null;
+            LastOpenError = null;
+            if (owner.Virtual(root, item, out var proof)) return proof;
+            proof = real.Probe(item);
+            LastFailureReason = real.LastFailureReason;
+            LastOpenError = real.LastOpenError;
+            return proof;
+        }
         public string? UnavailableReason => real.UnavailableReason;
-        public string? LastFailureReason => real.LastFailureReason;
+        public string? LastFailureReason { get; private set; }
+        public int? LastOpenError { get; private set; }
         public void Dispose() => real.Dispose();
     }
 }

@@ -26,6 +26,8 @@
   },
   "messages": {
     "planning-pair-mismatch": "Pair does not match the planning snapshot.",
+    "guardedInventoryIncomplete": "The guarded inventory re-read could not completely observe this path.",
+    "cachedContentOpenFailed": "content open failed: Windows error {0}",
     "conflict-successors-missing": "Conflict correspondence cannot be forgotten without its successors. Retry replans both copies; originals remain protected.",
     "baseline-unconfirmed": "The completed operation lacks matching file content evidence. No baseline was saved; Retry verifies the item again.",
     "delete-source-moved": "The original source survived at another path after an interrupted deletion. The delete was not acknowledged; Retry replans from the surviving identity.",
