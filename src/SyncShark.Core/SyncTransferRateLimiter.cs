@@ -27,6 +27,16 @@ public sealed class SyncTransferRateLimiter
         Resources = new SyncTransferResourceController(_settings);
     }
 
+    // Focused checks share one clock between the read retry budget and the provider cooldown it waits on.
+    internal SyncTransferRateLimiter(SyncTransferSettings settings, TimeProvider time,
+        Func<SyncResourcePressure> pressure)
+    {
+        _settings = SyncTransferSettings.Normalize(settings);
+        if (_settings.UploadPayloadBudgetBytes > 0)
+            UploadPayloadBudget.Capacity = _settings.UploadPayloadBudgetBytes;
+        Resources = new SyncTransferResourceController(_settings, time, pressure);
+    }
+
     public void Update(SyncTransferSettings settings)
     {
         lock (_gate)

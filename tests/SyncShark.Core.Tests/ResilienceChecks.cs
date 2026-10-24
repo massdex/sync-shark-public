@@ -8,10 +8,27 @@ internal static class ResilienceChecks
     {
         private long _ticks;
         public override long TimestampFrequency => TimeSpan.TicksPerSecond;
-        public override long GetTimestamp() => _ticks;
-        public override DateTimeOffset GetUtcNow() => DateTimeOffset.UnixEpoch.AddTicks(_ticks);
-        internal void Advance(TimeSpan delay) => _ticks += delay.Ticks;
+        public override long GetTimestamp() => Interlocked.Read(ref _ticks);
+        public override DateTimeOffset GetUtcNow() => DateTimeOffset.UnixEpoch.AddTicks(GetTimestamp());
+        internal void Advance(TimeSpan delay) => Interlocked.Add(ref _ticks, delay.Ticks);
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            if (dueTime != Timeout.InfiniteTimeSpan) Advance(dueTime);
+            ThreadPool.QueueUserWorkItem(_ => callback(state));
+            return new CompletedTimer();
+        }
+        private sealed class CompletedTimer : ITimer
+        {
+            public bool Change(TimeSpan dueTime, TimeSpan period) => false;
+            public void Dispose() { }
+            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        }
     }
+
+    // The read budget and the provider cooldown it waits on must share one clock, exactly as the real
+    // System clock does. A separate real-clock controller would never elapse while the fake clock advances.
+    internal static SyncTransferRateLimiter Limiter(Clock clock) => new(new SyncTransferSettings(), clock,
+        () => new SyncResourcePressure(.1, .4, 8L * 1024 * 1024 * 1024));
 
     internal static async Task RunAsync()
     {
@@ -23,7 +40,7 @@ internal static class ResilienceChecks
             using var wire = new Wire(clock, mode);
             using var http = new HttpClient(wire);
             using var cancel = new CancellationTokenSource();
-            var client = new DropboxPilotClient(http, new Tokens(), "/Pilot", Binding(), "id:pilot-folder")
+            var client = new DropboxPilotClient(http, new Tokens(), "/Pilot", Binding(), "id:pilot-folder", transferLimiter: Limiter(clock))
             {
                 ReadRetryTime = clock,
                 ReadTransientBudget = TimeSpan.FromSeconds(mode == "exhausted" ? 10 : 60),
@@ -31,7 +48,6 @@ internal static class ResilienceChecks
                 {
                     if (mode == "cancel") cancel.Cancel();
                     ct.ThrowIfCancellationRequested();
-                    if (mode == "cooldown") Check(delay >= TimeSpan.FromSeconds(5), "server cooldown is never shortened");
                     clock.Advance(delay);
                     return Task.CompletedTask;
                 }
@@ -61,7 +77,7 @@ internal static class ResilienceChecks
             {
                 Check(clock.GetUtcNow() >= DateTimeOffset.UnixEpoch.AddSeconds(20), "outage lasted at least 20 virtual seconds");
                 Check(wire.Attempts > 3, "read survived more than two retries");
-                Check(notices.Any(n => n.Phase.Contains("Waiting for network")), "waiting-for-network progress");
+                Check(mode == "cooldown" ? wire.CooldownWaits >= 4 : notices.Any(n => n.Phase.Contains("Waiting for network")), "cooldown elapsed or waiting-for-network progress");
             }
             if (mode is "auth" or "permission" or "conflict") Check(wire.Attempts == 1, "definite refusal never retried");
             if (mode == "exhausted") Check(failure!.Message.Contains("budget exhausted"), "clear budget exhaustion");
@@ -79,7 +95,7 @@ internal static class ResilienceChecks
         var clock = new Clock();
         using var wire = new Wire(clock, "always-server");
         using var http = new HttpClient(wire);
-        var client = new DropboxPilotClient(http, new Tokens(), "/Pilot", Binding(), "id:pilot-folder")
+        var client = new DropboxPilotClient(http, new Tokens(), "/Pilot", Binding(), "id:pilot-folder", transferLimiter: Limiter(clock))
         {
             ReadRetryTime = clock,
             ReadTransientBudget = TimeSpan.FromSeconds(3),
@@ -112,7 +128,7 @@ internal static class ResilienceChecks
         var clock = new Clock();
         using var wire = new Wire(clock, "refusal-then-timeout");
         using var http = new HttpClient(wire);
-        var client = new DropboxPilotClient(http, new Tokens(), "/Pilot", Binding(), "id:pilot-folder")
+        var client = new DropboxPilotClient(http, new Tokens(), "/Pilot", Binding(), "id:pilot-folder", transferLimiter: Limiter(clock))
         {
             ReadRetryTime = clock,
             ReadTransientBudget = TimeSpan.FromSeconds(10),
@@ -146,7 +162,7 @@ internal static class ResilienceChecks
         var source = new FlakyTokenSource(failures: 1);
         using var wire = new Wire(clock, "healthy");
         using var http = new HttpClient(wire);
-        var client = new DropboxPilotClient(http, source, "/Pilot", Binding(), "id:pilot-folder")
+        var client = new DropboxPilotClient(http, source, "/Pilot", Binding(), "id:pilot-folder", transferLimiter: Limiter(clock))
         {
             ReadRetryTime = clock,
             ReadTransientBudget = TimeSpan.FromSeconds(60),
@@ -170,8 +186,12 @@ internal static class ResilienceChecks
     private sealed class Wire(Clock clock, string mode) : HttpMessageHandler
     {
         internal int Attempts;
+        internal int CooldownWaits;
+        private DateTimeOffset _notBefore;
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
+            Check(clock.GetUtcNow() >= _notBefore, "no request is sent before the server deadline");
+            if (_notBefore != default) { CooldownWaits++; _notBefore = default; }
             // A full listing first verifies account/root identities. Those are healthy, offline fixture replies.
             var path = request.RequestUri!.AbsolutePath;
             if (path.EndsWith("get_current_account")) return Reply("{\"account_id\":\"account-id\",\"root_info\":{\"root_namespace_id\":\"root-namespace\",\"home_namespace_id\":\"home-namespace\"}}");
@@ -193,7 +213,11 @@ internal static class ResilienceChecks
                 if (mode is "server" or "cooldown")
                 {
                     var response = new HttpResponseMessage(mode == "server" ? HttpStatusCode.ServiceUnavailable : HttpStatusCode.TooManyRequests);
-                    if (mode == "cooldown") response.Headers.RetryAfter = new(TimeSpan.FromSeconds(5));
+                    if (mode == "cooldown")
+                    {
+                        response.Headers.RetryAfter = new(TimeSpan.FromSeconds(5));
+                        _notBefore = clock.GetUtcNow().AddSeconds(5);
+                    }
                     return Task.FromResult(response);
                 }
                 if (mode == "body") return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)

@@ -275,7 +275,7 @@ internal static class DropboxRouteCallerChecks
         using var harness = new Harness();
         harness.Wire.Respond("files/get_metadata", HttpStatusCode.TooManyRequests,
             retryAfter: TimeSpan.FromMinutes(10));
-        var error = await ExpectAsync<DropboxRouteException>(() => harness.Client.CallRouteAsync(
+        var error = await ExpectAsync<ProviderThrottleExhaustedException>(() => harness.Client.CallRouteAsync(
             new DropboxRouteCall(Route("files/get_metadata"), "{}"),
             Limits(maxBackoff: TimeSpan.FromMinutes(5)), default));
         Check(error.StatusCode == HttpStatusCode.TooManyRequests, "a backoff beyond the maximum fails as rate-limited");

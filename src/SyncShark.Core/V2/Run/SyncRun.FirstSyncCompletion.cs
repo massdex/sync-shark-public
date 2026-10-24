@@ -219,19 +219,20 @@ public sealed partial class SyncRun
                 if (old is not null) _store.SaveSyncRetry(pair.PairId, old);
                 continue;
             }
-            SaveFailedRetry(pair, path, reasons.GetValueOrDefault(path), old,
-                conflictSuccessors.GetValueOrDefault(path));
+            SaveFailedRetry(pair, path, reasons.GetValueOrDefault(path)?.Reason, old,
+                conflictSuccessors.GetValueOrDefault(path), reasons.GetValueOrDefault(path));
         }
         _store.RefreshInterruptedDeleteNotice(pair.PairId);
         _store.RefreshBlockedDeleteNotice(pair.PairId);
     }
 
     private void SaveFailedRetry(PairDef pair, string path, string? reason, SyncRetry? old,
-        SyncAction? conflictSuccessor = null)
+        SyncAction? conflictSuccessor = null, ActionResult? failure = null)
     {
         if (old?.Kind == "decision") return;
         // The evidence probe owns restored-row counting; the shared owner preserves that counter.
-        var retry = FailureRetryOwner.SaveFailedRetry(_store, pair.PairId, path, reason, old, _time.GetUtcNow());
+        var retry = FailureRetryOwner.SaveFailedRetry(_store, pair.PairId, path, reason, old, _time.GetUtcNow(),
+            failure?.FailureKind, failure?.RetryNotBefore);
         var attempts = retry.Attempts;
         // A frozen conflict successor owns its dedicated Retry-only explanation from its first failure, however
         // that failure arrives: the generic sync-retry notice (with Ignore) must never stand in for it. The
@@ -255,12 +256,12 @@ public sealed partial class SyncRun
             ExecutionReasons.ConflictCopyBlocked, ExecutionReasons.ConflictCopyNoticeId(pairId, successor));
     }
 
-    private static Dictionary<string, string> FailureReasons(Plan plan, Tally tally)
+    private static Dictionary<string, ActionResult> FailureReasons(Plan plan, Tally tally)
     {
-        var failed = tally.Failures.GroupBy(result => result.ActionId).ToDictionary(group => group.Key, group => group.Last().Reason);
-        var reasons = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var failed = tally.Failures.GroupBy(result => result.ActionId).ToDictionary(group => group.Key, group => group.Last());
+        var reasons = new Dictionary<string, ActionResult>(StringComparer.OrdinalIgnoreCase);
         foreach (var action in plan.Actions)
-            if (tally.WasQuotaBlocked(action.ActionId)) reasons[action.Path] = DropboxQuota.Detail;
+            if (tally.WasQuotaBlocked(action.ActionId)) reasons[action.Path] = new(action.ActionId, Outcome.Failed, null, null, null, DropboxQuota.Detail);
             else if (failed.GetValueOrDefault(action.ActionId) is { } reason) reasons[action.Path] = reason;
         return reasons;
     }
@@ -329,20 +330,21 @@ public sealed partial class SyncRun
                 continue; // A changed precondition is ordinary work, not a new issue by itself.
             }
             var prior = _store.SyncRetryAt(pair.PairId, path);
-            var reason = reasons.GetValueOrDefault(path) ?? prior?.LastError ??
+            var reason = reasons.GetValueOrDefault(path)?.Reason ?? prior?.LastError ??
                 "The reviewed effect could not be completed in this run.";
             var conflictSuccessor = reviewed[path].FirstOrDefault(action =>
                 action.ConflictTransitionKey is not null && !action.SuppressReconciledBaseline);
             // Parking adds reviewed authority, not another failure occurrence or a renewed deadline.
             var failure = FailureRetryOwner.ReportedFailure(prior, _time.GetUtcNow(), retainSleeping: true,
                 countAttempt: !(evidenceUnavailable && held.ContainsKey(path)));
+            failure = FailureRetryOwner.NotBefore(failure, reasons.GetValueOrDefault(path)?.RetryNotBefore);
             _store.SaveSyncRetry(pair.PairId, new(path, "first-sync", failure.Attempts, reason, failure.RetryAfter,
                 Held: held.GetValueOrDefault(path), ReviewedActions: reviewed[path].ToArray(),
                 HeldReviewed: held.ContainsKey(path), HeldExpected: held.TryGetValue(path, out var heldItem)
                     ? _store.Live(heldItem.Local == Side.A ? pair.A.RootId : pair.B.RootId, [path]).FirstOrDefault() : null,
                 PendingNotice: prior?.PendingNotice, Match: prior?.Match,
                 ReprobeEvidence: evidenceUnavailable && held.ContainsKey(path))
-                { FailureKind = FailureRetryOwner.ClassifyCause(reason) });
+                { FailureKind = reasons.GetValueOrDefault(path)?.FailureKind ?? prior?.FailureKind ?? FailureRetryOwner.ClassifyCause(reason) });
             WriteParkedWorkNotice(pair.PairId, path, reason, failure.Attempts, conflictSuccessor,
                 evidencePending.Contains(path), evidenceUnavailable);
         }

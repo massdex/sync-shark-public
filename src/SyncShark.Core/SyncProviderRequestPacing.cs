@@ -6,20 +6,19 @@ namespace Massdex.SyncShark;
 // Request pacing is independent of file concurrency. This seam never retries a
 // request: each adapter retains its existing read-only/effect replay boundary.
 internal static class SyncProviderRequestPacing
-{
-    // The route path of a request, and nothing else: never the token, the headers or the body.
+{    // The route path of a request, and nothing else: never the token, the headers or the body.
     internal static string RouteOf(HttpRequestMessage request) => request.RequestUri?.AbsolutePath ?? "request";
 
     internal static async Task<HttpResponseMessage> SendAsync(SyncTransferRateLimiter limiter,
         SyncProviderBudgetKey key, bool google, HttpClient client, HttpRequestMessage request,
         HttpCompletionOption option, CancellationToken token, Action? onSending = null,
-        Func<Task>? beforeSending = null, TimeSpan? errorBodyIdleTimeout = null)
+        Func<Task>? beforeSending = null, TimeSpan? errorBodyIdleTimeout = null,
+        bool deferProviderCooldown = false)
     {
         var route = RouteOf(request);
         var errorBodyIdle = errorBodyIdleTimeout ?? SyncResponseBody.DefaultIdleTimeout;
-        // The account's cooldown wait is announced by the single cooldown path (SyncTransferResourceController), which
-        // owns the actual sleep loop, so this seam only waits.
-        await limiter.Resources.WaitForRequestAsync(key, token, route).ConfigureAwait(false);
+        await limiter.Resources.WaitForRequestAsync(key, token, route,
+            deferProviderCooldown && !google).ConfigureAwait(false);
         if (beforeSending is not null) await beforeSending().ConfigureAwait(false);
         onSending?.Invoke();
         // The request joins the run's in-flight table, so its own sweeper names the route if it waits too long (RQ-090).
@@ -125,4 +124,17 @@ internal static class SyncProviderRequestPacing
                                            IOException or InvalidDataException or TimeoutException)
         { return false; } // Unknown/permission failures are not rate-limit retries.
     }
+}
+
+/// <summary>
+/// A read that would have waited for a server-requested provider cooldown in the pacing seam. It is not a
+/// transient failure: the read waits the cooldown outside its transient-failure budget and outside the
+/// admission lease, then retries. The provider cooldown itself is never shortened.
+/// </summary>
+internal sealed class ProviderCooldownDeferredException(TimeSpan delay, string route, DateTimeOffset retryAt = default)
+    : HttpRequestException($"Dropbox requires a {delay.TotalSeconds:N0} second cooldown before this read.")
+{
+    internal TimeSpan Delay { get; } = delay;
+    internal string Route { get; } = route;
+    internal DateTimeOffset RetryAt { get; } = retryAt;
 }

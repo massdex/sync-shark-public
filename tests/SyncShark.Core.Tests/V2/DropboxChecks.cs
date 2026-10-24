@@ -40,6 +40,7 @@ internal static partial class DropboxChecks
         await Group(nameof(HashFromStoreAsync), HashFromStoreAsync, failures);
         await Group(nameof(HashFallbackMatchesStoredVersionAsync), HashFallbackMatchesStoredVersionAsync, failures);
         await Group(nameof(DeletionTimesFromHistoryAsync), DeletionTimesFromHistoryAsync, failures);
+        await Group(nameof(DropboxThrottleBudgetChecks), DropboxThrottleBudgetChecks.RunAsync, failures);
         await Group(nameof(DeletedListingChecksAsync), DeletedListingChecksAsync, failures);
         await Group(nameof(OnePassDeletionChecksAsync), OnePassDeletionChecksAsync, failures);
         await Group(nameof(DeletionEvidenceCacheChecksAsync), DeletionEvidenceCacheChecksAsync, failures);
