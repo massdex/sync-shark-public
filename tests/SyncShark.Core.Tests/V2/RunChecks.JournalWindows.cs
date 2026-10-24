@@ -15,9 +15,11 @@ internal static partial class RunChecks
         var settings = Settings with { LocalReplayWindowsPerRun = windowBudget };
         var directory = Path.Combine(folder, "root");
         for (var n = 0; n < 4; n++) LocalChecks.Seed(directory, $"edit-{n}.txt", "journal edit " + n);
+        var clock = new CompletionClock();
         using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast,
-            TimeProvider.System, LocalItems.CaptureOptionalHash);
+            clock, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
+        fx.B.DropboxHashes = true; // Match the native local content proof used by this mixed-endpoint fixture.
         var root = LocalChecks.RootOf(directory, "ra");
         var pair = fx.Pair with { A = root };
         store.SavePair(pair);
@@ -26,13 +28,16 @@ internal static partial class RunChecks
         var target = start with { NextUsn = start.NextUsn + JournalReplayWindow.ReplayWindowBytes * 7 / 2 };
         var checkpoint = start;
         var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), settings,
-            TimeProvider.System, StorageFailureClassifier.IsStateDamage, pairId: pair.PairId)
+            clock, StorageFailureClassifier.IsStateDamage, pairId: pair.PairId)
         { WalkCheckpointForTest = () => (checkpoint, false),
-            GapIo = new LocalGapIo(store, Settings, new HashSet<string>(), () => true) };
+            GapIo = new LocalGapIo(store, settings, new HashSet<string>(), () => pendingInventory, clock) };
         var snapshot = await inventory.FullAsync(store.BeginGeneration(root.RootId, "full"), _ => true, null!, default);
         store.WriteSnapshot(snapshot);
         store.CompleteGeneration(snapshot.Gen, start.Cursor, true);
-        await inventory.VerifyIndexingPassAsync(default);
+        var verified = await inventory.VerifyIndexingPassAsync(default);
+        Console.WriteLine($"Journal run fixture: pending-inventory={pendingInventory}; verified={verified}");
+        Require(inventory.GapIo.Paused == pendingInventory,
+            "content proof is available for transfer cases and paused only for the metadata-only gap case");
         LocalChecks.Seed(directory, "edit-3.txt", "user edit near the end of a large retained journal");
         checkpoint = target;
         var reads = new List<long>();
@@ -66,7 +71,8 @@ internal static partial class RunChecks
         fx.Provider.AddWriter(root, await LocalWriter.OpenAsync(root, Side.A, pair.PairId,
             LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default,
             isStateDamage: StorageFailureClassifier.IsStateDamage));
-        var firstReport = await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+        var run = new SyncRun(store, fx.Executor, fx.Provider, settings, clock);
+        var firstReport = await run.IncrementalAsync(pair.PairId, new RecordingProgress(), default);
         if (pendingInventory) Require(walks == 1 && !store.GapInventoryPending(root.RootId) &&
             ((ILocalGapStore)store).GapEpoch(root.RootId)!.Epoch == epoch,
             "one pending-inventory walk settles without replacing its gap epoch");
@@ -74,7 +80,7 @@ internal static partial class RunChecks
         Require(reads.Count == Math.Min(4, windowBudget), "real run respects its replay-window budget");
         if (windowBudget == 2) Require(store.Cursor(root.RootId) != target.Cursor, "budget split retains the unread suffix");
         await inventory.VerifyIndexingPassAsync(default);
-        var secondReport = await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+        var secondReport = await run.IncrementalAsync(pair.PairId, new RecordingProgress(), default);
         Require(!secondReport.JournalBacklog, "caught-up run clears backlog flag");
         Require(reads.Count == 4 && reads.Distinct().Count() == 4, "real run replays 3.5 windows exactly once");
         Require(store.Live(root.RootId, ["edit-3.txt"]).Single().Size == new FileInfo(Path.Combine(directory, "edit-3.txt")).Length,
@@ -87,7 +93,17 @@ internal static partial class RunChecks
         }
         // Content verification remains its existing background owner, not gap hashing.
         await inventory.VerifyIndexingPassAsync(default);
-        await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+        // With a split budget, the first run can encounter the late file's old metadata
+        // before replay reaches its edit. Honor the resulting content-proof backoff just
+        // as AutoSync does; immediate test calls do not advance a wall clock.
+        if (store.SyncRetryAt(pair.PairId, "edit-3.txt") is { } retry)
+        {
+            Require(FailureRetryOwner.KindOf(retry) == FailureRetryOwner.FailureKind.ContentProof,
+                "late-window retry retains its measured content-proof cause");
+            Console.WriteLine($"Journal late retry: attempts={retry.Attempts}; due={retry.RetryAfter:O}; now={clock.Now:O}");
+            clock.Now = retry.RetryAfter.AddTicks(1);
+        }
+        await run.IncrementalAsync(pair.PairId, new RecordingProgress(), default);
         for (var n = 0; n < 4; n++)
             Require(await fx.B.ObserveSourceMetadataAsync($"edit-{n}.txt", default) is not null,
                 "every window, including the late user edit, reaches planning and transfer");

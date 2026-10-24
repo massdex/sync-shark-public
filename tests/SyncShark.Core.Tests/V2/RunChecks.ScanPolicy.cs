@@ -6,7 +6,6 @@ internal static partial class RunChecks
     {
         using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
-        await FirstSyncAsync(fx.Run(), fx);
         var pair = fx.Pair with { Excluded = [@"\Parent\Child\", ""],
             IgnoreRules = ["FolderName:.git", "FileName:ignored.txt", "FileExtension:.tmp"] };
         store.SavePair(pair);
@@ -15,6 +14,10 @@ internal static partial class RunChecks
             B = pair.B with { RootId = "nested-remote", RootPath = "/NestedDestination", RootObjectId = "nested-destination" } });
         Require(PairAdmission.DecideSaved(pair, store.Pairs()) is null,
             "nested fixture has distinct root identities and destinations, not an exact-root collision");
+        // Adding a pair invalidates every cursor. Bootstrap after layout setup so this test
+        // measures retirement during a delta, not a full walk that legitimately observes absence.
+        await FirstSyncAsync(fx.Run(), fx);
+        var fullReads = fx.A.FullCalls + fx.B.FullCalls;
         string[] filtered = ["Parent/Child/item.txt", "Parent/.git/config", "ignored.txt", "scratch.tmp",
             "Owned/item.txt", ".syncshark-control-test/item.txt", "Nested/item.txt"];
         foreach (var path in filtered)
@@ -34,7 +37,11 @@ internal static partial class RunChecks
         store.SaveSyncRetry(pair.PairId, held);
         store.SaveSyncRetry(pair.PairId, reviewed);
         var run = new SyncRun(store, fx.Executor, fx.Provider, Settings, TimeProvider.System, _ => ["Owned"]);
+        Console.WriteLine($"Scan policy before: {string.Join("; ", store.ReadSyncRetries(pair.PairId).Select(r => r.Path + "=" + r.LastError))}");
+        Console.WriteLine($"Scan policy siblings excluded: {PairInclude.NotSynced(pair, sibling, false, store.Pairs(), ["Owned"])}, {PairInclude.NotSynced(pair, prefixSibling, false, store.Pairs(), ["Owned"])}");
         await run.IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+        Console.WriteLine($"Scan policy after: {string.Join("; ", store.ReadSyncRetries(pair.PairId).Select(r => r.Path + "=" + r.LastError))}");
+        Require(fx.A.FullCalls + fx.B.FullCalls == fullReads, "retirement fixture uses retained delta cursors");
         Require(filtered.All(path => store.SyncRetryAt(pair.PairId, path) is null),
             "all permanent boundaries and ignore kinds retire even without Live rows");
         Require(store.SyncRetryAt(pair.PairId, sibling) is { } a && CachedIdentityRefresh.Pending(a) &&

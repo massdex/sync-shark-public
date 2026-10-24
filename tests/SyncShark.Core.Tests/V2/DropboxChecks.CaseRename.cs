@@ -4,7 +4,9 @@ internal static partial class DropboxChecks
 {
     private static async Task CaseRenameLocalSqliteAsync()
     {
-        var directory = Path.Combine(_root, "case-local");
+        // Native case-sensitive directories may need a different fixture volume than USN tests.
+        // Reuse the local fixture owner (SYNCSHARK_TEST_ROOT/TEMP), not the provider suite root.
+        var directory = LocalChecks.FreshRoot("case-local-" + Guid.NewGuid().ToString("N"));
         var local = Path.Combine(directory, "local");
         Directory.CreateDirectory(local);
         await File.WriteAllTextAsync(Path.Combine(local, "Doc.txt"), "content");

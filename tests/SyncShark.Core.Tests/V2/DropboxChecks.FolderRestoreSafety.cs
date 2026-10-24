@@ -122,9 +122,13 @@ internal static partial class DropboxChecks
                 if (mode is "lost-response" or "lost-response-again")
                     rig.H.Wire.AfterRestore = () => rig.H.Wire.DeleteRestoredFile("big/late-a.txt");
             }
+            string? confirmedPath = null;
             if (mode == "confirmed-then-deleted") rig.H.Wire.AfterRestore = () =>
             {
-                rig.H.Wire.DeleteRestoredFile("big/late-a.txt");
+                // Feed ordering is unspecified. Delete whichever restore actually completed,
+                // then reject the other one; never assume dictionary insertion order is the feed.
+                confirmedPath = rig.H.Wire.Restores.Single();
+                rig.H.Wire.DeleteRestoredFile(confirmedPath);
                 rig.H.Wire.RejectRestore = true;
             };
             var pauseRequested = false;
@@ -153,13 +157,17 @@ internal static partial class DropboxChecks
             Require(mode != "pre-send" || !rig.H.Wire.Calls.Contains("/2/files/restore"),
                 "pre-send failure never reaches files/restore");
             var saved = ProviderState(store);
-            var retryPath = mode == "confirmed-then-deleted" ? "big/late-b.txt" : "big/late-a.txt";
+            Console.WriteLine($"Restore classification mode={mode}; restored={saved["Restored"]?.ToJsonString()}; " +
+                $"started={saved["RestoreStarted"]?.ToJsonString()}; retry={saved["RestoreRetryAfter"]?.ToJsonString()}");
+            var retryPath = mode == "confirmed-then-deleted" && confirmedPath == "big/late-a.txt"
+                ? "big/late-b.txt" : "big/late-a.txt";
             Require(mode.StartsWith("lost-response", StringComparison.Ordinal)
                     ? saved["RestoreStarted"]?[retryPath] is not null
                     : saved["RestoreStarted"]?[retryPath] is null && saved["RestoreRetryAfter"]?[retryPath] is not null,
                 mode + " persists the correct submission classification");
             if (mode == "confirmed-then-deleted")
-                Require(saved["Restored"]!.AsArray().Any(n => n!.GetValue<string>() == "big/late-a.txt"),
+                Require(confirmedPath is not null &&
+                    saved["Restored"]!.AsArray().Any(n => n!.GetValue<string>() == confirmedPath),
                     "confirmed restoration remains durably settled even after user deletion");
             store.Dispose();
             store = SqliteStateStore.Open(folder, settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
@@ -247,8 +255,8 @@ internal static partial class DropboxChecks
                 rig.H.Wire.WholeFolderDeletes == 1 && await writer.ObserveAsync(retryPath, default) is not null,
                 mode + " retries known no-effect restore once due without replaying deletion");
             if (mode == "confirmed-then-deleted")
-                Require(rig.H.Wire.Restores.Count(p => p == "big/late-a.txt") == 1 &&
-                    await writer.ObserveAsync("big/late-a.txt", default) is null,
+                Require(confirmedPath is not null && rig.H.Wire.Restores.Count(p => p == confirmedPath) == 1 &&
+                    await writer.ObserveAsync(confirmedPath, default) is null,
                     "user deletion after confirmed restore is respected after cold reopen");
         }
         finally { store.Dispose(); }
