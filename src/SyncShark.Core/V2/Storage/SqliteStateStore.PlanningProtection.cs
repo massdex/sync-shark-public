@@ -62,7 +62,7 @@ public sealed partial class SqliteStateStore
     }
 
     // Copy one consistent set of protection inputs before RunScope materialization.
-    // Scope batches read only disk-backed TEMP tables, never pin the main WAL.
+    // Pins the main WAL only for the copy; scope batches read disk-backed TEMP only.
     internal PlanningProtection OpenPlanningProtection(PairDef pair)
     {
         var snapshot = DamageBoundary(() => OpenProtectionSnapshot(pair.A.RootId));

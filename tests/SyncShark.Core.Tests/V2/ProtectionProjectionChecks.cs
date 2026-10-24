@@ -186,22 +186,36 @@ internal static class ProtectionProjectionChecks
         using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var pair = Pair();
         store.SavePair(pair);
-        Seed(store, pair, Side.A, [File("Parent/Seed", "seed")]);
+        Seed(store, pair, Side.A, [File("Parent/file-0000000", "object-0000000", ItemFlags.NeedsRehash)]);
         using var writer = Writer(folder);
         StoreSchema.Execute(writer, null, """
-            WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000000)
+            WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<999999)
             INSERT INTO file_state(root_no,dir_no,name_key,name,kind,object_id,size,mtime,flags)
             SELECT r.root_no,d.dir_no,printf('FILE-%07d',x),printf('file-%07d',x),0,printf('object-%07d',x),1,0,256
               FROM n CROSS JOIN root r CROSS JOIN dir d WHERE r.root_id='left' AND d.path='Parent';
             """);
+        LocalChecks.Require(Convert.ToInt64(StoreSchema.Scalar(writer, null,
+            "SELECT count(*) FROM file_state;")) == 1_000_000, "measurement inventory has exactly one million rows");
+        MeasureMillion(store, pair, writer, "flags");
+        // Dispose the first private snapshot before measuring the unflagged fresh-gap range.
+        StoreSchema.Execute(writer, null, "UPDATE file_state SET flags=0;");
+        ((ILocalGapStore)store).BeginGap(pair.A.RootId, "cursor", 1, false, "fixture fresh gap");
+        LocalChecks.Require(Convert.ToInt64(StoreSchema.Scalar(writer, null,
+            "SELECT count(*) FROM local_gap WHERE after_object='' AND discovery_done=0;")) == 1,
+            "fresh-gap measurement starts at the empty discovery frontier");
+        MeasureMillion(store, pair, writer, "fresh-gap");
+    }
+
+    private static void MeasureMillion(SqliteStateStore store, PairDef pair, SqliteConnection writer, string variant)
+    {
         var watch = System.Diagnostics.Stopwatch.StartNew();
         using var frozen = store.OpenPlanningProtection(pair);
         watch.Stop();
         var copyBytes = frozen.TempBytesForTest;
         using var stream = frozen.Stream();
-        LocalChecks.Require(stream.SourcePasses == 3 && frozen.Read(["Parent/file-1000000"])[0].Covered,
-            "million held rows are copied and indexed");
-        Console.WriteLine($"protection-million: held=1000000; copy-ms={watch.ElapsedMilliseconds}; temp-copy-bytes={copyBytes}; temp-with-stream-bytes={frozen.TempBytesForTest}");
+        LocalChecks.Require(stream.SourcePasses == 3 && frozen.Read(["Parent/file-0999999"])[0].Covered,
+            "million held rows are copied and indexed: " + variant);
+        Console.WriteLine($"protection-million: variant={variant}; held=1000000; copy-ms={watch.ElapsedMilliseconds}; temp-copy-bytes={copyBytes}; temp-with-stream-bytes={frozen.TempBytesForTest}");
         using var command = writer.CreateCommand();
         ProtectionCheckpointChecks.Checkpoint(command);
     }
