@@ -4,4 +4,5 @@ namespace Massdex.SyncShark.V2;
 internal sealed record ResolveContext(ulong RootFileId, uint Volume, Func<ulong, ItemState?> KnownById,
     int MaxPaths, Func<NtfsUsnChange, string, CancellationToken, IReadOnlyList<string>?> FindNames,
     Func<ulong, ItemState?, bool>? Ambiguous = null, Action<string>? Fallback = null,
-    Action<NtfsUsnChange, ItemState?, string?, string>? Defer = null, Func<bool>? ScopeOverflow = null);
+    Action<NtfsUsnChange, ItemState?, string?, string>? Defer = null, Func<bool>? ScopeOverflow = null,
+    Action<IReadOnlyList<NtfsUsnChange>, CancellationToken>? PreparePage = null);

@@ -339,9 +339,7 @@ internal sealed partial class NoticeTable
     public (Notice Notice, bool Closed)? ById(long pairNo, string noticeId, SqliteTransaction? transaction = null)
     {
         noticeId = ResolveLegacyAlias(pairNo, noticeId, transaction);
-        using var command = StoreSchema.Command(_connection, transaction,
-            "SELECT n.notice_id,p.pair_id,n.rule,n.kind,n.path,n.detail,n.reason_key," + ActionableSql("n.state") + " FROM notice n " +
-            "JOIN pair p ON p.pair_no=n.pair_no WHERE n.pair_no=$p AND n.notice_id=$id;");
+        using var command = StoreSchema.Command(_connection, transaction, ByIdSql);
         command.Parameters.AddWithValue("$p", pairNo);
         command.Parameters.AddWithValue("$id", noticeId);
         using var reader = command.ExecuteReader();

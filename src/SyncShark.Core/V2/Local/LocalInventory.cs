@@ -245,7 +245,7 @@ public sealed partial class LocalInventory : IInventorySource
             }
             scan = await ApplyHistoryAsync(scan, include, ct).ConfigureAwait(false);
             var snapshot = BuildSnapshot(gen, rootId, cursor, scan, include);
-            sql?.ForgetLocalWalk(rootId);
+            sql?.RetireLocalWalk(rootId);
             return snapshot;
         }
     }

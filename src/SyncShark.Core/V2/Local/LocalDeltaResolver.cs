@@ -26,7 +26,7 @@ internal static class LocalDeltaResolver
     {
         IReadOnlyList<string>? Reject(string reason) { context.Fallback?.Invoke(reason); return null; }
         var collected = new List<string>();
-        foreach (var change in changes)
+        foreach (var change in Prepared(changes, context, ct))
         {
             ct.ThrowIfCancellationRequested();
             if (context.ScopeOverflow?.Invoke() == true) return Reject("ambiguous scope limit exceeded");
@@ -75,6 +75,16 @@ internal static class LocalDeltaResolver
             collected.Add(namedPath);
         }
         return Finalize(collected, context.MaxPaths, context.Fallback);
+    }
+
+    private static IEnumerable<NtfsUsnChange> Prepared(IReadOnlyList<NtfsUsnChange> changes, ResolveContext context, CancellationToken ct)
+    {
+        foreach (var page in changes.Chunk(JournalReadBudget.Records))
+        {
+            ct.ThrowIfCancellationRequested();
+            context.PreparePage?.Invoke(page, ct);
+            foreach (var change in page) yield return change;
+        }
     }
 
     private static string? ParentPath(NtfsUsnChange change, ResolveContext context) =>

@@ -69,6 +69,7 @@ internal static partial class StorageChecks
     }
     public static void RunRefusalNoticeChecks(string root)
     {
+        WrittenNameRefusalChecks(root);
         using var store = SqliteStateStore.Open(Fresh(root, "refusal-notices"), Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         var decision = new Notice("p1", 5, NoticeKind.UserDecision, "conflict", "original explanation", "tie");

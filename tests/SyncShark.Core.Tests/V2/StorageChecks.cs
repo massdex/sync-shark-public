@@ -22,6 +22,7 @@ internal static partial class StorageChecks
         await JournalSizingChecks.RunAsync(root);
         await RehashGateChecks(root);
         await WalkCleanupChecks(root);
+        await WalkRetirementChecks(root);
         await GapGateChecks(root);
         await NoticeGateChecks(root);
         OpenFreshReopen(root);

@@ -119,6 +119,7 @@ public sealed partial class SqliteStateStore : IStateStore
     /// <summary>Closes the store's connection; idempotent.</summary>
     public void Dispose()
     {
+        _walkReclaimStop.Cancel();
         using (_gate.Enter(CancellationToken.None))
         {
             if (_disposed) return;
@@ -305,7 +306,7 @@ public sealed partial class SqliteStateStore : IStateStore
     {
         var rootNo = RootNo(rootId);
         return rootNo is not null && StoreSchema.Scalar(_connection, null,
-            "SELECT 1 FROM file_state WHERE root_no=$r AND object_id=$o LIMIT 1 OFFSET 1;",
+            JournalMultipleNamesSql,
             ("$r", rootNo.Value), ("$o", objectId)) is not null;
     });
 
@@ -596,8 +597,8 @@ public sealed partial class SqliteStateStore : IStateStore
                 }
                 if (action.Kind is ActionKind.CopyNew or ActionKind.Update or ActionKind.Move or ActionKind.MkDir or ActionKind.KeepBoth &&
                     (action.Target == Side.A ? result.NewA : result.NewB) is { } written)
-                    _files.ClearProviderNameRefused(transaction, action.Target == Side.A ? rootNoA : rootNoB,
-                        written, action.ExpectedTarget);
+                    ClearWrittenNameRefusal(transaction, pairNo, pairId, action.Target == Side.A ? rootNoA : rootNoB,
+                        action, written);
 
             }
         }

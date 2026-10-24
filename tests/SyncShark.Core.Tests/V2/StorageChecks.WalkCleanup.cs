@@ -14,7 +14,7 @@ internal static partial class StorageChecks
         using (var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash))
         {
             store.BeginLocalWalk(definition, "options", start);
-            store.SaveLocalWalkPages(definition.RootId, Enumerable.Range(0, SqliteStateStore.LocalWalkCleanupPageRows * 2)
+            store.SaveLocalWalkPages(definition.RootId, Enumerable.Range(0, Fast.StoreWalkCleanupRows * 2)
                 .Select(n => (n, "[]")).ToArray());
         }
         using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = DbPath(folder) }.ToString()))
@@ -24,7 +24,7 @@ internal static partial class StorageChecks
             // Persist the exact first-page state, then reopen without finishing reclamation.
             StoreSchema.Execute(connection, tx, "UPDATE local_walk SET binding='' WHERE root_id=$r;", ("$r", definition.RootId));
             StoreSchema.Execute(connection, tx, SqliteStateStore.LocalWalkCleanupPageSql,
-                ("$r", definition.RootId), ("$n", SqliteStateStore.LocalWalkCleanupPageRows));
+                ("$r", definition.RootId), ("$n", Fast.StoreWalkCleanupRows));
             tx.Commit();
         }
         using var reopened = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
@@ -42,7 +42,7 @@ internal static partial class StorageChecks
         WalkCleanupRestartChecks(root);
         var folder = Fresh(root, "walk-cleanup");
         using var store = SqliteStateStore.Open(folder, Fast, new TestClock(), LocalItems.CaptureOptionalHash);
-        var count = SqliteStateStore.LocalWalkCleanupPageRows * 3;
+        var count = Fast.StoreWalkCleanupRows * 3;
         var definition = new RootDef("walk-root", SyncProviders.Local, null, folder, "root-identity");
         var checkpoint = new NtfsUsnCheckpoint(1, 0, 100, 0);
         store.BeginLocalWalk(definition, "options", checkpoint);
@@ -64,7 +64,7 @@ internal static partial class StorageChecks
                 {
                     var remaining = Convert.ToInt64(StoreSchema.Scalar(connection, null,
                         "SELECT COUNT(*) FROM local_walk_page WHERE root_id=$r AND ordinal>=0;", ("$r", definition.RootId)));
-                    Require(remaining == count - SqliteStateStore.LocalWalkCleanupPageRows,
+                    Require(remaining == count - Fast.StoreWalkCleanupRows,
                         "FIFO admits another store user after exactly one cleanup page");
                     Require(store.HasLocalWalk(definition.RootId), "partial cleanup retains unfinished-walk protection");
                     Require((string?)StoreSchema.Scalar(connection, null,
@@ -82,7 +82,7 @@ internal static partial class StorageChecks
         store.ForgetLocalWalk(definition.RootId);
         using var plan = StoreSchema.Command(connection, null, "EXPLAIN QUERY PLAN " + SqliteStateStore.LocalWalkCleanupPageSql);
         plan.Parameters.AddWithValue("$r", definition.RootId);
-        plan.Parameters.AddWithValue("$n", SqliteStateStore.LocalWalkCleanupPageRows);
+        plan.Parameters.AddWithValue("$n", Fast.StoreWalkCleanupRows);
         using var rows = plan.ExecuteReader();
         while (rows.Read())
             Require(!rows.GetString(3).Contains("SCAN ") && !rows.GetString(3).Contains("TEMP B-TREE"),

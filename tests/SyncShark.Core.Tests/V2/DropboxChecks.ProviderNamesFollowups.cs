@@ -229,6 +229,7 @@ internal static partial class DropboxChecks
             await fx.B.ObserveAsync("tie.txt", CancellationToken.None) == target &&
             fx.WriterA.Effects.Count == 0 && fx.WriterB.Effects.Count == 0,
             "pending refused decision preserves both versions without retry effects");
+        var refusal = fx.Store.OpenNotices("p1").Single(n => n.ReasonKey == ProviderNameRefusedException.NoticeKey);
         var fresh = (await fx.Run.ObserveDecisionsAsync("p1", [(notice.NoticeId!, notice.Path)], CancellationToken.None)).Single();
         var download = await fx.Run.ResolveDecisionAsync("p1", notice.Path, fresh.Token, Side.B,
             new RecordingProgress(), CancellationToken.None);
@@ -240,7 +241,12 @@ internal static partial class DropboxChecks
         Require(fx.Store.LiveFlaggedSummary("ra", ItemFlags.ProviderNameRefused, 3).Count == 0 &&
             fx.Store.OpenNotices("p1").All(n => n.ReasonKey != ProviderNameRefusedException.NoticeKey),
             "successful download clears the persisted refusal and closes its summary");
+        Require(fx.Store.NoticeById("p1", refusal.NoticeId!) is { Closed: true },
+            "successful download closes the identity-bound refusal without another inventory scan");
         fx.Reopen();
+        Require(fx.Store.NoticeById("p1", refusal.NoticeId!) is { Closed: true } &&
+            fx.Store.LiveFlaggedSummary("ra", ItemFlags.ProviderNameRefused, 3).Count == 0,
+            "refusal closure and cleared flag survive cold reopen");
         fx.WriterB.Refused.Clear();
         fx.ClearEffects();
         var edited = fx.A.Seed("tie.txt", "local edit after accepted download", mtime: time.AddDays(1));

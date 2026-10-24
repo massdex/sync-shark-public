@@ -12,6 +12,7 @@ internal static class LocalWalkChecks
 
     internal static async Task RunAsync()
     {
+        await CompletedWalkReturnsBeforeReclaimAsync();
         await PauseAndChangesAsync();
         await CrashInsideDirectoryAsync();
         await ChangedSelectionAsync();
@@ -34,6 +35,29 @@ internal static class LocalWalkChecks
         await TimedFlushAsync();
         CapabilityGateIdentity();
         MarkerAndIdentityValidation();
+    }
+
+    private static async Task CompletedWalkReturnsBeforeReclaimAsync()
+    {
+        var root = Fresh("background-reclaim");
+        LocalChecks.Seed(root, "kept.txt", "content");
+        using var store = SqliteStateStore.Open(root + "-state", StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
+        var inventory = Inventory(root, store, Start);
+        var gate = store.LocalWalkGate("root-local");
+        Task? barrier = null;
+        // Queue before retirement's worker while FullAsync owns the root gate. This
+        // deterministically prevents reclamation without delaying FullCore's return.
+        inventory.DirectoryCompletedForTest = _ => barrier ??= gate.WaitAsync();
+        var snapshot = await inventory.FullAsync(1, _ => true, null!, CancellationToken.None)
+            .WaitAsync(TimeSpan.FromSeconds(30));
+        await barrier!.WaitAsync(TimeSpan.FromSeconds(5));
+        try
+        {
+            LocalChecks.Require(snapshot.Items.Any(item => item.Path == "kept.txt") &&
+                store.LocalWalkPageCount("root-local") > 0 && !store.HasLocalWalk("root-local"),
+                "FullCore returns a complete snapshot before payload reclamation; retirement does not block journal catch-up");
+        }
+        finally { gate.Release(); }
     }
 
     private static string Fresh(string name)

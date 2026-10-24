@@ -26,6 +26,10 @@ public sealed record V2Settings(
     TimeSpan AutoRetryDelay,
     TimeSpan MinSafetyPoll)
 {
+    // Journal metadata admission bounds; no file-content reads occur under these leases.
+    internal const int JournalRecordsPerPage = 256;
+    internal static readonly TimeSpan JournalStoreSlice = TimeSpan.FromMilliseconds(200);
+
     // Diagnostic write batches bound commit latency without buffering a root-sized set.
     internal const int DefaultProvenanceBatchRows = 512;
 
@@ -34,6 +38,14 @@ public sealed record V2Settings(
     /// <summary>Maximum identities examined per rehash gate lease, including ineligible identities.</summary>
     public int StoreRehashPageRows { get; init; } = 128;
     internal const int MinimumStoreRehashPageRows = 1;
+
+    /// <summary>Checkpoint payload rows per synchronous invalidation transaction.</summary>
+    public int StoreWalkCleanupRows { get; init; } = 32;
+    /// <summary>Maximum checkpoint payload rows per background reclamation transaction.</summary>
+    public int StoreWalkReclaimRows { get; init; } = 1024;
+    /// <summary>Background deletion slice; checked between indivisible payload deletions, before commit.</summary>
+    public TimeSpan StoreWalkReclaimSlice { get; init; } = TimeSpan.FromMilliseconds(100);
+    internal const int MinimumStoreWalkRows = 1;
 
     /// <summary>Maximum notices maintained or published per store gate lease.</summary>
     public int StoreNoticePageRows { get; init; } = 128;

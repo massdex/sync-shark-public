@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 
 namespace Massdex.SyncShark.V2;
 
@@ -30,6 +31,12 @@ internal sealed class LocalJournalNames
     }
 
     internal static Action? LookupForTest { get; set; }
+    internal Func<string, bool>? StoredMultipleNames { get; set; }
+    private bool MultipleNames(ulong id)
+    {
+        var objectId = SyncLocalEndpointStore.ObjectId(LocalItems.ParseObjectId(_root.RootObjectId).Volume, id);
+        return StoredMultipleNames?.Invoke(objectId) ?? _known.HasMultipleNames(_root.RootId, objectId);
+    }
     public string? LastFailure { get; private set; }
     private IReadOnlyList<string>? Failed(string reason) { LastFailure = reason; return null; }
     public bool Ambiguous(ulong id, ItemState? known) => Ambiguous(id, known, false);
@@ -37,7 +44,7 @@ internal sealed class LocalJournalNames
     public bool Ambiguous(ulong id, ItemState? known, bool requirePresent)
     {
         _counters?.NameLookup();
-        if (_known.HasMultipleNames(_root.RootId, SyncLocalEndpointStore.ObjectId(LocalItems.ParseObjectId(_root.RootObjectId).Volume, id)))
+        if (MultipleNames(id))
         {
             LastFailure = $"multiple stored hard-link names for object {id:x16}";
             return true;
@@ -46,6 +53,13 @@ internal sealed class LocalJournalNames
     }
 
     private bool SingleLink(string relative, ulong id, bool requirePresent = false)
+    {
+        var started = Stopwatch.GetTimestamp();
+        try { return ReadSingleLink(relative, id, requirePresent); }
+        finally { _counters?.NativeProbe(Stopwatch.GetElapsedTime(started)); }
+    }
+
+    private bool ReadSingleLink(string relative, ulong id, bool requirePresent)
     {
         var path = Path.Combine(_root.RootPath, relative.Replace('/', Path.DirectorySeparatorChar));
         using var handle = OpenMetadata(path, 0, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
@@ -91,7 +105,7 @@ internal sealed class LocalJournalNames
             var directory = parent.Length == 0 ? _root.RootPath :
                 Path.Combine(_root.RootPath, parent.Replace('/', Path.DirectorySeparatorChar));
             var result = new Dictionary<ulong, List<string>>();
-            foreach (var entry in WindowsDirectoryListing.List(directory))
+            foreach (var entry in (_counters?.ListNames(directory) ?? WindowsDirectoryListing.List(directory)))
             {
                 ct.ThrowIfCancellationRequested();
                 var id = unchecked((ulong)entry.FileId);
@@ -128,7 +142,7 @@ internal sealed class LocalJournalNames
                 names = new Dictionary<ulong, string>();
                 var directory = parent.Length == 0 ? _root.RootPath :
                     Path.Combine(_root.RootPath, parent.Replace('/', Path.DirectorySeparatorChar));
-                foreach (var entry in WindowsDirectoryListing.List(directory))
+                foreach (var entry in (_counters?.ListNames(directory) ?? WindowsDirectoryListing.List(directory)))
                 {
                     ct.ThrowIfCancellationRequested();
                     var id = unchecked((ulong)entry.FileId);

@@ -11,6 +11,7 @@ public sealed partial class SqliteStateStore : ILocalWalkStore
     void ILocalWalkStore.SaveLocalWalkPages(string root, IReadOnlyList<(int Ordinal, string Payload)> pages) => SaveLocalWalkPages(root, pages);
     SemaphoreSlim ILocalWalkStore.LocalWalkGate(string root) => LocalWalkGate(root);
     void ILocalWalkStore.ForgetLocalWalk(string root) => ForgetLocalWalk(root);
+    void ILocalWalkStore.RetireLocalWalk(string root) => RetireLocalWalk(root);
     bool ILocalWalkStore.GapInventoryPending(string rootId) => GapInventoryPending(rootId);
 
     // Unfinished observations never enter file_state, generation completion, or deletion coverage.
@@ -39,7 +40,8 @@ public sealed partial class SqliteStateStore : ILocalWalkStore
 
     internal bool HasLocalWalk(string root) => InStore(() =>
         (long)StoreSchema.Scalar(_connection, null,
-            "SELECT EXISTS(SELECT 1 FROM local_walk WHERE root_id=$r);", ("$r", root))! != 0);
+            "SELECT EXISTS(SELECT 1 FROM local_walk WHERE root_id=$r AND NOT(binding='' AND cursor LIKE $retired));",
+            ("$r", root), ("$retired", RetiredWalkPrefix + "%"))! != 0);
 
     internal string? LocalWalkPage(string root, int ordinal) => InStore(() =>
         StoreSchema.Scalar(_connection, null,
@@ -89,7 +91,7 @@ public sealed partial class SqliteStateStore : ILocalWalkStore
     // between pages leaves an incomplete checkpoint, never a truncated successful replay:
     // LocalWalkPageCount detects the missing prefix (including a missing final page).
     // The caller holds LocalWalkGate(root), as for Begin/Save, throughout this operation.
-    internal const int LocalWalkCleanupPageRows = 32;
+    private int LocalWalkCleanupPageRows => Math.Max(V2Settings.MinimumStoreWalkRows, _settings.StoreWalkCleanupRows);
     internal const string LocalWalkCleanupPageSql =
         "DELETE FROM local_walk_page WHERE root_id=$r AND ordinal IN " +
         "(SELECT ordinal FROM local_walk_page WHERE root_id=$r AND ordinal>=0 ORDER BY ordinal LIMIT $n);";

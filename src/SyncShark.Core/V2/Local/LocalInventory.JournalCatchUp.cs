@@ -119,10 +119,8 @@ public sealed partial class LocalInventory
             Scope(known.Path, reason);
         }
         var fallbackReason = "resolved path limit exceeded";
-        var context = new ResolveContext(_rootFileId, _volume,
-            id => CatchUpByObject(rootId, SyncLocalEndpointStore.ObjectId(_volume, id)),
-            _settings.LocalDeltaMaxPaths, names.Find, names.Ambiguous, reason => fallbackReason = names.LastFailure ?? reason, Defer, () => scopeOverflow);
-        var paths = await LocalDeltaResolver.ResolveAsync(changes, context, ct).ConfigureAwait(false);
+        var paths = await ResolveJournalAsync(changes, names, reason => fallbackReason = names.LastFailure ?? reason,
+            Defer, () => scopeOverflow, ct).ConfigureAwait(false);
         CatchUp?.ObserveResolved(paths?.Count ?? 0);
         if (scopeOverflow || paths is null || paths.Count > _settings.LocalDeltaMaxPaths)
         {
