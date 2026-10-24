@@ -373,6 +373,11 @@ internal sealed class RecordingStore : IStateStore
         RecoveryRestoreProtectionCalls++;
         return _inner.RecoveryRestoreProtected(pairId, path, descendants, includeReady);
     }
+    public void UpdateSyncRetry(string pairId, string path, Func<SyncRetry?, SyncRetry?> update)
+    {
+        if (path == FailSaveRetryPath) throw new IOException("injected retry persistence failure");
+        _inner.UpdateSyncRetry(pairId, path, update);
+    }
     public string? FailSaveRetryPath { get; set; }
     public void SaveSyncRetry(string pairId, SyncRetry retry)
     {

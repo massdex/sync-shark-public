@@ -40,7 +40,7 @@ internal sealed class LocalGapIo(IStateStore known, V2Settings settings, IReadOn
     public bool Excluded(RootDef root, ItemState item) =>
         LocalItems.IsExcluded(item.Path, LocalItems.ProductOwnedRelative(root.RootPath, owned));
 
-    public ILocalGapProbe OpenProbes(RootDef root) => new FileIdProbes(root);
+    public ILocalGapProbe OpenProbes(RootDef root) => new FileIdProbes(root, Checkpoint);
 
     public LocalGapProof? Probe(RootDef root, ItemState item)
     {
@@ -53,9 +53,9 @@ internal sealed class LocalGapIo(IStateStore known, V2Settings settings, IReadOn
         private readonly Microsoft.Win32.SafeHandles.SafeFileHandle _volume;
         private readonly NtfsUsnCheckpoint? _checkpoint;
 
-        internal FileIdProbes(RootDef root)
+        internal FileIdProbes(RootDef root, Func<string, NtfsUsnCheckpoint?> checkpoint)
         {
-            NtfsUsnJournal.TryReadCheckpoint(root.RootPath, out _checkpoint);
+            _checkpoint = checkpoint(root.RootPath);
             _volume = NtfsUsnJournal.OpenGapVolume(root.RootPath);
         }
 
@@ -123,6 +123,9 @@ internal sealed class LocalGapIo(IStateStore known, V2Settings settings, IReadOn
         if (handle.IsInvalid)
         {
             var error = Marshal.GetLastWin32Error();
+            var reason = "open-failed(" + error + ")";
+            if (CachedIdentityRefresh.TryQueue(known, root, item, reason))
+                return new(LocalGapHashOutcome.IdentityChanged, Reason: CachedIdentityRefresh.PendingReason);
             return new(LocalGapHashOutcome.Unverifiable, Reason: "content open failed: Windows error " + error,
                 QuarantineCode: error is 225 or 226 ? error : null);
         }

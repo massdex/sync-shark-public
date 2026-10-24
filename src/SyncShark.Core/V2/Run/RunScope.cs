@@ -360,9 +360,10 @@ internal sealed partial class RunScope
             HashSet<string> hiddenA, HashSet<string> hiddenB,
             IEnumerable<(Baseline Basis, ItemState? A, ItemState? B)> claims)
     {
-        var visible = new List<Baseline>();
+        List<Baseline>? visible = null;
         using var claimed = claims.GetEnumerator();
-        baselines = baselines.OrderBy(x => x.ObjectKey, StringComparer.Ordinal).ToArray();
+        var claimIndex = -1;
+        baselines = Planner.OrderBaselines(baselines);
         var links = _scopeLinks ?? _links;
         for (var index = 0; index < baselines.Count; index++)
         {
@@ -373,14 +374,28 @@ internal sealed partial class RunScope
                     .SelectMany(basis => new[] { basis.A.Path, DropboxNameMapping.MatchPath(basis.A),
                         basis.B.Path, DropboxNameMapping.MatchPath(basis.B) }));
             }
-            if (!claimed.MoveNext()) throw new InvalidOperationException("Incomplete baseline claims.");
-            var (basis, claimA, claimB) = claimed.Current;
+            var basis = baselines[index];
+            // No hidden endpoint and no covered baseline means no triple can be removed.
+            // Do not build the full-pair claim indexes just to return the unchanged scope.
+            if (PlanProvenance.Current.Value is null && hiddenA.Count == 0 && hiddenB.Count == 0 &&
+                !Covered(basis.A, Side.A, links) && !Covered(basis.B, Side.B, links))
+            {
+                visible?.Add(basis);
+                continue;
+            }
+            while (claimIndex < index)
+            {
+                if (!claimed.MoveNext()) throw new InvalidOperationException("Incomplete baseline claims.");
+                claimIndex++;
+            }
+            var (_, claimA, claimB) = claimed.Current;
             var covered = (claimA is not null && hiddenA.Contains(claimA.ObjectId)) ||
                 (claimB is not null && hiddenB.Contains(claimB.ObjectId)) ||
                 hiddenA.Contains(basis.A.ObjectId) || hiddenB.Contains(basis.B.ObjectId) ||
                 Covered(basis.A, Side.A, links) || Covered(basis.B, Side.B, links);
             if (covered)
             {
+                visible ??= baselines.Take(index).ToList();
                 if (!PermanentHold(basis.A, links) && !PermanentHold(basis.B, links))
                 {
                     Defer(basis.A, Side.A, links);
@@ -391,9 +406,9 @@ internal sealed partial class RunScope
                 if (claimA is not null) hiddenA.Add(claimA.ObjectId);
                 if (claimB is not null) hiddenB.Add(claimB.ObjectId);
             }
-            else visible.Add(basis);
+            else visible?.Add(basis);
         }
-        if (visible.Count == baselines.Count) return (a, b, baselines);
+        if (visible is null) return (a, b, baselines);
         if (PlanProvenance.Current.Value is { } provenance)
         {
             foreach (var item in a) if (hiddenA.Contains(item.ObjectId)) provenance.Visibility(Side.A, item, true, "protected-baseline-triple");
@@ -542,8 +557,18 @@ internal sealed partial class RunScope
     private static bool UnderRebuildable(RebuildableSelection chosen, string path) =>
         chosen.Folders.Any(folder => PairPath.IsSelfOrUnder(path, folder));
 
-    private IReadOnlyList<Baseline> Filter(IReadOnlyList<Baseline> baselines) => baselines
-        .Where(b => !Excluded(b.A, Side.A) && !Excluded(b.B, Side.B)).ToArray();
+    private IReadOnlyList<Baseline> Filter(IReadOnlyList<Baseline> baselines)
+    {
+        List<Baseline>? visible = null;
+        for (var index = 0; index < baselines.Count; index++)
+        {
+            var basis = baselines[index];
+            if (Excluded(basis.A, Side.A) || Excluded(basis.B, Side.B))
+                visible ??= baselines.Take(index).ToList();
+            else visible?.Add(basis);
+        }
+        return visible is null ? baselines : visible;
+    }
 
     internal sealed record Scope(IReadOnlyList<ItemState> A, IReadOnlyList<ItemState> B, IReadOnlyList<Baseline> Baselines)
     {

@@ -40,12 +40,21 @@ public static partial class Planner
         var none = Array.Empty<ItemState>();                       // only baselines claim, by id or by path
         var pathA = ById(b.Count == 0 ? none : a, byIdA);
         var pathB = ById(b.Count == 0 ? none : bSide, byIdB);
-        var baselines = b.OrderBy(x => x.ObjectKey, StringComparer.Ordinal).ToList();
+        var baselines = OrderBaselines(b);
         var idsA = new HashSet<string>(baselines.Select(x => x.A.ObjectId), StringComparer.Ordinal);
         var idsB = new HashSet<string>(baselines.Select(x => x.B.ObjectId), StringComparer.Ordinal);
         foreach (var basis in baselines)
             yield return (basis, Claim(byIdA, pathA, claimed, basis.A, idsA, Side.A),
                 Claim(byIdB, pathB, claimed, basis.B, idsB, Side.B));
+    }
+
+    // SQLite supplies this order already. Preserve stable ordering for arbitrary contract callers.
+    internal static IReadOnlyList<Baseline> OrderBaselines(IReadOnlyList<Baseline> baselines)
+    {
+        for (var i = 1; i < baselines.Count; i++)
+            if (string.CompareOrdinal(baselines[i - 1].ObjectKey, baselines[i].ObjectKey) > 0)
+                return baselines.OrderBy(x => x.ObjectKey, StringComparer.Ordinal).ToArray();
+        return baselines;
     }
 
     /// <summary>Pairs each side's unclaimed items by case-insensitive path, in one pass per side.</summary>

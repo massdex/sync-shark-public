@@ -259,6 +259,19 @@ if (args is ["--v2-snapshot-million-memory-checks", var snapshotMemoryRoot])
     return 0;
 }
 
+if (args is ["--v2-compare-equivalence-checks"])
+{
+    Massdex.SyncShark.V2.CompareEquivalenceChecks.Run();
+    await Massdex.SyncShark.V2.RunChecks.MemoryReductionChecksAsync();
+    return 0;
+}
+
+if (args is ["--v2-compare-memory-checks"])
+{
+    await Massdex.SyncShark.V2.CompareMemoryChecks.RunAsync();
+    return 0;
+}
+
 if (args is ["--v2-million-memory-checks"])
 {
     await Massdex.SyncShark.V2.RunChecks.MillionItemPrepareMemoryAsync();

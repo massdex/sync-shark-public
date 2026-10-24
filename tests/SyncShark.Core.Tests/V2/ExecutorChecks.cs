@@ -1092,6 +1092,7 @@ internal static partial class ExecutorChecks
         public int CountSyncRetries(string pairId) => _inner.CountSyncRetries(pairId);
         public bool HasActiveRestoredRetries(string pairId) => _inner.HasActiveRestoredRetries(pairId);
         public bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants, bool restoredOnly = false) => _inner.RetryProtected(pairId, path, active, descendants, restoredOnly);
+        public void UpdateSyncRetry(string pairId, string path, Func<SyncRetry?, SyncRetry?> update) => _inner.UpdateSyncRetry(pairId, path, update);
         public void SaveSyncRetry(string pairId, SyncRetry retry) => _inner.SaveSyncRetry(pairId, retry);
         public void ClearSyncRetry(string pairId, string path) => _inner.ClearSyncRetry(pairId, path);
     public void SuspendHeldRetry(string pairId, SyncRetry retry) => _inner.SuspendHeldRetry(pairId, retry);

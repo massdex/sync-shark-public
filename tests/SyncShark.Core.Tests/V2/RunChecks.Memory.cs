@@ -8,6 +8,7 @@ internal static partial class RunChecks
     // Called by the main check runner; no timing/GC thresholds or large synthetic inventories.
     public static async Task MemoryReductionChecksAsync()
     {
+        BaselineOrder_ReusesSortedInput();
         Scope_ReusesUnchangedRows();
         Scope_RefreshesOnlyHashEvidence();
         Scope_RefreshesMappedHashEvidence();
@@ -17,6 +18,19 @@ internal static partial class RunChecks
         Scope_WithoutHeldReusesInput();
         await Preview_ApplyUsesLookupWithoutRecapturingMatchesAsync();
         Console.WriteLine("PASS MemoryReductionChecks");
+    }
+
+    private static void BaselineOrder_ReusesSortedInput()
+    {
+        var item = new ItemState("kept.txt", ItemKind.File, "id", null, null, 1,
+            DateTimeOffset.UnixEpoch, ItemFlags.None);
+        var first = new Baseline("pair", "a", item, item, 1);
+        var second = first with { ObjectKey = "b" };
+        IReadOnlyList<Baseline> sorted = new[] { first, second };
+        Require(ReferenceEquals(sorted, Planner.OrderBaselines(sorted)),
+            "ordered store baselines do not allocate another full-scope array");
+        Require(Planner.OrderBaselines(new[] { second, first }).SequenceEqual(sorted),
+            "unsorted contract inputs retain the original ordinal ordering");
     }
 
     private static void Scope_ReusesUnchangedRows()

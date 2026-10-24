@@ -137,7 +137,9 @@ internal sealed partial class LocalGapWorker(ILocalGapStore store, ILocalGapIo i
                     VerificationBudget.RequiresHash(item, proof.File) ? "content-proof-required" :
                     !Matches(item, proof.File) ? "metadata-mismatch" :
                     proof.File.Usn >= epoch.Boundary ? "usn>=boundary" : "proved-unchanged";
-                if (epoch.TrustFileUsn && proof is null) failures.Add((item, reason));
+                if (epoch.TrustFileUsn && proof is null &&
+                    !(store is IStateStore known && CachedIdentityRefresh.TryQueue(known, root, item, reason)))
+                    failures.Add((item, reason));
                 discovered.Add((item, reason != "proved-unchanged"));
                 Record(item, reason);
             }

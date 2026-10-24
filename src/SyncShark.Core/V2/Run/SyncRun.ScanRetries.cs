@@ -31,7 +31,9 @@ public sealed partial class SyncRun
                 .Where(retry => include(retry.Path)).Where(retry =>
             {
                 if (remaining > 0 && retry.RetryAfter <= _time.GetUtcNow()) { remaining--; return true; }
-                incomplete.Add(retry.Path); // Sleeping work still protects both sides and its notice.
+                // Quiet identity rediscovery already has durable retry + gap/rehash protection.
+                // Do not materialize its unvisited (potentially root-sized) suffix as scan failures.
+                if (!CachedIdentityRefresh.Pending(retry)) incomplete.Add(retry.Path);
                 return false;
             }).Select(retry => retry.Path).ToArray();
             // Finding 3 (F4 memory): a root retry's job is planning coverage, not a second read. Plan
@@ -71,9 +73,14 @@ public sealed partial class SyncRun
                 foreach (var path in reread.IncompleteSubtrees)
                 {
                     incomplete.Add(path);
-                    if (reread.IncompleteReasons.GetValueOrDefault(path) is { Length: > 0 } detail) reasons[path] = detail;
+                    reasons[path] = reread.IncompleteReasons.GetValueOrDefault(path) ??
+                        "The guarded inventory re-read could not completely observe this path.";
                 }
                 touched.AddRange(reread.Changes.Select(change => change.Path));
+                foreach (var scope in scopes)
+                    if (!reread.IncompleteSubtrees.Any(path => path.Length == 0 ||
+                        PairPath.IsSelfOrUnder(scope, path) || PairPath.IsSelfOrUnder(path, scope)))
+                        CachedIdentityRefresh.Observed(_store, pair.PairId, scope, root.RootId);
                 if (reread.IncompleteSubtrees.Contains(string.Empty)) { rootSettles = false; rootDebtSettles = false; }
             }
             else if (RehearsalEndpoints.Unwrap(inventory) is DropboxInventory dropbox && _store is SqliteStateStore sql)
@@ -142,7 +149,8 @@ public sealed partial class SyncRun
         // A retry is retired only after its endpoints have observed the scope. A promoted
         // cursor excludes read debt through these durable targeted-reread rows.
         foreach (var retry in _store.ReadSyncRetries(pair.PairId))
-            if ((retry.Kind == "scan" || retry.ReadRoots is { Count: > 0 }) &&
+            if (!CachedIdentityRefresh.Pending(retry) &&
+                (retry.Kind == "scan" || retry.ReadRoots is { Count: > 0 }) &&
                 (retry.Path.Length == 0 ? !failed.Contains(string.Empty) : !failed.Any(path => path.Length == 0 ||
                     PairPath.IsSelfOrUnder(retry.Path, path) || PairPath.IsSelfOrUnder(path, retry.Path))))
             {
@@ -175,6 +183,9 @@ public sealed partial class SyncRun
             var previous = _store.SyncRetryAt(pair.PairId, path);
             // Preserve existing reviewed authority; the scan must not replace it.
             var diagnostic = scan.A.IncompleteReasons.GetValueOrDefault(path) ?? scan.B.IncompleteReasons.GetValueOrDefault(path);
+            // A bounded pass can leave queued rediscovery unvisited. That is protected work,
+            // not an observation failure; only an attempted, failed reread earns a notice.
+            if (previous is not null && CachedIdentityRefresh.Pending(previous) && diagnostic is null) continue;
             // Finding 4: the durable retry keeps the raw internal cause for support and the next run;
             // the notice says the same thing in plain language with a concrete fix. Both stay one row
             // (and one notice) per path, so repeated runs never duplicate them.

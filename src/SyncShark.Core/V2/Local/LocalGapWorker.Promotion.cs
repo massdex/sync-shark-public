@@ -63,7 +63,9 @@ internal sealed partial class LocalGapWorker
         var current = probes.Probe(currentItem);
         if (current is null)
         {
-            store.DeferGapResult(root.RootId, result, probes.UnavailableReason ?? "file identity proof temporarily unavailable");
+            if (!CachedIdentityRefresh.TryQueue(known, root, currentItem, probes.LastFailureReason))
+                store.DeferGapResult(root.RootId, result, probes.UnavailableReason ?? probes.LastFailureReason ??
+                    "file identity proof temporarily unavailable");
             return;
         }
         if (!ProofFollows(current.JournalCursor, runStart.Cursor) ||

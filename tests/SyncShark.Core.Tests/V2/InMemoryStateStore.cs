@@ -33,6 +33,17 @@ internal sealed partial class InMemoryStateStore : IStateStore
     public bool RetryProtected(string pairId, string path, IReadOnlySet<string> active, bool descendants, bool restoredOnly = false) =>
         ReadSyncRetries(pairId).Any(item => RetryProtectionPredicate.Includes(item, restoredOnly) && !active.Contains(item.Path) && (descendants
             ? PairPath.IsSelfOrUnder(item.Path, path) : PairPath.IsSelfOrUnder(path, item.Path)));
+    public void UpdateSyncRetry(string pairId, string path, Func<SyncRetry?, SyncRetry?> update)
+    {
+        lock (_gate)
+        {
+            var prior = SyncRetryAt(pairId, path);
+            var next = update(prior);
+            if (ReferenceEquals(prior, next)) return;
+            if (next is null) ClearSyncRetry(pairId, path);
+            else SaveSyncRetry(pairId, next);
+        }
+    }
     public void SaveSyncRetry(string pairId, SyncRetry retry)
     { lock (_gate) _retries[(pairId, retry.Path.ToUpperInvariant())] = retry; IndexingWorkSignal.Publish(this); }
     public void ClearSyncRetry(string pairId, string path)

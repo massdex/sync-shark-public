@@ -12,7 +12,7 @@ internal static partial class LocalJournalChecks
         var product = Path.Combine(folder, "gap-reasons-" + Guid.NewGuid().ToString("N"));
         var root = new RootDef("gap-root", SyncProviders.Local, null, folder, SyncLocalEndpointStore.ObjectId(1, 1));
         const string cursor = "0000000000000001:200";
-        string[] reasons = ["proved-unchanged", "usn>=boundary", "metadata-mismatch", "journal-mismatch", "open-failed(87)", "ioctl-failed(1)"];
+        string[] reasons = ["proved-unchanged", "usn>=boundary", "metadata-mismatch", "journal-mismatch", "open-failed(5)", "ioctl-failed(1)"];
         var rows = reasons.Select((reason, i) => new ItemState(reason, ItemKind.File,
             SyncLocalEndpointStore.ObjectId(1, (ulong)i + 10), null, new string('a', 64), 3,
             DateTimeOffset.UtcNow, ItemFlags.None)).ToArray();
@@ -31,7 +31,7 @@ internal static partial class LocalJournalChecks
                 "diagnostic unchanged proof remains protected until next run");
             gaps.PromoteGapDiscovery(root.RootId);
             LocalChecks.Require(gaps.GapHashPage(root.RootId, epoch, 128).Count == 3 &&
-                store.OpenNotices(pair.PairId).Count == 1 && gaps.GapProgress(root.RootId).Contains("open-failed(87)") &&
+                store.OpenNotices(pair.PairId).Count == 1 && gaps.GapProgress(root.RootId).Contains("open-failed(5)") &&
                 store.ProtectionBatch(root.RootId, ItemFlags.NeedsRehash, rows.Skip(4).Select(row => row.Path).ToArray()).All(hit => hit.Covered),
                 "paused hashing still exposes one root notice and exact native probe reason; failed entities stay protected");
             store.RequestIndexRetry(root.RootId);
@@ -126,15 +126,15 @@ internal static partial class LocalJournalChecks
             gaps.GapProgress(root.RootId).Contains("make offline/cloud content available", StringComparison.Ordinal),
             "unsupported proof has bounded attempts, explains retry, and retains path protection");
         var beforeRetry = io.Reads;
-        io.Reason = "open-failed(87)";
+        io.Reason = "open-failed(5)";
         gaps.RetryGapFailures(root.RootId);
         await worker.HashPage(root, epoch, default);
         await worker.HashPage(root, epoch, default);
         LocalChecks.Require(io.Reads > beforeRetry && io.Reads <= beforeRetry + 2 && gaps.HasGapProtection(root.RootId),
             "explicit next-run retry allows one new attempt without reopening a hot loop");
-        LocalChecks.Require(gaps.GapProgress(root.RootId).Contains("open-failed(87)") &&
+        LocalChecks.Require(gaps.GapProgress(root.RootId).Contains("open-failed(5)") &&
             store.ByObject(root.RootId, item.ObjectId) is not null,
-            "hash failure retains the IO-owned native reason and never interprets 87 as deletion");
+            "hash failure retains the IO-owned native access-denied reason and never interprets it as deletion");
     }
 
     private static async Task GapShutdownResumeChecks(string folder)

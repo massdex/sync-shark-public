@@ -176,6 +176,14 @@ internal static class IncrementalInventoryChecks
                 mergedTree.Decisions.Any(decision => decision.RelativePath == "Café.txt") &&
                 mergedTree.Decisions.Any(decision => decision.RelativePath == "Cafe\u0301.txt"),
             "The unchanged collision handling still blocks both NFC-equivalent names with two explicit decisions");
+        var thirdAlias = PilotLocalScanner.MergeIncremental(retainedTree, ScanOf("CAFÉ.txt"), treeScope);
+        Require(!thirdAlias.Entries.Keys.Any(path => PilotPath.CanonicalComparisonKey(path) ==
+                    PilotPath.CanonicalComparisonKey("Café.txt")) &&
+                thirdAlias.Decisions.Count(decision => decision.Kind == PilotDecisionKind.Blocked) == 3,
+            "A third alias stays blocked after both original collision spellings are removed");
+        Require(mergedTree.Entries.Keys.Contains("Folderish/other.txt") &&
+                mergedTree.Entries.ContainsKey("FOLDERISH/OTHER.TXT"),
+            "Published scan keys retain original spelling and case-insensitive lookup");
         var refreshedCopy = ScanOf("Folder/child.txt");
         var mergedTreeRefreshed = PilotLocalScanner.MergeIncremental(retainedTree, refreshedCopy, treeScope);
         Require(mergedTreeRefreshed.Entries.Count == 3 && ReferenceEquals(mergedTreeRefreshed.Entries["Folder/child.txt"],

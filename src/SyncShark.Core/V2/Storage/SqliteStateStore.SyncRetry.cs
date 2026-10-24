@@ -79,6 +79,15 @@ public sealed partial class SqliteStateStore
             SaveSyncRetry(pairId, retry with { RetryAfter = DateTimeOffset.MinValue });
     });
 
+    public void UpdateSyncRetry(string pairId, string path, Func<SyncRetry?, SyncRetry?> update) => InIndexingStore(() =>
+    {
+        var prior = SyncRetryAt(pairId, path);
+        var next = update(prior);
+        if (ReferenceEquals(prior, next)) return;
+        if (next is null) ClearSyncRetry(pairId, path);
+        else SaveSyncRetry(pairId, next);
+    });
+
     public void SaveSyncRetry(string pairId, SyncRetry retry) => InIndexingStore(() =>
         StoreSchema.Execute(_connection, null,
             "INSERT INTO sync_retry(pair_no,path_key,json,retry_after) VALUES($p,$key,$json,$due) " +

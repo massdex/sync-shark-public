@@ -311,6 +311,7 @@ public sealed partial class LocalInventory : IInventorySource
             }
             ct.ThrowIfCancellationRequested();
             if (result.Outcome is LocalGapHashOutcome.Paused or LocalGapHashOutcome.Disabled) break;
+            if (result.Outcome == LocalGapHashOutcome.IdentityChanged) continue;
             if (result.QuarantineCode is { } code)
                 PersistQuarantine(new PilotDecision(item.Path, PilotDecisionKind.Blocked, result.Reason ?? "content reader reported quarantine")
                     { QuarantineCode = code, QuarantineFile = true });
@@ -496,13 +497,14 @@ public sealed partial class LocalInventory : IInventorySource
         items.Sort((left, right) => string.CompareOrdinal(left.Path, right.Path));
         var unobservedPointers = scan.Decisions.Where(d => d.Reason == OwnedPointerProof.ObservationMessage)
             .Select(d => d.RelativePath).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var incomplete = scan.Complete ? DecisionPaths(scan, include) : [string.Empty];
+        var complete = scan.Complete; // The absence callback must not retain the scan's entry graph.
+        var incomplete = complete ? DecisionPaths(scan, include) : [string.Empty];
         // A handled quarantine is not a run-wide incomplete scan, but its unobserved subtree
         // must remain untouched in storage until an explicit retry obtains fresh evidence.
         return new Snapshot(rootId, _side, gen, cursor, items, incomplete)
             { IncludesPath = path => include(path) && !UnderHeldDescendant(path, heldPaths) && !unobservedPointers.Contains(path), IncompleteReasons = DecisionReasons(scan, include),
                 VerifyAbsence = HasOnlyHistoryHolds(scan)
-                    ? item => HistoryListingAbsence(item, scan, include, incomplete) : null,
+                    ? item => HistoryListingAbsence(item, complete, include, incomplete) : null,
                 OpenAbsenceVerifier = HasOnlyHistoryHolds(scan) ? null : () => new LocalFileAbsence(_root.RootPath, _rootIdentity) };
     }
 
@@ -528,10 +530,11 @@ public sealed partial class LocalInventory : IInventorySource
             changes.Add(new Change(ChangeKind.Upsert, held.ObjectId, held.Path, held, null));
         }
         var incompletePaths = decisionPaths.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var complete = scan.Complete;
         var historyOnly = extraIncomplete.Count == 0 && HasOnlyHistoryHolds(scan);
         var absence = new Snapshot(rootId, _side, gen, throughCursor, [], decisionPaths)
             { VerifyAbsence = historyOnly
-                    ? item => HistoryListingAbsence(item, scan,
+                    ? item => HistoryListingAbsence(item, complete,
                         path => include(path) && paths.Any(scope => PairPath.IsSelfOrUnder(path, scope)), decisionPaths) : null,
                 OpenAbsenceVerifier = historyOnly ? null : () => new LocalFileAbsence(_root.RootPath, _rootIdentity) };
         using var verifier = decisionPaths.Count == 0 ? null : absence.OpenAbsenceVerifier?.Invoke();
@@ -548,9 +551,9 @@ public sealed partial class LocalInventory : IInventorySource
 
     // History availability is not identity evidence. Listing omission proves absence only in
     // the complete, included, observed part of this scan, never within a held/incomplete subtree.
-    private static FileAbsence HistoryListingAbsence(ItemState item, PilotLocalScan scan,
+    private static FileAbsence HistoryListingAbsence(ItemState item, bool complete,
         Func<string, bool> include, IReadOnlyList<string> incomplete) =>
-        scan.Complete && include(item.Path) && !LocalItems.InsideAny(item.Path, incomplete)
+        complete && include(item.Path) && !LocalItems.InsideAny(item.Path, incomplete)
             ? FileAbsence.Gone : FileAbsence.Unknown;
 
     // History holds describe missing known items, not an unenumerated directory.

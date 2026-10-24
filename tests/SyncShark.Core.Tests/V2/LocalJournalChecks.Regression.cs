@@ -8,6 +8,7 @@ internal static partial class LocalJournalChecks
     {
         "protection-index" => ProtectionIndexAsync(folder),
         "gap-store" => GapStoreAsync(folder),
+        "cached-identity" => CachedIdentityAsync(folder),
         "hardlinks" => HardLinksAsync(folder), "rehash" => RehashDebtAsync(folder),
         "crash" => CrashDrainAsync(folder), "protection" => ProtectionScaleAsync(folder), "drain" => DrainAsync(folder), "vanish" => VanishAsync(folder),
         "physical-large" => PhysicalFolderAsync(folder, 200_000), "physical" => PhysicalFolderAsync(folder), _ => throw new ArgumentException("Unknown regression", nameof(name))

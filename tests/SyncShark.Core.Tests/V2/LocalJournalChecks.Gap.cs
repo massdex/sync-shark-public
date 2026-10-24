@@ -11,6 +11,7 @@ internal static partial class LocalJournalChecks
         await IndexingRunsAsync(folder);
         await IndexFailureNoticeChecksAsync(Path.Combine(folder, "index-failures"));
         await GapDiscoveryReasonChecks(folder);
+        await CachedIdentityAsync(Path.Combine(folder, "cached-identity"));
         ProtectionBatchChecks.Run(Path.Combine(folder, "protection-" + Guid.NewGuid().ToString("N")));
         var product = Path.Combine(folder, "gap-" + Guid.NewGuid().ToString("N"));
         var stamp = DateTimeOffset.UtcNow;

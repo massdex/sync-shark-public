@@ -107,8 +107,7 @@ public sealed class PilotLocalScanner
             catch (Exception) { /* Display failures must not affect local inventory completeness. */ }
         }
         rootLease.VerifyBinding();
-        var entries = new Dictionary<string, PilotLocalEntry>(StringComparer.OrdinalIgnoreCase);
-        var canonicalPaths = new Dictionary<string, string>(StringComparer.Ordinal);
+        var entries = new Dictionary<string, PilotLocalEntry>(StringComparer.Ordinal);
         var blockedCanonicalPaths = new HashSet<string>(StringComparer.Ordinal);
         var decisions = new List<PilotDecision>();
         long totalBytes = 0;
@@ -121,7 +120,7 @@ public sealed class PilotLocalScanner
         void RecordEntry(PilotLocalEntry entry)
         {
             pageEntries?.Add(entry);
-            AddEntry(entries, canonicalPaths, blockedCanonicalPaths, decisions, entry);
+            AddEntry(entries, blockedCanonicalPaths, decisions, entry);
         }
         using var inspectionCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var inspectionToken = inspectionCancellation.Token;
@@ -286,7 +285,7 @@ public sealed class PilotLocalScanner
                 // Retry them on the next full walk, without discarding unrelated saved progress.
                 var replayDecisionStart = decisions.Count;
                 foreach (var entry in saved.Entries)
-                    AddEntry(entries, canonicalPaths, blockedCanonicalPaths, decisions, entry);
+                    AddEntry(entries, blockedCanonicalPaths, decisions, entry);
                 // AddEntry reconstructs collision state, but the page already contains its exact decisions.
                 decisions.RemoveRange(replayDecisionStart, decisions.Count - replayDecisionStart);
                 decisions.AddRange(saved.Decisions);
@@ -661,7 +660,7 @@ public sealed class PilotLocalScanner
         catch (Exception) { /* Reporting does not change the completed scan. */ }
         rootLease.VerifyBinding();
         stopwatch.Stop();
-        return new PilotLocalScan(entries, decisions, totalBytes, filesHashed,
+        return new PilotLocalScan(PublishEntries(entries), decisions, totalBytes, filesHashed,
             Elapsed: stopwatch.Elapsed, PathsInspected: entriesFound, Incremental: refreshPaths is not null,
             Complete: complete);
         }
@@ -702,8 +701,7 @@ public sealed class PilotLocalScanner
     {
         cancellationToken.ThrowIfCancellationRequested();
         var scope = new HashSet<string>(paths, StringComparer.OrdinalIgnoreCase);
-        var entries = new Dictionary<string, PilotLocalEntry>(StringComparer.OrdinalIgnoreCase);
-        var canonical = new Dictionary<string, string>(StringComparer.Ordinal);
+        var entries = new Dictionary<string, PilotLocalEntry>(StringComparer.Ordinal);
         var blocked = new HashSet<string>(StringComparer.Ordinal);
         var decisions = new List<PilotDecision>(refreshed.Decisions);
         var lookups = 0L;
@@ -711,16 +709,16 @@ public sealed class PilotLocalScanner
         foreach (var entry in retained.Entries.Values)
         {
             if ((++processed & 0xFF) == 0) cancellationToken.ThrowIfCancellationRequested();
-            if (!RefreshedByScope(scope, entry.RelativePath, out var probes)) AddEntry(entries, canonical, blocked, decisions, entry);
+            if (!RefreshedByScope(scope, entry.RelativePath, out var probes)) AddEntry(entries, blocked, decisions, entry);
             lookups += probes;
         }
         foreach (var entry in refreshed.Entries.Values)
         {
             if ((++processed & 0xFF) == 0) cancellationToken.ThrowIfCancellationRequested();
-            AddEntry(entries, canonical, blocked, decisions, entry);
+            AddEntry(entries, blocked, decisions, entry);
         }
         scopeLookups = lookups;
-        return refreshed with { Entries = entries, Decisions = decisions,
+        return refreshed with { Entries = PublishEntries(entries), Decisions = decisions,
             TotalBytes = entries.Values.Where(entry => entry.Kind == PilotEntryKind.File).Sum(entry => entry.Size) };
     }
 
@@ -783,8 +781,14 @@ public sealed class PilotLocalScanner
         rootLease.VerifyBinding();
     }
 
+    // Keep just one canonical index during the walk. Published lookups retain their original
+    // spelling and OrdinalIgnoreCase contract; canonical keys never escape the scanner.
+    private static IReadOnlyDictionary<string, PilotLocalEntry> PublishEntries(
+        Dictionary<string, PilotLocalEntry> entries) => entries.Values.ToDictionary(
+            entry => entry.RelativePath, StringComparer.OrdinalIgnoreCase);
+
     private static void AddEntry(IDictionary<string, PilotLocalEntry> entries,
-        IDictionary<string, string> canonicalPaths, ISet<string> blockedCanonicalPaths,
+        ISet<string> blockedCanonicalPaths,
         ICollection<PilotDecision> decisions, PilotLocalEntry entry)
     {
         var key = PilotPath.CanonicalComparisonKey(entry.RelativePath);
@@ -794,10 +798,11 @@ public sealed class PilotLocalScanner
                 "A case- or Unicode-normalization-colliding local name is not accepted."));
             return;
         }
-        if (canonicalPaths.TryGetValue(key, out var existingPath) &&
-            !string.Equals(existingPath, entry.RelativePath, StringComparison.Ordinal))
+        if (entries.TryGetValue(key, out var existing) &&
+            !string.Equals(existing.RelativePath, entry.RelativePath, StringComparison.Ordinal))
         {
-            entries.Remove(existingPath);
+            var existingPath = existing.RelativePath;
+            entries.Remove(key);
             decisions.Add(new PilotDecision(existingPath, PilotDecisionKind.Blocked,
                 "A case- or Unicode-normalization-colliding local name is not accepted."));
             decisions.Add(new PilotDecision(entry.RelativePath, PilotDecisionKind.Blocked,
@@ -805,8 +810,7 @@ public sealed class PilotLocalScanner
             blockedCanonicalPaths.Add(key);
             return;
         }
-        canonicalPaths[key] = entry.RelativePath;
-        entries[entry.RelativePath] = entry;
+        entries[key] = entry;
     }
 
     private static FileStream OpenExclusiveVerified(string fullPath, PilotDirectoryLease rootLease,

@@ -9,6 +9,7 @@ internal static partial class LocalInventoryChecks
 {
     public static async Task RunAsync()
     {
+        AbsenceCallbacksReleaseScan();
         await LocalWalkChecks.RunAsync().ConfigureAwait(false);
         await RemovalSubtreeAsync();
         await RemovalGuardBothSidesAsync();

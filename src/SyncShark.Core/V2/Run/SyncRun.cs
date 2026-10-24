@@ -880,7 +880,9 @@ public sealed partial class SyncRun : ISyncRun
         ct.ThrowIfCancellationRequested();
         var deferredPlanning = AdmitPlanningPage(pairId);
         using var planningTiming = new RunBoundaryTiming("planning", _settings.EnableRunInstrumentation);
-        var activeRetries = retries.Select(item => item.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        // Being due does not authorize effects for an unvisited guarded identity refresh.
+        var activeRetries = retries.Where(item => !CachedIdentityRefresh.Pending(item))
+            .Select(item => item.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var retryHeld = retries.Where(item => item.Held is not null).Select(item => item.Held!).ToArray();
         var pendingEvidence = scan.A.PendingDeletionEvidence.Concat(scan.B.PendingDeletionEvidence)
             .GroupBy(entry => entry.Key, StringComparer.OrdinalIgnoreCase)
@@ -897,8 +899,9 @@ public sealed partial class SyncRun : ISyncRun
             .Select(notice => notice.Path).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         // Content/space notices explicitly rescope their work even before the retry backoff expires.
         // Otherwise that same retry row filters out the very path we just admitted for re-evaluation.
-        var noticeHeldPaths = retryPaths.Where(path => _store.SyncRetryAt(pairId, path) is
-            { Held: not null } or { Kind: "decision" or "deletion-evidence" }).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var noticeHeldPaths = retryPaths.Where(path => _store.SyncRetryAt(pairId, path) is { } retry &&
+            (retry is { Held: not null } or { Kind: "decision" or "deletion-evidence" } ||
+             CachedIdentityRefresh.Pending(retry))).ToHashSet(StringComparer.OrdinalIgnoreCase);
         activeRetries.UnionWith(retryPaths.Where(path => !noticeHeldPaths.Contains(path)));
         var fallbackReported = false;
         void ReportRetryFallback()
@@ -1346,8 +1349,10 @@ public sealed partial class SyncRun : ISyncRun
     {
         var links = LeftAlone(pair).WithPending(PendingDecisions(pair.PairId, decisions))
             .WithPending(OutstandingFootprints(pair.PairId))
+            // Identity refresh must remain inventory-visible and uses the bounded retry
+            // protection owner below, never a root-sized pending-path collection.
             .WithPending(_store.ReadSyncRetries(pair.PairId)
-                .Where(retry => RetryProtectionDomain.Includes(retry))
+                .Where(retry => RetryProtectionDomain.Includes(retry) && !CachedIdentityRefresh.Pending(retry))
                 .Where(retry => retry.Kind == "scan" || retry.ReadRoots is { Count: > 0 } ||
                     retry.PendingNotice is not null)
                 .Select(retry => retry.Path));
