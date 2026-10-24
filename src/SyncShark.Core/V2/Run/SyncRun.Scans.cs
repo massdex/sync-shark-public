@@ -2,10 +2,16 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SyncRun
 {
+    private void RecordLocalCatchUpFallback(PairDef pair, RootDef root) =>
+        _store.AddNotices([new Notice(pair.PairId, 31, NoticeKind.Info, root.RootId,
+            "Local change journal catch-up was unavailable. Retrying a fresh inventory; no stale paused snapshot will be planned.",
+            "local-walk-catch-up")]);
+
     internal sealed record SideScan(long Gen, string CursorAfter, bool Complete, bool Full,
         IReadOnlyList<string> ChangePaths, IReadOnlyList<string> ChangeObjectIds,
         IReadOnlyDictionary<string, DateTimeOffset?> Deleted, IReadOnlyList<string> PreviousPaths)
     {
+        public bool JournalBacklog { get; init; }
         internal bool AllItemsChanged { get; init; }
         internal bool WalkObserved { get; init; } // Actual snapshot, not merely full planning coverage.
         internal IReadOnlyList<Change>? UserChanges { get; set; } = [];
@@ -37,6 +43,7 @@ public sealed partial class SyncRun
             scope.PendingChanges(a, b, A.AllItemsChanged, B.AllItemsChanged);
         }
 
+        public bool JournalBacklog => A.JournalBacklog || B.JournalBacklog;
         public bool AnyFull => A.Full || B.Full;
         public bool HasChanges => A.ChangePaths.Count > 0 || B.ChangePaths.Count > 0;
 

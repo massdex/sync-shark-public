@@ -708,11 +708,11 @@ public sealed partial class SyncRun
                 IncompleteReasons = failures
             };
         }
-        // Evidence availability is not cursor invalidity. First-sync Dropbox inventory ingests
-        // observed absence and resolves held paths separately with targeted revision checks.
+        // Evidence availability is not cursor invalidity; first-sync absence uses targeted revision checks.
         if (delta.CursorInvalid)
         {
             Trace($"scan {side}: full listing required; provider cursor invalid/reset or malformed feed");
+            if (RehearsalEndpoints.Unwrap(inventory) is LocalInventory) RecordLocalCatchUpFallback(pair, root);
             // BeginGeneration closes the discarded delta generation as incomplete, without advancing its cursor.
             var fullGen = _store.BeginGeneration(root.RootId, "full");
             Trace($"scan {side}: rescan snapshot read start ({watch.ElapsedMilliseconds} ms)");
@@ -746,8 +746,8 @@ public sealed partial class SyncRun
                 continue;
             }
             ids.Add(change.ObjectId);
-            var before = _store.ByObject(root.RootId, change.ObjectId)?.Path;
-            if (before is not null && !string.Equals(before, change.Path, StringComparison.Ordinal)) previous.Add(before);
+            var before = _store.ByObject(root.RootId, change.ObjectId);
+            if (change.HasPreviousPath(before)) previous.Add(before!.Path);
         }
         _store.WriteDelta(delta with { IncludesPath = include, ChangedObject = firstSync ? null : ids.Add });
         RehearsalEndpoints.Acknowledge(inventory);
@@ -768,7 +768,7 @@ public sealed partial class SyncRun
         // unchanged items that never reached execution, even though its subsequent feed is empty.
         return new SideScan(deltaGen, delta.CursorAfter, delta.IncompleteSubtrees.Count == 0,
             hydrate.Length > 0 || observationOnly, paths, ids, deleted, previous)
-            { IncompleteSubtrees = delta.IncompleteSubtrees, IncompleteReasons = delta.IncompleteReasons, ObservedCoverage = observationStore is null ? null : coverage, RehashThrough = _store.RehashWatermark(root.RootId),
+            { JournalBacklog = delta.JournalBacklog, IncompleteSubtrees = delta.IncompleteSubtrees, IncompleteReasons = delta.IncompleteReasons, ObservedCoverage = observationStore is null ? null : coverage, RehashThrough = _store.RehashWatermark(root.RootId),
                 PendingDeletionEvidence = delta.PendingDeletionEvidence, ReleasedDeletionEvidence = delta.ReleasedDeletionEvidence,
                 RootDebtSettles = retryReads.RootSettles, UserChanges = delta.Changes };
     }
@@ -794,9 +794,7 @@ public sealed partial class SyncRun
         if (delta.CursorInvalid)
         {
             Trace($"scan {side}: local walk catch-up unavailable; retrying one fresh walk");
-            _store.AddNotices([new Notice(pair.PairId, 31, NoticeKind.Info, root.RootId,
-                "Local change journal catch-up was unavailable. Retrying a fresh inventory; no stale paused snapshot will be planned.",
-                "local-walk-catch-up")]);
+            RecordLocalCatchUpFallback(pair, root);
             var freshGen = _store.BeginGeneration(root.RootId, "full");
             var fresh = await ReadFullAsync(inventory, freshGen, include, root, throttle, ct);
             _store.WriteSnapshot(fresh with { IncludesPath = path => include(path) && (fresh.IncludesPath?.Invoke(path) ?? true), ChangedObject = firstSync || allChanged ? null : id => fullChanges.Add(id), AllItemsChanged = () => allChanged = true });
@@ -807,7 +805,7 @@ public sealed partial class SyncRun
             // must reach the result exactly as the ordinary full-walk branches carry them. Dropping
             // them retires a subtree retry/notice and plans against scope that was never read.
             return new SideScan(freshGen, fresh.CursorAfter, fresh.IncompleteSubtrees.Count == 0, true, [], fullChanges.ToArray(),
-                NoDeletions, []) { AllItemsChanged = allChanged, RehashThrough = _store.RehashWatermark(root.RootId),
+                NoDeletions, []) { JournalBacklog = delta.JournalBacklog, AllItemsChanged = allChanged, RehashThrough = _store.RehashWatermark(root.RootId),
                     ScopedFullCoverage = fresh.IncompleteSubtrees.Count > 0 && !fresh.IncompleteSubtrees.Contains(string.Empty),
                     PendingDeletionEvidence = fresh.PendingDeletionEvidence,
                     IncompleteSubtrees = fresh.IncompleteSubtrees, IncompleteReasons = fresh.IncompleteReasons };
@@ -830,7 +828,7 @@ public sealed partial class SyncRun
         if (complete) CloseHydrationFallback(pair, root);
         return new SideScan(gen, delta.CursorAfter, complete, true,
             delta.Changes.Select(c => c.Path).ToArray(), firstSync || allChanged ? [] : fullChanges.Concat(delta.Changes.Select(c => c.ObjectId)).Distinct().ToArray(),
-            NoDeletions, []) { AllItemsChanged = allChanged, RehashThrough = _store.RehashWatermark(root.RootId),
+            NoDeletions, []) { JournalBacklog = delta.JournalBacklog, AllItemsChanged = allChanged, RehashThrough = _store.RehashWatermark(root.RootId),
                 ScopedFullCoverage = incomplete.Length > 0 && !incomplete.Contains(string.Empty),
                 PendingDeletionEvidence = evidence, ReleasedDeletionEvidence = delta.ReleasedDeletionEvidence,
                 IncompleteSubtrees = incomplete, IncompleteReasons = reasons };

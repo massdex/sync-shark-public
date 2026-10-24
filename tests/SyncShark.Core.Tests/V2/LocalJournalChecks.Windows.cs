@@ -5,6 +5,10 @@ internal static partial class LocalJournalChecks
     internal static async Task ReplayWindowsAsync(string folder)
     {
         WindowRecordBoundary();
+        WindowSizingPersistence(Path.Combine(folder, "sizing"));
+        await WindowAuthorityAsync(Path.Combine(folder, "case-only"), true, false);
+        await WindowAuthorityAsync(Path.Combine(folder, "delete-windows"), false, false);
+        await WindowAuthorityAsync(Path.Combine(folder, "prepare-windows"), false, true);
         await ReplayWindowCaseAsync(Path.Combine(folder, "four"), 8, false);
         await ReplayWindowCaseAsync(Path.Combine(folder, "budget"), 2, false);
         await ReplayWindowCaseAsync(Path.Combine(folder, "crash"), 8, true);
@@ -49,6 +53,7 @@ internal static partial class LocalJournalChecks
         var pair = new PairDef("pair", "Pair A", local,
             new("cloud", SyncProviders.Dropbox, null, "/cloud", "cloud"), [], [], true);
         store.SavePair(pair);
+        store.MarkFirstSyncDone(pair.PairId);
         var inventory = LocalChecks.Inventory(root, store, TimeProvider.System, settings: settings);
         inventory.WalkCheckpointForTest = () => (start, false);
         await SaveFull(inventory, store);

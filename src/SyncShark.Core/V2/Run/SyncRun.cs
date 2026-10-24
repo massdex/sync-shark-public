@@ -962,7 +962,7 @@ public sealed partial class SyncRun : ISyncRun
             // sleeping on its backoff), so the early return goes through the same outcome rule as execution.
             return new(new Plan(pairId, 0, [], []), IncrementalOutcome(
                 WithReconciliation(new RunReport(pairId, string.Empty, 0, 0, 0, 0, 0, 0, 0, 0, [])
-                    { Deferred = retryCount }, reconcile), []), null);
+                    { Deferred = retryCount, JournalBacklog = scan.JournalBacklog }, reconcile), []), null);
         }
 
         void refresh(HashRequest request) => inventory = scanner.RefreshHashes(pair, loadScope(), request);
@@ -1075,7 +1075,7 @@ public sealed partial class SyncRun : ISyncRun
             completion.Step(() => throttle.Report(RunPhases.Finishing, null, tally.Done, 0));
             completion.Step(() => throttle.Flush());
             var report = WithReconciliation(BuildReport(pairId, plan, tally, ct.IsCancellationRequested), reconcile);
-            completion.Step(() => report = report with { Deferred = _store.CountSyncRetries(pairId) });
+            completion.Step(() => report = report with { Deferred = _store.CountSyncRetries(pairId), JournalBacklog = scan.JournalBacklog });
             completion.Step(() => report = IncrementalOutcome(report,
                 pendingEvidence.Keys.Concat(unresolvedEvidence).Distinct(StringComparer.OrdinalIgnoreCase).ToArray()));
             return completion.Finish(report);

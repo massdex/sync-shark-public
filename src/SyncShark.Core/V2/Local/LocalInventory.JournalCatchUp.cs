@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 
 namespace Massdex.SyncShark.V2;
 
@@ -64,12 +64,14 @@ public sealed partial class LocalInventory
             return Invalid(gen, rootId, cursor,
                 journalId != through.JournalId ? "journal replaced" : next > through.NextUsn ? "cursor ahead of journal" : "journal gap: cursor precedes retained range");
         }
-        var window = new JournalReplayWindow();
+        var window = new JournalReplayWindow(_known.JournalWindowSize(_volume, rootId));
         var budget = Math.Clamp(_settings.LocalReplayWindowsPerRun, 1, 64);
         for (var index = 1; ; index++)
         {
             ct.ThrowIfCancellationRequested();
             var end = window.Through(next, through);
+            var recordsBefore = CatchUp?.Records ?? 0;
+            var pathsBefore = CatchUp?.Resolved ?? 0;
             Delta delta;
             try { delta = await ReadWindowAsync(lease, cursor, gen, rootId, journalId, next, end, window, include, ct).ConfigureAwait(false); }
             catch (RetrySmallerJournalWindow) { index--; continue; }
@@ -77,12 +79,13 @@ public sealed partial class LocalInventory
             if (delta.CursorInvalid || delta.IncompleteSubtrees.Count != 0 || delta.PendingDeletionEvidence.Count != 0 ||
                 !NtfsUsnCheckpoint.TryParseCursor(delta.CursorAfter, out _, out var consumed) || consumed <= next)
                 return delta;
-            RunTrace.Emit($"journal catch-up window {index}: {consumed - next} bytes, {CatchUp?.Records ?? 0} records, {CatchUp?.Resolved ?? 0} paths");
+            RunTrace.Emit($"journal catch-up window {index}: {consumed - next} bytes, {(CatchUp?.Records ?? 0) - recordsBefore} records, {(CatchUp?.Resolved ?? 0) - pathsBefore} paths");
+            _known.SaveJournalWindowSize(_volume, Path.GetPathRoot(_root.RootPath)!.TrimEnd(Path.DirectorySeparatorChar).ToUpperInvariant(), rootId, window.Bytes);
+            delta = delta with { JournalBacklog = consumed < through.NextUsn };
             // Run owns deletion timestamps, directory descendant expansion and move pre-images.
             // End this call at such a window rather than discard that authority between windows.
-            if (consumed >= through.NextUsn || index >= budget || !_known.SupportsJournalWindows ||
-                delta.Changes.Any(change => change.Kind == ChangeKind.Delete || change.State?.Kind == ItemKind.Folder ||
-                    _known.ByObject(rootId, change.ObjectId) is { } before && !PairPath.Same(before.Path, change.Path)))
+            if (consumed >= through.NextUsn || index >= budget || !_known.SupportsJournalWindows(rootId) ||
+                delta.Changes.Any(change => change.NeedsRunAuthority(_known.ByObject(rootId, change.ObjectId))))
                 return delta;
             _known.CheckpointJournalWindow(delta with { IncludesPath = include });
             JournalWindowPersistedForTest?.Invoke(delta.CursorAfter);
@@ -113,8 +116,15 @@ public sealed partial class LocalInventory
                 throw new RetrySmallerJournalWindow();
             return JournalReadFailed(gen, rootId, cursor, through, next, readFailure ?? "journal read failed", readFailureKind);
         }
-        if (consumed < next || consumed > through.NextUsn || (consumed == next && through.NextUsn > next))
+        if (consumed == next && through.NextUsn > next)
+        {
+            if (window.RetryNoProgress()) throw new RetrySmallerJournalWindow();
+            return JournalReadFailed(gen, rootId, cursor, through, next,
+                "journal window made no progress at maximum range", NtfsUsnReadFailure.OverLimit);
+        }
+        if (consumed < next || consumed > through.NextUsn)
             return RetryJournal(gen, rootId, cursor, "journal window did not advance at a record boundary");
+        window.MadeProgress();
         through = through with { NextUsn = consumed };
         CatchUp?.ObserveRecords(changes.Count);
         return await ResolveWindowAsync(lease, cursor, gen, rootId, next, through, window, changes, include, ct).ConfigureAwait(false);

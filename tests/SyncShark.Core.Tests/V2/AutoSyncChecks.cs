@@ -14,6 +14,7 @@ internal static partial class AutoSyncChecks
     public static async Task RunAsync()
     {
         var clock = Stopwatch.StartNew();
+        await JournalBacklog_ImmediateRunsAsync();
         await Burst_OneRunAsync();
         await SteadyStream_RunsAtMaxDelayAsync();
         await SignalDuringRun_ExactlyOneMoreAsync();
@@ -38,6 +39,21 @@ internal static partial class AutoSyncChecks
         await ReviewStartDuringStopDrainAsync();
         await AutoSyncHostChecks.RunAsync();
         Console.WriteLine($"v2 autosync checks passed in {clock.ElapsedMilliseconds} ms.");
+    }
+
+    internal static async Task JournalBacklog_ImmediateRunsAsync()
+    {
+        await using var rig = new Rig(["p1"]);
+        for (var window = 0; window < 3; window++)
+            rig.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Complete) with { JournalBacklog = true });
+        rig.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Complete));
+        var before = rig.Clock.GetUtcNow();
+        await rig.StartAsync();
+        await Until(() => rig.Run.Runs("p1") == 4, "journal suffix drains without timer advance or monitor signals");
+        await rig.ParkedAsync(AutoStatus.Idle);
+        Require(rig.Clock.GetUtcNow() == before && rig.State("p1").RetryAt is null,
+            "backlog drains immediately and clears its retry when caught up");
+        Pass("JournalBacklog_ImmediateRuns");
     }
 
     private static async Task Burst_OneRunAsync()

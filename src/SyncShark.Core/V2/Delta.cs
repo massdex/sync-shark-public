@@ -1,9 +1,10 @@
-﻿namespace Massdex.SyncShark.V2;
+namespace Massdex.SyncShark.V2;
 
 /// <summary>An incremental set of changes since a cursor.</summary>
 public sealed record Delta(string RootId, Side Side, long Gen, string CursorBefore, string CursorAfter,
     IReadOnlyList<Change> Changes, bool CursorInvalid, IReadOnlyList<string> IncompleteSubtrees)
 {
+    public bool JournalBacklog { get; init; }
     public IReadOnlyDictionary<string, string> IncompleteReasons { get; init; } = new Dictionary<string, string>();
     // Local partial refreshes use the same evidence for displaced objects as for missing rows.
     internal Snapshot? DisplacementEvidence { get; init; }

@@ -45,6 +45,7 @@ if (args is ["--v2-outcome-ownership-checks"])
 
 if (args is ["--v2-journal-window-checks", var journalWindowRoot])
 {
+    await Massdex.SyncShark.V2.AutoSyncChecks.JournalBacklog_ImmediateRunsAsync();
     await Massdex.SyncShark.V2.LocalJournalChecks.ReplayWindowsAsync(Path.GetFullPath(journalWindowRoot));
     await Massdex.SyncShark.V2.RunChecks.JournalWindowRunAsync(Path.Combine(Path.GetFullPath(journalWindowRoot), "run"));
     return 0;

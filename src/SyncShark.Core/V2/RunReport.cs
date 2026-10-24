@@ -4,6 +4,7 @@ namespace Massdex.SyncShark.V2;
 public sealed record RunReport(string PairId, string Outcome, int Done, int Failed, int Held, int Uploaded,
     int Downloaded, int Deleted, int Moved, int KeptBoth, IReadOnlyList<ActionResult> Failures)
 {
+    public bool JournalBacklog { get; init; }
     internal bool CompletionFailed { get; init; }
     internal bool AttemptFailed { get; init; }
     internal bool Paused { get; init; }

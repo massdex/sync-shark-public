@@ -363,6 +363,10 @@ jobs:
                 flag: --v2-hotfix-gap-checks
                 takes-root: true
                 drive: c
+              - suite: journal-windows
+                flag: --v2-journal-window-checks
+                takes-root: true
+                drive: c
               - suite: ignored-child
                 flag: --v2-ignored-child-checks
                 takes-root: false
