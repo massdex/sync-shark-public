@@ -141,6 +141,13 @@ internal static partial class RunChecks
         var refresh = store.BeginGeneration(root.RootId, "quarantine-refresh");
         store.CompleteGeneration(refresh, checkpoint.Cursor, true);
         Require(store.GapInventoryPending(root.RootId), cause + ": targeted refresh cannot clear obligation");
+        // Check the gap notice while gap protection is active. The overflow/cloud-outage
+        // fixtures below deliberately finish and promote discovery before introducing a
+        // later write; its ordinary rehash summary need not repeat a discharged gap reason.
+        if (cause is "overflow" or "untrusted" or "read-outage" or "read-timeout" or "cloud-outage")
+            Require(gaps.HasGapProtection(root.RootId) &&
+                new RehashProtection(store, pair).Summary(pair.PairId).Detail.Contains("synthetic overflow", StringComparison.Ordinal),
+                cause + ": active verification summary exposes the floor fallback reason");
         // Publish independently completed verification BEFORE the outage run. Otherwise
         // the unrelated background gap hold would correctly prevent the later upload,
         // or promoting it on the recovery run would itself supply a dirty-path handoff.
@@ -187,9 +194,6 @@ internal static partial class RunChecks
             cause + ": run catch-up replays advanced checkpoint, not newer walk start");
         Require(store.IndexRetryDue(root.RootId) && store.NextIndexRetry(root.RootId) is null,
             cause + ": recovered journal fallback leaves independent indexing immediately eligible");
-        if (cause is "overflow" or "untrusted" or "read-outage" or "read-timeout" or "cloud-outage")
-            Require(new RehashProtection(store, pair).Summary(pair.PairId).Detail.Contains("synthetic overflow", StringComparison.Ordinal),
-                cause + ": existing verification summary exposes the floor fallback reason without root backoff");
         // D90: catch-up persists protected proof debt; the separate index run proves content.
         // Measured pre-index state in all nine crash modes: hash=NULL, NeedsRehash, one entity debt row.
         Require(store.ByObject(root.RootId, original.ObjectId) is { Hash: null } pending &&
