@@ -46,8 +46,14 @@ internal static partial class DropboxChecks
         var remoteFolder = (await h.Writer().ObserveAsync("folder", CancellationToken.None))!;
         await AuthorizedFixtureDeleteAsync(h.Writer(), new SyncAction("user-remote-delete", 6, ActionKind.Delete, Side.B,
             "folder", null, null, remoteFolder, false, null), CancellationToken.None);
-        await run.RequestRescanAsync([localRoot.RootId, pair.B.RootId], CancellationToken.None);
+        // The scripted Dropbox feed needs a fresh listing. Keep the real local journal cursor:
+        // resetting it intentionally opens a rehash hold, which correctly blocks this parent delete.
+        await run.RequestRescanAsync([pair.B.RootId], CancellationToken.None);
         var result = await run.IncrementalAsync(pair.PairId, new RecordingProgress(), CancellationToken.None);
+        if (result.Failed != 0 || result.Deleted != 1)
+            Console.WriteLine("RECOVERY DIAGNOSTIC " + System.Text.Json.JsonSerializer.Serialize(new
+            { result, notices = store.OpenNotices(pair.PairId), baselines = store.Baselines(pair.PairId),
+                local = store.Live(localRoot.RootId), retries = store.ReadSyncRetries(pair.PairId) }));
         Require(result.Failed == 0 && result.Deleted == 1, "propagated parent deletion completes without standalone refused child effects");
         Require(!Directory.Exists(Path.Combine(local, "folder")), "reviewed enclosing folder deletion completes");
         Require(Directory.Exists(recovery) && Directory.EnumerateFiles(recovery, "*.recovery", SearchOption.AllDirectories)

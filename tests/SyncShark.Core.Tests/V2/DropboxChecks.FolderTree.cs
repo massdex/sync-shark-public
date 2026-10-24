@@ -8,6 +8,7 @@ internal static partial class DropboxChecks
 {
     private static async Task FolderTreeChecksAsync()
     {
+        await LocalSourceReappearanceChecksAsync();
         await FolderTreeDispatchReappearedAsync(false);
         await FolderTreeDispatchReappearedAsync(true);
         await FolderTreeMissingProofAsync();
