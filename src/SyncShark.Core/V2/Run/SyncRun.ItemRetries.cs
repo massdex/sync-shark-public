@@ -8,7 +8,6 @@ public sealed partial class SyncRun
         var byPath = previous.ToDictionary(item => item.Path, StringComparer.OrdinalIgnoreCase);
         var leftAlone = LeftAlone(pair);
         var includes = BuildPredicates(pair, PairInclude.For);
-        var ignoreRules = PairInclude.IgnoreRules(pair);
         var decisions = _store.UnresolvedNotices(pair.PairId).Where(PlanNotices.HasPathScope).Where(notice => notice.Kind == NoticeKind.UserDecision)
             .Select(notice => notice.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var uncertain = OutstandingFootprints(pair.PairId).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -47,14 +46,14 @@ public sealed partial class SyncRun
             if (_store.SyncRetryAt(pair.PairId, item.Path)?.Kind == "decision")
             { remaining.Remove(item.Path); continue; }
             var rebuildable = item.ReviewedActions?.Any(action => action.RebuildableRemove) == true;
-            var excluded = !rebuildable && pair.Excluded.Any(path => PairPath.IsSelfOrUnder(item.Path, path));
+            var excluded = !rebuildable && PairInclude.Excludes(pair, item.Path);
             var a = _store.Live(pair.A.RootId, [item.Path]).FirstOrDefault();
             var b = _store.Live(pair.B.RootId, [item.Path]).FirstOrDefault();
-            var ignored = SyncIgnorePolicy.IsIgnored(item.Path, (a ?? b)?.Kind == ItemKind.Folder, ignoreRules);
+            var notSynced = PairInclude.NotSynced(pair, item.Path, (a ?? b)?.Kind == ItemKind.Folder, rebuildable);
             // A hold is not an exclusion or proof of success. In particular, inventory narrowed by
             // a root/quarantine/grant hold may look absent or equal without evaluating this retry.
             // Only the user's actual exclusion/ignore can retire debt in a protected scope.
-            if (!excluded && !ignored && ((rebuildable ? leftAlone.CoversExceptLocalLinks(item.Path) : leftAlone.Covers(item.Path)) ||
+            if (!notSynced && ((rebuildable ? leftAlone.CoversExceptLocalLinks(item.Path) : leftAlone.Covers(item.Path)) ||
                 !rebuildable && (!includes.A(item.Path) || !includes.B(item.Path))))
             {
                 // Rotate held debt out of the bounded due page without recording a failed attempt.
@@ -69,8 +68,8 @@ public sealed partial class SyncRun
             var absent = scanComplete && a is null && b is null && !uncertain.Contains(item.Path);
             var equal = evaluated(item.Path) && a is not null && b is not null && Content.SameContent(a, b) == true;
             if (item.Held is not null)
-                RunLog.Trace($"Held retry completion evidence: path={item.Path}; kind={item.Kind}; reprobe={item.ReprobeEvidence}; due={item.RetryAfter:O}; current={_store.SyncRetryAt(pair.PairId, item.Path)?.Kind}; remaining={remaining.Contains(item.Path)}; pending={pending.Contains(item.Path, StringComparer.OrdinalIgnoreCase)}; settled={settled.Contains(item.Path)}; equal={equal}; evaluated={evaluated(item.Path)}; absent={absent}; decision={decisions.Contains(item.Path)}; excluded={excluded}; ignored={ignored}");
-            if (excluded || ignored || decisions.Contains(item.Path) || refused || absent || !remaining.Contains(item.Path) && (settled.Contains(item.Path) || equal ||
+                RunLog.Trace($"Held retry completion evidence: path={item.Path}; kind={item.Kind}; reprobe={item.ReprobeEvidence}; due={item.RetryAfter:O}; current={_store.SyncRetryAt(pair.PairId, item.Path)?.Kind}; remaining={remaining.Contains(item.Path)}; pending={pending.Contains(item.Path, StringComparer.OrdinalIgnoreCase)}; settled={settled.Contains(item.Path)}; equal={equal}; evaluated={evaluated(item.Path)}; absent={absent}; decision={decisions.Contains(item.Path)}; excluded={excluded}; notSynced={notSynced}");
+            if (notSynced || decisions.Contains(item.Path) || refused || absent || !remaining.Contains(item.Path) && (settled.Contains(item.Path) || equal ||
                 item.Held is not null && !pending.Contains(item.Path, StringComparer.OrdinalIgnoreCase)))
             {
                 remaining.Remove(item.Path);

@@ -2,6 +2,18 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SyncRun
 {
+    private Func<string, bool> ScanPathsNotSynced(PairDef pair)
+    {
+        var pairs = _store.Pairs();
+        var owned = _productOwned(pair);
+        return path =>
+        {
+            var item = _store.Live(pair.A.RootId, [path]).FirstOrDefault() ??
+                _store.Live(pair.B.RootId, [path]).FirstOrDefault();
+            return PairInclude.NotSynced(pair, path, item?.Kind == ItemKind.Folder, pairs, owned);
+        };
+    }
+
     // A full walk (including gap recovery and cursor fallback) bypasses targeted scan retries.
     // Capture before it can stream snapshot writes, then settle through the same identity owner.
     private async Task<SideScan> ScanWithIdentityRefreshAsync(PairDef pair, Side side, ProgressThrottle throttle,
@@ -10,11 +22,11 @@ public sealed partial class SyncRun
         var root = side == Side.A ? pair.A : pair.B;
         var predicates = Predicates(pair, LinkExclusions.None);
         var include = side == Side.A ? predicates.A : predicates.B;
-        var ignoreRules = PairInclude.IgnoreRules(pair);
+        var notSynced = ScanPathsNotSynced(pair);
         var scopes = root.Provider == SyncProviders.Local
             ? _store.ReadSyncRetries(pair.PairId).Where(retry => CachedIdentityRefresh.NeedsObservation(retry) &&
                 (retry.ReadRoots is null || retry.ReadRoots.Contains(root.RootId)) && include(retry.Path) &&
-                !ScanPathExcluded(pair, retry.Path, ignoreRules))
+                !notSynced(retry.Path))
                 .Select(retry => retry.Path).Take(V2Settings.ScanRetryScopeLimit).ToArray() : [];
         IReadOnlyList<ItemState> before = scopes.Length == 0 ? [] : _store.Live(root.RootId, scopes);
         var scan = await ScanSideCoreAsync(pair, side, throttle, ct, inventoryCursors, firstSync);

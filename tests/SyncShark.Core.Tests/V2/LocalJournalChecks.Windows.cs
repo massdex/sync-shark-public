@@ -108,11 +108,19 @@ internal static partial class LocalJournalChecks
                 reads.Add(from.NextUsn);
                 var index = (from.NextUsn - start.NextUsn) / JournalReplayWindow.ReplayWindowBytes;
                 var name = $"window-{index}.txt";
-                var id = LocalItems.ParseObjectId(LocalChecks.ObjectIdOf(Path.Combine(root, name))).FileId;
+                var id = LocalItems.ParseObjectId(WindowFileObjectId(root, name)).FileId;
                 changes = [new(id, LocalItems.ParseObjectId(local.RootObjectId).FileId, from.NextUsn, 0x100, FileAttributes.Normal, name)];
                 failure = null; kind = NtfsUsnReadFailure.Transient; return true;
             };
         }
+    }
+
+    private static string WindowFileObjectId(string root, string path)
+    {
+        using var lease = PilotDirectoryLease.Open(root);
+        var scan = new PilotLocalScanner { MetadataOnly = true }.ScanAsync(lease,
+            refreshPaths: [path], traverseDirectory: _ => false).GetAwaiter().GetResult();
+        return LocalItems.FromScan(scan.Entries[path]).ObjectId;
     }
 
     private static async Task OverflowWindowsAsync(string folder, bool floor)
@@ -128,10 +136,10 @@ internal static partial class LocalJournalChecks
         await SaveFull(inventory, store);
         LocalChecks.Seed(root, "one.txt", "one"); LocalChecks.Seed(root, "two.txt", "two");
         LocalChecks.Seed(root, "early.txt", "persisted before overflow");
-        var early = LocalItems.ParseObjectId(LocalChecks.ObjectIdOf(Path.Combine(root, "early.txt"))).FileId;
+        var early = LocalItems.ParseObjectId(WindowFileObjectId(root, "early.txt")).FileId;
         var parent = LocalItems.ParseObjectId(LocalChecks.ObjectIdOf(root)).FileId;
-        var one = LocalItems.ParseObjectId(LocalChecks.ObjectIdOf(Path.Combine(root, "one.txt"))).FileId;
-        var two = LocalItems.ParseObjectId(LocalChecks.ObjectIdOf(Path.Combine(root, "two.txt"))).FileId;
+        var one = LocalItems.ParseObjectId(WindowFileObjectId(root, "one.txt")).FileId;
+        var two = LocalItems.ParseObjectId(WindowFileObjectId(root, "two.txt")).FileId;
         var sizes = new List<long>();
         inventory.WalkCheckpointForTest = () => (target, false);
         inventory.JournalReadForTest = (string _, NtfsUsnCheckpoint from, NtfsUsnCheckpoint through,
@@ -154,7 +162,7 @@ internal static partial class LocalJournalChecks
                 gap.Boundary == start.NextUsn + JournalReplayWindow.ReplayWindowBytes,
                 "floor fallback protects only history after the persisted first window");
             LocalChecks.Require(store.Live("root-local", ["early.txt"]).Single().ObjectId ==
-                LocalChecks.ObjectIdOf(Path.Combine(root, "early.txt")), "floor fallback retains the earlier window's persisted change");
+                WindowFileObjectId(root, "early.txt"), "floor fallback retains the earlier window's persisted change");
         }
         else LocalChecks.Require(!delta.CursorInvalid && delta.CursorAfter == target.Cursor &&
             ((ILocalGapStore)store).GapEpoch("root-local") is null, "halving fits and replays without a gap");

@@ -41,6 +41,18 @@ internal static class PairInclude
     internal static bool Excludes(PairDef pair, string path) =>
         Covered(path, pair.Excluded.Select(Normalize).Where(boundary => boundary.Length > 0), false);
 
+    // Rebuildable reviewed removals bypass explicit exclusions, but never ignore rules.
+    internal static bool NotSynced(PairDef pair, string path, bool isDirectory, bool rebuildable = false) =>
+        !rebuildable && Excludes(pair, path) ||
+        path.Length > 0 && SyncIgnorePolicy.IsIgnored(path, isDirectory, IgnoreRules(pair));
+
+    // Scan admission and retirement share the same permanent boundaries on both sides.
+    internal static bool NotSynced(PairDef pair, string path, bool isDirectory,
+        IReadOnlyList<PairDef> pairs, IReadOnlyList<string> productOwned) =>
+        NotSynced(pair, path, isDirectory) ||
+        PermanentBoundary(pair, Side.A, path, false, pairs, productOwned) is not null ||
+        PermanentBoundary(pair, Side.B, path, false, pairs, productOwned) is not null;
+
     private static bool Covered(string path, IEnumerable<string> boundaries, bool rejectAncestors) =>
         boundaries.Any(boundary => PairPath.IsSelfOrUnder(path, boundary) ||
             rejectAncestors && PairPath.IsUnder(boundary, path));

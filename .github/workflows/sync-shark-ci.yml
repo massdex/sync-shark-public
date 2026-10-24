@@ -363,6 +363,10 @@ jobs:
                 flag: --v2-hotfix-gap-checks
                 takes-root: true
                 drive: c
+              - suite: cached-identity-exclusions
+                flag: --v2-cached-identity-exclusion-checks
+                takes-root: true
+                drive: c
               - suite: journal-windows
                 flag: --v2-journal-window-checks
                 takes-root: true

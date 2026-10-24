@@ -2,10 +2,43 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SyncRun
 {
+    private const string LocalCatchUpFallbackNoticeKey = "local-walk-catch-up";
+
     private void RecordLocalCatchUpFallback(PairDef pair, RootDef root) =>
         _store.AddNotices([new Notice(pair.PairId, 31, NoticeKind.Info, root.RootId,
             "Local change journal catch-up was unavailable. Retrying a fresh inventory; no stale paused snapshot will be planned.",
-            "local-walk-catch-up")]);
+            LocalCatchUpFallbackNoticeKey)]);
+
+    private void CloseLocalCatchUpFallback(PairDef pair, RootDef root)
+    {
+        foreach (var notice in _store.UnresolvedNotices(pair.PairId))
+            if (notice.ReasonKey == LocalCatchUpFallbackNoticeKey && notice.NoticeId is not null &&
+                string.Equals(notice.Path, root.RootId, StringComparison.Ordinal))
+                _store.CloseNotice(notice.NoticeId, "resolved");
+    }
+
+    private void CloseLocalScanFallbacks(PairDef pair, RootDef root)
+    {
+        CloseHydrationFallback(pair, root);
+        CloseLocalCatchUpFallback(pair, root);
+    }
+
+    private static Delta WithHydrationFailures(Delta delta, IReadOnlyDictionary<string, string> hydrationFailures)
+    {
+        if (hydrationFailures.Count > 0)
+        {
+            var failures = delta.IncompleteReasons.ToDictionary(entry => entry.Key, entry => entry.Value,
+                StringComparer.OrdinalIgnoreCase);
+            foreach (var failure in hydrationFailures) failures[failure.Key] = failure.Value;
+            delta = delta with
+            {
+                IncompleteSubtrees = delta.IncompleteSubtrees.Concat(hydrationFailures.Keys)
+                    .Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
+                IncompleteReasons = failures
+            };
+        }
+        return delta;
+    }
 
     internal sealed record SideScan(long Gen, string CursorAfter, bool Complete, bool Full,
         IReadOnlyList<string> ChangePaths, IReadOnlyList<string> ChangeObjectIds,

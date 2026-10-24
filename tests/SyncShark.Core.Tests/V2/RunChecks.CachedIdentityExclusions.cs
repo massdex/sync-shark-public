@@ -4,6 +4,8 @@ internal static partial class RunChecks
 {
     internal static async Task CachedIdentityExclusionsAsync(string folder)
     {
+        await ScanBoundaryRetirementAsync(Path.Combine(folder, "boundaries"));
+        await LocalCatchUpNoticeLifecycleAsync(Path.Combine(folder, "notice"));
         foreach (var ignored in new[] { false, true })
         {
             using var store = SqliteStateStore.Open(Path.Combine(folder, ignored ? "ignored" : "excluded"),

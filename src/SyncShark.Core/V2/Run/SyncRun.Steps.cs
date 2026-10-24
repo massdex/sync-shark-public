@@ -696,18 +696,7 @@ public sealed partial class SyncRun
             : RehearsalEndpoints.Unwrap(inventory) is DropboxInventory dropbox
                 ? RehearsalEndpoints.Apply(inventory, await dropbox.ChangesSinceAsync(cursor, deltaGen, include, ct, firstSync), include, echo: true)
                 : await inventory.ChangesSinceAsync(cursor, deltaGen, include, ct);
-        if (hydrationFailures.Count > 0)
-        {
-            var failures = delta.IncompleteReasons.ToDictionary(entry => entry.Key, entry => entry.Value,
-                StringComparer.OrdinalIgnoreCase);
-            foreach (var failure in hydrationFailures) failures[failure.Key] = failure.Value;
-            delta = delta with
-            {
-                IncompleteSubtrees = delta.IncompleteSubtrees.Concat(hydrationFailures.Keys)
-                    .Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
-                IncompleteReasons = failures
-            };
-        }
+        delta = WithHydrationFailures(delta, hydrationFailures);
         // Evidence availability is not cursor invalidity; first-sync absence uses targeted revision checks.
         if (delta.CursorInvalid)
         {
@@ -762,6 +751,8 @@ public sealed partial class SyncRun
             IncompleteReasons = deltaReasons
         };
         await inventory.VerifyPendingAsync(include, paths.Add, ct);
+        if (delta.IncompleteSubtrees.Count == 0 && RehearsalEndpoints.Unwrap(inventory) is LocalInventory)
+            CloseLocalCatchUpFallback(pair, root);
         if (firstSync && delta.IncompleteSubtrees.Count == 0 && delta.PendingDeletionEvidence.Count == 0)
             observationStore?.SaveInventoryObservation(coverage, delta.CursorAfter);
         // With no effect cursor, load the retained inventory too: a failed prepare may have observed
@@ -825,7 +816,7 @@ public sealed partial class SyncRun
         var evidence = MergeCatchUpDeletionEvidence(snapshot.PendingDeletionEvidence,
             delta.PendingDeletionEvidence, delta.ReleasedDeletionEvidence);
         var complete = incomplete.Length == 0;
-        if (complete) CloseHydrationFallback(pair, root);
+        if (complete) CloseLocalScanFallbacks(pair, root);
         return new SideScan(gen, delta.CursorAfter, complete, true,
             delta.Changes.Select(c => c.Path).ToArray(), firstSync || allChanged ? [] : fullChanges.Concat(delta.Changes.Select(c => c.ObjectId)).Distinct().ToArray(),
             NoDeletions, []) { JournalBacklog = delta.JournalBacklog, AllItemsChanged = allChanged, RehashThrough = _store.RehashWatermark(root.RootId),
@@ -1335,7 +1326,7 @@ public sealed partial class SyncRun
         foreach (var notice in open)
         {
             // Watch health is owned by the watch lifecycle; a successful polling run proves no watch recovery.
-            if (notice.ReasonKey is RecoveryRestorePending or RecoveryRestoreReady or "store-maintenance" or "autosync-watch-unavailable") continue;
+            if (notice.ReasonKey is RecoveryRestorePending or RecoveryRestoreReady or "store-maintenance" or "autosync-watch-unavailable" or LocalCatchUpFallbackNoticeKey) continue;
             if (notice.Repair is not null)
             {
                 if (notice.NoticeId is not null && RepairSynced(notice, plan, evaluated, unsettled))

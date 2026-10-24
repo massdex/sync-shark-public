@@ -35,7 +35,7 @@ public sealed partial class SyncRun
         var incomplete = new List<string>();
         var reasons = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var remaining = V2Settings.ScanRetryScopeLimit;
-        var ignoreRules = PairInclude.IgnoreRules(pair);
+        var notSynced = ScanPathsNotSynced(pair);
         var rootDebtSettles = false;
         foreach (var batch in _store.ReadSyncRetries(pair.PairId)
             .Where(retry => (retry.Kind == "scan" || retry.ReadRoots is { Count: > 0 }) &&
@@ -50,7 +50,7 @@ public sealed partial class SyncRun
             // debt) so a ready restore keeps its protection until the scheduled retry.
             var authoritativeReplay = RehearsalEndpoints.Unwrap(inventory) is LocalInventory || RehearsalEndpoints.Unwrap(inventory) is DropboxInventory && rootFeedComplete;
             var scopes = batch.Where(retry => !(authoritativeReplay && retry.Path.Length == 0 && retry.Kind == "scan"))
-                .Where(retry => include(retry.Path) && (retry.Kind != "scan" || !ScanPathExcluded(pair, retry.Path, ignoreRules))).Where(retry =>
+                .Where(retry => include(retry.Path) && (retry.Kind != "scan" || !notSynced(retry.Path))).Where(retry =>
             {
                 if (verified.Contains(retry.Path)) return false;
                 if (remaining > 0 && retry.RetryAfter <= _time.GetUtcNow()) { remaining--; return true; }
@@ -154,19 +154,12 @@ public sealed partial class SyncRun
         return (touched, incomplete, reasons, rootDebtSettles);
     }
 
-    private bool ScanPathExcluded(PairDef pair, string path, IReadOnlyList<SyncIgnoreRule> ignoreRules)
-    {
-        if (PairInclude.Excludes(pair, path)) return true;
-        if (ignoreRules.Count == 0) return false;
-        var item = _store.Live(pair.A.RootId, [path]).FirstOrDefault() ??
-            _store.Live(pair.B.RootId, [path]).FirstOrDefault();
-        return SyncIgnorePolicy.IsIgnored(path, item?.Kind == ItemKind.Folder, ignoreRules);
-    }
-
-    private void RetireScanRetries(PairDef pair, IReadOnlyCollection<string> failed, IReadOnlyList<SyncIgnoreRule> ignoreRules)
+    private void RetireScanRetries(PairDef pair, IReadOnlyCollection<string> failed, Func<string, bool> notSynced)
     {
         foreach (var retry in _store.ReadSyncRetries(pair.PairId))
-            if (Retirable(retry, failed) || retry.Kind == "scan" && ScanPathExcluded(pair, retry.Path, ignoreRules))
+            if ((Retirable(retry, failed) || retry.Kind == "scan" && notSynced(retry.Path)) &&
+                // RQ-052: scan bookkeeping cannot discard held or reviewed deletion evidence.
+                (retry.Kind != "scan" || retry.Held is null && retry.ReviewedActions is not { Count: > 0 }))
             {
                 if (retry.Kind != "scan")
                 {
@@ -185,13 +178,13 @@ public sealed partial class SyncRun
 
     private void RecordScanRetries(PairDef pair, BothScan scan)
     {
-        var ignoreRules = PairInclude.IgnoreRules(pair);
+        var notSynced = ScanPathsNotSynced(pair);
         var failed = ScanFailures(scan).ToArray();
-        RetireScanRetries(pair, failed, ignoreRules);
+        RetireScanRetries(pair, failed, notSynced);
         // Do not recreate retired scan debt from a filtered targeted reread. Other retry
         // kinds retain their existing read-debt and reviewed-authority bookkeeping.
         failed = failed.Where(path => _store.SyncRetryAt(pair.PairId, path) is { Kind: not "scan" } ||
-            !ScanPathExcluded(pair, path, ignoreRules)).ToArray();
+            !notSynced(path)).ToArray();
         // A transient metadata observation is one durable per-entity retry, but above the limit it is ONE pair
         // notice: a root-wide handle/registration cause must not write a notice per file. Counting and testing
         // the per-path observation inline keeps no second million-entry collection.

@@ -97,13 +97,13 @@ internal static class CachedIdentityRefresh
         // obsolete work, but it is still not a verification failure for the replacement.
         if (known.ByObject(root.RootId, item.ObjectId) is null) return true;
         var queued = false;
-        foreach (var pair in known.Pairs().Where(pair => pair.A.RootId == root.RootId || pair.B.RootId == root.RootId))
+        var pairs = known.Pairs();
+        foreach (var pair in pairs.Where(pair => pair.A.RootId == root.RootId || pair.B.RootId == root.RootId))
         {
             // Deliberately skipped work is handled, not an indexing failure. Other pairs
             // sharing this root still decide independently whether they need rediscovery.
             queued = true;
-            if (PairInclude.Excludes(pair, item.Path) ||
-                SyncIgnorePolicy.IsIgnored(item.Path, item.Kind == ItemKind.Folder, PairInclude.IgnoreRules(pair))) continue;
+            if (PairInclude.NotSynced(pair, item.Path, item.Kind == ItemKind.Folder, pairs, [])) continue;
             known.UpdateSyncRetry(pair.PairId, item.Path, prior =>
             {
                 if (prior is null) return new(item.Path, "scan", 0, PendingReason,
