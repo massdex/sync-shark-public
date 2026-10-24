@@ -185,6 +185,11 @@ internal static partial class RunChecks
         Require(gaps.GapEpoch(root.RootId)!.Epoch == epoch.Epoch, cause + ": next run preserves interrupted epoch");
         Require(reads.Count == 1 && reads[0] == (cause == "replace-pending" ? 250 : 200),
             cause + ": run catch-up replays advanced checkpoint, not newer walk start");
+        Require(store.IndexRetryDue(root.RootId) && store.NextIndexRetry(root.RootId) is null,
+            cause + ": recovered journal fallback leaves independent indexing immediately eligible");
+        if (cause is "overflow" or "untrusted" or "read-outage" or "read-timeout" or "cloud-outage")
+            Require(new RehashProtection(store, pair).Summary(pair.PairId).Detail.Contains("synthetic overflow", StringComparison.Ordinal),
+                cause + ": existing verification summary exposes the floor fallback reason without root backoff");
         // D90: catch-up persists protected proof debt; the separate index run proves content.
         // Measured pre-index state in all nine crash modes: hash=NULL, NeedsRehash, one entity debt row.
         Require(store.ByObject(root.RootId, original.ObjectId) is { Hash: null } pending &&

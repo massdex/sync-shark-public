@@ -613,11 +613,11 @@ public sealed partial class LocalInventory : IInventorySource
         if (kind == NtfsUsnReadFailure.OverLimit)
         {
             if (_pairId is not null && (WalkCheckpointForTest is null || CapacityQueryForTest is not null)) ObserveCapacity(cursor, overflow: true);
-            // The window planner has exhausted its minimum range. Retain the existing
-            // protected whole-root fallback and let the shared index-failure owner notify.
+            // A bounded fallback is not an indexing failure: imposing root backoff here
+            // would prevent its verification debt from draining. The existing verification
+            // summary displays this persisted gap reason without changing retry eligibility.
             var detail = "journal range over limit: metadata rescan and trusted per-file verification; " + reason;
             (_known as ILocalGapStore)?.BeginGap(rootId, through.Cursor, next, trustFileUsn: true, detail);
-            _known.RecordIndexFailure(rootId, detail);
             return Invalid(gen, rootId, cursor, detail);
         }
         return RetryJournal(gen, rootId, cursor, reason);

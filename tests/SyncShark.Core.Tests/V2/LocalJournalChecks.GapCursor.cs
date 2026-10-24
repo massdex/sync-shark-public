@@ -36,6 +36,10 @@ internal static partial class LocalJournalChecks
             epochId = epoch.Epoch;
             LocalChecks.Require(delta.CursorInvalid && store.Cursor(root.RootId) == covered.Cursor && store.GapInventoryPending(root.RootId),
                 "over-limit atomically advances covered cursor and retains crash-safe inventory obligation");
+            LocalChecks.Require(store.IndexRetryDue(root.RootId) && store.NextIndexRetry(root.RootId) is null,
+                "bounded replay fallback creates verification work, not a root indexing backoff");
+            LocalChecks.Require(gaps.GapProgress(root.RootId).Contains("limit", StringComparison.Ordinal),
+                "the existing verification summary retains the fallback reason without failure backoff");
             gaps.GapDiscovered(root.RootId, epoch, row, true);
             gaps.StageGapHash(root.RootId, epoch, row, new string('b', 64),
                 new GapCheckIo(row.Mtime, covered.Cursor).Proof(row, 100));
