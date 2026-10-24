@@ -1306,6 +1306,12 @@ if (args is ["--v2-plan-only-checks"])
     return 0;
 }
 
+if (args is ["--v2-cached-identity-exclusion-checks", var identityExclusionRoot])
+{
+    await Massdex.SyncShark.V2.RunChecks.CachedIdentityExclusionsAsync(Path.GetFullPath(identityExclusionRoot));
+    return 0;
+}
+
 if (args is ["--v2-run-checks"])
 {
     await Massdex.SyncShark.V2.RunChecks.RunAsync();

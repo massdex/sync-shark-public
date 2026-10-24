@@ -35,6 +35,7 @@ public sealed partial class SyncRun
         var incomplete = new List<string>();
         var reasons = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var remaining = V2Settings.ScanRetryScopeLimit;
+        var ignoreRules = PairInclude.IgnoreRules(pair);
         var rootDebtSettles = false;
         foreach (var batch in _store.ReadSyncRetries(pair.PairId)
             .Where(retry => (retry.Kind == "scan" || retry.ReadRoots is { Count: > 0 }) &&
@@ -43,14 +44,13 @@ public sealed partial class SyncRun
         {
             ct.ThrowIfCancellationRequested();
             var verified = CachedIdentityRefresh.Verified(_store, batch, root.RootId);
-            // Read-resilience F-R: a provider replay from the
-            // UNADVANCED cursor already covers the whole root, so root debt must not stay asleep after
+            // A provider replay from the UNADVANCED cursor covers the root; debt must not stay asleep after
             // it succeeds. A completed Dropbox feed and a local journal replay are authoritative;
             // other inventories keep the conservative read (a due retry re-reads, a sleeping one stays
             // debt) so a ready restore keeps its protection until the scheduled retry.
             var authoritativeReplay = RehearsalEndpoints.Unwrap(inventory) is LocalInventory || RehearsalEndpoints.Unwrap(inventory) is DropboxInventory && rootFeedComplete;
             var scopes = batch.Where(retry => !(authoritativeReplay && retry.Path.Length == 0 && retry.Kind == "scan"))
-                .Where(retry => include(retry.Path)).Where(retry =>
+                .Where(retry => include(retry.Path) && (retry.Kind != "scan" || !ScanPathExcluded(pair, retry.Path, ignoreRules))).Where(retry =>
             {
                 if (verified.Contains(retry.Path)) return false;
                 if (remaining > 0 && retry.RetryAfter <= _time.GetUtcNow()) { remaining--; return true; }
@@ -154,11 +154,19 @@ public sealed partial class SyncRun
         return (touched, incomplete, reasons, rootDebtSettles);
     }
 
-    private void RecordScanRetries(PairDef pair, BothScan scan)
+    private bool ScanPathExcluded(PairDef pair, string path, IReadOnlyList<SyncIgnoreRule> ignoreRules)
     {
-        var failed = ScanFailures(scan).ToArray();
+        if (PairInclude.Excludes(pair, path)) return true;
+        if (ignoreRules.Count == 0) return false;
+        var item = _store.Live(pair.A.RootId, [path]).FirstOrDefault() ??
+            _store.Live(pair.B.RootId, [path]).FirstOrDefault();
+        return SyncIgnorePolicy.IsIgnored(path, item?.Kind == ItemKind.Folder, ignoreRules);
+    }
+
+    private void RetireScanRetries(PairDef pair, IReadOnlyCollection<string> failed, IReadOnlyList<SyncIgnoreRule> ignoreRules)
+    {
         foreach (var retry in _store.ReadSyncRetries(pair.PairId))
-            if (Retirable(retry, failed))
+            if (Retirable(retry, failed) || retry.Kind == "scan" && ScanPathExcluded(pair, retry.Path, ignoreRules))
             {
                 if (retry.Kind != "scan")
                 {
@@ -173,6 +181,17 @@ public sealed partial class SyncRun
                         if (notice.ReasonKey == "sync-retry" && PairPath.Same(notice.Path, retry.Path) && notice.NoticeId is not null)
                             _store.CloseNotice(notice.NoticeId, "resolved");
             }
+    }
+
+    private void RecordScanRetries(PairDef pair, BothScan scan)
+    {
+        var ignoreRules = PairInclude.IgnoreRules(pair);
+        var failed = ScanFailures(scan).ToArray();
+        RetireScanRetries(pair, failed, ignoreRules);
+        // Do not recreate retired scan debt from a filtered targeted reread. Other retry
+        // kinds retain their existing read-debt and reviewed-authority bookkeeping.
+        failed = failed.Where(path => _store.SyncRetryAt(pair.PairId, path) is { Kind: not "scan" } ||
+            !ScanPathExcluded(pair, path, ignoreRules)).ToArray();
         // A transient metadata observation is one durable per-entity retry, but above the limit it is ONE pair
         // notice: a root-wide handle/registration cause must not write a notice per file. Counting and testing
         // the per-path observation inline keeps no second million-entry collection.

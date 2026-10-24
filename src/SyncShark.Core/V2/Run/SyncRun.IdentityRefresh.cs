@@ -10,9 +10,11 @@ public sealed partial class SyncRun
         var root = side == Side.A ? pair.A : pair.B;
         var predicates = Predicates(pair, LinkExclusions.None);
         var include = side == Side.A ? predicates.A : predicates.B;
+        var ignoreRules = PairInclude.IgnoreRules(pair);
         var scopes = root.Provider == SyncProviders.Local
             ? _store.ReadSyncRetries(pair.PairId).Where(retry => CachedIdentityRefresh.NeedsObservation(retry) &&
-                (retry.ReadRoots is null || retry.ReadRoots.Contains(root.RootId)) && include(retry.Path))
+                (retry.ReadRoots is null || retry.ReadRoots.Contains(root.RootId)) && include(retry.Path) &&
+                !ScanPathExcluded(pair, retry.Path, ignoreRules))
                 .Select(retry => retry.Path).Take(V2Settings.ScanRetryScopeLimit).ToArray() : [];
         IReadOnlyList<ItemState> before = scopes.Length == 0 ? [] : _store.Live(root.RootId, scopes);
         var scan = await ScanSideCoreAsync(pair, side, throttle, ct, inventoryCursors, firstSync);

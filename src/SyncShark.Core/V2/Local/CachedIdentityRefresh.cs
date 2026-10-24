@@ -99,19 +99,23 @@ internal static class CachedIdentityRefresh
         var queued = false;
         foreach (var pair in known.Pairs().Where(pair => pair.A.RootId == root.RootId || pair.B.RootId == root.RootId))
         {
+            // Deliberately skipped work is handled, not an indexing failure. Other pairs
+            // sharing this root still decide independently whether they need rediscovery.
+            queued = true;
+            if (PairInclude.Excludes(pair, item.Path) ||
+                SyncIgnorePolicy.IsIgnored(item.Path, item.Kind == ItemKind.Folder, PairInclude.IgnoreRules(pair))) continue;
             known.UpdateSyncRetry(pair.PairId, item.Path, prior =>
             {
                 if (prior is null) return new(item.Path, "scan", 0, PendingReason,
                     now ?? TimeProvider.System.GetUtcNow(), ReadRoots: [root.RootId]);
-                if (prior.Kind == "scan" && prior.ReadRoots is null || prior.ReadRoots?.Contains(root.RootId) == true)
+                if (prior.Kind == "scan" && (prior.ReadRoots is null || prior.ReadRoots.Contains(root.RootId)))
                     return prior;
                 // Keep reviewed authority, attempts, notices and deadlines owned by the existing retry.
                 return prior with
                 { ReadRoots = (prior.ReadRoots ?? []).Append(root.RootId).Distinct(StringComparer.Ordinal).ToArray() };
             });
-            queued = true;
         }
-        // Never hide a failure if there is no durable consumer for the requested refresh.
+        // Never hide a failure if no pair owns the requested refresh.
         return queued;
     }
 }

@@ -34,17 +34,16 @@ internal static class PairInclude
         var root = side == Side.A ? pair.A : pair.B;
         var protectedPaths = pair.Excluded.Concat(productOwned).Select(Normalize).Where(path => path.Length > 0)
             .Concat(NestedRoots(root, pair.PairId, allPairs)).ToArray();
-        return path =>
-        {
-            if (ArtifactPaths.IsArtifactPath(path)) return false;
-            foreach (var protectedPath in protectedPaths)
-            {
-                if (PairPath.IsSelfOrUnder(path, protectedPath)) return false;
-                if (rejectAncestors && PairPath.IsUnder(protectedPath, path)) return false;
-            }
-            return true;
-        };
+        return path => !ArtifactPaths.IsArtifactPath(path) && !Covered(path, protectedPaths, rejectAncestors);
     }
+
+    /// <summary>Only explicit pair exclusions, not temporary holds or unreadable inventory.</summary>
+    internal static bool Excludes(PairDef pair, string path) =>
+        Covered(path, pair.Excluded.Select(Normalize).Where(boundary => boundary.Length > 0), false);
+
+    private static bool Covered(string path, IEnumerable<string> boundaries, bool rejectAncestors) =>
+        boundaries.Any(boundary => PairPath.IsSelfOrUnder(path, boundary) ||
+            rejectAncestors && PairPath.IsUnder(boundary, path));
 
     /// <summary>Names the permanent boundary rejecting this path, without treating temporary holds as exclusions.</summary>
     internal static string? PermanentBoundary(PairDef pair, Side side, string path, bool rejectAncestors,
