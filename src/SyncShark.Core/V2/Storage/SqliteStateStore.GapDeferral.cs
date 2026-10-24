@@ -2,7 +2,7 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SqliteStateStore
 {
-    void ILocalGapStore.DeferGapResult(string rootId, LocalGapResult result, string reason) => InIndexingStore(() =>
+    void ILocalGapStore.DeferGapResult(string rootId, LocalGapResult result, string reason, bool recordFailure) => InIndexingStore(() =>
     {
         var root = RootNo(rootId);
         if (root is null) return;
@@ -16,7 +16,7 @@ public sealed partial class SqliteStateStore
             ("$r", root.Value), ("$o", result.Expected.ObjectId), ("$e", result.Epoch), ("$s", result.Sequence), ("$why", reason));
         var changed = StoreSchema.Changes(_connection, tx) != 0;
         IndexFailureTransitionForTest?.Invoke();
-        if (changed && !CachedIdentityRefresh.Pending(reason))
+        if (changed && recordFailure)
             SaveGapFailure(tx, rootId, root.Value, result.Epoch, result.Expected.ObjectId, reason, ProofCause, owner);
         tx.Commit();
     });

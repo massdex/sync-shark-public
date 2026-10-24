@@ -45,10 +45,12 @@ internal sealed partial class RunScope
         IEnumerator<(Baseline Basis, ItemState? A, ItemState? B)> claimed, ref int claimIndex,
         HashSet<string> hiddenA, HashSet<string> hiddenB, LinkExclusions links)
     {
+        var coveredA = Covered(basis.A, Side.A, links);
+        var coveredB = Covered(basis.B, Side.B, links);
         // No hidden endpoint and no covered baseline means no triple can be removed.
         // Do not build full-pair claim indexes just to return the unchanged scope.
         if (PlanProvenance.Current.Value is null && hiddenA.Count == 0 && hiddenB.Count == 0 &&
-            !Covered(basis.A, Side.A, links) && !Covered(basis.B, Side.B, links)) return false;
+            !coveredA && !coveredB) return false;
         while (claimIndex < index)
         {
             if (!claimed.MoveNext()) throw new InvalidOperationException("Incomplete baseline claims.");
@@ -58,7 +60,7 @@ internal sealed partial class RunScope
         var covered = (claimA is not null && hiddenA.Contains(claimA.ObjectId)) ||
             (claimB is not null && hiddenB.Contains(claimB.ObjectId)) ||
             hiddenA.Contains(basis.A.ObjectId) || hiddenB.Contains(basis.B.ObjectId) ||
-            Covered(basis.A, Side.A, links) || Covered(basis.B, Side.B, links);
+            coveredA || coveredB;
         if (!covered) return false;
         if (!PermanentHold(basis.A, links) && !PermanentHold(basis.B, links))
         {

@@ -8,8 +8,14 @@ internal static class LocalScanEntries
     // Keep just one canonical index during the walk. Published lookups retain their original
     // spelling and OrdinalIgnoreCase contract; canonical keys never escape the scanner.
     internal static IReadOnlyDictionary<string, PilotLocalEntry> PublishEntries(
-        Dictionary<string, PilotLocalEntry> entries) => entries.Values.ToDictionary(
-            entry => entry.RelativePath, StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, PilotLocalEntry> entries)
+    {
+        // Admitted names can still collide case-insensitively after Unicode normalization.
+        // Publish with last-wins, as admission does, instead of failing the walk.
+        var published = new Dictionary<string, PilotLocalEntry>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in entries.Values) published[entry.RelativePath] = entry;
+        return published;
+    }
 
     internal static void AddEntry(IDictionary<string, PilotLocalEntry> entries,
         ISet<string> blockedCanonicalPaths,

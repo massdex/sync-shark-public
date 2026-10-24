@@ -17,6 +17,9 @@ internal static class ProtectionProjectionChecks
         var gen = store.BeginGeneration(root, "fixture");
         store.WriteSnapshot(new(root, side, gen, "cursor", items, []));
         store.CompleteGeneration(gen, "cursor", true);
+        // Inventory flags are reconciled against durable entity debt, not accepted as its authority.
+        foreach (var item in items.Where(item => (item.Flags & ItemFlags.NeedsRehash) != 0))
+            store.RequireRehash(root, item, "fixture protection debt");
     }
 
     private static SqliteConnection Writer(string folder)
@@ -63,22 +66,29 @@ internal static class ProtectionProjectionChecks
         var expected = store.ProtectionBatch(pair.A.RootId, ItemFlags.NeedsRehash, paths)
             .Zip(store.ProtectionBatch(pair.B.RootId, ItemFlags.NeedsRehash, paths),
                 (a, b) => new ProtectionMatch(a.Covered || b.Covered, a.Contains || b.Contains)).ToArray();
-        LocalChecks.Require(expected[0].Contains && expected[3].Covered && expected[4].Covered && expected[5].Covered &&
-            expected[7].Covered == (discoverySide == Side.A) && expected[8].Covered && !expected[9].Contains &&
-            expected[13].Covered && expected[15].Covered == (discoverySide == Side.B) && !expected[17].Covered,
-            "mixed oracle exercises flags, case aliases, both gap branches, ancestors and clean siblings");
+        var context = $"storage={storage}, discoverySide={discoverySide}";
+        var none = new ProtectionMatch(false, false);
+        var held = new ProtectionMatch(true, true);
+        var contains = new ProtectionMatch(false, true);
+        var ancestor = new ProtectionMatch(true, false);
+        ProtectionMatch[] fixture = [contains, contains, contains, held, ancestor, held, ancestor,
+            discoverySide == Side.A ? held : none, held, none, none, none, contains, held, ancestor,
+            discoverySide == Side.B ? held : none, held, none, none];
+        RequireMatches(paths, fixture, expected, "main fixture oracle " + context);
         using var frozen = store.OpenPlanningProtection(pair);
         using var stream = frozen.Stream();
-        LocalChecks.Require(stream.SourcePasses == 3 && frozen.Read(paths).SequenceEqual(expected) &&
-            stream.Read(paths).SequenceEqual(expected), "TEMP exact and indexed reads equal main mixed fixture on both sides");
+        LocalChecks.Require(stream.SourcePasses == 3, "mixed fixture builds indexed TEMP stream " + context);
+        RequireMatches(paths, expected, frozen.Read(paths), "TEMP exact versus main " + context);
+        RequireMatches(paths, expected, stream.Read(paths), "TEMP stream versus main " + context);
         StoreSchema.Execute(writer, null, "UPDATE file_state SET flags=0; UPDATE local_gap SET discovery_done=1; DELETE FROM local_gap_item;");
         LocalChecks.Require(store.ProtectionBatch(pair.A.RootId, ItemFlags.NeedsRehash, paths).All(x => !x.Covered && !x.Contains) &&
             store.ProtectionBatch(pair.B.RootId, ItemFlags.NeedsRehash, paths).All(x => !x.Covered && !x.Contains),
             "live release removes both gap branches and flags on both sides");
         using var fallback = frozen.Stream();
-        LocalChecks.Require(fallback.SourcePasses == 0 && frozen.Read(paths).SequenceEqual(expected) &&
-            stream.Read(paths).SequenceEqual(expected) && fallback.Read(paths).SequenceEqual(expected),
-            "range, queued and side B holds remain frozen through all reader paths");
+        LocalChecks.Require(fallback.SourcePasses == 0, "mixed fixture exercises exact fallback " + context);
+        RequireMatches(paths, expected, frozen.Read(paths), "frozen exact after release " + context);
+        RequireMatches(paths, expected, stream.Read(paths), "frozen stream after release " + context);
+        RequireMatches(paths, expected, fallback.Read(paths), "frozen fallback after release " + context);
         foreach (Action mismatch in new Action[] {
             () => frozen.RetryLookup("other", new HashSet<string>(), false),
             () => frozen.RetryProtected("other", "", true, new HashSet<string>(), false),
@@ -88,6 +98,18 @@ internal static class ProtectionProjectionChecks
             try { mismatch(); } catch (ArgumentException) { threw = true; }
             LocalChecks.Require(threw, "mismatched pair fails closed before querying TEMP");
         }
+    }
+
+    private static void RequireMatches(IReadOnlyList<string> paths, IReadOnlyList<ProtectionMatch> expected,
+        IReadOnlyList<ProtectionMatch> actual, string context)
+    {
+        LocalChecks.Require(expected.Count == actual.Count, context + " result count");
+        var differences = Enumerable.Range(0, paths.Count).Where(i => expected[i] != actual[i]).Select(i =>
+            $"path='{paths[i]}': expected={expected[i]}, actual={actual[i]}, " +
+            $"missing={(expected[i].Covered && !actual[i].Covered) || (expected[i].Contains && !actual[i].Contains)}, " +
+            $"extra={(actual[i].Covered && !expected[i].Covered) || (actual[i].Contains && !expected[i].Contains)}");
+        var detail = string.Join("; ", differences);
+        LocalChecks.Require(detail.Length == 0, context + (detail.Length == 0 ? " matches" : ": " + detail));
     }
 
     private static void CopyFailure(string folder)

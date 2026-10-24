@@ -64,7 +64,7 @@ internal sealed partial class LocalGapWorker
         if (current is null)
         {
             if (CachedIdentityRefresh.TryQueue(known, root, currentItem, probes.LastOpenError))
-                store.DeferGapResult(root.RootId, result, CachedIdentityRefresh.PendingReason);
+                store.DeferGapResult(root.RootId, result, CachedIdentityRefresh.PendingReason, recordFailure: false);
             else
                 store.DeferGapResult(root.RootId, result, probes.UnavailableReason ?? probes.LastFailureReason ??
                     "file identity proof temporarily unavailable");

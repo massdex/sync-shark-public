@@ -5,8 +5,7 @@ internal static class CachedIdentityRefresh
 {
     internal const string PendingReason = "cached file identity changed; guarded path rediscovery pending";
 
-    internal static bool Pending(SyncRetry retry) => retry.Kind == "scan" && Pending(retry.LastError);
-    internal static bool Pending(string reason) => reason == PendingReason;
+    internal static bool Pending(SyncRetry retry) => retry.Kind == "scan" && retry.LastError == PendingReason;
 
     /// <summary>Read debt a completed inventory may retire; a quiet refresh is not read debt.</summary>
     internal static bool InventoryDebt(SyncRetry retry) =>

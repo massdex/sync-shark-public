@@ -150,7 +150,7 @@ internal static class FailureBoundaryChecks
         public void SetGapStatus(string rootId, bool discovery, string status)
         { if (status.StartsWith("worker failed:", StringComparison.Ordinal)) FailureStatuses++; }
         public string GapProgress(string rootId) => "";
-        public void DeferGapResult(string rootId, LocalGapResult result, string reason) { }
+        public void DeferGapResult(string rootId, LocalGapResult result, string reason, bool recordFailure = true) { }
         public void FailGapItem(string rootId, LocalGapEpoch epoch, ItemState item, string reason) { }
         public void RetryGapFailures(string rootId) { }
         public bool IsIncompleteInitialInventory(string rootId) => false;

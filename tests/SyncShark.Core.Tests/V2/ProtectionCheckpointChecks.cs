@@ -14,6 +14,7 @@ internal static class ProtectionCheckpointChecks
             DateTimeOffset.UnixEpoch, ItemFlags.NeedsRehash);
         var gen = store.BeginGeneration(pair.A.RootId, "fixture");
         store.WriteSnapshot(new(pair.A.RootId, Side.A, gen, "cursor", [item], []));
+        store.RequireRehash(pair.A.RootId, item, "fixture protection debt");
         store.SaveSyncRetry(pair.PairId, new("Retry/File", "sync", 1, "pending", DateTimeOffset.MaxValue));
         using var frozen = store.OpenPlanningProtection(pair);
         using var writer = new SqliteConnection(new SqliteConnectionStringBuilder
