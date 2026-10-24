@@ -393,8 +393,9 @@ public sealed partial class SqliteStateStore : ILocalGapStore
     {
         var root = RootNo(rootId);
         if (root is null || ReadGap(root)?.Epoch != epoch.Epoch) return Array.Empty<(ItemState, bool)>();
-        StageGapOrphans(root.Value, epoch.Epoch);
+        if (includeBulk) StageGapOrphans(root.Value, epoch.Epoch);
         var ids = SelectGapWork(root.Value, epoch, Math.Clamp(limit, 1, 128), includeBulk, out var urgent);
+        if (ids.Count == 0) return Array.Empty<(ItemState, bool)>();
         var result = new List<(ItemState Item, bool Urgent)>();
         var current = ids.Select(id => (Id: id, Item: _reads.ByObject(root.Value, id))).ToArray();
         using var tx = _connection.BeginTransaction();

@@ -5,12 +5,17 @@ internal static partial class RunChecks
     internal static async Task DuplicatePlanActionsAsync()
     {
         await DuplicateBaselineRetirementsAsync();
+        Rule27RetirementIdentity();
+        EmbeddedCatalogsAreStrictUtf8();
+        await DuplicateFirstFailureAsync();
+        DuplicateCompletionFailureContract();
         foreach (var heldLane in new[] { false, true })
             foreach (var samePath in new[] { false, true })
                 await DuplicateActionFailureAsync(heldLane, samePath);
         foreach (var kind in Enum.GetValues<ActionKind>())
         {
-            var old = PlanIds.ActionId("pair", 7, 15, kind, Side.B, "Parent/Child");
+            var old = "a" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(string.Join('\n', "pair", "7", "15", kind.ToString(), "B", "parent/child"))))[..16].ToLowerInvariant();
             var first = PlanIds.ActionId("pair", 7, 15, kind, Side.B, "Parent/Child", "baseline-one");
             var second = PlanIds.ActionId("pair", 7, 15, kind, Side.B, "Parent/Child", "baseline-two");
             Require(kind == ActionKind.Forget ? first != second && first != old : first == old && second == old,
@@ -71,11 +76,11 @@ internal static partial class RunChecks
         var first = plan.Actions.Single(action => action.Path == "first.txt");
         Require(first.Kind == ActionKind.CopyNew, "forced collision exercises a non-Forget effect");
         var duplicate = first with { Path = samePath ? first.Path : "rejected.txt", ObjectKey = "rejected-key" };
-        plan = plan with { Actions = plan.Actions.Concat(new[] { duplicate }).ToArray() };
+        plan = plan with { Actions = plan.Actions.Concat(new[] { duplicate, duplicate }).ToArray() };
         var report = await run.ApplyAsync(fx.Pair.PairId, plan, new RecordingProgress(), default,
             heldLane ? ReviewedHeld(plan) : null);
-        Require(report.Outcome == RunOutcomes.Partial && report.Failed == 1,
-            "one forced duplicate is one item failure, not a failed run");
+        Require(report.Outcome == RunOutcomes.Partial && report.Failed == 2,
+            "each extra duplicate is an item failure, not a failed run");
         Require(await fx.A.ObserveAsync("first.txt", default) is not null &&
             await fx.A.ObserveAsync("sibling.txt", default) is not null,
             "the first action and independent sibling both execute");
@@ -86,10 +91,17 @@ internal static partial class RunChecks
             "duplicate debt survives same-id success and is re-planned rather than replayed");
         var notices = fx.Store.OpenNotices(fx.Pair.PairId).Where(notice =>
             notice.Path == duplicate.Path && notice.ReasonKey == "sync-retry").ToArray();
-        Require(notices.Length == 1 && notices[0].Detail.Contains("duplicate action id") &&
+        Require(notices.Length == 1 && notices[0].Detail.Contains("extra change was not applied") &&
             notices[0].Detail.Contains("Retry") && notices[0].Detail.Contains("Ignore"),
             "the shared failure owner supplies one actionable deduplicated notice");
         Require(!fx.Store.OpenNotices(fx.Pair.PairId).Any(notice => notice.ReasonKey == "run-unavailable"),
             "no whole-run failure notice is raised");
+        Require(report.Failures.Count(result => result.RejectedDuplicatePath == duplicate.Path) == 2,
+            "failure samples identify rejected paths separately from the kept effect");
+        fx.Store.SaveSyncRetry(fx.Pair.PairId, retry! with { RetryAfter = DateTimeOffset.MinValue });
+        await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        Require(fx.Store.SyncRetryAt(fx.Pair.PairId, duplicate.Path) is null &&
+            !fx.Store.OpenNotices(fx.Pair.PairId).Any(notice => notice.Path == duplicate.Path && notice.ReasonKey == "sync-retry"),
+            "the next clean run retires duplicate debt and closes its notice");
     }
 }

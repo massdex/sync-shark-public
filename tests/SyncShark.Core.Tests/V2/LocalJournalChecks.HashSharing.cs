@@ -45,6 +45,7 @@ internal static partial class LocalJournalChecks
         var epoch = gaps.GapEpoch(root.RootId)!;
         gaps.GapDiscovered(root.RootId, epoch, item, true);
         gaps.GapDiscoveryDone(root.RootId, epoch);
+        await UrgentSaveDuringHashAsync(root, item, store, settings, checkpoint, timeout.Token);
         var renamed = false;
         var racing = new LocalGapIo(store, settings, new HashSet<string>(), () => false)
         {
@@ -65,6 +66,29 @@ internal static partial class LocalJournalChecks
             gaps.GapResults(root.RootId, gaps.GapResultWatermark(root.RootId), 128).Count == 0,
             "renamed path drops its hash result and retains protection without staging or promotion");
         Console.WriteLine("PASS native F file-ID content sharing (journal evidence injected; no journal creation)");
+    }
+
+    private static async Task UrgentSaveDuringHashAsync(RootDef root, ItemState item, SqliteStateStore store,
+        V2Settings settings, NtfsUsnCheckpoint checkpoint, CancellationToken ct)
+    {
+        var path = Path.Combine(root.RootPath, item.Path.Replace('/', Path.DirectorySeparatorChar));
+        var saves = 0;
+        var io = new LocalGapIo(store, settings, new HashSet<string>(), () => true)
+        {
+            CheckpointForCheck = _ => checkpoint,
+            FileUsnForCheck = NativeEvidence,
+            AfterContentReadForCheck = _ =>
+            {
+                if (saves >= 3) return;
+                using (var writer = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete))
+                    writer.WriteByte((byte)++saves);
+                File.SetLastWriteTimeUtc(path, item.Mtime.UtcDateTime.AddSeconds(saves));
+            }
+        };
+        var result = await io.HashAsync(root, item, urgent: true, ct);
+        LocalChecks.Require(saves == 3 && result.Outcome == LocalGapHashOutcome.ChangedDuringRead,
+            "native urgent read classifies repeated concurrent saves as deferral, not failure");
+        File.SetLastWriteTimeUtc(path, item.Mtime.UtcDateTime);
     }
 
     private static NtfsFileUsn? NativeEvidence(SafeFileHandle file)

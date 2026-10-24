@@ -107,14 +107,14 @@ public static class FailureRetryOwner
     /// <summary>Persist a pair/path failure using the existing durable retry adapter.</summary>
     public static SyncRetry SaveFailedRetry(IStateStore store, string pairId, string path,
         string? reason, SyncRetry? old, DateTimeOffset now,
-        FailureKind? failureKind = null, DateTimeOffset? retryNotBefore = null)
+        FailureKind? failureKind = null, DateTimeOffset? retryNotBefore = null, bool countAttempt = true)
     {
         var cause = reason ?? (old?.LastError is { Length: > 0 } previous
             ? previous : "The item could not be confirmed or applied.");
         var kind = failureKind ?? (reason is null && old is not null ? KindOf(old) : ClassifyCause(cause));
         var state = ReportedFailure(old, now,
             retainSleeping: kind == FailureKind.ContentProof && old is not null && KindOf(old) == FailureKind.ContentProof,
-            countAttempt: old is not { ReprobeEvidence: true });
+            countAttempt: countAttempt && old is not { ReprobeEvidence: true });
         var retry = (old ?? new SyncRetry(path, "sync", 0, "", DateTimeOffset.MinValue)) with
         {
             Attempts = state.Attempts,

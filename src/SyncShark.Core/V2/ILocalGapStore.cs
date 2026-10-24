@@ -26,6 +26,7 @@ internal interface ILocalGapStore
     void SetGapStatus(string rootId, bool discovery, string status);
     string GapProgress(string rootId);
     void DeferGapResult(string rootId, LocalGapResult result, string reason, bool recordFailure = true);
+    void DeferGapHash(string rootId, LocalGapEpoch epoch, ItemState item, string reason);
     void FailGapItem(string rootId, LocalGapEpoch epoch, ItemState item, string reason);
     void RetryGapFailures(string rootId);
     bool IsIncompleteInitialInventory(string rootId);

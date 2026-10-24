@@ -164,7 +164,7 @@ public sealed partial class SyncRun
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var path in pending.Concat(unconfirmed).Concat(blocked)
             .Concat(plan.Actions.Where(action => action.Kind != ActionKind.Hold && !tally.WasSettled(action.ActionId))
-                .Select(action => action.Path)).Distinct(StringComparer.OrdinalIgnoreCase).Where(path => !tally.DuplicatePaths.Contains(path)))
+                .Select(action => action.Path)).Distinct(StringComparer.OrdinalIgnoreCase).Where(tally.CompleteRetry))
         {
             if (_store.SyncRetryAt(pair.PairId, path) is { ReprobeEvidence: true }) continue;
             // Recovery holds already retained exact reviewed authority before filtering effects.
@@ -189,7 +189,7 @@ public sealed partial class SyncRun
             var conflictSuccessor = reviewed[path].FirstOrDefault(action =>
                 action.ConflictTransitionKey is not null && !action.SuppressReconciledBaseline);
             // Parking adds reviewed authority, not another failure occurrence or a renewed deadline.
-            var failure = ParkedFailureState(prior, reasons.GetValueOrDefault(path), evidenceUnavailable && held.ContainsKey(path));
+            var failure = ParkedFailureState(prior, reasons.GetValueOrDefault(path), evidenceUnavailable && held.ContainsKey(path) || tally.DuplicatePaths.Contains(path));
             _store.SaveSyncRetry(pair.PairId, new(path, "first-sync", failure.Attempts, reason, failure.RetryAfter,
                 Held: held.GetValueOrDefault(path), ReviewedActions: reviewed[path].ToArray(),
                 HeldReviewed: held.ContainsKey(path), HeldExpected: held.TryGetValue(path, out var heldItem)

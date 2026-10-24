@@ -139,13 +139,21 @@ internal sealed class LocalGapIo(IStateStore known, V2Settings settings, IReadOn
         using var stream = new FileStream(handle, FileAccess.Read, ContentBufferBytes, isAsync: false);
         var content = await ReadHashAsync(stream, urgent, ct).ConfigureAwait(false);
         if (content is null) return new(LocalGapHashOutcome.Paused);
-        var after = FileProof(handle);
-        if (after is null || before != after || Checkpoint(root.RootPath) is not { } through ||
-            through.JournalId != checkpoint.JournalId || through.NextUsn < checkpoint.NextUsn || content.Value.Bytes != item.Size)
+        return ValidateHash(root, item, urgent, checkpoint, before, FileProof(handle), content.Value);
+    }
+
+    private LocalGapHashResult ValidateHash(RootDef root, ItemState item, bool urgent, NtfsUsnCheckpoint checkpoint,
+        NtfsFileUsn before, NtfsFileUsn? after, (string Hash, long Bytes) content)
+    {
+        if (after is null || Checkpoint(root.RootPath) is not { } through ||
+            through.JournalId != checkpoint.JournalId || through.NextUsn < checkpoint.NextUsn)
             return new(LocalGapHashOutcome.Unverifiable);
-        if (ProbePath(root, item) is not { } pathProof || pathProof.File != after) return new(LocalGapHashOutcome.Unverifiable);
+        if (before != after || content.Bytes != item.Size)
+            return new(urgent ? LocalGapHashOutcome.ChangedDuringRead : LocalGapHashOutcome.Unverifiable);
+        if (ProbePath(root, item) is not { } pathProof) return new(LocalGapHashOutcome.Unverifiable);
+        if (pathProof.File != after) return new(urgent ? LocalGapHashOutcome.ChangedDuringRead : LocalGapHashOutcome.Unverifiable);
         // Promotion checks this file's USN and metadata in the same journal on a later run.
-        return new(LocalGapHashOutcome.Verified, content.Value.Hash, new LocalGapProof(checkpoint.Cursor, after!));
+        return new(LocalGapHashOutcome.Verified, content.Hash, new LocalGapProof(checkpoint.Cursor, after!));
     }
 
     private async Task<(string Hash, long Bytes)?> ReadHashAsync(FileStream stream, bool urgent, CancellationToken ct)

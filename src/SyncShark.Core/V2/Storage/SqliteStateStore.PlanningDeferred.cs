@@ -50,7 +50,6 @@ public sealed partial class SqliteStateStore
                     .Where(row => row.root is not null).ToArray();
                 WritePlanningDirty(tx, pair.Value, System.Text.Json.JsonSerializer.Serialize(rows),
                     urgent ? UserChangeReason : VerificationWaitReason);
-                if (urgent) foreach (var row in batch) RetainUrgentGap(tx, row.Root, row.Item);
                 tx.Commit();
             });
     }
@@ -115,17 +114,7 @@ public sealed partial class SqliteStateStore
         var pair = PairNo(pairId);
         if (pair is null) return (IReadOnlyList<DeferredPlanning>)Array.Empty<DeferredPlanning>();
         using var tx = _connection.BeginTransaction();
-        var rows = ReadPlanningIntake(tx, pair.Value, beforeVersion);
-        var totalPaths = 0;
-        var admitted = new List<DeferredPlanning>(rows.Count);
-        foreach (var row in rows)
-        {
-            var remaining = DeferredIntakePathCap - totalPaths;
-            if (remaining <= 0) break;
-            var materialized = MaterializeAliases(tx, row, remaining);
-            totalPaths += materialized.Paths.Count;
-            admitted.Add(materialized);
-        }
+        var admitted = ReadPlanningIntake(tx, pair.Value, beforeVersion);
         if (rotate && admitted.Count > 0)
         {
             // FIFO rotation: admitted versions move above the unadmitted eligible queue, keeping

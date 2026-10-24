@@ -6,6 +6,8 @@ internal static partial class RunChecks
     {
         await UrgentIncidentAsync();
         await UrgentBoundsAsync();
+        await UrgentFairnessAsync();
+        await UrgentMutationAsync();
         Console.WriteLine("PASS UserChangePriority: incident, retry, restart, handoff, rotation, gates and bounds");
     }
 
@@ -117,6 +119,7 @@ internal static partial class RunChecks
     {
         public bool Paused => true;
         public string? FailPath { get; set; }
+        public string? ChangingPath { get; set; }
         public List<string> Attempts { get; } = [];
         public LocalGapProof Probe(RootDef root, ItemState item) => new(PriorityCheckpoint.Cursor,
             new NtfsFileUsn(1, 1, 100, item.Size, item.Mtime.UtcDateTime.ToFileTimeUtc()));
@@ -126,6 +129,11 @@ internal static partial class RunChecks
         {
             Require(urgent, "active input never opens bulk content");
             Attempts.Add(item.Path);
+            if (ChangingPath == item.Path)
+            {
+                endpoint.Seed(item.Path, "saved during hash " + Attempts.Count);
+                return new(LocalGapHashOutcome.ChangedDuringRead);
+            }
             if (FailPath == item.Path) { FailPath = null; return new(LocalGapHashOutcome.Unverifiable, Reason: "fixture read failure"); }
             var current = await endpoint.ObserveAsync(item.Path, ct);
             return new(LocalGapHashOutcome.Verified, current!.Hash, Probe(root, item));

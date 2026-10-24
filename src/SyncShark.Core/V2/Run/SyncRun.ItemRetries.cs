@@ -26,7 +26,7 @@ public sealed partial class SyncRun
         var remaining = pending.ToHashSet(StringComparer.OrdinalIgnoreCase);
         var failed = plan.Actions.Where(action => action.Kind != ActionKind.Hold && !tally.WasSettled(action.ActionId))
             .Select(action => action.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        remaining.UnionWith(failed.Concat(tally.DuplicatePaths));
+        remaining.UnionWith(failed);
         remaining.UnionWith(plan.Notices.Where(PlanNotices.HasPathScope).Where(notice => notice.ReasonKey == PlanNotices.ContentUnconfirmed.Key || notice.ReasonKey == "sync-retry").Select(notice => notice.Path));
         var settled = plan.Actions.Where(action => tally.WasSettled(action.ActionId))
             .SelectMany(action => action.Kind == ActionKind.Move && action.FromPath is not null
@@ -90,7 +90,7 @@ public sealed partial class SyncRun
             }
             else remaining.Add(item.Path); // Back off unresolved no-action rows too; they cannot monopolize a bounded batch.
         }
-        foreach (var path in remaining.Where(path => !tally.DuplicatePaths.Contains(path)))
+        foreach (var path in remaining.Where(tally.CompleteRetry))
         {
             var old = _store.SyncRetryAt(pair.PairId, path) ?? byPath.GetValueOrDefault(path);
             if (sourceBlocked.Contains(path))
@@ -102,19 +102,19 @@ public sealed partial class SyncRun
                 continue;
             }
             SaveFailedRetry(pair, path, reasons.GetValueOrDefault(path)?.Reason, old,
-                conflictSuccessors.GetValueOrDefault(path), reasons.GetValueOrDefault(path));
+                conflictSuccessors.GetValueOrDefault(path), reasons.GetValueOrDefault(path), !tally.DuplicatePaths.Contains(path));
         }
         _store.RefreshInterruptedDeleteNotice(pair.PairId);
         _store.RefreshBlockedDeleteNotice(pair.PairId);
     }
 
     private void SaveFailedRetry(PairDef pair, string path, string? reason, SyncRetry? old,
-        SyncAction? conflictSuccessor = null, ActionResult? failure = null)
+        SyncAction? conflictSuccessor = null, ActionResult? failure = null, bool countAttempt = true)
     {
         if (old?.Kind == "decision") return;
         // The evidence probe owns restored-row counting; the shared owner preserves that counter.
         var retry = FailureRetryOwner.SaveFailedRetry(_store, pair.PairId, path, reason, old, _time.GetUtcNow(),
-            failure?.FailureKind, failure?.RetryNotBefore);
+            failure?.FailureKind, failure?.RetryNotBefore, countAttempt);
         var attempts = retry.Attempts;
         // A frozen conflict successor owns its dedicated Retry-only explanation from its first failure, however
         // that failure arrives: the generic sync-retry notice (with Ignore) must never stand in for it. The

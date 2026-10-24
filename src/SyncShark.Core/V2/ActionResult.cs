@@ -6,6 +6,8 @@ public sealed record ActionResult(string ActionId, Outcome Outcome, ItemState? N
 {
     /// <summary>Original failure code for run-level classification; no exception or provider payload retained.</summary>
     public int? FailureHResult { get; init; }
+    /// <summary>A rejected duplicate is a separate admission failure, not the kept effect's result.</summary>
+    public string? RejectedDuplicatePath { get; init; }
     public FailureRetryOwner.FailureKind? FailureKind { get; init; }
     public DateTimeOffset? RetryNotBefore { get; init; }
 

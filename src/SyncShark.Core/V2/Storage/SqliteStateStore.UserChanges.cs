@@ -5,6 +5,7 @@ namespace Massdex.SyncShark.V2;
 public sealed partial class SqliteStateStore
 {
     internal const string VerificationWaitReason = "Waiting for content verification";
+    // Persisted in partial-index predicates: changing this literal requires an index migration.
     internal const string UserChangeReason = "Waiting for verification of a recent change";
     internal const int UrgentHashCap = 64;
     internal const int UrgentCandidateCap = 1024;
@@ -12,17 +13,17 @@ public sealed partial class SqliteStateStore
         "CREATE INDEX IF NOT EXISTS planning_deferred_user_pv ON planning_deferred(pair_no,version,root_no,object_id) WHERE reason='" + UserChangeReason + "';" +
         "CREATE INDEX IF NOT EXISTS planning_deferred_user_rv ON planning_deferred(root_no,version,object_id) WHERE reason='" + UserChangeReason + "';";
 
-    // DISTINCT is bounded by the inner LIMIT, including roots shared by several pairs.
+    // Grouping and the outer sort are bounded by the indexed candidate LIMIT, even across pairs.
     internal static readonly string UrgentGapSql = """
         SELECT g.object_id FROM (
-          SELECT DISTINCT object_id FROM (
-            SELECT object_id FROM planning_deferred INDEXED BY planning_deferred_user_rv
+          SELECT object_id, MIN(version) AS oldest FROM (
+            SELECT object_id,version FROM planning_deferred INDEXED BY planning_deferred_user_rv
             WHERE root_no=$r AND reason=$user ORDER BY version LIMIT $candidates
-          )
+          ) GROUP BY object_id
         ) u CROSS JOIN local_gap_item g
         WHERE g.root_no=$r AND g.object_id=u.object_id AND g.epoch=$e
           AND g.hash IS NULL AND g.retry_allowed=1 AND g.metadata_ready=0 AND g.retry_after<=$now
-        LIMIT $limit;
+        ORDER BY u.oldest,u.object_id LIMIT $limit;
         """.Replace("$user", "'" + UserChangeReason + "'");
 
     private List<string> SelectGapWork(long root, LocalGapEpoch epoch, int limit, bool includeBulk,
@@ -32,7 +33,6 @@ public sealed partial class SqliteStateStore
         using (var cmd = StoreSchema.Command(_connection, null, UrgentGapSql))
         {
             cmd.Parameters.AddWithValue("$r", root); cmd.Parameters.AddWithValue("$e", epoch.Epoch);
-            cmd.Parameters.AddWithValue("$user", UserChangeReason);
             cmd.Parameters.AddWithValue("$candidates", UrgentCandidateCap);
             cmd.Parameters.AddWithValue("$limit", Math.Min(limit, UrgentHashCap));
             cmd.Parameters.AddWithValue("$now", NowMs());
@@ -51,18 +51,6 @@ public sealed partial class SqliteStateStore
         using var rows = bulk.ExecuteReader();
         while (rows.Read()) ids.Add(rows.GetString(0));
         return ids;
-    }
-
-    // A delta may precede the bulk discovery frontier. Add only an explicit hold;
-    // never advance that frontier or replace already staged evidence.
-    private void RetainUrgentGap(SqliteTransaction tx, string rootId, ItemState item)
-    {
-        if (item.Kind != ItemKind.File) return;
-        StoreSchema.Execute(_connection, tx,
-            "INSERT OR IGNORE INTO local_gap_item(root_no,object_id,epoch,expected_json) " +
-            "SELECT g.root_no,$id,g.epoch,$item FROM local_gap g JOIN root r ON r.root_no=g.root_no " +
-            "WHERE r.root_id=$root AND EXISTS(SELECT 1 FROM file_state f WHERE f.root_no=g.root_no AND f.object_id=$id);",
-            ("$id", item.ObjectId), ("$root", rootId), ("$item", System.Text.Json.JsonSerializer.Serialize(item)));
     }
 
     internal static readonly string UrgentPlanningIntakeSql = """
@@ -85,29 +73,41 @@ public sealed partial class SqliteStateStore
 
     private List<DeferredPlanning> ReadPlanningIntake(SqliteTransaction tx, long pair, long before)
     {
-        var rows = new List<DeferredPlanning>();
-        ReadPlanningIntakePage(tx, pair, before, UrgentPlanningIntakeSql, rows);
-        if (rows.Count < DeferredIntakeEntityCap)
-            ReadPlanningIntakePage(tx, pair, before,
-                BulkPlanningIntakeSql, rows);
-        return rows;
+        var admitted = new List<DeferredPlanning>();
+        AddPage(UrgentPlanningIntakeSql, DeferredIntakeEntityCap / 2, DeferredIntakePathCap / 2);
+        AddPage(BulkPlanningIntakeSql, DeferredIntakeEntityCap - admitted.Count,
+            DeferredIntakePathCap - admitted.Sum(row => row.Paths.Count));
+        return admitted;
+
+        void AddPage(string sql, int limit, int paths)
+        {
+            var rows = ReadPlanningIntakePage(tx, pair, before, sql, limit);
+            foreach (var row in rows)
+            {
+                if (paths <= 0) break;
+                var materialized = MaterializeAliases(tx, row, paths);
+                paths -= materialized.Paths.Count;
+                admitted.Add(materialized);
+            }
+        }
     }
 
-    private void ReadPlanningIntakePage(SqliteTransaction tx, long pair, long before, string sql,
-        List<DeferredPlanning> rows)
+    private List<DeferredPlanning> ReadPlanningIntakePage(SqliteTransaction tx, long pair, long before, string sql, int limit)
     {
+        var rows = new List<DeferredPlanning>();
         using var command = StoreSchema.Command(_connection, tx, sql);
         command.Parameters.AddWithValue("$p", pair);
         command.Parameters.AddWithValue("$before", before);
-        command.Parameters.AddWithValue("$limit", DeferredIntakeEntityCap - rows.Count);
-        command.Parameters.AddWithValue("$user", UserChangeReason);
+        command.Parameters.AddWithValue("$limit", limit);
+        if (sql == BulkPlanningIntakeSql) command.Parameters.AddWithValue("$user", UserChangeReason);
         using var reader = command.ExecuteReader();
         while (reader.Read()) rows.Add(new(reader.GetInt64(0), reader.GetString(1), reader.GetString(2),
             reader.GetInt64(3), [], true, reader.GetString(4), reader.GetString(5),
             reader.GetInt64(6), reader.GetString(7), reader.GetString(8), reader.GetInt64(9) != 0));
+        return rows;
     }
 
     public long UrgentPending(string pairId) => InStore(() => Convert.ToInt64(StoreSchema.Scalar(_connection, null,
         "SELECT COUNT(*) FROM planning_deferred INDEXED BY planning_deferred_user_pv WHERE pair_no=$p AND reason='" + UserChangeReason + "';",
-        ("$p", PairNo(pairId)), ("$user", UserChangeReason))));
+        ("$p", PairNo(pairId)))));
 }

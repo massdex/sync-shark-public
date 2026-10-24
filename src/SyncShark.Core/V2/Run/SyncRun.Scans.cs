@@ -7,7 +7,7 @@ public sealed partial class SyncRun
         IReadOnlyDictionary<string, DateTimeOffset?> Deleted, IReadOnlyList<string> PreviousPaths)
     {
         internal bool AllItemsChanged { get; init; }
-        internal IReadOnlyList<Change> UserChanges { get; init; } = [];
+        internal IReadOnlyList<Change>? UserChanges { get; set; } = [];
         // Full also selects stored scope for hydrated deltas; only a returned full snapshot can establish this.
         public bool ScopedFullCoverage { get; init; }
         public IReadOnlyList<string> IncompleteSubtrees { get; init; } = [];
@@ -27,7 +27,11 @@ public sealed partial class SyncRun
     {
         internal void PendingChanges(RunScope scope, IEnumerable<string> a, IEnumerable<string> b)
         {
-            scope.UserChanges(A.UserChanges, B.UserChanges);
+            if (A.UserChanges is { } userA && B.UserChanges is { } userB)
+            {
+                scope.UserChanges(userA, userB);
+                A.UserChanges = B.UserChanges = null; // Retain scope sets across reloads, release delta payloads.
+            }
             scope.PendingChanges(a, b, A.AllItemsChanged, B.AllItemsChanged);
         }
 

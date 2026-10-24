@@ -15,7 +15,7 @@ internal static class PlanIds
     public static string Split(string objectKey, Side side) => "k" + Hex16(objectKey, "split", SideText(side));
 
     /// <summary>The plan-unique id of one action.</summary>
-    public static string ActionId(string pairId, long gen, int rule, ActionKind kind, Side target, string path) =>
+    private static string ActionId(string pairId, long gen, int rule, ActionKind kind, Side target, string path) =>
         "a" + Hex16(pairId, gen.ToString(CultureInfo.InvariantCulture), rule.ToString(CultureInfo.InvariantCulture),
             kind.ToString(), SideText(target), path.ToLowerInvariant());
 

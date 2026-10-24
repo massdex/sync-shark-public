@@ -177,7 +177,8 @@ public sealed partial class SyncRun
         if (held.Count == 0)
         {
             Trace("0 held deletes skipped Recovery (identical to Dropbox history)");
-            return new(approved, await ExecuteAsync(approved, pair, throttle, ct, tally), unapproved.Concat(approved.RecoveryPending).Concat(tally.DuplicatePaths).Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
+            approved = await ExecuteAsync(approved, pair, throttle, ct, tally);
+            return new(approved, tally, unapproved.Concat(approved.RecoveryPending).Concat(tally.DuplicatePaths).Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
         }
         approved = await AdmitReviewedRemovalsAsync(approved, pair, ct).ConfigureAwait(false);
         var byId = IndexPlanActions(ref approved, pair, tally);
@@ -504,7 +505,7 @@ public sealed partial class SyncRun
                         // guards still refuse a restore that would write over protected content.
                         var deletable = survivor.Kind == ItemKind.File && survivor.Flags == ItemFlags.None;
                         var proposal = new SyncAction(PlanIds.ActionId(pair.PairId, approved.Gen, 40, ActionKind.Delete,
-                            rule.Local, rule.Path), 40, ActionKind.Delete, rule.Local, rule.Path, null, null,
+                            rule.Local, rule.Path, null), 40, ActionKind.Delete, rule.Local, rule.Path, null, null,
                             survivor, true, null) { OppositeAbsent = true };
                         // N3: only a successful fresh lookup may say history was checked. A released row
                         // (outage, no answer, or local-local pair) says history was unavailable and carries
@@ -865,7 +866,7 @@ public sealed partial class SyncRun
                 // An exact current tombstone authorizes an empty folder, discounting only the small
                 // FileName-rule files above. Ignored data needing Recovery keeps a held folder instead.
                 var action = new SyncAction(PlanIds.ActionId(pair.PairId, approved.Gen, 23, ActionKind.Delete,
-                    held.Local, held.Path), 23, ActionKind.Delete, held.Local, held.Path, null, null, current, true, null)
+                    held.Local, held.Path, null), 23, ActionKind.Delete, held.Local, held.Path, null, null, current, true, null)
                     { OppositeAbsent = true };
                 return new HeldPlanResult(FreezeFolderDeletes(pair, new Plan(pair.PairId, approved.Gen, [action], [])),
                     false);

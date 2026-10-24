@@ -51,17 +51,22 @@ internal static partial class RunChecks
     {
         var connection = PriorityConnection(store);
         CheckPriorityPlan(connection, SqliteStateStore.UrgentGapSql,
-            [("$r", 1L), ("$e", "epoch"), ("$now", long.MaxValue), ("$user", SqliteStateStore.UserChangeReason),
-                ("$candidates", SqliteStateStore.UrgentCandidateCap), ("$limit", SqliteStateStore.UrgentHashCap)], "planning_deferred_user_rv");
+            [("$r", 1L), ("$e", "epoch"), ("$now", long.MaxValue),
+                ("$candidates", SqliteStateStore.UrgentCandidateCap), ("$limit", SqliteStateStore.UrgentHashCap)], "planning_deferred_user_rv", boundedSort: true);
+        var sql = SqliteStateStore.UrgentGapSql;
+        var start = sql.IndexOf("SELECT object_id,version", StringComparison.Ordinal);
+        var end = sql.IndexOf(") GROUP BY", start, StringComparison.Ordinal);
+        CheckPriorityPlan(connection, sql[start..end], [("$r", 1L), ("$candidates", SqliteStateStore.UrgentCandidateCap)],
+            "planning_deferred_user_rv");
         CheckPriorityPlan(connection, SqliteStateStore.UrgentPlanningIntakeSql,
-            [("$p", 1L), ("$before", long.MaxValue), ("$user", SqliteStateStore.UserChangeReason), ("$limit", 256)], "planning_deferred_user_pv");
+            [("$p", 1L), ("$before", long.MaxValue), ("$limit", 128)], "planning_deferred_user_pv");
         Require(SqliteStateStore.UrgentCandidateCap == 1024 &&
             SqliteStateStore.UrgentGapSql.IndexOf("LIMIT $candidates", StringComparison.Ordinal) <
             SqliteStateStore.UrgentGapSql.IndexOf("CROSS JOIN", StringComparison.Ordinal),
             "candidate LIMIT bounds input to DISTINCT and the gap join, not only returned matches");
     }
 
-    private static void CheckPriorityPlan(SqliteConnection connection, string sql, (string, object)[] parameters, string index)
+    private static void CheckPriorityPlan(SqliteConnection connection, string sql, (string, object)[] parameters, string index, bool boundedSort = false)
     {
         using var command = connection.CreateCommand();
         command.CommandText = "EXPLAIN QUERY PLAN " + sql;
@@ -70,7 +75,7 @@ internal static partial class RunChecks
         var plan = new List<string>();
         while (reader.Read()) plan.Add(reader.GetString(3));
         Require(plan.Any(line => line.Contains(index, StringComparison.Ordinal)) &&
-            !plan.Any(line => line.Contains("B-TREE FOR ORDER BY", StringComparison.Ordinal)),
+            plan.Count(line => line.Contains("B-TREE FOR ORDER BY", StringComparison.Ordinal)) <= (boundedSort ? 1 : 0),
             "urgent page uses its ordered partial index without sorting the population");
     }
 

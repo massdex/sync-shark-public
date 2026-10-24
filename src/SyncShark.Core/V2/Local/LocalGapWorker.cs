@@ -217,18 +217,7 @@ internal sealed partial class LocalGapWorker(ILocalGapStore store, ILocalGapIo i
                 else
                 {
                     ct.ThrowIfCancellationRequested();
-                    // The IO owns the observed cause. Never re-read live pause state to
-                    // reinterpret an interrupted or disabled read as a verification failure.
-                    var reason = result.Reason ?? "file/journal proof unavailable or changed; make offline/cloud content available, then retry sync";
-                    if (result.Outcome == LocalGapHashOutcome.Unverifiable)
-                        store.FailGapItem(root.RootId, epoch, item, reason);
-                    store.SetGapStatus(root.RootId, false, result.Outcome switch
-                    {
-                        LocalGapHashOutcome.Paused => "content verification paused during read; retry when activity/power allows",
-                        LocalGapHashOutcome.Disabled => "content verification disabled by byte-rate setting",
-                        _ => $"{reason} for {item.Path}; retry pending"
-                    });
-                    RunTrace.Emit($"local gap verification interrupted or changed; retained for restart: {item.Path}");
+                    RetainInterruptedHash(root, epoch, item, result);
                 }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)

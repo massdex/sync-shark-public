@@ -23,6 +23,23 @@ internal sealed partial class LocalGapWorker
         }
     }
 
+    private void RetainInterruptedHash(RootDef root, LocalGapEpoch epoch, ItemState item, LocalGapHashResult result)
+    {
+        // IO owns the observed cause; live pause state cannot reinterpret the result.
+        var reason = result.Reason ?? "file/journal proof unavailable or changed; make offline/cloud content available, then retry sync";
+        if (result.Outcome == LocalGapHashOutcome.ChangedDuringRead)
+            store.DeferGapHash(root.RootId, epoch, item, nameof(LocalGapHashOutcome.ChangedDuringRead));
+        else if (result.Outcome == LocalGapHashOutcome.Unverifiable)
+            store.FailGapItem(root.RootId, epoch, item, reason);
+        store.SetGapStatus(root.RootId, false, result.Outcome switch
+        {
+            LocalGapHashOutcome.Paused => "content verification paused during read; retry when activity/power allows",
+            LocalGapHashOutcome.Disabled => "content verification disabled by byte-rate setting",
+            _ => $"{reason} for {item.Path}; retry pending"
+        });
+        RunTrace.Emit($"local gap verification interrupted or changed; retained for restart: {item.Path}");
+    }
+
     private void ReportFailure(RootDef root, bool discovery, CancellationTokenSource stop, Exception error)
     {
         stop.Cancel();

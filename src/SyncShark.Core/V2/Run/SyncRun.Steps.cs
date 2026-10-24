@@ -222,14 +222,7 @@ public sealed partial class SyncRun
                             result.Outcome == Outcome.Skipped ? ActionState.Skipped : ActionState.None);
                 }
             }
-            if (result.Outcome is Outcome.Failed or Outcome.Uncertain && Failures.Count < _failureSampleLimit)
-                Failures.Add(result);
-            // A skipped effect is still unfinished, but it is not a failure: keep its bounded reason in the
-            // separate skip histogram so deferred work is explained without inflating the failure counts.
-            if (result.Outcome is Outcome.Failed or Outcome.Uncertain)
-                RunInstrumentation.Current?.RecordFailure(result.Reason);
-            else if (result.Outcome is Outcome.Skipped or Outcome.Refused)
-                RunInstrumentation.Current?.RecordSkip(result.Reason);
+            RecordFailureResult(action, result);
         }
     }
 
@@ -1273,7 +1266,7 @@ public sealed partial class SyncRun
         return plan;
     }
 
-    private async Task<Tally> ExecuteAsync(Plan plan, PairDef pair, ProgressThrottle throttle, CancellationToken ct, Tally tally)
+    private async Task<Plan> ExecuteAsync(Plan plan, PairDef pair, ProgressThrottle throttle, CancellationToken ct, Tally tally)
     {
         plan = await AdmitReviewedRemovalsAsync(plan, pair, ct).ConfigureAwait(false);
         var byId = IndexPlanActions(ref plan, pair, tally);
@@ -1309,7 +1302,7 @@ public sealed partial class SyncRun
             if (executionFailure is null || StorageFailureClassifier.ScopeOf(executionFailure, ct) != FailureRetryOwner.FailureScope.State)
                 FairStoreGate.Cleanup(() => AddProviderNameRefusalNotice(pair));
         }
-        return tally;
+        return plan;
     }
 
     private void AddProviderNameRefusalNotice(PairDef pair)

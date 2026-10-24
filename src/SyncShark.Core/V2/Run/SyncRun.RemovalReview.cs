@@ -169,7 +169,7 @@ public sealed partial class SyncRun
                     if (ProtectedReason(db, approvedHeader, row) is not null || filesOnly && row.Item.Kind != ItemKind.File) continue;
                     var item = row.Item;
                     actions.Add(new SyncAction(PlanIds.ActionId(pair.PairId + ":removal:" + approvedHeader.Generation, 0, 40,
-                        ActionKind.Delete, row.Side, item.Path), 40, ActionKind.Delete, row.Side, item.Path,
+                        ActionKind.Delete, row.Side, item.Path, null), 40, ActionKind.Delete, row.Side, item.Path,
                         null, null, item, item.Kind == ItemKind.File, null)
                     { DescendantsPlanned = true, PreserveIgnoredChildren = true, RemovalReviewChoice = true });
                 }
