@@ -47,8 +47,8 @@ internal static partial class AutoSyncChecks
         for (var window = 0; window < 3; window++)
             rig.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Complete) with { JournalBacklog = true });
         rig.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Complete));
+        await rig.StartAsync(); // Startup consumes the existing quiet-window debounce.
         var before = rig.Clock.GetUtcNow();
-        await rig.StartAsync();
         await Until(() => rig.Run.Runs("p1") == 4, "journal suffix drains without timer advance or monitor signals");
         await rig.ParkedAsync(AutoStatus.Idle);
         Require(rig.Clock.GetUtcNow() == before && rig.State("p1").RetryAt is null,
