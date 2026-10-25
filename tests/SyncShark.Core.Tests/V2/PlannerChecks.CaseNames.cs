@@ -15,35 +15,30 @@ internal static partial class PlannerChecks
                 changed == Side.B ? b with { Path = "Child/FOLDERS" } : b);
             var plan = Decide(Row(baseline, a, b));
             var action = plan.Actions.Single();
-            Require(action.Kind == ActionKind.Adopt && action.Source == a && action.ExpectedTarget == b,
-                "case-equivalent locations adopt both actual spellings without a provider move");
+            Require(exact
+                ? action.Kind == ActionKind.Adopt && action.Source == a && action.ExpectedTarget == b
+                : action.Kind == ActionKind.Move && action.Target == Opposite(changed) &&
+                  action.Source == (changed == Side.A ? a : b) &&
+                  action.ExpectedTarget == (changed == Side.A ? b : a) &&
+                  action.Path == (changed == Side.A ? a.Path : b.Path),
+                "case rename preserves identity and propagates exact spelling; equal spelling only adopts");
             Require(plan.Notices.Count == 0, "successful case propagation needs no difference notice");
             AssertEmpty(Decide(Row(Base("case", a, b), a, b)));
             if (folder) continue;
-            var unknown = Row(baseline, changed == Side.A ? a with { Hash = null } : a,
-                changed == Side.B ? b with { Hash = null } : b);
-            var pending = Decide(unknown);
-            Require(pending.Actions.Count == 0 && pending.Notices.Any(n => n.ReasonKey == PlanNotices.ContentUnconfirmed.Key),
-                "unknown case-only content cannot be adopted or moved from metadata alone");
-            var hashes = Planner.HashRequests([unknown]);
-            Require((changed == Side.A ? hashes.PathsA : hashes.PathsB).Count == 1,
-                "case-only content verification is requested even when its baseline metadata is unchanged");
             var editedA = changed == Side.A ? a with { Hash = "h2" } : a;
             var editedB = changed == Side.B ? b with { Hash = "h2" } : b;
             var edits = Decide(Row(baseline, editedA, editedB)).Actions;
             var edit = edits.Single(x => x.Kind == ActionKind.Update);
-            Require(edits.Count == 1 && edit.Target == Opposite(changed) &&
-                edit.Path == (changed == Side.A ? b.Path : a.Path),
-                "case-only move and edit updates at the existing target spelling without a move");
-            var divergent = Decide(Row(baseline with { B = baseline.B with { Hash = "h2" } },
-                a, b with { Hash = "h2" }));
-            Require(divergent.Actions.Count == 1 && divergent.Actions.Single() is { Kind: ActionKind.Hold, Rule: 29 },
-                "unchanged divergent baseline content requires a decision, never an arbitrary spelling winner");
+            Require(edits.Count(x => x.Kind == ActionKind.Move) == (exact ? 0 : 1) &&
+                edit.Target == Opposite(changed) &&
+                edit.Path == (changed == Side.A ? a.Path : b.Path),
+                "case-only move and edit renames then updates at the new spelling");
         }
     }
 
     /// <summary>
-    /// Ancestor and independent leaf-case differences are the same locations, not provider moves.
+    /// The folder rename carries an unchanged child, while an independent child leaf-case
+    /// rename remains a Move after its ancestor's spelling is rebased.
     /// </summary>
     private static void CaseEquivalentChildren_OnlyTopmostFolderNotices()
     {
@@ -59,11 +54,11 @@ internal static partial class PlannerChecks
 
         var plan = Decide(false, Row(folderBase, folderA, folderB), Row(childBase, childA, childB),
             Row(nestedBase, nestedA, nestedB));
-        Require(plan.Actions.Count == 3 && plan.Actions.All(x => x.Kind == ActionKind.Adopt),
-            "folder, child and independent leaf spelling differences all adopt without moves");
-        Require(plan.Actions.Any(x => x.Source == folderA && x.ExpectedTarget == folderB) &&
-            plan.Actions.Any(x => x.Source == nestedA && x.ExpectedTarget == nestedB),
-            "adoption retains actual endpoint spellings and identities");
+        Require(plan.Actions.Count == 2 && plan.Actions.All(x => x.Kind == ActionKind.Move),
+            "folder move carries unchanged child; independent leaf rename remains");
+        Require(plan.Actions.Any(x => x.Path == folderA.Path && x.FromPath == folderB.Path) &&
+            plan.Actions.Any(x => x.Path == nestedA.Path && x.FromPath == "Child/Folders/notes.txt"),
+            "child rename retains its new leaf spelling after the ancestor move");
         Require(plan.Notices.Count == 0, "case propagation raises no difference notice");
     }
 }

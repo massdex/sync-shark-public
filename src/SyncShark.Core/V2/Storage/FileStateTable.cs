@@ -431,7 +431,7 @@ internal sealed class FileStateTable
                 DeleteRow(rootNo, moved.DirNo, moved.Name, batch);
                 wrote = true;
             }
-        if (live is null && atKey.Count == 1 && atKey[0].Item.ObjectId != state.ObjectId && !suppressed.Contains(atKey[0].Item.ObjectId))
+        if (live is null && atKey.Count == 1 && atKey[0].Item.ObjectId != state.ObjectId)
             wrote |= RemoveAt(rootNo, atKey[0].DirNo, atKey[0].Name, now, suppressed, batch);
         if (live is null) return Insert(FileStateReader.Entry.Of(parent, name, state), rootNo, batch, debtReconciled: true);
         var merged = RowCodec.CarryHash(state, live.Value.Item);

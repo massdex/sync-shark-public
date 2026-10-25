@@ -387,7 +387,7 @@ internal sealed partial class InMemoryStateStore : IStateStore
                 if (change.Kind == ChangeKind.Upsert && change.State is not null &&
                     (d.IncludesPath?.Invoke(change.Path) ?? true))
                 {
-                    Upsert(d.RootId, change.State, d.Gen, d.IncludesPath, upserted);
+                    Upsert(d.RootId, change.State, d.Gen, d.IncludesPath);
                     ForgetUnderLink(d.RootId, change.State);
                 }
         }
@@ -1245,8 +1245,8 @@ internal sealed partial class InMemoryStateStore : IStateStore
         string.Equals(path, prefix, StringComparison.Ordinal) || path.StartsWith(prefix + "/", StringComparison.Ordinal);
 
     // Like Storage: the object's old row goes (a move or case-only rename); an exact-path row is updated in place;
-    // without one, a single unobserved other-spelling object is displaced; observed clash siblings stay.
-    private void Upsert(string rootId, ItemState item, long gen, Func<string, bool>? include, IReadOnlySet<string> observed)
+    // without one, a single other-spelling row of another object is displaced, while a known clash is kept.
+    private void Upsert(string rootId, ItemState item, long gen, Func<string, bool>? include)
     {
         var live = LiveRows(rootId);
         var atKey = live.Keys.Where(path => PairPath.Same(path, item.Path)).ToList();
@@ -1257,7 +1257,7 @@ internal sealed partial class InMemoryStateStore : IStateStore
                      .Select(pair => pair.Key).ToList())
             Close(rootId, other, gen);
         if (!live.ContainsKey(item.Path) && atKey.Count == 1 && live.TryGetValue(atKey[0], out var single) &&
-            !string.Equals(single.State.ObjectId, item.ObjectId, StringComparison.Ordinal) && !observed.Contains(single.State.ObjectId))
+            !string.Equals(single.State.ObjectId, item.ObjectId, StringComparison.Ordinal))
             Close(rootId, atKey[0], gen);
         Put(rootId, item, gen);
     }

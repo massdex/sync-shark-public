@@ -519,9 +519,7 @@ internal static class EngineCompositionChecks
             var plan = await composition.Run.PreviewFirstSyncAsync(pairId, progress, default);
             var applied = await composition.Run.ApplyAsync(pairId, plan, progress, default);
             Require(applied.Failed == 0 && File.Exists(Path.Combine(right, "initial.txt")),
-                "production fixture establishes first-sync state and local control namespaces: " +
-                $"failed={applied.Failed}; done={applied.Done}; exists={File.Exists(Path.Combine(right, "initial.txt"))}; " +
-                $"plan={Text(plan)}; failures={string.Join(" | ", applied.Failures)}");
+                "production fixture establishes first-sync state and local control namespaces");
         }
         // Copy only this closed fixture, never a running/user store. Copy its configuration too.
         foreach (var directory in Directory.EnumerateDirectories(product, "*", SearchOption.AllDirectories))

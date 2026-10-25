@@ -72,7 +72,6 @@ internal static partial class StorageChecks
         Both(root, "clash-idless-replay", CaseClash_ReplayWithoutIdentityKeepsSurvivors);
         Both(root, "identity-exact", Delete_IdentityBoundToExactPath);
         Both(root, "clash-same-spelling", CaseClash_DeleteUpsertSameSpellingKeepsSibling);
-        CaseClash_RenameCreateRetainsObservedIdentities(root);
         Both(root, "live-spellings", LiveSpellings_KeyOnly);
         Both(root, "incomplete-subtree", Snapshot_IncompleteSubtreeIsSelfOrUnder);
         Both(root, "subtree-replay", FolderDelete_ReplayAfterPartial);

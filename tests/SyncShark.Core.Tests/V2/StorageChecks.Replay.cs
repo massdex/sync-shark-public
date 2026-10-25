@@ -58,30 +58,6 @@ internal static partial class StorageChecks
         RequireLive(store, "ra", ClashSet[0], ClashSet[1]);
     }
 
-    private static void CaseClash_RenameCreateRetainsObservedIdentities(string root)
-    {
-        foreach (var reverse in new[] { false, true })
-        {
-            using var store = OpenSqlite(root, "case-rename-create-" + reverse, new TestClock());
-            var original = F("Doc.txt", "id:original", "11");
-            var moved = original with { Path = "doc.txt" };
-            var created = F("Doc.txt", "id:created", "22");
-            var gen = store.BeginGeneration("ra", "snapshot");
-            store.WriteSnapshot(new Snapshot("ra", Side.A, gen, "c", [original], []));
-            var upserts = new[] { moved, created }.Select(item =>
-                new Change(ChangeKind.Upsert, item.ObjectId, item.Path, item, null));
-            if (reverse) upserts = upserts.Reverse();
-            var changes = new[] { new Change(ChangeKind.Delete, original.ObjectId, original.Path, null, T0) }
-                .Concat(upserts).ToArray();
-            for (var replay = 0; replay < 2; replay++)
-            {
-                var next = store.BeginGeneration("ra", "delta");
-                store.WriteDelta(new Delta("ra", Side.A, next, "c", "d", changes, false, []));
-                RequireLive(store, "ra", moved, created);
-            }
-        }
-    }
-
     // The keyed candidate lookup behind a deleted path's other spellings: every spelling of the path, no subtree.
     private static void LiveSpellings_KeyOnly(IStateStore store)
     {

@@ -462,7 +462,8 @@ internal sealed partial class ActionRunner
         }
 
         var done = DoneResult(action, newT, recoveryHolder.Reference);
-        return await SettleAsync(done).ConfigureAwait(false);
+        await SettleAsync(done).ConfigureAwait(false);
+        return done;
     }
 
     private async Task<ItemState?> EffectAsync(SyncAction action, IEndpointWriter target, IEndpointWriter source,
