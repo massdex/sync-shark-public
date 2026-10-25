@@ -20,6 +20,6 @@ internal sealed class ReconcileRunScope : IDisposable
         var requestedPaths = requested.Select(action => action.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var extraPaths = expanded.Select(action => action.Path).Distinct(StringComparer.OrdinalIgnoreCase)
             .Count(path => !requestedPaths.Contains(path));
-        if (extraPaths > 0) RunLog.Trace($"recovery group expanded: {extraPaths} extra paths");
+        if (extraPaths > 0) RunTrace.Emit($"recovery group expanded: {extraPaths} extra paths");
     }
 }
