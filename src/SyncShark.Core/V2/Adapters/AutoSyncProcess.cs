@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Text;
 using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
@@ -111,6 +112,7 @@ public static class AutoSyncProcess
     /// <summary>Enables or disables the single supervisor registration; foreign values are preserved.</summary>
     public static string RegisterStartup(string executable, bool enabled)
     {
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
         var command = enabled ? StartupCommand(executable) : null;
         using var key = OpenStartupKey(writable: true, create: enabled);
         var current = key?.GetValue(ValueName);
@@ -128,6 +130,7 @@ public static class AutoSyncProcess
         return EdgeMessages.Text("startup-registered");
     }
 
+    [SupportedOSPlatform("windows")]
     private static void WriteStartup(RegistryKey key, string command)
     {
         BeforeStartupWriteForTest?.Invoke();
@@ -136,6 +139,7 @@ public static class AutoSyncProcess
         RemoveLegacyStartup(key);
     }
 
+    [SupportedOSPlatform("windows")]
     private static void RemoveLegacyStartup(RegistryKey? key)
     {
         if (IsStartupCommand(key?.GetValue(LegacyValueName) as string, LegacyArguments))
@@ -147,6 +151,7 @@ public static class AutoSyncProcess
     {
         try
         {
+            if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
             using var key = OpenStartupKey(writable: true);
             var value = key?.GetValue(ValueName);
             // A legacy launcher is existing opt-in, not permission inferred from a stored flag.

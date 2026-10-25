@@ -94,6 +94,7 @@ internal static class AutoSyncStartupChecks
         }
     }
 
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     private static void CheckMigrationOrder(RegistryKey key, string previous, string executable, List<string> messages)
     {
         var legacy = $"\"{previous}\" {AutoSyncProcess.LegacyArguments}";
