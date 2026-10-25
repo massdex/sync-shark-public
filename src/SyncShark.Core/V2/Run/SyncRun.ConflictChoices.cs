@@ -214,10 +214,8 @@ public sealed partial class SyncRun
         }
         var a = _endpoints.Writer(pair.A);
         var b = _endpoints.Writer(pair.B);
-        var observed = await Task.WhenAll(a.ObserveAsync(versions.A.Path, token), b.ObserveAsync(versions.B.Path, token));
-        if (observed[0] is null || observed[1] is null ||
-            !SameConflictItem(observed[0]!, versions.A, pair.A) || !SameConflictItem(observed[1]!, versions.B, pair.B))
-            return Result(Outcome.Skipped, "An item changed since this notice. Refresh or dismiss it and review the new state; no files changed.");
+        if (await CheckConflictOriginalsAsync(pair, notice, versions, noticeId, choice, token).ConfigureAwait(false) is { } checkedResult)
+            return checkedResult;
         var actions = new List<SyncAction>();
         var guards = ActionPredicates(pair, LeftAlone(pair));
         SyncAction Action(ActionKind kind, Side side, string path, ItemState? source, ItemState? victim) =>

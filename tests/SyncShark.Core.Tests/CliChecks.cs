@@ -436,7 +436,7 @@ internal static partial class CliChecks
         Require(!SyncCliRegistry.MutatesProductState(proofList) &&
             SyncCliRegistry.Rows.Single(row => row.Command == "conflicts list").Effect.Contains("failure stage"),
             "proof failure listing is a state-free read through the shared notice command");
-        foreach (var choice in new[] { "retry-now", "ignore" })
+        foreach (var choice in new[] { "retry-now", "ignore", "keep-a", "keep-b" })
         {
             var command = SyncCliRegistry.Parse(["--cli", "conflicts", "resolve", "--pair", "fixture", "--path", "item.txt",
                 "--key", "exact-notice", "--generation", "0", "--choice", choice, "--yes"]);
