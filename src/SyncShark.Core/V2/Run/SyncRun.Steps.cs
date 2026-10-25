@@ -227,7 +227,7 @@ public sealed partial class SyncRun
     }
 
     private async Task<ReconcileResult> ReconcileAsync(PairDef pair, ProgressThrottle throttle, CancellationToken ct,
-        IReadOnlyList<string>? narrowedIgnoreRules = null)
+        IReadOnlyList<string>? narrowedIgnoreRules = null, Func<SyncAction, bool>? intentFilter = null)
     {
         // The same protection snapshot answers the guard and the hold-cause classification below, so a rehash/held
         // count is read once per run and the classification cannot disagree with the guard.
@@ -272,7 +272,8 @@ public sealed partial class SyncRun
             var parkedRetries = new List<SyncRetry>();
             // The page carries each row's stored state, so classification never point-queries it per intent.
             var rowStates = batch.ToDictionary(row => row.Action.ActionId, row => row.State, StringComparer.Ordinal);
-            foreach (var entry in GuardedActions(batch.Select(row => row.Action), guard))
+            foreach (var entry in GuardedActions(batch.Select(row => row.Action)
+                .Where(action => intentFilter?.Invoke(action) ?? true), guard))
             {
                 ct.ThrowIfCancellationRequested();
                 var action = entry.Action;
@@ -949,7 +950,7 @@ public sealed partial class SyncRun
             scan.B.Complete || scan.B.ScopedFullCoverage,
             scan.A.IncompleteSubtrees.ToHashSet(StringComparer.OrdinalIgnoreCase),
             scan.B.IncompleteSubtrees.ToHashSet(StringComparer.OrdinalIgnoreCase))
-        { ExactCreationObservedA = scan.A.ExactCreationObserved, ExactCreationObservedB = scan.B.ExactCreationObserved };
+        { ExactCreationObservedA = scan.A.ExactCreationObserved, ExactCreationObservedB = scan.B.ExactCreationObserved, Unknown = scan.Unknown };
         return Planner.Join(scope.Baselines, scope.A, scope.B, scan.A.Deleted, scan.B.Deleted, completeness, firstSync, scope.ContextA, scope.ContextB, scope.ProtectedAliases);
     }
 
@@ -1354,7 +1355,7 @@ public sealed partial class SyncRun
     private void AcknowledgeVerifiedRehash(PairDef pair, BothScan scan, Plan plan, Tally tally,
         Func<string, bool> evaluated, Func<string, bool> includeA, Func<string, bool> includeB, CancellationToken ct,
         IEnumerable<SqliteStateStore.DeferredPlanning>? deferredPlanning = null,
-        Action<SqliteStateStore.DeferredPlanning>? acknowledged = null)
+        Action<SqliteStateStore.DeferredPlanning>? acknowledged = null, ReconcileBatch? batch = null)
     {
         var unsettled = new SortedSet<string>(tally.DuplicatePaths, StringComparer.OrdinalIgnoreCase);
         foreach (var notice in plan.Notices) // Summaries are display-only; explicit paths and typed root holds remain.
@@ -1387,8 +1388,8 @@ public sealed partial class SyncRun
                     !_store.BaselinesAt(pair.PairId, Side.A, [path]).Any() &&
                     !_store.BaselinesAt(pair.PairId, Side.B, [path]).Any(), acknowledged);
             }
-        _store.AcknowledgeRehash(pair.A.RootId, scan.A.RehashThrough, path => Settled(path) && includeA(path), ct);
-        _store.AcknowledgeRehash(pair.B.RootId, scan.B.RehashThrough, path => Settled(path) && includeB(path), ct);
+        _store.AcknowledgeRehash(pair.A.RootId, scan.A.RehashThrough, path => Settled(path) && includeA(path), ct, batch?.ObjectIdsA);
+        _store.AcknowledgeRehash(pair.B.RootId, scan.B.RehashThrough, path => Settled(path) && includeB(path), ct, batch?.ObjectIdsB);
     }
 
     // The paths this run joined and planned for: current and baseline paths on both sides.

@@ -96,10 +96,12 @@ public sealed partial class SyncRun
         scope.Length > 0 && include(scope) && !incomplete.Any(failed => failed.Length == 0 ||
             PairPath.IsSelfOrUnder(scope, failed) || PairPath.IsUnder(failed, scope)));
 
-    private void RetireScanRetries(PairDef pair, IReadOnlyCollection<string> failed, Func<string, bool> notSynced)
+    private void RetireScanRetries(PairDef pair, IReadOnlyCollection<string> failed, Func<string, bool> notSynced,
+        IReadOnlyList<string>? observed = null)
     {
         foreach (var retry in _store.ReadSyncRetries(pair.PairId))
-            if ((Retirable(retry, failed) || retry.Kind == "scan" && notSynced(retry.Path)) &&
+            if ((observed is null || observed.Any(path => PairPath.IsSelfOrUnder(retry.Path, path))) &&
+                (Retirable(retry, failed) || retry.Kind == "scan" && notSynced(retry.Path)) &&
                 // RQ-052: scan bookkeeping cannot discard held or reviewed deletion evidence.
                 (retry.Kind != "scan" || retry.Held is null && retry.ReviewedActions is not { Count: > 0 }))
             {
@@ -118,11 +120,11 @@ public sealed partial class SyncRun
             }
     }
 
-    private void RecordScanRetries(PairDef pair, BothScan scan)
+    private void RecordScanRetries(PairDef pair, BothScan scan, IReadOnlyList<string>? observed = null)
     {
         var notSynced = ScanPathsNotSynced(pair);
         var failed = ScanFailures(scan).ToArray();
-        RetireScanRetries(pair, failed, notSynced);
+        RetireScanRetries(pair, failed, notSynced, observed);
         // Do not recreate retired scan debt from a filtered targeted reread. Other retry
         // kinds retain their existing read-debt and reviewed-authority bookkeeping.
         failed = failed.Where(path => _store.SyncRetryAt(pair.PairId, path) is { Kind: not "scan" } ||

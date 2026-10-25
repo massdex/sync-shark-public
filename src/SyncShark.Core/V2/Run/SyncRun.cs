@@ -846,13 +846,15 @@ public sealed partial class SyncRun : ISyncRun
         // exclusion for every removal kind, not unrelated selective exclusions or permanent boundaries.
         var observationPair = reviewScopes.Count == 0 ? pair : pair with
         { Excluded = pair.Excluded.Where(path => !reviewScopes.Contains(path)).ToArray() };
-        var reconcile = await ReconcileAsync(pair, throttle, ct);
+        var batch = options?.Batch;
+        var reconcile = await ReconcileAsync(pair, throttle, ct, intentFilter: batch is null ? null : batch.Contains);
         BothScan scan;
         var before = LeftAlone(pair, includeRestore: false).WithPending(reconcile.Protected);
         try
         {
-            scan = await ScanBothAsync(observationPair, throttle, ct);
-            RetainReviewedRemovalObservations(observationPair, scan, reviewScopes, ct);
+            scan = batch is null ? await ScanBothAsync(observationPair, throttle, ct) :
+                await ScanBatchAsync(observationPair, batch, throttle, ct);
+            if (batch is null) RetainReviewedRemovalObservations(observationPair, scan, reviewScopes, ct);
         }
         catch (Exception error) when (RunFailure(error, ct))
         {
@@ -861,7 +863,7 @@ public sealed partial class SyncRun : ISyncRun
             return new(null, FailedRun(pairId, [new ActionResult(string.Empty, Outcome.Failed, null, null, null, error.Message)]), null);
         }
 
-        RecordScanRetries(pair, scan);
+        RecordScanRetries(pair, scan, batch?.Paths);
         var rootsComplete = !scan.A.IncompleteSubtrees.Contains(string.Empty) &&
             !scan.B.IncompleteSubtrees.Contains(string.Empty);
         if (_endpoints is PlanOnlyEndpoints && !rootsComplete)
@@ -869,17 +871,19 @@ public sealed partial class SyncRun : ISyncRun
             { RunUnavailable = "A side could not be read in full. This preview is unavailable; retry after the read outage." }, null, null);
         // Restore verification reads both sides (including SidesEqual's stored inventory). Neither
         // incomplete coverage nor a read-only preview can authorize a retry or retire its protection.
-        IReadOnlyList<string> recoveryTouched = rootsComplete && _endpoints is not PlanOnlyEndpoints
+        IReadOnlyList<string> recoveryTouched = batch is null && rootsComplete && _endpoints is not PlanOnlyEndpoints
             ? await RefreshRecoveryRestoresAsync(pair, scan, ct) : [];
-        CloseObservedRepairs(pair, scan);
+        if (batch is null) CloseObservedRepairs(pair, scan);
         // Finding 1 (Astra): a link or stub that disappears in this run still protects its path for the whole run.
         // The restore refresh above may have frozen a new intent; take the run's hold snapshot after it.
         ResetRecoveryProtection();
         var retryCount = _store.CountSyncRetries(pairId);
-        var retries = _store.DueSyncRetries(pairId, _time.GetUtcNow(), 256, CachedIdentityRefresh.PendingReason)
-            .Where(retry => retry.Path.Length != 0 || retry.Kind != "run").ToArray();
+        var retries = batch is null ? _store.DueSyncRetries(pairId, _time.GetUtcNow(), 256, CachedIdentityRefresh.PendingReason)
+            .Where(retry => retry.Path.Length != 0 || retry.Kind != "run").ToArray() : [];
         ct.ThrowIfCancellationRequested();
-        var deferredPlanning = AdmitPlanningPage(pairId, pair);
+        var deferredPlanning = batch is null ? AdmitPlanningPage(pairId, pair) :
+            ((SqliteStateStore)_store).DeferredPlanningFor(pairId, pair.A.RootId, batch.ObjectIdsA)
+                .Concat(((SqliteStateStore)_store).DeferredPlanningFor(pairId, pair.B.RootId, batch.ObjectIdsB)).ToArray();
         var current = LeftAlone(pair); // Admission may retire non-work; summaries must observe that transition.
         using var planningTiming = new RunBoundaryTiming("planning", _settings.EnableRunInstrumentation);
         var activeRetries = CachedIdentityRefresh.ActiveRetryPaths(retries);
@@ -891,7 +895,7 @@ public sealed partial class SyncRun : ISyncRun
             entry => (Side?)entry.Value, StringComparer.OrdinalIgnoreCase);
         // Execution-time space refusals have no intent. Their durable notices, like unconfirmed content,
         // must bring the paths back into an otherwise empty incremental run until they resolve.
-        var retryPaths = _store.UnresolvedNotices(pairId).Where(PlanNotices.HasPathScope)
+        var retryPaths = batch is not null ? batch.Paths.ToArray() : _store.UnresolvedNotices(pairId).Where(PlanNotices.HasPathScope)
             .Where(notice => (notice.Rule == UnconfirmedRule && notice.ReasonKey == PlanNotices.ContentUnconfirmed.Key) ||
                 notice.ReasonKey == "name-mapping-collision" ||
                 notice.ReasonKey is FreeSpaceRefusal.InsufficientReasonKey or FreeSpaceRefusal.UnknownSpaceReasonKey or
@@ -916,8 +920,9 @@ public sealed partial class SyncRun : ISyncRun
             restoreProtection: incrementalRestore, persistDeferred: true, cancellationToken: ct);
         retryPaths = retryPaths.Concat(recoveryTouched).Concat(retries.Select(item => item.Path))
             .Concat(deferredPlanning.SelectMany(item => item.Paths)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        var rootDebtSettling = rootsComplete && (scan.A.RootDebtSettles || scan.B.RootDebtSettles);
-        var touched = new List<string>(scan.Touched(reconcile.Touched.Concat(retryPaths)
+        var rootDebtSettling = batch is null && rootsComplete && (scan.A.RootDebtSettles || scan.B.RootDebtSettles);
+        var recoveryPaths = batch is null ? reconcile.Touched : reconcile.Touched.Where(batch.Contains);
+        var touched = new List<string>(scan.Touched(recoveryPaths.Concat(retryPaths)
             .Concat(decisions?.Keys ?? Enumerable.Empty<string>())));
         // Finding 3: a whole-root read retry expands planning to the whole pair only in the run where
         // that debt actually settles. While another root is unreadable its empty-path failure keeps
@@ -980,7 +985,8 @@ public sealed partial class SyncRun : ISyncRun
         deciding = null!;
         inventory = null;
         var planningBacklog = 0;
-        var settlement = PlanSettlePage(pair, scan, links, deferredPlanning, touched, predicates.A, predicates.B, ct);
+        var settlement = batch is null ? PlanSettlePage(pair, scan, links, deferredPlanning, touched, predicates.A, predicates.B, ct) :
+            (Rows: (IReadOnlyList<SqliteStateStore.DeferredPlanning>)[], Adopts: (IReadOnlyList<SyncAction>)[], Candidates: 0);
         settleEvaluated.UnionWith(settlement.Rows.SelectMany(row => row.Paths));
         deferredPlanning = deferredPlanning.Concat(settlement.Rows).ToArray();
         decided = decided with { Actions = decided.Actions.Concat(settlement.Adopts).ToArray() };
@@ -1069,7 +1075,7 @@ public sealed partial class SyncRun : ISyncRun
                 completion.Step(RefreshRetryProtection);
                 using (var acknowledgementTiming = new RunBoundaryTiming("acknowledgement", _settings.EnableRunInstrumentation))
                     completion.Step(() => AcknowledgeVerifiedRehash(pair, scan, plan, tally, evaluated, predicates.A, predicates.B, ct, deferredPlanning,
-                        _ => settledCount++));
+                        _ => settledCount++, batch));
                 completion.Step(() => planningBacklog = ReportSettledPlanning(pairId, settledCount, deferredPlanning.Count,
                     progress, settlement.Candidates - settlement.Rows.Count));
                 completion.Step(() => RaiseLinksSummary(pair, LeftAlone(pair)));
@@ -1079,7 +1085,7 @@ public sealed partial class SyncRun : ISyncRun
                     completion.Step(() => AdvanceCursor(scan.A));
                     completion.Step(() => AdvanceCursor(scan.B));
                 }
-                completion.Step(_store.Prune);
+                if (batch is null) completion.Step(_store.Prune);
             }
             return FinishIncrementalCompletion(completion, pairId, plan, tally, reconcile, pendingEvidence.Keys,
                 unresolvedEvidence, throttle, scan.JournalBacklog, planningBacklog, ct);
