@@ -18,9 +18,9 @@ internal static class TrayStartup
         args.Any(value => string.Equals(value, "--tray", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
-    /// The one routing decision <c>App.OnStartup</c> makes for the tray: a <c>--tray</c> left after the core switch
-    /// is a start only when core v2 was selected and no other argument remains. Anything else is refused, so a
-    /// reordered or weakened startup branch fails the focused fixture check.
+    /// The shared tray predicate's routing decision, used by the application's startup helper: a <c>--tray</c>
+    /// left after the core switch is a start only when core v2 was selected and no other argument remains. This
+    /// covers the predicate and its gate; it neither owns nor asserts the application's branch order.
     /// </summary>
     internal static Route Decide(bool useCoreV2, IReadOnlyList<string> args) =>
         !IsTrayRequest(args) ? Route.NotTray
