@@ -36,7 +36,11 @@ internal static partial class StorageChecks
             var gen = store.BeginGeneration("rb", "full");
             store.WriteSnapshot(new Snapshot("rb", Side.B, gen, "observed", [child], []));
             store.RetainPlanningObservations("rb", [child], default);
-            store.RetainPlanningObservations("rb", [child], default);
+            Require(store.DeferredPlanningDisplayPage("p1").Count == 0,
+                "ordinary observation admission respects the saved exclusion");
+            // The run's reviewed-removal scan removes only its reviewed scope from observation exclusions.
+            store.RetainPlanningObservations("rb", [child], default, Pair("p1"));
+            store.RetainPlanningObservations("rb", [child], default, Pair("p1"));
             store.CompleteGeneration(gen, "observed", true);
             Require(store.DueSyncRetries("p1", deadline.AddSeconds(-1), 256).Count == 0,
                 "retaining sleeping removal observations grants no early effect authority");

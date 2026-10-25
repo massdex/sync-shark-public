@@ -64,7 +64,7 @@ internal sealed class ItemEligibility(
             var result = Evaluate(pair, action.Target == Side.A ? Side.B : Side.A, source, Purpose.Plan);
             if (!result.Eligible) return result;
         }
-        return new("held:related-effect");
+        return new("protection"); // Unexplained direct blocks retain the existing safety notice.
     }
 
     internal Result EvaluateRoot(string rootId, ItemState item, Purpose purpose)

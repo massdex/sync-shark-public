@@ -447,8 +447,7 @@ public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatc
     // Only product-owned folders strictly inside the root are excluded from its scan: a root AT or INSIDE Recovery
     // is the user's own choice (backing Recovery up) and is scanned; its own copies stay hidden as artifact names.
     private IReadOnlySet<string> OwnedInside(RootDef root, string recovery) =>
-        _paths.ProductOwnedPaths(recovery).Where(path => LocalItems.RelativeTo(root.RootPath, path) is not null)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        LocalItems.ProductOwnedInside(root.RootPath, _paths.ProductOwnedPaths(recovery));
 
     private static bool IsLocal(RootDef root) =>
         string.Equals(root.Provider, SyncProviders.Local, StringComparison.OrdinalIgnoreCase);

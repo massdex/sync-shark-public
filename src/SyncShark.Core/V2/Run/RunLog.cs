@@ -9,6 +9,7 @@ namespace Massdex.SyncShark.V2;
 // The background task is the sole owner of files, rotation, flushing and disposal. Producers only TryWrite.
 internal sealed class RunLog : RunTrace, IDisposable
 {
+    internal const string AutoSyncCommand = "autosync";
     internal const int MaximumFiles = 50;
     internal const long MaximumBytes = 200L * 1024 * 1024;
     internal const long MaximumRunBytes = 100L * 1024 * 1024;
@@ -38,7 +39,7 @@ internal sealed class RunLog : RunTrace, IDisposable
         try
         {
             _directory = System.IO.Path.GetFullPath(System.IO.Path.Combine(root, "v2", "logs",
-                command == "autosync" ? "autosync" : string.Empty));
+                command == AutoSyncCommand ? AutoSyncCommand : string.Empty));
             var stamp = DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss-fff", CultureInfo.InvariantCulture);
             var stem = stamp + "-" + Guid.NewGuid().ToString("N")[..8] + "-" + Safe(pair) + "-" + Safe(command);
             Path = System.IO.Path.Combine(_directory, stem + ".log");
@@ -185,7 +186,8 @@ internal sealed class RunLog : RunTrace, IDisposable
         try
         {
             var folder = new DirectoryInfo(directory);
-            if (!folder.Exists || folder.Name != "logs" || folder.Parent?.Name != "v2") return;
+            var logs = folder.Name == AutoSyncCommand ? folder.Parent : folder;
+            if (!folder.Exists || logs?.Name != "logs" || logs.Parent?.Name != "v2") return;
             // A junction/symlink must not turn the dedicated directory into a foreign target.
             for (DirectoryInfo? ancestor = folder; ancestor is not null; ancestor = ancestor.Parent)
                 if ((ancestor.Attributes & FileAttributes.ReparsePoint) != 0)

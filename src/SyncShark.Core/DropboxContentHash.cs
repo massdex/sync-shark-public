@@ -9,7 +9,7 @@ public static class DropboxContentHash
 
     public static string Compute(ReadOnlySpan<byte> input)
     {
-        var hasher = new BlockHasher();
+        var hasher = new V2.ContentBlockHasher();
         hasher.Append(input);
         return hasher.Finish();
     }
@@ -22,7 +22,7 @@ public static class DropboxContentHash
     {
         ArgumentNullException.ThrowIfNull(input);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bufferBytes);
-        var hasher = new BlockHasher();
+        var hasher = new V2.ContentBlockHasher();
         // Pooled: one large buffer per hashed file would put every file's buffer on the large-object heap.
         var buffer = ArrayPool<byte>.Shared.Rent(bufferBytes);
         try
@@ -38,13 +38,4 @@ public static class DropboxContentHash
         return hasher.Finish();
     }
 
-    /// <summary>
-    /// The one reusable incremental Dropbox block hasher. Its output is preserved exactly: SHA256 over the
-    /// concatenated SHA256 of each exact 4 MiB block, the final partial block hashed exactly once, and the
-    /// empty aggregate for zero bytes. It retains only the running aggregate and the current block's own
-    /// 32-byte state, so an arbitrarily large object can be streamed through bounded memory and the file is
-    /// never buffered whole, copied to a temporary file or sought. The caller chooses the chunk sizes; every
-    /// chunking of the same bytes produces the same digest.
-    /// </summary>
-    public sealed class BlockHasher : V2.ContentBlockHasher { }
 }

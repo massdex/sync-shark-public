@@ -132,6 +132,22 @@ internal static partial class RunChecks
             File.WriteAllText(orphan, "{}"); File.WriteAllText(foreign, "{}");
             RunLog.Rotate(directory, 50, RunLog.MaximumBytes);
             Require(!File.Exists(orphan) && File.Exists(foreign), "rotation cleans only matching orphan twins");
+            var autosync = Path.Combine(directory, RunLog.AutoSyncCommand);
+            Directory.CreateDirectory(autosync);
+            for (var n = 0; n < RunLog.MaximumFiles + 2; n++)
+            {
+                var stem = Path.Combine(autosync, $"20260101-120000-{n:000}-aaaaaaaa-p-autosync");
+                File.WriteAllText(stem + ".log", "log");
+                File.WriteAllText(stem + ".jsonl", "{}");
+            }
+            using (var log = RunLog.Open(Path.GetDirectoryName(Path.GetDirectoryName(directory)!)!, "pair", "autosync", false))
+                log.Summary("bounded AutoSync history");
+            Require(Directory.GetFiles(autosync, "*.log").Length == RunLog.MaximumFiles &&
+                Directory.GetFiles(autosync, "*.jsonl").Length == RunLog.MaximumFiles,
+                "production AutoSync logging bounds both file formats through the rotation owner");
+            RunLog.Rotate(autosync, RunLog.MaximumFiles, 10);
+            Require(Directory.GetFiles(autosync).Sum(path => new FileInfo(path).Length) <= 10,
+                "AutoSync rotation also enforces its byte budget");
         }
         finally { Directory.Delete(directory, true); }
         Console.WriteLine("PASS Output_ReviewChecks");

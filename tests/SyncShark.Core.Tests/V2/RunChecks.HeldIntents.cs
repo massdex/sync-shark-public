@@ -606,14 +606,14 @@ internal static partial class RunChecks
                 ? LinkExclusions.Reason.Key : LinkExclusions.StubReason.Key;
             Require(store.OpenNotices(fx.Pair.PairId).Count(notice => notice.ReasonKey == summaryKey) == 1,
                 label + ": setup leaves the standing summary explaining the protected item");
-            Require(store.CountDeferredPlanning(fx.Pair.PairId) == 0,
-                label + ": full SyncRun creates no deferred rows for permanent holds");
+            Require(store.CountDeferredPlanning(fx.Pair.PairId) == (kind == ItemFlags.Link ? 2 : 1),
+                label + ": selection-only admission retains the observed entity and any descendant without granting effects");
             if (kind == ItemFlags.Link)
             {
                 fx.B.Seed(target.Path, "changed counterpart");
                 await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
-                Require(store.CountDeferredPlanning(fx.Pair.PairId) == 0,
-                    "changed counterpart under a permanent link still creates no deferred row");
+                Require(store.CountDeferredPlanning(fx.Pair.PairId) == 3,
+                    "the changed counterpart also retains observation debt without retiring the cached-link descendants");
             }
             var baselinesBefore = store.Baselines(fx.Pair.PairId).Count;
 

@@ -11,6 +11,7 @@ public sealed record ContentProofFailure(ContentProofFailure.StageKind Stage, st
     internal static readonly StageKind[] ItemStages = [StageKind.Classification, StageKind.ContentOpen,
         StageKind.BeforeRead, StageKind.Read, StageKind.AfterRead, StageKind.PathIdentity];
     internal bool ItemScoped => ItemStages.Contains(Stage);
+    internal bool RootScoped => Stage is StageKind.Journal or StageKind.VolumeOpen or StageKind.RootOpen;
     public string Encode() => Prefix + JsonSerializer.Serialize(this);
     public static ContentProofFailure? Decode(string? text)
     {

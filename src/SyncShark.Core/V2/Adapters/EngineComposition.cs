@@ -160,7 +160,7 @@ public sealed class EngineComposition : IDisposable
             _auto ??= new AutoSync(Store, Run, Endpoints, Settings, paused, () => Floor(safetyPoll()), _time,
                 (pairId, cause) =>
                 {
-                    var log = RunLog.Open(Paths.ProductRoot, pairId, "autosync", verbose: false);
+                    var log = RunLog.Open(Paths.ProductRoot, pairId, RunLog.AutoSyncCommand, verbose: false);
                     log.Summary("wake-cause=" + cause);
                     return log;
                 });

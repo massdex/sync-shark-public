@@ -45,7 +45,7 @@ public sealed partial class SyncRun
         if (guard is not null)
             foreach (var entry in GuardedActions(actions, guard))
                 if (!Allowed(entry.Guard, entry.Action))
-                    reasons.TryAdd(entry.Action, entry.Guard.Explain?.Invoke(entry.Action) ?? new("held:protection"));
+                    reasons.TryAdd(entry.Action, entry.Guard.Explain?.Invoke(entry.Action) ?? new("protection"));
         return reasons;
     }
 
@@ -114,7 +114,7 @@ public sealed partial class SyncRun
 
     private static Notice EligibilityNotice(string pairId, string path, string reason)
     {
-        var boundary = reason is "outside-pair" or "excluded" or "ignored" or "product-owned" or "link" or "stub";
+        var boundary = reason is "outside-pair" or "excluded" or "ignored" or "product-owned" or "link" or "stub" or "protection";
         return new(pairId, boundary ? OutsidePairRule : 40, NoticeKind.Info, path,
             (boundary ? PlanNotices.OutsidePairArea.Detail :
                 string.Format(System.Globalization.CultureInfo.InvariantCulture, MessageCatalog.Default.Message("eligibility-rejected"), reason)) +

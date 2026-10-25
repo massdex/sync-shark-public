@@ -110,7 +110,7 @@ internal static class PlanningProtectionChecks
         var builder = typeof(SyncRun).GetMethod("Protection", System.Reflection.BindingFlags.Instance |
             System.Reflection.BindingFlags.NonPublic)!;
         LinkExclusions Build() => (LinkExclusions)builder.Invoke(run,
-            [pair, null, null, null, null, null, null])!;
+            [pair, null, null, null, null, null, null, ItemEligibility.Purpose.Plan, null, null, null])!;
         var preview = Build();
         var apply = Build();
         var incremental = Build();
@@ -262,8 +262,8 @@ internal static class PlanningProtectionChecks
             var options = new PlanOptions(TimeSpan.Zero, firstSync,
                 new("{name} [{side}]{ext}", "s", TimeSpan.Zero, "Left", "Right"), 10);
             var plan = Planner.Decide("pair", 1, rows, options);
-            LocalChecks.Require(plan.Actions.Count == 0 && plan.Notices.Single().ReasonKey == PlanNotices.CannotRead.Key,
-                "unknown target coverage is a no-action exact scan retry in either orientation and run mode");
+            LocalChecks.Require(plan.Actions.Count == 0 && plan.Notices.Single().ReasonKey == PlanNotices.DestinationUnobserved.Key,
+                "unknown target coverage is a no-action exact observation retry in either orientation and run mode");
             var chosen = Planner.Decide("pair", 1, rows, options with
                 { Winners = new Dictionary<string, Side?> { [item.Path] = source } });
             LocalChecks.Require(chosen.Actions.Count == 0, "a winner choice cannot manufacture target coverage");

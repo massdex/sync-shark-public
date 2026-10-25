@@ -52,6 +52,21 @@ public static partial class Planner
         Emit(ctx, row, rule, ActionKind.Move, target, source.Path, current.Path, source, current, false, key);
     }
 
+    // Competing leaf spellings need a metadata winner; content equality is not rename authority.
+    private static void ResolveCaseConflict(Context ctx, PlanRow row, string key)
+    {
+        if (!ModificationTime.IsPlausible(row.A!.Mtime, ctx.Options.ObservedAt) ||
+            !ModificationTime.IsPlausible(row.B!.Mtime, ctx.Options.ObservedAt) ||
+            (row.A.Mtime - row.B.Mtime).Duration() <= ctx.Options.TieWindow)
+            Hold(ctx, row, 20, PlanNotices.NeedDecision);
+        else
+        {
+            var winner = row.A.Mtime > row.B.Mtime ? Side.A : Side.B;
+            ChangedAgainstSame(ctx, row, winner, RowState.Moved, key);
+            AddNotice(ctx, 20, NoticeKind.AutoConflict, PrimaryPath(row), PlanNotices.AutoConflict);
+        }
+    }
+
     // Ancestor-only spelling is the same location; adoption still requires content proof.
     private static void SameLocation(Context ctx, PlanRow row, int rule,
         ItemState source, ItemState current, string key)

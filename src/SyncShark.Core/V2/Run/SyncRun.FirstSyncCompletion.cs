@@ -20,7 +20,7 @@ public sealed partial class SyncRun
                 .Distinct(StringComparer.OrdinalIgnoreCase);
             store.RetainPlanningObservations(root, changed.Where(item => covered(item.Path))
                 .Concat(parents.SelectMany(path => _store.Live(root, [path]).Where(item =>
-                    string.Equals(item.Path, path, StringComparison.OrdinalIgnoreCase)))), ct);
+                    string.Equals(item.Path, path, StringComparison.OrdinalIgnoreCase)))), ct, pair);
         }
         // Marks are committed above. Execution checkpoints advance later in AdvanceCursors;
         // interruption here must replay the feed rather than lose the planning obligation.

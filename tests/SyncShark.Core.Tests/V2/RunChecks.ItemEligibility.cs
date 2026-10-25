@@ -93,6 +93,17 @@ internal static partial class RunChecks
             "only the accepted content proof publishes verified content");
         Require(!store.OpenNotices(pair.PairId).Any(row => row.NoticeId == notice.NoticeId),
             "accepted proof closes its item failure without waiting for unrelated failures");
+        var changedSelectionIo = new LocalGapIo(store, StorageChecks.Fast, new HashSet<string>(), () => false)
+        {
+            AfterContentReadForCheck = _ =>
+            {
+                store.SavePair(pair with { Excluded = ["Parent"] });
+                store.SavePair(pair with { PairId = "included-pair", Excluded = ["Parent"] });
+            }
+        };
+        var excludedAfterRead = await changedSelectionIo.HashAsync(root, item, true, default);
+        Require(excludedAfterRead.Outcome == LocalGapHashOutcome.NotPairWork && excludedAfterRead.Failure is null,
+            "post-read selection rejection retires work rather than recording an eligibility failure");
         Console.WriteLine("PASS ItemEligibilityContent");
     }
 }

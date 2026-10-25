@@ -155,8 +155,7 @@ internal sealed partial class LocalGapIo(IStateStore known, V2Settings settings,
             if (!urgent && Paused) return new(LocalGapHashOutcome.Paused);
             if (settings.LocalGapBytesPerSecond <= 0) return new(LocalGapHashOutcome.Disabled);
             if (Eligibility(root, item, checkHolds: true) is { Eligible: false } eligibility)
-                return eligibility.NotPairWork ? new(LocalGapHashOutcome.NotPairWork, Reason: eligibility.Reason) :
-                    new(LocalGapHashOutcome.Held, Reason: eligibility.Reason);
+                return EligibilityRejection(eligibility);
             stage = ProofStage.RootOpen;
             var identity = LocalItems.ParseObjectId(root.RootObjectId);
             using var lease = PilotDirectoryLease.Open(root.RootPath, new PilotDirectoryIdentity(identity.Volume, identity.FileId));
@@ -217,8 +216,8 @@ internal sealed partial class LocalGapIo(IStateStore known, V2Settings settings,
             return LocalGapHashResult.Failed(ProofStage.AfterRead, MessageCatalog.Default.Message("proof-content-changed"),
                 outcome: urgent ? LocalGapHashOutcome.ChangedDuringRead : LocalGapHashOutcome.Unverifiable);
         if (ProbePath(root, item, out var failure) is not { } pathProof)
-            return failure?.Cause.StartsWith("held:", StringComparison.Ordinal) == true
-                ? new(LocalGapHashOutcome.Held, Reason: failure.Cause)
+            return failure is { Stage: ProofStage.Eligibility }
+                ? EligibilityRejection(new ItemEligibility.Result(failure.Cause))
                 : new(LocalGapHashOutcome.Unverifiable, Reason: failure?.Cause) { Failure = failure };
         if (pathProof.File != after) return LocalGapHashResult.Failed(ProofStage.PathIdentity, MessageCatalog.Default.Message("proof-path-changed"),
             outcome: urgent ? LocalGapHashOutcome.ChangedDuringRead : LocalGapHashOutcome.Unverifiable);
@@ -226,10 +225,14 @@ internal sealed partial class LocalGapIo(IStateStore known, V2Settings settings,
         return new(LocalGapHashOutcome.Verified, content.Hash, new LocalGapProof(checkpoint.Cursor, after!));
     }
 
+    private static LocalGapHashResult EligibilityRejection(ItemEligibility.Result eligibility) =>
+        new(eligibility.NotPairWork ? LocalGapHashOutcome.NotPairWork : LocalGapHashOutcome.Held,
+            Reason: eligibility.Reason);
+
     private async Task<(string Hash, long Bytes)?> ReadHashAsync(FileStream stream, bool urgent, CancellationToken ct)
     {
         var buffer = ArrayPool<byte>.Shared.Rent(ContentBufferBytes);
-        var hasher = new DropboxContentHash.BlockHasher();
+        var hasher = new ContentBlockHasher();
         try
         {
             while (true)

@@ -183,11 +183,11 @@ internal sealed class HashAlgorithmIncrementalHasher(string algorithm, HashAlgor
 
 /// <summary>
 /// The Dropbox block-algorithm seam: the exact 4 MiB block policy lives in
-/// <see cref="DropboxContentHash.BlockHasher"/> and is never reimplemented here.
+/// <see cref="V2.ContentBlockHasher"/> and is never reimplemented here.
 /// </summary>
 internal sealed class DropboxBlockIncrementalHasher : IIncrementalContentHasher
 {
-    private readonly DropboxContentHash.BlockHasher _hasher = new();
+    private readonly V2.ContentBlockHasher _hasher = new();
     private bool _finished;
 
     public string Algorithm => SyncContentIdentity.DropboxBlockSha256;

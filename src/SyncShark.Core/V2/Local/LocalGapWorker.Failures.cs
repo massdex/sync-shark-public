@@ -26,7 +26,7 @@ internal sealed partial class LocalGapWorker
     private void RetainInterruptedHash(RootDef root, LocalGapEpoch epoch, ItemState item, LocalGapHashResult result)
     {
         if (result.Outcome == LocalGapHashOutcome.Held) return;
-        if (result.Failure is { Stage: ContentProofFailure.StageKind.Journal or ContentProofFailure.StageKind.VolumeOpen or ContentProofFailure.StageKind.RootOpen } rootFailure &&
+        if (result.Failure is { RootScoped: true } rootFailure &&
             store is IStateStore known)
         {
             if (known.IndexRetryDue(root.RootId)) known.RecordIndexFailure(root.RootId, rootFailure.Encode());

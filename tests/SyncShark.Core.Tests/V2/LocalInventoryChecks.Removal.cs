@@ -55,6 +55,16 @@ internal static partial class LocalInventoryChecks
             var reviewedReads = contentReads;
             LocalChecks.Require((await inventory.HashAsync(["consented/original.tmp"], default)).Count == 0 &&
                 contentReads == reviewedReads, "reviewed proof scope cannot leak into ordinary content work on " + side);
+            LocalChecks.Seed(directory, "sibling.tmp", "outside the reviewed folder");
+            await inventory.ReadSubtreeAsync("consented", async _ =>
+            {
+                var beforeSibling = contentReads;
+                var siblingRows = new List<ItemState>();
+                await inventory.ReadSubtreeAsync("sibling.tmp", page =>
+                { siblingRows.AddRange(page); return Task.CompletedTask; }, default);
+                LocalChecks.Require(contentReads == beforeSibling && siblingRows.Single().Hash is null,
+                    "an ignored sibling outside the active reviewed folder receives no content read on " + side);
+            }, default, progress: null, reviewedRemoval: consentPair);
             var plannedConsent = await DeleteSourceGuard.RecordRemovalConsentAsync(
                 proposed with { ActionId = "planned-consent", DescendantsPlanned = true, PreserveIgnoredChildren = false },
                 consentPair, store, inventory, default, isStateDamage: StorageFailureClassifier.IsStateDamage);
@@ -70,6 +80,40 @@ internal static partial class LocalInventoryChecks
             var incompleteConsent = await DeleteSourceGuard.RecordRemovalConsentAsync(proposed, consentPair, store, inventory, default, isStateDamage: StorageFailureClassifier.IsStateDamage);
             LocalChecks.Require(incompleteConsent.FrozenRemovalSignature == "unproven",
                 "undisclosed carried contents cannot acquire a consent signature on " + side);
+            // Reviewed proof cannot turn a link or online-only child into deletion authority.
+            LocalChecks.Seed(directory, "outside/target.txt", "never read through the link");
+            Directory.CreateDirectory(Path.Combine(directory, "unsafe"));
+            var junction = Path.Combine(directory, "unsafe", "link");
+            var stubPath = Path.Combine(directory, "unsafe", "stub.txt");
+            LocalChecks.Seed(directory, "unsafe/stub.txt", "offline bytes");
+            LocalChecks.CreateJunction(junction, Path.Combine(directory, "outside"));
+            var attributes = File.GetAttributes(stubPath);
+            File.SetAttributes(stubPath, attributes | FileAttributes.Offline);
+            try
+            {
+                var beforeUnsafe = contentReads;
+                var unsafeRows = new List<ItemState>();
+                await inventory.ReadSubtreeAsync("unsafe", page =>
+                { unsafeRows.AddRange(page); return Task.CompletedTask; }, default, progress: null, reviewedRemoval: consentPair);
+                LocalChecks.Require(contentReads == beforeUnsafe &&
+                    unsafeRows.Any(item => item.Path == "unsafe/link" && (item.Flags & ItemFlags.Link) != 0) &&
+                    unsafeRows.Any(item => item.Path == "unsafe/stub.txt" && (item.Flags & ItemFlags.Placeholder) != 0) &&
+                    unsafeRows.All(item => item.Hash is null),
+                    "reviewed link and stub children get no content reads or hashes on " + side);
+                var unsafeAction = proposed with { Path = "unsafe", ExpectedTarget = unsafeRows.Single(item => item.Path == "unsafe"),
+                    RemovalReviewChoice = true };
+                LocalChecks.Require(await DeleteSourceGuard.CaptureReviewedRemovalAsync(unsafeAction, consentPair, store,
+                    inventory, default, isStateDamage: StorageFailureClassifier.IsStateDamage) is null &&
+                    !await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(unsafeAction with { FrozenRemovalSignature = "unproven" },
+                        consentPair, store, inventory, default, isStateDamage: StorageFailureClassifier.IsStateDamage) &&
+                    contentReads == beforeUnsafe,
+                    "link/stub removal remains unproven and refused without content reads on " + side);
+            }
+            finally
+            {
+                File.SetAttributes(stubPath, attributes);
+                LocalChecks.RemoveJunction(junction);
+            }
             // Wide tree crosses page boundaries without opening content (empty directories).
             for (var i = 0; i < 513; i++) Directory.CreateDirectory(Path.Combine(directory, "wide", "d" + i));
             var count = 0;

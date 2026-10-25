@@ -202,7 +202,8 @@ internal static partial class LocalJournalChecks
         await using (resumed)
         {
             resumed.Start(_ => false, _ => { });
-            await WaitForIndexAsync(() => store.CountDeferredPlanning(pairA.PairId) == 3 &&
+            await WaitForIndexAsync(() => store.RehashPendingCount(rootA.RootId) == 0 &&
+                store.RehashPendingCount(rootB.RootId) == 0 && store.CountDeferredPlanning(pairA.PairId) == 3 &&
                 store.CountDeferredPlanning(pairB.PairId) == 3,
                 "both resumed roots to verify and publish their backlog");
             await resumed.StopAsync();

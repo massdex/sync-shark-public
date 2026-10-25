@@ -38,7 +38,8 @@ internal sealed partial class LocalGapIo
         if (guard.Safe.Count == 0) return (null, new(LocalGapHashOutcome.Unverifiable, Reason: "proof:parent-identity-unavailable")
         { Failure = guard.Failure ?? new(ProofStage.ParentIdentity, MessageCatalog.Default.Message("proof-parent-unsafe")) });
         var scan = await new PilotLocalScanner { MetadataOnly = true, CloudFilesAware = true }
-            .ScanAsync(lease, owned, ct, refreshPaths: [path], traverseDirectory: _ => false).ConfigureAwait(false);
+            .ScanAsync(lease, LocalItems.ProductOwnedInside(root.RootPath, owned), ct,
+                refreshPaths: [path], traverseDirectory: _ => false).ConfigureAwait(false);
         if (scan.Decisions.Any(decision => decision.Kind == PilotDecisionKind.OnlineOnly))
             return (null, new(LocalGapHashOutcome.NotPairWork, Reason: "stub"));
         if (!scan.Entries.TryGetValue(path, out var entry))

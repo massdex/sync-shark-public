@@ -21,6 +21,10 @@ internal static partial class RunChecks
         foreach (var flag in new[] { ItemFlags.Link, ItemFlags.Placeholder })
             Require(eligibility.Evaluate(fx.Pair, Side.A, item with { Flags = flag }, ItemEligibility.Purpose.Plan).Eligible,
                 "selection-only planning preserves observation for cached classifications");
+        var blocked = new SyncAction("direct-block", 40, ActionKind.Delete, Side.B, "unexplained", null, null,
+            item with { Path = "unexplained", Flags = ItemFlags.None }, false, null);
+        Require(eligibility.ExplainEffect(fx.Pair, blocked).Reason == "protection",
+            "an unexplained direct safety block is not misclassified as a silent related-effect hold");
         foreach (var reason in PlanNotices.ObservationReasons)
         {
             var observation = new Notice(fx.Pair.PairId, 30, NoticeKind.Info, "waiting.txt", reason.Detail, reason.Key);

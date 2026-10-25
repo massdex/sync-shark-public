@@ -37,6 +37,13 @@ public static partial class Planner
             return;
         }
         var same = Content.SameContent(row.A!, row.B!);
+        if (same == true && sA == RowState.Moved && sB == RowState.Moved &&
+            PairPath.Same(row.A!.Path, row.Base!.A.Path) && PairPath.Same(row.B!.Path, row.Base.B.Path) &&
+            !PairPath.SameLeafLocation(row.A.Path, row.B.Path))
+        {
+            ResolveCaseConflict(ctx, row, key);
+            return;
+        }
         if (same == true)
             AdoptAction(ctx, row, 3, Side.B, row.B!.Path, row.A!, row.B!, key);           // rule 3
         else if (same is null)

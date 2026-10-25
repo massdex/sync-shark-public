@@ -32,8 +32,10 @@ internal static partial class RunChecks
                 Require(store.OpenNotices(fx.Pair.PairId).Any(n => n.Path.Length == 0 &&
                     n.ReasonKey == (flag == ItemFlags.Link ? "links-excluded" : "stubs-left-alone")),
                     "production summary remains present during settlement");
-                Require(report.Failed == 0 && store.CountDeferredPlanning(fx.Pair.PairId) == 0,
-                    $"{flag} summary permits admitted equal-content debt to retire through a real run");
+                var remaining = store.DeferredPlanningDisplayPage(fx.Pair.PairId);
+                Require(report.Failed == 0 && remaining.Count == 1 && remaining[0].ObjectId == protectedItem.ObjectId &&
+                    remaining[0].Path == protectedItem.Path,
+                    $"{flag} summary retires the equal-content debt while retaining the unverified observation");
                 Require(store.Baselines(fx.Pair.PairId).Any(b => b.A.Path == local.Path && b.A.Hash == local.Hash),
                     "summary settlement preserves the verified baseline");
             }

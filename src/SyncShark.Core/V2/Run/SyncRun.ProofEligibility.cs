@@ -13,8 +13,11 @@ public sealed partial class SyncRun
             .ToDictionary(pair => pair.PairId, pair => Protection(pair,
                 purpose: ItemEligibility.Purpose.ContentProof, proofRoot: root.RootId, proofPaths: paths)
                 .ForPaths(paths), StringComparer.Ordinal);
-        return (pair, _, item, _) => holds.TryGetValue(pair.PairId, out var protection) &&
-            (protection.Covers(item.Path) || item.Kind == ItemKind.Folder && protection.Contains(item.Path))
-                ? "held:protection" : null;
+        return (pair, _, item, _) => holds.TryGetValue(pair.PairId, out var protection)
+            ? ProtectionHold(protection, item.Path, item.Kind == ItemKind.Folder) : null;
     }
+
+    // One mapping from protection coverage to the eligibility hold reason.
+    private static string? ProtectionHold(LinkExclusions protection, string path, bool descendants) =>
+        protection.Covers(path) || descendants && protection.Contains(path) ? "held:protection" : null;
 }

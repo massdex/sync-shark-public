@@ -306,6 +306,8 @@ internal static partial class RunChecks
         {
             using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
+            // The fake target hashes the transferred bytes with the real local adapter algorithm.
+            fx.A.DropboxHashes = fx.B.DropboxHashes = true;
             var root = LocalChecks.RootOf(directory, "ra");
             var pair = fx.Pair with { A = root };
             store.SavePair(pair);
@@ -792,6 +794,8 @@ internal static partial class RunChecks
         LocalChecks.Seed(directory, "sub/file.txt", "content");
         using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
+        // The fake target hashes the transferred bytes with the real local adapter algorithm.
+        fx.A.DropboxHashes = fx.B.DropboxHashes = true;
         var root = LocalChecks.RootOf(directory, "ra");
         var pair = fx.Pair with { A = root };
         store.SavePair(pair);
@@ -982,6 +986,8 @@ internal static partial class RunChecks
         LocalChecks.Seed(directory, "sub/file.txt", "content");
         using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
+        // The fake target hashes the transferred bytes with the real local adapter algorithm.
+        fx.A.DropboxHashes = fx.B.DropboxHashes = true;
         var root = LocalChecks.RootOf(directory, "ra");
         var pair = fx.Pair with { A = root };
         store.SavePair(pair);

@@ -16,7 +16,7 @@ public sealed partial class LocalInventory
             _known.RetireIndexingRehash(_root.RootId, item, revision);
             return false;
         }
-        if (result.Failure is { Stage: ContentProofFailure.StageKind.Journal or ContentProofFailure.StageKind.VolumeOpen or ContentProofFailure.StageKind.RootOpen } rootFailure)
+        if (result.Failure is { RootScoped: true } rootFailure)
         {
             if (_known.IndexRetryDue(_root.RootId)) _known.RecordIndexFailure(_root.RootId, rootFailure.Encode());
             return false;

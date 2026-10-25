@@ -72,7 +72,7 @@ internal static class SyncExactFileUploadRules
     {
         source.Position = 0;
         using var sha = SHA256.Create();
-        var blockHasher = new DropboxContentHash.BlockHasher();
+        var blockHasher = new V2.ContentBlockHasher();
         var buffer = new byte[128 * 1024];
         while (true)
         {

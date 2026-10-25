@@ -130,6 +130,10 @@ internal static partial class LocalItems
         return false;
     }
 
+    // A root at or inside Recovery is explicitly pairable; only strictly contained product folders are excluded.
+    internal static IReadOnlySet<string> ProductOwnedInside(string rootPath, IReadOnlySet<string> productOwnedPaths) =>
+        productOwnedPaths.Where(path => RelativeTo(rootPath, path) is not null).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>The root-relative product-owned exclusion set one local root's scan and watch share.</summary>
     public static IReadOnlySet<string> ProductOwnedRelative(string rootPath, IReadOnlySet<string> productOwnedPaths) =>
         productOwnedPaths.Select(path => RelativeTo(rootPath, path)).Where(path => path is not null)

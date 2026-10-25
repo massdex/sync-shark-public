@@ -34,7 +34,7 @@ internal static partial class LocalJournalChecks
         };
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         var positive = await stable.HashAsync(root, item, timeout.Token);
-        var expected = new DropboxContentHash.BlockHasher();
+        var expected = new ContentBlockHasher();
         var zeros = new byte[64 * 1024];
         for (var offset = 0; offset < size; offset += zeros.Length) expected.Append(zeros);
         LocalChecks.Require(positive is { Outcome: LocalGapHashOutcome.Verified } completed && completed.Hash == expected.Finish(),

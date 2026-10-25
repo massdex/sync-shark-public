@@ -850,7 +850,7 @@ public sealed partial class SyncRun : ISyncRun
         try
         {
             scan = await ScanBothAsync(observationPair, throttle, ct);
-            RetainReviewedRemovalObservations(pair, scan, reviewScopes, ct);
+            RetainReviewedRemovalObservations(observationPair, scan, reviewScopes, ct);
         }
         catch (Exception error) when (RunFailure(error, ct))
         {
@@ -1225,7 +1225,7 @@ public sealed partial class SyncRun : ISyncRun
         var eligibility = new ItemEligibility(_store.Pairs(), _productOwned(pair), (_, _, item, _) =>
             links.CoversLink(item.Path) || links.ContainsLink(item.Path) ? "link" :
             links.CoversStub(item.Path) || links.ContainsStub(item.Path) ? "stub" :
-            links.Covers(item.Path) || links.Contains(item.Path) ? "held:protection" : null);
+            ProtectionHold(links, item.Path, descendants: true));
         var guard = new ActionGuard(links.Narrow(plain.A), links.Narrow(plain.B), links.NarrowAction(strict.A),
             links.NarrowAction(strict.B), IgnoreRules: PairInclude.IgnoreRules(pair),
             Prepare: links.RequiresBatch ? paths => ActionPredicates(pair, links.ForPaths(paths), rebuildables) : null,
@@ -1351,8 +1351,7 @@ public sealed partial class SyncRun : ISyncRun
     {
         var protection = Protection(pair, purpose: purpose, proofItem: item,
             proofRoot: side == Side.A ? pair.A.RootId : pair.B.RootId).ForPaths([item.Path]);
-        return protection.Covers(item.Path) || item.Kind == ItemKind.Folder && protection.Contains(item.Path)
-            ? "held:protection" : null;
+        return ProtectionHold(protection, item.Path, item.Kind == ItemKind.Folder);
     }
 
     // One composition owner for preview, reviewed apply, incremental planning and repair admission.

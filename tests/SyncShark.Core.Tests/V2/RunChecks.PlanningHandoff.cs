@@ -24,6 +24,23 @@ internal static partial class RunChecks
         await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
         Require((await fx.B.ObserveAsync("held.txt", default))?.Hash == Hash("observed"),
             "lifting protection plans the retained observation without another provider change");
+        var ancestor = new ItemState("placeholder", ItemKind.Folder, "ancestor", null, null, 0,
+            DateTimeOffset.MinValue, ItemFlags.Placeholder);
+        var child = new ItemState("placeholder/child.txt", ItemKind.File, "descendant", null, null, 4,
+            DateTimeOffset.MinValue, ItemFlags.None);
+        var stub = child with { Path = "placeholder/stub.txt", ObjectId = "stub", Flags = ItemFlags.Placeholder };
+        generation = store.BeginGeneration(fx.Pair.A.RootId, "full");
+        store.WriteSnapshot(new Snapshot(fx.Pair.A.RootId, Side.A, generation, "", [ancestor], [])
+            { IncludesPath = path => path == ancestor.Path });
+        store.WriteSnapshot(new Snapshot(fx.Pair.A.RootId, Side.A, generation, "", [child, stub], [])
+            { IncludesPath = path => path == child.Path || path == stub.Path });
+        Require(store.DeferredPlanningDisplayPage(fx.Pair.PairId).Any(row => row.Path == child.Path) &&
+            store.DeferredPlanningDisplayPage(fx.Pair.PairId).Any(row => row.Path == stub.Path),
+            "snapshot handoff is selection-only despite cached placeholder ancestor and incoming stub");
+        var observed = child with { Path = "placeholder/observed.txt", ObjectId = "observed" };
+        store.RetainPlanningObservations(fx.Pair.A.RootId, [observed], default);
+        Require(store.DeferredPlanningDisplayPage(fx.Pair.PairId).Any(row => row.Path == observed.Path),
+            "run observation uses the same selection-only admission owner");
         Console.WriteLine("PASS PlanningObservationHandoff");
     }
 }

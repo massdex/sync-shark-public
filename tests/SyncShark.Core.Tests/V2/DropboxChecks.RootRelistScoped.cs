@@ -64,7 +64,7 @@ internal static partial class DropboxChecks
             ?? throw new InvalidOperationException("Missing targeted scan owner.");
         var gen = store.BeginGeneration(RootId, "delta");
         var result = await (Task<(IReadOnlyList<string> Touched, IReadOnlyList<string> Incomplete,
-            IReadOnlyDictionary<string, string> Reasons, bool RootSettles)>)retry.Invoke(run,
+            IReadOnlyDictionary<string, string> Reasons, bool RootSettles, IReadOnlyList<string> Observed)>)retry.Invoke(run,
             [pair, pair.B, Side.B, inventory, "saved", gen, (Func<string, bool>)(_ => true),
              (Action<string>)(_ => { }), new ProgressThrottle(null, TimeProvider.System, TimeSpan.Zero),
              CancellationToken.None, false])!;
