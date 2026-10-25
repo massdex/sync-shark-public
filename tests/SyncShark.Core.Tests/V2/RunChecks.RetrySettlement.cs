@@ -39,7 +39,7 @@ internal static partial class RunChecks
             if (mode == "equal-new-identity")
             {
                 await fx.A.DeleteAsync(new SyncAction("replace-local", 6, ActionKind.Delete, Side.A,
-                    baseline.A.Path, null, null, null, false), default);
+                    baseline.A.Path, null, null, null, false, null), default);
                 fx.A.InventoryWithoutHashes = false;
                 var replacement = fx.A.Seed(baseline.A.Path, "cloud-edit", mtime: baseline.A.Mtime);
                 Require(replacement.ObjectId != baseline.A.ObjectId && Content.SameContent(replacement, baseline.B) == true,
