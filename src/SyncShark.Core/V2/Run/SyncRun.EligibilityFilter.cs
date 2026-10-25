@@ -89,6 +89,17 @@ public sealed partial class SyncRun
 
     private static void PropagateBlocked(Plan plan, HashSet<SyncAction> blocked)
     {
+        // An isolated hold needs only a seed-sized index and one scan, not whole-plan adjacency.
+        var seedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seedKeys = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var seed in blocked.Concat(plan.SkippedActions))
+        {
+            foreach (var path in RowPaths(seed)) seedPaths.Add(path);
+            if (seed.ObjectKey is { } key) seedKeys.Add(key);
+        }
+        if (!plan.Actions.Any(action => !blocked.Contains(action) &&
+            (action.ObjectKey is { } key && seedKeys.Contains(key) || RowPaths(action).Any(seedPaths.Contains))))
+            return;
         // Index references, not action copies; each adjacency list is consumed at most once.
         // Keep ordinal object identity separate from case-insensitive path occupancy.
         var paths = new Dictionary<string, List<SyncAction>>(StringComparer.OrdinalIgnoreCase);
