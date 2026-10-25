@@ -1,0 +1,3 @@
+--v2-autosync-checks
+--cli-checks
+--v2-storage-checks
