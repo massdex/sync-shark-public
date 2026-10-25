@@ -397,7 +397,13 @@ internal static partial class AutoSyncChecks
         Require(rig.Run.Runs("p1") == 1 && rig.Watches.Created == 2,
             "signals from retired watches cannot bypass the real-failure cooldown or re-arm early");
         rig.Clock.Advance(TimeSpan.FromMilliseconds(1));
-        await Until(() => rig.Run.Runs("p1") >= 2, "real failure retries at its own deadline");
+        await Until(() => rig.Watches.Created == 4 && rig.WatchA.Parked && rig.WatchB.Parked &&
+            rig.Clock.ActiveTimers == 1, "real-failure deadline re-arms watches through startup debounce");
+        rig.Clock.Advance(Settings.ChangeQuietWindow);
+        await rig.ParkedAsync(AutoStatus.Idle);
+        Require(rig.Run.Runs("p1") == 2, "outer recovery produces exactly one retry run");
+        rig.Clock.Advance(Settings.ChangeQuietWindow);
+        Require(rig.Run.Runs("p1") == 2, "consumed startup signals cannot produce a duplicate recovery run");
         Pass("Deferred_OuterFailureReplacesBackoff");
     }
 
