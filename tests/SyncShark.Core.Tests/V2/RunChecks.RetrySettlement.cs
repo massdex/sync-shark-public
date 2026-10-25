@@ -42,7 +42,14 @@ internal static partial class RunChecks
                     baseline.B, baseline.A with { Hash = "previous", Mtime = baseline.A.Mtime.AddMinutes(-1) }, false, baseline.ObjectKey);
                 store.RecordIntents(fx.Pair.PairId, [action]);
                 store.CommitResult(fx.Pair.PairId, gen, action, new(action.ActionId, Outcome.Uncertain, null, null, null, "effect outcome unknown"));
-                fx.Provider.AddWriter(fx.Pair.A, new HashlessObserver(fx.WriterA));
+                // Keep the effect genuinely unresolved: a hashless read alone retires this
+                // checkpoint-free update as superseded instead of exercising pending protection.
+                fx.WriterA.OnRead = observedPath =>
+                {
+                    if (PairPath.Same(observedPath, baseline.A.Path))
+                        throw new HttpRequestException("Fixture observation temporarily unavailable", null,
+                            System.Net.HttpStatusCode.ServiceUnavailable);
+                };
             }
             if (mode == "other-baseline")
             {
