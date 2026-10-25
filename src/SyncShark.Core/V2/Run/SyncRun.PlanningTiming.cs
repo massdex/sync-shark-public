@@ -10,9 +10,18 @@ public sealed partial class SyncRun
     // the counts it produced, through the same RunLog trace the run already writes.
     private static long PlanningStepStarted() => Stopwatch.GetTimestamp();
 
-    private static void TracePlanningStep(string step, long started, string counts) =>
-        RunLog.Trace(string.Create(CultureInfo.InvariantCulture,
-            $"planning {step}: elapsed-ms={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0}; {counts}"));
+    private static void RunTracePlanningStep(string step, long started, string counts) =>
+        RunLog.Trace(string.Create(CultureInfo.InvariantCulture, $"planning {step}: elapsed-ms={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0}; {counts}"));
+
+    // One safety-filter pass with the action counts it kept and dropped; ApplySafetyFilter's other
+    // callers (apply, deferred evidence) keep their untraced shape.
+    private Plan FilteredPlan(PairDef pair, string step, ActionGuard? guard, Plan plan)
+    {
+        var started = PlanningStepStarted();
+        var filtered = ApplySafetyFilter(pair, guard, plan);
+        RunTracePlanningStep("filter " + step, started, $"actions={plan.Actions.Count}->{filtered.Actions.Count}; blocked={filtered.SkippedActions.Count - plan.SkippedActions.Count}");
+        return filtered;
+    }
 
     private async Task<DeferredExecution> ExecuteMeasuredPlanAsync(Plan plan, PairDef pair,
         ProgressThrottle throttle, IReadOnlySet<string> reviewedDeletes, CancellationToken ct)

@@ -1,2 +1,3 @@
 --v2-run-checks
 --v2-planner-checks
+--v2-journal-window-checks

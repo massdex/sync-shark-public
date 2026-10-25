@@ -58,12 +58,7 @@ public static partial class Planner
             {
                 var start = ctx.Draft.Count;
                 Dispatch(ctx, row);
-                // Scan this row's own appended entries by index: Skip(start) advances an iterator over
-                // an ever-growing draft, which is quadratic across the plan.
-                var readsOwnedPointer = false;
-                for (var index = start; index < ctx.Draft.Count && !readsOwnedPointer; index++)
-                    readsOwnedPointer = ReadsOwnedPointer(ctx.Draft[index].Action);
-                if (readsOwnedPointer)
+                if (ctx.Draft.FindIndex(start, entry => ReadsOwnedPointer(entry.Action)) >= 0)   // not Skip(start): O(draft) per row
                 {
                     ctx.TruncateDraft(start);
                     ctx.Notices.RemoveAll(notice => PairPath.Same(notice.Path, PrimaryPath(row)) &&

@@ -15,10 +15,19 @@ public sealed partial class SyncRun
         DeleteSourceGuard.RecordRemovalConsentAsync(action, pair, _store,
             _endpoints.Inventory(action.Target == Side.A ? pair.A : pair.B), ct, isStateDamage: StorageFailureClassifier.IsStateDamage);
 
-    private async Task<Plan> ApplyReviewedRetriesAsync(PairDef pair, Plan plan, IReadOnlyList<SyncRetry> retries, CancellationToken ct)
+    // The reviewed-retry stage's start and end braces: the contract below is unchanged, and its
+    // elapsed time and action counts reach the run log without growing that long method.
+    private async Task<Plan> TracedReviewedRetriesAsync(PairDef pair, Plan plan, IReadOnlyList<SyncRetry> retries, CancellationToken ct)
     {
         var started = PlanningStepStarted();
         RunLog.Trace($"planning retries: start; candidates={retries.Count}; actions={plan.Actions.Count}");
+        var applied = await ApplyReviewedRetriesAsync(pair, plan, retries, ct);
+        RunTracePlanningStep("retries done", started, $"actions={plan.Actions.Count}->{applied.Actions.Count}");
+        return applied;
+    }
+
+    private async Task<Plan> ApplyReviewedRetriesAsync(PairDef pair, Plan plan, IReadOnlyList<SyncRetry> retries, CancellationToken ct)
+    {
         // Re-read persisted scheduling authority: neither a rounded index candidate nor a stale
         // caller snapshot may replay a reviewed effect before its exact current deadline.
         retries = retries.Select(retry => _store.SyncRetryAt(pair.PairId, retry.Path))
@@ -118,11 +127,7 @@ public sealed partial class SyncRun
                 Notices = plan.Notices.Concat(changedNotices).ToArray()
             };
         }
-        if (replacements.Count == 0 && replaced.Count == 0)
-        {
-            TracePlanningStep("retries done", started, $"due={retries.Length}; replaced=0; actions={plan.Actions.Count}");
-            return plan;
-        }
+        if (replacements.Count == 0 && replaced.Count == 0) return plan;
         bool Replaced(string path) => replaced.Contains(path, StringComparer.OrdinalIgnoreCase) ||
             folders.Any(folder => PairPath.IsSelfOrUnder(path, folder));
         // A retained collapsed folder already expands its frozen descendants. Child intents are retained
@@ -137,15 +142,11 @@ public sealed partial class SyncRun
         var replay = DropUnderNewLocalLinks(pair, plan with
             { Actions = replacements.Where(action => lockedPaths.Contains(action.Path)).ToArray(), Notices = [] });
         var replayActions = replacements.Where(action => !lockedPaths.Contains(action.Path)).Concat(replay.Actions);
-        var applied = plan with
+        return plan with
         {
             Actions = plan.Actions.Where(action => !Replaced(action.Path)).Concat(replayActions).ToArray(),
             Notices = plan.Notices.Where(notice => !Replaced(notice.Path)).Concat(replay.Notices).ToArray()
         };
-        TracePlanningStep("retries done", started,
-            $"due={retries.Length}; replaced={replaced.Count}; replacements={replacements.Count}; " +
-            $"actions={plan.Actions.Count}->{applied.Actions.Count}");
-        return applied;
 
         async Task<bool> UnchangedAsync(SyncAction action)
         {

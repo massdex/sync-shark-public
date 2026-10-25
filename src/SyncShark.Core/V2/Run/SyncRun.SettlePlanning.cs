@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Globalization;
 
 namespace Massdex.SyncShark.V2;
 
@@ -35,7 +34,19 @@ public sealed partial class SyncRun
         var notSynced = ScanPathsNotSynced(pair);
         var chunks = candidates.Where(row => row.Paths.All(path =>
             includeA(path) && includeB(path) && !notSynced(path))).Chunk(128).ToArray();
-        var lastTrace = started;
+        EvaluateSettleChunks(chunks, pair, scan, protection, touched, accepted, adopts, ct);
+        var settled = adopts.Distinct().ToArray();
+        RunTracePlanningStep("settle done", started, $"candidates={candidates.Count}; chunks={chunks.Length}; accepted={accepted.Count}; rejected={candidates.Count - accepted.Count}; adopts={settled.Length}");
+        return (accepted, settled, candidates.Count);
+    }
+
+    // Chunk progress, in the protection-scope shape: the first and last chunk always report, and a
+    // long lane reports at most about one line every few seconds.
+    private void EvaluateSettleChunks(SqliteStateStore.DeferredPlanning[][] chunks, PairDef pair, BothScan scan,
+        LinkExclusions protection, IReadOnlyList<string> touched, List<SqliteStateStore.DeferredPlanning> accepted,
+        List<SyncAction> adopts, CancellationToken ct)
+    {
+        var lastTrace = Stopwatch.GetTimestamp();
         for (var index = 0; index < chunks.Length; index++)
         {
             var chunk = chunks[index];
@@ -45,15 +56,8 @@ public sealed partial class SyncRun
             if (index != 0 && index != chunks.Length - 1 &&
                 Stopwatch.GetElapsedTime(lastTrace).TotalSeconds < SettleChunkTraceSeconds) continue;
             lastTrace = Stopwatch.GetTimestamp();
-            RunLog.Trace(string.Create(CultureInfo.InvariantCulture,
-                $"planning settle chunk {index + 1}/{chunks.Length}: candidates={chunk.Length}; accepted={chunkAccepted}; " +
-                $"rejected={chunk.Length - chunkAccepted}; running-accepted={accepted.Count}"));
+            RunLog.Trace($"planning settle chunk {index + 1}/{chunks.Length}: candidates={chunk.Length}; accepted={chunkAccepted}; rejected={chunk.Length - chunkAccepted}; running-accepted={accepted.Count}");
         }
-        var settled = adopts.Distinct().ToArray();
-        TracePlanningStep("settle done", started,
-            $"candidates={candidates.Count}; chunks={chunks.Length}; accepted={accepted.Count}; " +
-            $"rejected={candidates.Count - accepted.Count}; adopts={settled.Length}");
-        return (accepted, settled, candidates.Count);
     }
 
     private void EvaluateSettleChunk(PairDef pair, BothScan scan, LinkExclusions protection,

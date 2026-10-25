@@ -26,22 +26,20 @@ internal static partial class RunChecks
             var lines = File.ReadAllLines(jsonPath);
             bool Has(params string[] parts) => lines.Any(line =>
                 parts.All(part => line.Contains(part, StringComparison.Ordinal)));
-            Require(Has("\"kind\":\"trace\"", "planning: start;", "rows="),
-                "the planning phase opens with its own trace line in the run log");
-            Require(Has("planning decide: start;", "rows="),
-                "the decide stage reports its start with its row count");
+            Require(Has("\"kind\":\"trace\"", "planning decide: start;", "rows="),
+                "the planning phase's first sub-stage reports its start in the run log");
             Require(Has("planning decide done:", "elapsed-ms=", "actions="),
                 "the decide stage reports its end with elapsed time and counts");
-            Require(Has("planning filter pass=1:", "actions=", "blocked="),
+            Require(Has("planning filter decide:", "actions=", "blocked="),
                 "a safety-filter pass reports its action count");
-            Require(Has("planning filter pass=2:"),
+            Require(Has("planning filter retries:") && Has("planning filter notices:"),
                 "every safety-filter pass in the phase is traced, not just the first");
-            Require(Has("planning retries done:", "elapsed-ms="),
+            Require(Has("planning retries: start;") && Has("planning retries done:", "elapsed-ms="),
                 "the reviewed-retry stage reports its start and end");
-            Require(Has("planning settle: start;") && Has("planning settle done:", "candidates="),
-                "the settle lane reports its start and end where it runs");
-            Require(Has("planning: done;", "filter-passes=", "actions="),
-                "the planning phase closes with its final counts");
+            Require(Has("planning settle: start;", "capacity=") || Has("planning settle: skipped;"),
+                "the settle lane reports whether it runs, with its start counts");
+            Require(!Has("planning settle: start;") || Has("planning settle done:", "candidates="),
+                "a running settle lane reports its end with its counts");
         }
         finally { DeleteFixture(folder); }
         Console.WriteLine("PASS PlanningSubStageTraces");

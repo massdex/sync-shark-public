@@ -1055,12 +1055,12 @@ public sealed partial class SyncRun
         RunLog.Trace($"planning decide: start; rows={rows.Count}");
         var plan = decide(rows);
         var decidedRows = rows.Count;
-        TracePlanningStep("decide pass 1", started, $"rows={decidedRows}; actions={plan.Actions.Count}; notices={plan.Notices.Count}");
+        RunTracePlanningStep("decide pass 1", started, $"rows={decidedRows}; actions={plan.Actions.Count}; notices={plan.Notices.Count}");
         var victims = UnhashedFolderVictims(pair, plan);
         var request = ResolveCurrentPaths(pair, UnhashedFiles(plan, victims));
         if (request.PathsA.Count == 0 && request.PathsB.Count == 0)
         {
-            TracePlanningStep("decide done", started, $"passes=1; hashed=0; rows={decidedRows}; actions={plan.Actions.Count}");
+            RunTracePlanningStep("decide done", started, $"passes=1; hashed=0; rows={decidedRows}; actions={plan.Actions.Count}");
             return (HoldUnhashed(pair.PairId, plan, victims), rows);
         }
         // Only path requests survive this pass. Do not retain its rows, plan or folder victims
@@ -1075,10 +1075,9 @@ public sealed partial class SyncRun
         // reloaded rows, so a size-only difference resolved by the hash pass never produces a false copy-back.
         var finalRows = reload();
         plan = decide(finalRows);
-        TracePlanningStep("decide pass 2", started, $"rows={finalRows.Count}; actions={plan.Actions.Count}; notices={plan.Notices.Count}");
+        RunTracePlanningStep("decide pass 2", started, $"rows={finalRows.Count}; actions={plan.Actions.Count}; notices={plan.Notices.Count}");
         var held = HoldUnhashed(pair.PairId, plan, UnhashedFolderVictims(pair, plan));
-        TracePlanningStep("decide done", started,
-            $"passes=2; hashed={request.PathsA.Count + request.PathsB.Count}; actions={held.Actions.Count}; final-rows={finalRows.Count}");
+        RunTracePlanningStep("decide done", started, $"passes=2; hashed={request.PathsA.Count + request.PathsB.Count}; actions={held.Actions.Count}; final-rows={finalRows.Count}");
         return (held, finalRows);
     }
 

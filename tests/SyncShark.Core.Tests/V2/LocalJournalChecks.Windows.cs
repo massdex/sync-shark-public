@@ -123,6 +123,15 @@ internal static partial class LocalJournalChecks
         return LocalItems.FromScan(scan.Entries[path]).ObjectId;
     }
 
+    // The record count from a "journal catch-up window i: N bytes, R records, P paths" trace line.
+    private static long WindowRecords(string line)
+    {
+        var marker = " bytes, ";
+        var start = line.IndexOf(marker, StringComparison.Ordinal) + marker.Length;
+        var end = line.IndexOf(" records", start, StringComparison.Ordinal);
+        return long.Parse(line[start..end], System.Globalization.CultureInfo.InvariantCulture);
+    }
+
     private static async Task OverflowWindowsAsync(string folder, bool floor)
     {
         var root = Path.Combine(folder, "root");
@@ -153,7 +162,21 @@ internal static partial class LocalJournalChecks
                     new(two, parent, from.NextUsn + 80, 0x100, FileAttributes.Normal, "two.txt")] : [];
             failure = null; kind = NtfsUsnReadFailure.Transient; return true;
         };
-        var delta = await inventory.ChangesSinceAsync(start.Cursor, store.BeginGeneration("root-local", "delta"), _ => true, default);
+        var traceJson = new MemoryStream();
+        Delta delta;
+        using (var log = RunLog.Open(folder, "journal", RunLog.AutoSyncCommand, verbose: false,
+            path => path.EndsWith(".jsonl", StringComparison.Ordinal) ? traceJson : new MemoryStream()))
+        {
+            delta = await inventory.ChangesSinceAsync(start.Cursor, store.BeginGeneration("root-local", "delta"), _ => true, default);
+        }
+        var windowLines = System.Text.Encoding.UTF8.GetString(traceJson.ToArray()).Split('\n')
+            .Where(line => line.Contains("journal catch-up window ", StringComparison.Ordinal)).ToArray();
+        // A window that overflows is halved and retried; the retry must report its own observation,
+        // never the failed attempt's count minus its own (which printed a negative live).
+        if (!floor)
+            LocalChecks.Require(windowLines.Length > 1 && WindowRecords(windowLines[0]) == 1 &&
+                windowLines.Skip(1).All(line => WindowRecords(line) == 0),
+                "each halved journal window reports its own record count, never a negative difference");
         LocalChecks.Require(sizes.Contains(JournalReplayWindow.ReplayWindowBytes / 2), "overflow halves the window");
         if (floor)
         {

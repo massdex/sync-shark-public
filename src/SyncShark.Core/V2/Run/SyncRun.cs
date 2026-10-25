@@ -962,18 +962,6 @@ public sealed partial class SyncRun : ISyncRun
         void refresh(HashRequest request) => inventory = scanner.RefreshHashes(pair, loadScope(), request);
         var rows = await HashAndJoinAsync(pair, loadScope, scan, false, throttle, ct, refresh);
         throttle.Report(RunPhases.Planning, null, 0, 0);
-        RunLog.Trace($"planning: start; rows={rows.Count}; retries={retries.Length}; deferred={deferredPlanning.Count}; touched={touched.Count}");
-        // Every safety-filter pass in this phase reports the action count it kept and dropped, so a
-        // slow or over-blocking pass is visible between the comparison trace and the boundary line.
-        var filterPasses = 0;
-        Plan Filter(ActionGuard? guard, Plan input)
-        {
-            var started = PlanningStepStarted();
-            var output = ApplySafetyFilter(pair, guard, input);
-            TracePlanningStep("filter pass=" + (++filterPasses), started,
-                $"actions={input.Actions.Count}->{output.Actions.Count}; blocked={output.SkippedActions.Count - input.SkippedActions.Count}");
-            return output;
-        }
         var rowEvaluated = EvaluatedPaths(rows);
         var mappingRetries = _store.UnresolvedNotices(pairId).Where(n => n.ReasonKey == "name-mapping-collision")
             .Select(n => n.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -982,7 +970,7 @@ public sealed partial class SyncRun : ISyncRun
         var deciding = DecideWithHashedCopiesAsync(pair, scan, rows,
             () => JoinRows(loadScope(), scan, false),
             pass => ExpandOccupancyOnce(pair, loadScope, scan,
-                Filter(ActionPredicates(pair, links), Decide(pair, scan, pass, winners, mappingContext, links)), touched, links,
+                FilteredPlan(pair, "decide", ActionPredicates(pair, links), Decide(pair, scan, pass, winners, mappingContext, links)), touched, links,
                 winners, () => inventory = null),
             throttle, ct, refresh);
         rows = [];
@@ -1017,15 +1005,15 @@ public sealed partial class SyncRun : ISyncRun
         var retryPair = pair with { Excluded = pair.Excluded.Where(path => !reviewedRemovalScopes.Contains(path)).ToArray() };
         var retrySelection = RebuildableSelection.Sides(pair) is { } retrySides
             ? new RebuildableSelection(retrySides.Cloud, rebuildableRetries) : null;
-        plan = await ApplyReviewedRetriesAsync(pair, plan, retries, ct);
+        plan = await TracedReviewedRetriesAsync(pair, plan, retries, ct);
         RefreshRetryProtection();
-        plan = Filter(ActionPredicates(retryPair, links, retrySelection), plan);
+        plan = FilteredPlan(pair, "retries", ActionPredicates(retryPair, links, retrySelection), plan);
         RaiseLinksSummary(pair, current);
         var openNotices = _store.UnresolvedNotices(pair.PairId);
         RetainPlanningFailures(pair, plan);
         WriteNotices(plan.Notices);
         RefreshRetryProtection();
-        plan = Filter(ActionPredicates(retryPair, links.WithPending(
+        plan = FilteredPlan(pair, "notices", ActionPredicates(retryPair, links.WithPending(
             _store.ReadSyncRetries(pairId).Where(retry => retry.PendingNotice is not null).Select(retry => retry.Path)), retrySelection), plan);
         plan = plan with { HeldDeletions = retryHeld, FirstSyncOptions = Options(pair, false, winners, null) };
         var reviewedDeletes = retries.Where(item => item.HeldReviewed && item.Held is not null && item.HeldExpected is { } expected &&
@@ -1033,9 +1021,6 @@ public sealed partial class SyncRun : ISyncRun
                     expected.ObjectId == currentHeld.ObjectId && Content.SideStamp(expected) == Content.SideStamp(currentHeld))
                     .Select(item => FolderDelete.VictimKey(item.Held!.Local, item.Path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
         planningTiming.PeakScopeRows = scanner.PeakMaterializedRows;
-        RunLog.Trace($"planning: done; actions={plan.Actions.Count}; notices={plan.Notices.Count}; " +
-            $"held-deletions={plan.HeldDeletions.Length}; filter-passes={filterPasses}; " +
-            $"settle-candidates={settlement.Candidates}");
         planningTiming.Dispose();
         return new(plan, null, ExecutePreparedAsync, () =>
         {
@@ -1125,7 +1110,7 @@ public sealed partial class SyncRun : ISyncRun
         }
         if (extra.Count == 0)
         {
-            TracePlanningStep("occupancy", started, $"extra=0; actions={plan.Actions.Count}");
+            RunTracePlanningStep("occupancy", started, $"extra=0; actions={plan.Actions.Count}");
             return plan;
         }
         touched.AddRange(extra);
@@ -1134,8 +1119,7 @@ public sealed partial class SyncRun : ISyncRun
         var rows = JoinRows(scope, scan, false);
         var decided = Decide(pair, scan, rows, winners, scope, links);
         var filtered = ApplySafetyFilter(pair, ActionPredicates(pair, links), decided);
-        TracePlanningStep("occupancy", started,
-            $"extra={extra.Count}; decided={decided.Actions.Count}; filtered={filtered.Actions.Count}");
+        RunTracePlanningStep("occupancy", started, $"extra={extra.Count}; decided={decided.Actions.Count}; filtered={filtered.Actions.Count}");
         return filtered;
     }
 
