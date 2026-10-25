@@ -110,11 +110,7 @@ internal sealed class TrayClient : IDisposable
         {
             if (args.Button == MouseButtons.Left) _menu.Show(Cursor.Position);
         };
-        _menu.Opening += (_, _) =>
-        {
-            if (_pendingPairs) { _pendingPairs = false; RebuildPairs(_view.Pairs); }
-            if (DateTimeOffset.UtcNow - _conflictsFetchedUtc > ConflictCacheLifetime) _conflictsLoad = LoadConflictsAsync();
-        };
+        _menu.Opening += (_, _) => OnMenuOpening();
         _menu.Closed += (_, _) =>
         {
             if (_pendingPairs) { _pendingPairs = false; RebuildPairs(_view.Pairs); }
@@ -140,7 +136,14 @@ internal sealed class TrayClient : IDisposable
     internal Task ConflictsLoad => _conflictsLoad;
 
     /// <summary>Raises the production menu-open path without showing a window, for the focused fixture checks.</summary>
-    internal void OpenMenuForTest() => _menu.Opening?.Invoke(_menu, EventArgs.Empty);
+    internal void OpenMenuForTest() => OnMenuOpening();
+
+    // The one menu-open path: deferred pair rows first, then a conflict read only when the cache is stale.
+    private void OnMenuOpening()
+    {
+        if (_pendingPairs) { _pendingPairs = false; RebuildPairs(_view.Pairs); }
+        if (DateTimeOffset.UtcNow - _conflictsFetchedUtc > ConflictCacheLifetime) _conflictsLoad = LoadConflictsAsync();
+    }
 
     /// <summary>The tray's own single-instance owner. A null result means another tray already owns the icon.</summary>
     internal static IDisposable? TryTakeOwnership()
