@@ -43,9 +43,93 @@ internal static partial class RunChecks
                 "verified case-only rows adopt the actual endpoint spellings");
             Require(!store.UnresolvedIntents(fx.Pair.PairId).Any(), "case-only rows leave no failed Move intents");
         }
+        await FolderSpellingChoicesAsync();
+        await NonCaseFolderChoiceRefusedAsync();
         await AncestorOnlyCaseLocationAsync();
         await AncestorDriftEditColdReopenAsync();
         Console.WriteLine("PASS CaseLocation: known and unknown content through SQLite and SyncRun");
+    }
+
+    private static async Task NonCaseFolderChoiceRefusedAsync()
+    {
+        var fx = Build();
+        fx.A.Seed("Parent", "", ItemKind.Folder);
+        var run = fx.Run();
+        await FirstSyncAsync(run, fx);
+        fx.Store.AddNotices([new Notice(fx.Pair.PairId, 5, NoticeKind.UserDecision, "Parent", "Choose a side", "needs-decision")]);
+        var notice = fx.Store.OpenNotices(fx.Pair.PairId).Single(n => n.Kind == NoticeKind.UserDecision);
+        var snapshot = (await run.ObserveDecisionsAsync(fx.Pair.PairId, [(notice.NoticeId!, notice.Path)], default)).Single();
+        var calls = fx.WriterA.Calls + fx.WriterB.Calls;
+        var refused = false;
+        try { await run.ResolveDecisionAsync(fx.Pair.PairId, notice.Path, snapshot.Token, Side.A, new RecordingProgress(), default); }
+        catch (SyncRunRefusedException error) { refused = error.Message.Contains("folder decisions can't be resolved yet", StringComparison.Ordinal); }
+        Require(refused && fx.WriterA.Calls + fx.WriterB.Calls == calls,
+            "non-case folder choices remain refused without effects");
+    }
+
+    private static async Task FolderSpellingChoicesAsync()
+    {
+        foreach (var winner in new[] { Side.A, Side.B })
+        foreach (var both in new[] { false, true })
+        foreach (var stale in both ? new[] { false, true } : new[] { false })
+        {
+            using var store = SqliteStateStore.Open(FixtureFolder("folder-spelling"), Settings,
+                TimeProvider.System, LocalItems.CaptureOptionalHash);
+            var fx = Build(suppliedStore: store);
+            fx.A.Seed("Parent", "", ItemKind.Folder);
+            fx.A.Seed("Parent/child.txt", "child bytes");
+            var run = fx.Run();
+            await FirstSyncAsync(run, fx);
+            var childA = await fx.A.ObserveAsync("Parent/child.txt", default);
+            var childB = await fx.B.ObserveAsync("Parent/child.txt", default);
+            foreach (var side in new[] { Side.A, Side.B })
+            {
+                if (!both && side != winner) continue;
+                var endpoint = side == Side.A ? fx.A : fx.B;
+                await endpoint.MoveAsync(new("folder-rename", 25, ActionKind.Move, side,
+                    side == Side.A ? "PARENT" : "parent", "Parent", null, null, false, null), default);
+            }
+            var calls = fx.WriterA.Calls + fx.WriterB.Calls;
+            var report = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            if (both)
+            {
+                // Work arriving below a held folder belongs to AutoSync, not the folder spelling choice.
+                childA = fx.A.Seed("PARENT/child.txt", "queued child edit");
+                var notice = store.OpenNotices(fx.Pair.PairId).Single(n => n.Rule == 20 && n.Kind == NoticeKind.UserDecision);
+                var snapshot = (await run.ObserveDecisionsAsync(fx.Pair.PairId, [(notice.NoticeId!, notice.Path)], default)).Single();
+                if (stale)
+                {
+                    var loser = winner == Side.A ? fx.B : fx.A;
+                    await loser.MoveAsync(new("stale-spelling", 25, ActionKind.Move, winner == Side.A ? Side.B : Side.A,
+                        "pArEnT", winner == Side.A ? "parent" : "PARENT", null, null, false, null), default);
+                    var refused = false;
+                    try { await run.ResolveDecisionAsync(fx.Pair.PairId, notice.Path, snapshot.Token, winner, new RecordingProgress(), default); }
+                    catch (SyncRunRefusedException error) { refused = error.Message.Contains("exact spelling changed", StringComparison.Ordinal); }
+                    Require(refused && (await loser.ObserveAsync("pArEnT", default))?.Path == "pArEnT",
+                        "stale spelling choice refuses without a move");
+                    notice = store.OpenNotices(fx.Pair.PairId).Single(n => n.Rule == 20 && n.Kind == NoticeKind.UserDecision);
+                    snapshot = (await run.ObserveDecisionsAsync(fx.Pair.PairId, [(notice.NoticeId!, notice.Path)], default)).Single();
+                }
+                report = await run.ResolveDecisionAsync(fx.Pair.PairId, notice.Path, snapshot.Token, winner,
+                    new RecordingProgress(), default);
+                Require(!store.OpenNotices(fx.Pair.PairId).Any(n => n.NoticeId == notice.NoticeId),
+                    "folder spelling choice closes only after convergence");
+            }
+            var chosen = winner == Side.A ? "PARENT" : "parent";
+            Require(report.Moved == 1 && report.Deleted == 0 && report.KeptBoth == 0 &&
+                fx.WriterA.Calls + fx.WriterB.Calls == calls + 1 &&
+                (await fx.A.ObserveAsync(chosen, default))?.Path == chosen &&
+                (await fx.B.ObserveAsync(chosen, default))?.Path == chosen,
+                "baseline rename or explicit folder choice performs one move in either direction");
+            Require((await fx.A.ObserveAsync(chosen + "/child.txt", default))?.ObjectId == childA!.ObjectId &&
+                (await fx.B.ObserveAsync(chosen + "/child.txt", default))?.ObjectId == childB!.ObjectId &&
+                (await fx.A.ObserveAsync(chosen + "/child.txt", default))?.Hash == childA.Hash &&
+                (await fx.B.ObserveAsync(chosen + "/child.txt", default))?.Hash == childB.Hash,
+                "folder spelling changes preserve child identities without child moves or keep-both");
+            var followup = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            Require(followup.Moved == 0 && followup.KeptBoth == 0 && followup.Deleted == 0,
+                "ancestor-only child drift remains quiet after a folder spelling choice");
+        }
     }
 
     private static async Task AncestorDriftEditColdReopenAsync()

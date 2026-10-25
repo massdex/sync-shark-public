@@ -1164,6 +1164,7 @@ public sealed partial class SyncRun : ISyncRun
             var carried = plan.Actions.Any(action => tally.WasDone(action.ActionId) &&
                 action.Source is not null && action.Target != winner &&
                 PairPath.IsSelfOrUnder(action.Path, notice.Path));
+            if (IsCaseSpellingDecision(notice)) continue; // ResolveDecisionAsync verifies exact spellings freshly.
             if (!unfinished && (carried || pair is not null && SidesEqual(pair, notice.Path)))
                 _store.CloseNotice(notice.NoticeId, winner == Side.A ? "A" : "B");
         }

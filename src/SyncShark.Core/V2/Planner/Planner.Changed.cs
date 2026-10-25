@@ -52,12 +52,25 @@ public static partial class Planner
         Emit(ctx, row, rule, ActionKind.Move, target, source.Path, current.Path, source, current, false, key);
     }
 
-    // Competing leaf spellings need a metadata winner; content equality is not rename authority.
+    // With a baseline, only one side's rename supplies authority; competing or absent renames need a choice.
     private static void ResolveCaseConflict(Context ctx, PlanRow row, string key)
     {
         var content = Content.SameContent(row.A!, row.B!);
         if (content is null) { SkipUnconfirmedRow(ctx, row); return; }
         if (content == false) { Hold(ctx, row, 29, PlanNotices.NeedDecision); return; }
+        if (row.Base is { } baseline)
+        {
+            var renamedA = !PairPath.SameLeafLocation(row.A!.Path, baseline.A.Path);
+            var renamedB = !PairPath.SameLeafLocation(row.B!.Path, baseline.B.Path);
+            if (renamedA != renamedB)
+                ChangedAgainstSame(ctx, row, renamedA ? Side.A : Side.B, RowState.Moved, key);
+            else
+            {
+                Hold(ctx, row, 20, PlanNotices.NeedDecision);
+                AttachConflictVersions(ctx, 20, PrimaryPath(row), new(row.A!, row.B!, baseline));
+            }
+            return;
+        }
         if (!ModificationTime.IsPlausible(row.A!.Mtime, ctx.Options.ObservedAt) ||
             !ModificationTime.IsPlausible(row.B!.Mtime, ctx.Options.ObservedAt) ||
             (row.A.Mtime - row.B.Mtime).Duration() <= ctx.Options.TieWindow)

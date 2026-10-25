@@ -47,7 +47,7 @@ public static partial class Planner
         var same = Content.SameContent(row.A!, row.B!);
         if (same == true && sA == RowState.Moved && sB == RowState.Moved &&
             PairPath.Same(row.A!.Path, row.Base!.A.Path) && PairPath.Same(row.B!.Path, row.Base.B.Path) &&
-            !PairPath.SameLeafLocation(row.A.Path, row.B.Path))
+            LeafCaseMismatch(row))
         {
             ResolveCaseConflict(ctx, row, key);
             return;

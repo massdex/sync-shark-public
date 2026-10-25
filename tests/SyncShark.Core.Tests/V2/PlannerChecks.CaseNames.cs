@@ -81,13 +81,9 @@ internal static partial class PlannerChecks
             }
             else
             {
-                var source = winner == Side.A ? a : b;
-                var target = winner == Side.A ? b : a;
-                Require(plan.Actions.Count == 1 && plan.Actions.Single() is { Kind: ActionKind.Move, Rule: 20 } move &&
-                    move.Target == Opposite(winner) && move.Source == source && move.ExpectedTarget == target &&
-                    move.Path == source.Path && move.FromPath == target.Path && move.ObjectKey == row.Base!.ObjectKey,
-                    "proven unchanged leaf mismatch uses one case Move, never delete-and-create");
-                Require(plan.Notices.Any(n => n.Kind == NoticeKind.AutoConflict), "existing case winner remains visible");
+                Require(plan.Actions.Count == 1 && plan.Actions.Single() is { Kind: ActionKind.Hold, Rule: 20 } &&
+                    plan.Notices.Single().ConflictVersions?.Base == row.Base,
+                    "persisted mismatch without baseline rename authority freezes a spelling choice, regardless of times");
             }
         }
         var local = F("Parent/report_.txt", "local", "same");
@@ -99,7 +95,10 @@ internal static partial class PlannerChecks
     {
         var folderA = D("Parent/Photos", "folder-a");
         var folderB = D("Parent/photos", "folder-b", DateTimeOffset.UnixEpoch);
-        AssertEmpty(Decide(Row(Base("folder-case", folderA, folderB), folderA, folderB)));
+        var folderChoice = Decide(Row(Base("folder-case", folderA, folderB), folderA, folderB));
+        Require(folderChoice.Actions.Single() is { Kind: ActionKind.Hold, Rule: 20 } &&
+            folderChoice.Notices.Single().ConflictVersions is { Base: not null },
+            "persisted folder mismatch freezes a resolvable identity-bound spelling choice");
         foreach (var winner in new[] { Side.A, Side.B })
         foreach (var mapped in new[] { false, true })
         foreach (var tied in new[] { false, true })
@@ -108,7 +107,9 @@ internal static partial class PlannerChecks
             var cloudPath = mapped ? "parent/report:.txt" : "parent/report_.txt";
             var b = F(cloudPath, "b", "same", mtime: !tied && winner == Side.B ? T0.AddMinutes(1) : T0)
                 with { IdentityJson = mapped ? DropboxNameMapping.Fact(cloudPath) : null };
-            var row = Row(Base("leaf-followup", a, b), a, b);
+            var baseA = !tied && winner == Side.A ? a with { Path = "Parent/report_.txt" } : a;
+            var baseB = !tied && winner == Side.B ? b with { Path = mapped ? "parent/Report:.txt" : "parent/Report_.txt" } : b;
+            var row = Row(Base("leaf-followup", baseA, baseB), a, b);
             var plan = Decide(row);
             if (tied)
             {

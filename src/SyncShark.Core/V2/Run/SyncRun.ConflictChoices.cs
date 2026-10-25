@@ -354,6 +354,18 @@ public sealed partial class SyncRun
                     await (item.Action.Target == Side.A ? a : b).ObserveAsync(folder.Path, ct).ConfigureAwait(false) is { } now &&
                     !string.Equals(now.ObjectId, folder.ObjectId, StringComparison.Ordinal))
                     return Result(Outcome.Skipped, "A different folder now occupies " + folder.Path + ". Nothing further was removed; earlier removals remain recoverable.");
+                if (item.Action is { Kind: ActionKind.Move, Source.Kind: ItemKind.Folder,
+                    ExpectedTarget.Kind: ItemKind.Folder, FromPath: not null } folderMove &&
+                    PairPath.Same(folderMove.Path, folderMove.FromPath))
+                {
+                    var sourceNow = await (folderMove.Target == Side.A ? b : a)
+                        .ObserveAsync(folderMove.Source.Path, ct).ConfigureAwait(false);
+                    var targetNow = await (folderMove.Target == Side.A ? a : b)
+                        .ObserveAsync(folderMove.FromPath, ct).ConfigureAwait(false);
+                    if (sourceNow?.ObjectId != folderMove.Source.ObjectId || sourceNow.Path != folderMove.Source.Path ||
+                        targetNow?.ObjectId != folderMove.ExpectedTarget.ObjectId || targetNow.Path != folderMove.ExpectedTarget.Path)
+                        return Result(Outcome.Skipped, "The folder identity or exact spelling changed; refresh the spelling choice. Nothing further was changed.");
+                }
                 retry.Add(item.Action with { ProviderEffect = null, CallerOwnsNotice = true });
             }
             else return item.Result;

@@ -20,6 +20,8 @@ internal sealed partial class ActionRunner
                 RetryAfterSeconds = ProviderTransientFailure.VerificationRetrySeconds,
                 ProviderNameRefused = false
             };
+        result = await FolderCaseMoveProof.VerifyAsync(action, result, target,
+            action.Target == Side.A ? _b : _a, ct, _isStateDamage).ConfigureAwait(false);
         return await CommitAsync(action, result).ConfigureAwait(false);
     }
 

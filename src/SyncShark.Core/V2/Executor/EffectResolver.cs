@@ -16,6 +16,17 @@ internal static partial class EffectResolver
         ProviderJobCheckCache? jobChecks = null, string? materializationBlock = null,
         ItemState? historicalDeleteSource = null, RecoveryRef? preserved = null, bool deleteRestorePending = true)
     {
+        var result = await ResolveCoreAsync(x, target, source, ct, isStateDamage, unknownCommitGracePeriod,
+            timeProvider, jobChecks, materializationBlock, historicalDeleteSource, preserved, deleteRestorePending)
+            .ConfigureAwait(false);
+        return await FolderCaseMoveProof.VerifyAsync(x, result, target, source, ct, isStateDamage).ConfigureAwait(false);
+    }
+
+    private static async Task<ActionResult> ResolveCoreAsync(SyncAction x, IEndpointWriter target, IEndpointWriter source,
+        CancellationToken ct, Func<Exception, bool> isStateDamage, TimeSpan? unknownCommitGracePeriod,
+        TimeProvider? timeProvider, ProviderJobCheckCache? jobChecks, string? materializationBlock,
+        ItemState? historicalDeleteSource, RecoveryRef? preserved, bool deleteRestorePending)
+    {
         ArgumentNullException.ThrowIfNull(isStateDamage);
         // Restore creates only: without the atomic receipt we cannot claim ownership. Abandon the
         // intent, not the Recovery copy or notice, even if observation/provider lookup is unavailable.

@@ -34,7 +34,7 @@ public static partial class Planner
         row.A is not null && row.B is not null &&
         (!PathEqual(row.A.Path, row.Base.A.Path) || !PathEqual(row.B.Path, row.Base.B.Path));
 
-    private static bool LeafCaseMismatch(PlanRow row) => row.A is { Kind: ItemKind.File } && row.B is { Kind: ItemKind.File } &&
+    private static bool LeafCaseMismatch(PlanRow row) => row.A is not null && row.B is not null && row.A.Kind == row.B.Kind &&
         DropboxNameMapping.SamePlace(row.A, row.B) &&
         !PairPath.SameLeafLocation(DropboxNameMapping.MatchPath(row.A), DropboxNameMapping.MatchPath(row.B));
 
