@@ -268,13 +268,13 @@ public sealed partial class SyncRun : ISyncRun
     // reserved for genuinely all-pair maintenance whose existing call shape has no pair identity.
     private async Task<T> RunExclusiveAsync<T>(IProgress<RunProgress>? progress,
         Func<IProgress<RunProgress>, CancellationToken, Task<T>> body, CancellationToken ct, string? historyPairId = null,
-        string? admissionPairId = null, bool preserveAcceptedChoice = false)
+        string? admissionPairId = null, bool preserveAcceptedChoice = false, bool admitBody = true)
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         lock (_stopGate) _active.Add(linked, (done, preserveAcceptedChoice));
         _restoreSnapshot.Value = new RestoreSnapshot();
-        try { return await RunAdmittedAsync(progress, body, linked.Token, historyPairId, admissionPairId ?? historyPairId).ConfigureAwait(false); }
+        try { return await RunAdmittedAsync(progress, body, linked.Token, historyPairId, admissionPairId ?? historyPairId, admitBody).ConfigureAwait(false); }
         finally
         {
             _restoreSnapshot.Value = null;
@@ -285,15 +285,15 @@ public sealed partial class SyncRun : ISyncRun
 
     private async Task<T> RunAdmittedAsync<T>(IProgress<RunProgress>? progress,
         Func<IProgress<RunProgress>, CancellationToken, Task<T>> body, CancellationToken ct, string? historyPairId,
-        string? admissionPairId)
+        string? admissionPairId, bool admitBody)
     {
         // The pump and the in-flight table open before the gate, so a run queued behind another is still visible
         // (the gate wait is itself a tracked operation) rather than silently blocked.
         var queuedAt = _time.GetUtcNow();
         using var activity = RunActivity.Begin(progress, _settings, _time);
         var gateWait = RunOperations.Begin(RunOperationKind.Gate, "run gate");
-        IDisposable lease;
-        try { lease = await _admission.EnterAsync(admissionPairId, ct).ConfigureAwait(false); }
+        IDisposable? lease;
+        try { lease = admitBody ? await _admission.EnterAsync(admissionPairId, ct).ConfigureAwait(false) : null; }
         finally { gateWait.Dispose(); }
         using var admission = lease;
         ct.ThrowIfCancellationRequested();
@@ -303,38 +303,22 @@ public sealed partial class SyncRun : ISyncRun
         if (queued >= TimeSpan.FromSeconds(1))
             activity.Progress.Report(new RunProgress("Queued", null, 0, 0) { Message = $"Run queued for {queued.TotalSeconds:N1}s" });
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        return await ExecuteAdmittedAsync(body, activity.Progress, linked, instrumentation, startedAt, historyPairId);
+    }
+
+    private async Task<T> ExecuteAdmittedAsync<T>(Func<IProgress<RunProgress>, CancellationToken, Task<T>> body,
+        IProgress<RunProgress> progress, CancellationTokenSource linked, RunInstrumentation? instrumentation,
+        DateTimeOffset startedAt, string? historyPairId)
+    {
         try
         {
-            // One execution-batch account-verification flight per adapter+binding+token: the scope is begun
-            // before the run body starts, so every worker task, concurrent queue and effect it spawns inherits
-            // the AsyncLocal and shares one get_current_account flight instead of verifying per operation. A token
-            // refresh produces a new key and therefore exactly one new verification for the new generation.
+            // All worker effects inherit one verification flight and the store cancellation scope.
             await using var accountVerification = SyncProviderAccountVerificationScope.Begin(linked.Token);
             T result;
             using (FairStoreGate.WithCancellation(linked.Token))
-                result = await body(activity.Progress, linked.Token).ConfigureAwait(false);
-            if (result is not RunReport report) return result;
-            if (report.HaltedBy is { } fatal && StorageFailureClassifier.ScopeOf(fatal, linked.Token) == FailureRetryOwner.FailureScope.State)
-                return (T)(object)FinalizeOutcome(report with { CompletedUtc = _time.GetUtcNow(), Diagnostics = instrumentation?.Snapshot() }, linked.Token);
-            var completion = new CompletionSteps(this, report.PairId, linked.Token);
-            var completed = report;
-            completion.Step(() =>
-            {
-                var space = FreeSpacePresentation.Group(_store.UnresolvedNotices(report.PairId));
-                foreach (var summary in space)
-                    activity.Progress.Report(new RunProgress("Pending", null, 0, 0) { Message = summary.Detail });
-                completed = report with
-                {
-                    CompletedUtc = _time.GetUtcNow(),
-                    Diagnostics = instrumentation?.Snapshot(),
-                    FreeSpacePending = space
-                };
-            });
-            completed = WithIndexingStatus(FinalizeOutcome(completion.Finish(completed), linked.Token));
-            // the run owns its retained outcome. Only the bounded counts are stored; the live
-            // report keeps its failure examples for the caller and nothing else is written.
-            RecordSummarySafely(completed, startedAt);
-            return (T)(object)completed;
+                result = await body(progress, linked.Token).ConfigureAwait(false);
+            return result is RunReport report
+                ? (T)(object)CompleteAdmittedReport(report, progress, linked.Token, instrumentation, startedAt) : result;
         }
         catch (PairPausedException paused) when (typeof(T) == typeof(RunReport))
         {
@@ -347,11 +331,7 @@ public sealed partial class SyncRun : ISyncRun
         catch (Exception error) when (typeof(T) == typeof(RunReport) && historyPairId is not null &&
             StorageFailureClassifier.ScopeOf(error, linked.Token) == FailureRetryOwner.FailureScope.State)
         {
-            // Preserve effects already counted before the store lost authority; never run completion or history writes.
-            var counted = error.Data["SyncRun.ExecutionReport"] as RunReport ??
-                new RunReport(historyPairId, RunOutcomes.Failed, 0, 1, 0, 0, 0, 0, 0, 0, []);
-            return (T)(object)FinalizeOutcome(counted with { HaltedBy = error, CompletionFailed = true,
-                CompletedUtc = _time.GetUtcNow(), Diagnostics = instrumentation?.Snapshot() }, linked.Token);
+            return (T)(object)StateFailureReport(error, historyPairId, linked.Token, instrumentation);
         }
         catch (Exception error)
         {
@@ -362,6 +342,35 @@ public sealed partial class SyncRun : ISyncRun
                     0, 0, 0, 0, 0, 0, []) { AttemptFailed = true, HaltedBy = error }, linked.Token), startedAt);
             throw;
         }
+    }
+
+    private RunReport CompleteAdmittedReport(RunReport report, IProgress<RunProgress> progress,
+        CancellationToken ct, RunInstrumentation? instrumentation, DateTimeOffset startedAt)
+    {
+        if (report.HaltedBy is { } fatal && StorageFailureClassifier.ScopeOf(fatal, ct) == FailureRetryOwner.FailureScope.State)
+            return FinalizeOutcome(report with { CompletedUtc = _time.GetUtcNow(), Diagnostics = instrumentation?.Snapshot() }, ct);
+        var completion = new CompletionSteps(this, report.PairId, ct);
+        var completed = report;
+        completion.Step(() =>
+        {
+            var space = FreeSpacePresentation.Group(_store.UnresolvedNotices(report.PairId));
+            foreach (var summary in space)
+                progress.Report(new RunProgress("Pending", null, 0, 0) { Message = summary.Detail });
+            completed = report with { CompletedUtc = _time.GetUtcNow(), Diagnostics = instrumentation?.Snapshot(), FreeSpacePending = space };
+        });
+        completed = WithIndexingStatus(FinalizeOutcome(completion.Finish(completed), ct));
+        // Retain only bounded counts; failure examples stay on the live report.
+        RecordSummarySafely(completed, startedAt);
+        return completed;
+    }
+
+    private RunReport StateFailureReport(Exception error, string pairId, CancellationToken ct, RunInstrumentation? instrumentation)
+    {
+        // Preserve counted effects without completion or history writes after storage loses authority.
+        var counted = error.Data["SyncRun.ExecutionReport"] as RunReport ??
+            new RunReport(pairId, RunOutcomes.Failed, 0, 1, 0, 0, 0, 0, 0, 0, []);
+        return FinalizeOutcome(counted with { HaltedBy = error, CompletionFailed = true,
+            CompletedUtc = _time.GetUtcNow(), Diagnostics = instrumentation?.Snapshot() }, ct);
     }
 
     private void RecordSummarySafely(RunReport report, DateTimeOffset startedAt)
@@ -378,12 +387,12 @@ public sealed partial class SyncRun : ISyncRun
         }
         catch (Exception error) { RunOutput.Observe(error); }
         // Empty successful safety polls do not evict meaningful history.
-        if (report.Outcome == RunOutcomes.Complete && report.Done == 0 && report.FailureCount == 0 &&
+        if (_reconciliationRunId.Value is null && report.Outcome == RunOutcomes.Complete && report.Done == 0 && report.FailureCount == 0 &&
             report.Held == 0 && report.Deferred == 0 && report.Skipped == 0)
             return;
         try
         {
-            _store.RecordRunSummary(RunSummary.Of(Guid.NewGuid().ToString("N"), report, startedAt, _time.GetUtcNow()));
+            _store.RecordRunSummary(RunSummary.Of(_reconciliationRunId.Value ?? Guid.NewGuid().ToString("N"), report, startedAt, _time.GetUtcNow()));
             _store.CloseNoticeFamily(report.PairId, "run-history-unavailable");
         }
         catch (Exception error)
@@ -835,13 +844,7 @@ public sealed partial class SyncRun : ISyncRun
         await _endpoints.PrepareAsync(pair, ct);
         await RefreshDropboxQuotaAsync(pair, ct);
         var throttle = new ProgressThrottle(progress, _time, _settings.ProgressInterval);
-        // Probe only the exclusions that could hide a reviewed removal. Retry rows are keyed by
-        // their affected path; unrelated retry JSON and its ReviewedActions are never enumerated.
-        var reviewScopes = pair.Excluded.Where(path =>
-            (_store.SyncRetryAt(pairId, path)?.ReviewedActions ?? []).Any(action =>
-                DeleteSourceGuard.ReviewedRemoval(action) &&
-                string.Equals(action.Path, path, StringComparison.OrdinalIgnoreCase)))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var reviewScopes = ReviewedRemovalObservationScopes(pair);
         // A retry deadline gates effects, never observations. Lift the exact reviewed-removal
         // exclusion for every removal kind, not unrelated selective exclusions or permanent boundaries.
         var observationPair = reviewScopes.Count == 0 ? pair : pair with
@@ -1091,6 +1094,13 @@ public sealed partial class SyncRun : ISyncRun
                 unresolvedEvidence, throttle, scan.JournalBacklog, planningBacklog, ct);
         }
     }
+
+    // Retry rows are keyed by the affected path; unrelated reviewed-action JSON is never read.
+    private HashSet<string> ReviewedRemovalObservationScopes(PairDef pair) => pair.Excluded.Where(path =>
+        (_store.SyncRetryAt(pair.PairId, path)?.ReviewedActions ?? []).Any(action =>
+            DeleteSourceGuard.ReviewedRemoval(action) &&
+            string.Equals(action.Path, path, StringComparison.OrdinalIgnoreCase)))
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
     // After the first Decide, load any create targets the touched scope missed and decide once more.
     private Plan ExpandOccupancyOnce(PairDef pair, Func<RunScope.Scope> loadScope, BothScan scan, Plan plan,

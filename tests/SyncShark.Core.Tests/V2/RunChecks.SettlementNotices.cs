@@ -75,7 +75,7 @@ internal static partial class RunChecks
                 var acknowledge = typeof(SyncRun).GetMethod("AcknowledgeVerifiedRehash", BindingFlags.Instance | BindingFlags.NonPublic)!;
                 acknowledge.Invoke(run, [fx.Pair, new SyncRun.BothScan(side, side), plan, new SyncRun.Tally(Settings),
                     (Func<string, bool>)(_ => true), (Func<string, bool>)(_ => true), (Func<string, bool>)(_ => true),
-                    CancellationToken.None, page, null]);
+                    CancellationToken.None, page, null, null]);
                 Require(store.CountDeferredPlanning(fx.Pair.PairId) == (scenario == "summary" ? 0 : 1),
                     scenario + " retains the intended settlement and exact-version boundary");
             }

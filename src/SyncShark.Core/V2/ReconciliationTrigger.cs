@@ -8,5 +8,7 @@ internal enum ReconciliationTrigger
     JournalReplaced,
     JournalPositionInvalid,
     DropboxReset,
-    OverflowReplay
+    OverflowReplay,
+    PlanningBacklog,
+    ScheduledConsistency
 }
