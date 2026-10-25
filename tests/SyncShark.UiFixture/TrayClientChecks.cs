@@ -117,30 +117,29 @@ internal static class TrayClientChecks
             "tray mode starts while the product lock is held and never acquires it");
     }
 
-    // The production startup decision (the branch App.OnStartup calls) with the product lock held by the
-    // test, an isolated root and a controlled host: the first reply is real, the next is a miss.
+    // The shared tray predicate and decision, on the real CoreSwitch.Select outputs. This covers the
+    // predicate and its core-v2 gate only; it does not assert where App.OnStartup places the branch.
     private static void ProductionStartupRoute()
     {
         var root = Path.Combine(Path.GetTempPath(), "tray-startup-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         using var productRoot = SyncSharkRuntimePaths.OverrideProductRootForTest(root);
         using var productLock = PilotInstanceLock.Acquire(SyncSharkRuntimePaths.InstanceLockFile);
-        // The same startup decision App.OnStartup makes, on the real CoreSwitch.Select outputs: the tray
-        // branch is reached only after the switch was removed and only for core v2.
         var (selectedV2, trayArgs, coreError) = CoreSwitch.Select(["--core", "v2", "--tray"], null);
         Require(coreError is null && selectedV2 &&
                 TrayStartup.Decide(selectedV2, trayArgs) == TrayStartup.Route.Start,
-            "the startup branch's own decision routes real --core v2 --tray arguments to the tray");
+            "the shared tray decision accepts real --core v2 --tray arguments after the switch is removed");
         var legacy = CoreSwitch.Select(["--core", "v1", "--tray"], null);
         Require(legacy.Error is null && !legacy.UseV2 && TrayStartup.IsTrayRequest(legacy.Args) &&
                 TrayStartup.Decide(legacy.UseV2, legacy.Args) == TrayStartup.Route.Invalid,
-            "a tray request without core v2 is refused by the same startup decision");
+            "the shared tray decision refuses a tray request without core v2");
         Require(TrayStartup.Decide(true, []) == TrayStartup.Route.NotTray,
-            "ordinary core v2 startup never enters the tray branch");
+            "the shared tray predicate does not select tray for ordinary core v2 startup");
         var diagnostics = new List<string>();
         var statusCalls = 0;
         var mutationSends = 0;
         var exited = false;
+        var delayedStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         // Inline continuations keep the menu-item updates on this (fixture) thread.
         var actionGate = new TaskCompletionSource<AutoSyncHostReply?>();
         TrayHostSend send = (request, _, token) =>
@@ -150,10 +149,10 @@ internal static class TrayClientChecks
                 Interlocked.Increment(ref mutationSends);
                 return actionGate.Task;
             }
-            // The first two polls answer immediately; the third stays in flight at the 2 s cap and can
-            // only complete as a miss when the tray's own deadline cancels it.
+            // The first two polls answer immediately; the third signals that it is in flight at the 2 s cap
+            // and can only complete as a miss when the tray's own deadline cancels it.
             return ++statusCalls == 3
-                ? DelayedStatusAsync(token)
+                ? DelayedStatusAsync(token, delayedStarted)
                 : Task.FromResult<AutoSyncHostReply?>(Reply("running", Pair("pair-a", "Pair A", "Running")));
         };
 
@@ -186,11 +185,16 @@ internal static class TrayClientChecks
                 notice.Title.Contains("rejected", StringComparison.Ordinal) &&
                 notice.Message.Contains("Pause was refused: the run is at a safe point.", StringComparison.Ordinal),
             "a nonzero forwarded CLI exit shows the host's stderr diagnostic, distinct from uncertainty");
+        Require(diagnostics.Any(message => message.Contains("action 'Pause", StringComparison.Ordinal) &&
+                message.Contains("rejected", StringComparison.Ordinal) &&
+                message.Contains("Pause was refused: the run is at a safe point.", StringComparison.Ordinal)),
+            "the rejected action outcome is logged with its stderr before the balloon");
 
-        // A reply still in flight at the 2 s cap leaves the poll pending, then applies as a miss.
+        // A reply still in flight at the 2 s cap is pending; only the cap turns it into a miss.
         var delayed = client.RefreshNowAsync();
+        WaitFor(delayedStarted.Task);
         Require(!delayed.IsCompleted && client.View.Status == "Working" && client.View.CanAct,
-            "a status reply still in flight is pending, not a miss, until the 2 s cap");
+            "an in-flight status reply is still pending before the 2 s cap");
         WaitFor(delayed);
         Require(client.View.Status.EndsWith("(Updating…)", StringComparison.Ordinal) && !client.View.CanAct,
             "a status reply that completes past the 2 s cap is a miss: last known view plus Updating…");
@@ -199,10 +203,12 @@ internal static class TrayClientChecks
         Require(exited, "the tray exit action disposes only the client");
     }
 
-    // A reply that is deliberately slower than the tray's own two-second status cap. It honours the cap's
-    // token, so the poll is still pending at the cap and then records a miss rather than a late success.
-    private static async Task<AutoSyncHostReply?> DelayedStatusAsync(CancellationToken token)
+    // A reply that is deliberately slower than the tray's own two-second status cap. It signals that the
+    // request is in flight, then honours the cap's token, so the poll records a miss rather than a late success.
+    private static async Task<AutoSyncHostReply?> DelayedStatusAsync(CancellationToken token,
+        TaskCompletionSource started)
     {
+        started.TrySetResult();
         await Task.Delay(TimeSpan.FromSeconds(2) + TimeSpan.FromMilliseconds(250), token).ConfigureAwait(false);
         return Reply("running", Pair("pair-a", "Pair A", "Running"));
     }
@@ -288,13 +294,15 @@ internal static class TrayClientChecks
                 diagnostics[0].Contains("conflict list read failed (unavailable)", StringComparison.Ordinal),
             "an unanswered conflict load logs once on the unavailable transition");
 
-        // A refusal is a distinct transition; a usable reply then logs recovery and fills the rows.
-        conflictsReplies.Enqueue(() => HostRefusal("the conflict catalog is busy"));
+        // A forwarded conflict-list refusal is a distinct transition and carries its stderr explanation;
+        // a usable reply then logs recovery and fills the rows.
+        conflictsReplies.Enqueue(() => ConflictsResult(4, "", "the conflict catalog is busy"));
         client.OpenMenuForTest();
         WaitFor(client.ConflictsLoad);
         Require(diagnostics.Count == 2 &&
-                diagnostics[1].Contains("conflict list read failed (rejected)", StringComparison.Ordinal),
-            "a refused conflict load logs the distinct rejected transition");
+                diagnostics[1].Contains("conflict list read failed (rejected)", StringComparison.Ordinal) &&
+                diagnostics[1].Contains("the conflict catalog is busy", StringComparison.Ordinal),
+            "a refused conflict load logs the rejected transition with the command's stderr");
         conflictsReplies.Enqueue(() => ConflictsResult(0, ConflictsStdout(3)));
         client.OpenMenuForTest();
         WaitFor(client.ConflictsLoad);
@@ -303,6 +311,11 @@ internal static class TrayClientChecks
             "a usable conflict load logs one recovery after the failure");
         Require(client.ConflictStatusText.Contains("3", StringComparison.Ordinal),
             "the menu-visible conflict count comes from the list loaded when the menu opened");
+        Require(client.ConflictRowsForTest.SequenceEqual(new[] { "item.txt — conflict" }),
+            "the loaded conflict is rendered as one exact menu row");
+        Require(SnapshotConflictRequests(requests).All(request =>
+                request.CliArgs is ["--cli", "conflicts", "list", "--limit", "10", "--json"]),
+            "every menu conflict read asks for exactly conflicts list --limit 10 --json");
 
         var before = ConflictRequestCount(requests);
         client.OpenMenuForTest();
@@ -315,10 +328,13 @@ internal static class TrayClientChecks
         string.Equals(request.Command, "cli", StringComparison.Ordinal) &&
         request.CliArgs is { } args && args.Contains("conflicts", StringComparer.Ordinal);
 
-    private static int ConflictRequestCount(List<AutoSyncHostRequest> requests)
+    private static List<AutoSyncHostRequest> SnapshotConflictRequests(List<AutoSyncHostRequest> requests)
     {
-        lock (requests) return requests.Count(IsConflictsRequest);
+        lock (requests) return requests.Where(IsConflictsRequest).ToList();
     }
+
+    private static int ConflictRequestCount(List<AutoSyncHostRequest> requests) =>
+        SnapshotConflictRequests(requests).Count;
 
     // Exiting the tray never sends the host's stop command and leaves the host transport answering.
     private static void ExitStopsOnlyTheTray()
@@ -366,17 +382,9 @@ internal static class TrayClientChecks
             "running", true, document.RootElement.Clone(), null);
     }
 
-    private static AutoSyncHostReply HostRefusal(string message)
+    private static AutoSyncHostReply ConflictsResult(int exitCode, string stdout, string stderr = "")
     {
-        using var document = JsonDocument.Parse("null");
-        return new AutoSyncHostReply(AutoSyncHostProtocol.Version, Guid.NewGuid().ToString("N"),
-            new AutoSyncHostIdentity("tray-fixture", 4321, DateTimeOffset.UtcNow.AddMinutes(-5)),
-            "running", false, document.RootElement.Clone(), new SyncCliError("busy", message));
-    }
-
-    private static AutoSyncHostReply ConflictsResult(int exitCode, string stdout)
-    {
-        using var document = JsonDocument.Parse(JsonSerializer.Serialize(new { exitCode, stdout, stderr = "" }));
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(new { exitCode, stdout, stderr }));
         return new AutoSyncHostReply(AutoSyncHostProtocol.Version, Guid.NewGuid().ToString("N"),
             new AutoSyncHostIdentity("tray-fixture", 4321, DateTimeOffset.UtcNow.AddMinutes(-5)),
             "running", true, document.RootElement.Clone(), null);

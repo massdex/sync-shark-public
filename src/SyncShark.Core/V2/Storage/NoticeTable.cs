@@ -11,10 +11,11 @@ namespace Massdex.SyncShark.V2;
 internal sealed partial class NoticeTable
 {
     /// <summary>
-    /// The saturation value of the one open-conflict count behind the tray icon. The count reads only this many
-    /// rows, so its cost is bounded, not just its result: at or past the cap the icon says 99+ and never claims
-    /// an exact total. It counts exactly the notice rows `conflicts list` shows, and the existing <c>nt_open</c>
-    /// index seeks the two action states instead of scanning the table.
+    /// The saturation value of the one open-conflict count behind the tray icon: at or past this many visible
+    /// notices the icon says 99+ and never claims an exact total. Only the result is capped. The traversal is
+    /// not row-bounded: the same indexed pass also visits open notices whose choice is ignore/quarantine-ignore
+    /// before the NOT filter removes them. That residual cost is deferral #25, the designed paging lane, and is
+    /// not changed here (no index or schema change).
     /// </summary>
     internal const int AttentionCountCap = 100;
 
