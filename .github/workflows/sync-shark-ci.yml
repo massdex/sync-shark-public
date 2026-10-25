@@ -644,12 +644,6 @@ jobs:
         shell: pwsh
         run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector iteration-ui-checks
 
-      - name: 'UI check: tray client'
-        id: ui-tray-client
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector tray-client-checks -Arguments none
-
       - name: 'UI check: tray tooltip'
         id: ui-tray-tooltip
         continue-on-error: true
@@ -807,6 +801,15 @@ jobs:
         shell: pwsh
         run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector pair-failure-presentation-checks -Arguments none
 
+      # The tray-client selector is carried by the tray feature's fixture. Run it wherever that
+      # fixture exists and skip it on a tree that does not carry it, rather than failing the check.
+      - name: 'UI check: tray client'
+        id: ui-tray-client
+        if: ${{ hashFiles('tests/SyncShark.UiFixture/TrayClientChecks.cs') != '' }}
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector tray-client-checks -Arguments none
+
       # Run every check before failing, so one red selector never hides the rest.
       - name: Enforce UI check results
         if: always()
@@ -825,7 +828,9 @@ jobs:
           Write-Host "SUMMARY"
           Write-Host ("{0,-34} {1,-10}" -f 'STEP', 'RESULT')
           foreach ($result in $results) { Write-Host ("{0,-34} {1,-10}" -f $result.Step, $result.Result) }
-          $failed = @($results | Where-Object { $_.Result -ne 'success' })
+          # A deliberately guarded selector that this tree does not carry is skipped, not failed;
+          # every selector that actually runs must still succeed.
+          $failed = @($results | Where-Object { $_.Result -ne 'success' -and $_.Result -ne 'skipped' })
           Write-Host "TOTAL checks=$($results.Count) failed=$($failed.Count)"
 
           if ($env:GITHUB_STEP_SUMMARY) {

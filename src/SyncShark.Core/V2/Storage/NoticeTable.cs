@@ -11,12 +11,17 @@ namespace Massdex.SyncShark.V2;
 internal sealed partial class NoticeTable
 {
     /// <summary>
-    /// The one open-conflict count behind the tray icon. It counts exactly the notice rows `conflicts list`
-    /// shows, and the existing <c>nt_open</c> index seeks the two action states instead of scanning the table.
+    /// The saturation value of the one open-conflict count behind the tray icon. The count reads only this many
+    /// rows, so its cost is bounded, not just its result: at or past the cap the icon says 99+ and never claims
+    /// an exact total. It counts exactly the notice rows `conflicts list` shows, and the existing <c>nt_open</c>
+    /// index seeks the two action states instead of scanning the table.
     /// </summary>
+    internal const int AttentionCountCap = 100;
+
     internal static readonly string VisibleCountSql =
-        "SELECT COUNT(*) FROM notice n INDEXED BY nt_open JOIN pair p ON p.pair_no=n.pair_no WHERE " + VisibleSql("n.state") +
-        " AND NOT (" + IgnoredSql("n.choice") + ");";
+        "SELECT COUNT(*) FROM (SELECT 1 FROM notice n INDEXED BY nt_open JOIN pair p ON p.pair_no=n.pair_no WHERE " +
+        VisibleSql("n.state") + " AND NOT (" + IgnoredSql("n.choice") + ") LIMIT " +
+        AttentionCountCap.ToString(CultureInfo.InvariantCulture) + ");";
 
     private readonly SqliteConnection _connection;
 

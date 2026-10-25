@@ -1,6 +1,9 @@
 param(
     [Parameter(Mandatory = $true)][string]$Selector,
-    [ValidateSet('root', 'none', 'assembly')][string]$Arguments = 'root'
+    [ValidateSet('root', 'none', 'assembly')][string]$Arguments = 'root',
+    # Hard per-selector bound. A hung fixture is killed and still emits a UI-RESULT line, so one
+    # selector can never block the remaining checks until the job timeout.
+    [int]$TimeoutSeconds = 300
 )
 
 # Runs one tests/SyncShark.UiFixture selector as a bounded check. The scratch and
@@ -36,9 +39,28 @@ if ($Arguments -eq 'assembly') {
 
 $watch = [System.Diagnostics.Stopwatch]::StartNew()
 Write-Host "Running: $exe $($testArgs -join ' ')"
-& $exe @testArgs
-$code = $LASTEXITCODE
+$stdout = [IO.Path]::GetTempFileName()
+$stderr = [IO.Path]::GetTempFileName()
+# Start-Process joins -ArgumentList with spaces, so quote any path that carries whitespace.
+$quotedArgs = @($testArgs | ForEach-Object {
+    if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+})
+$process = Start-Process -FilePath $exe -ArgumentList $quotedArgs -NoNewWindow -PassThru `
+    -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+$timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
+if ($timedOut) {
+    try { $process.Kill($true) } catch { try { $process.Kill() } catch { } }
+    try { $process.WaitForExit(10000) | Out-Null } catch { }
+}
 $watch.Stop()
+Get-Content -LiteralPath $stdout -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+Get-Content -LiteralPath $stderr -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
+if ($timedOut) {
+    Write-Host ("UI-RESULT {0} FAIL timeout seconds={1}" -f $flag, [int][Math]::Round($watch.Elapsed.TotalSeconds))
+    exit 124
+}
+$code = $process.ExitCode
 $result = if ($code -eq 0) { 'PASS' } else { 'FAIL' }
 Write-Host ("UI-RESULT {0} {1} exit={2} seconds={3}" -f $flag, $result, $code, [int][Math]::Round($watch.Elapsed.TotalSeconds))
 exit $code
