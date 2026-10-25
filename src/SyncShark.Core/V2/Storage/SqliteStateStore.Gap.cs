@@ -177,6 +177,11 @@ public sealed partial class SqliteStateStore : ILocalGapStore
             "SELECT 1 FROM local_gap g JOIN root r ON r.root_no=g.root_no WHERE r.root_id=$id AND g.inventory_pending=1;",
             ("$id", rootId)) is not null);
 
+    internal void CompleteGapInventory(string rootId, string epoch) => InIndexingStore(() =>
+        StoreSchema.Execute(_connection, null,
+            "UPDATE local_gap SET inventory_pending=0 WHERE root_no=(SELECT root_no FROM root WHERE root_id=$r) AND epoch=$e;",
+            ("$r", rootId), ("$e", epoch)));
+
     internal void SettleGapInventory(long completedGeneration, bool cursorHeldForEvidence = false) => InIndexingStore(() =>
         SettleGapInventory(null, completedGeneration, cursorHeldForEvidence));
 
