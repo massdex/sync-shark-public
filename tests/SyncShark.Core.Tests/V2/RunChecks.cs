@@ -12,6 +12,9 @@ internal static partial class RunChecks
         var failures = new List<string>();
         await Group(nameof(ReconciliationBatchBoundValidated), ReconciliationBatchBoundValidated, failures);
         await Group(nameof(ReadScopesRereadsExactPaths), ReadScopesRereadsExactPaths, failures);
+        await Group(nameof(ReconciliationSelectionRows), ReconciliationSelectionRows, failures);
+        await Group(nameof(ReconciliationDropboxSelectionRows), ReconciliationDropboxSelectionRows, failures);
+        await Group(nameof(ReconciliationSelectsByUsn), ReconciliationSelectsByUsn, failures);
         await Group(nameof(ReconciliationAdmissionUsesCurrentBaselineAsync), ReconciliationAdmissionUsesCurrentBaselineAsync, failures);
         await Group(nameof(EligibilityRegressionAsync), EligibilityRegressionAsync, failures);
         await Group(nameof(CaseLocationAsync), CaseLocationAsync, failures);

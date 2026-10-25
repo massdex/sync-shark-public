@@ -14,6 +14,8 @@ internal sealed class ReconciliationScope
 
     internal static ReconciliationScope Root { get; } = new([], [string.Empty]);
 
+    internal IEnumerable<string> ReadScopes => _subtrees.Concat(_paths).Distinct(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>Whether a path belongs to the scope; an empty subtree denotes the root.</summary>
     internal bool Contains(string path) => _paths.Contains(path) || PairPath.CoveredBy(path, _subtrees);
 

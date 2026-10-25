@@ -7,6 +7,7 @@ internal static partial class LocalJournalChecks
     public static async Task RunAsync(string folder, bool scale = true)
     {
         Directory.CreateDirectory(folder);
+        await ReconcileWalkFallbackUsesFileUsn(Path.Combine(folder, "reconcile-walk"));
         await JournalLookupChecks.RunAsync(Path.Combine(folder, "journal-lookup"));
         await RunChecks.PausedWalkCatchesUpBeforePlanningAsync(Path.Combine(folder, "paused-prepare"));
         await HardLinksAsync(Path.Combine(folder, "hardlinks"));
