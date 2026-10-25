@@ -11,28 +11,12 @@ namespace Massdex.SyncShark.V2;
 internal sealed partial class NoticeTable
 {
     /// <summary>
-    /// The bounded catalog page and total cap. Past it the tray icon only needs to know "any", and the human
-    /// total is reported as at-least, so one million open notices never cost an unbounded read.
+    /// The one open-conflict count behind the tray icon. It counts exactly the notice rows `conflicts list`
+    /// shows, and the existing <c>nt_open</c> index seeks the two action states instead of scanning the table.
     /// </summary>
-    internal const int OpenNoticeCeiling = 1000;
-
-    /// <summary>The visible inbox state, exactly 'open'. Aggregated rows stay actionable but hidden, so this is
-    /// the same set as <see cref="VisibleSql"/>; the bounded catalog spells it this way so the partial
-    /// <c>nt_page</c> and <c>nt_free_space</c> indexes can serve the page and the free-space summary.</summary>
-    internal static string OpenStateSql(string stateColumn) => stateColumn + "='open'";
-
-    /// <summary>The three free-space reasons, spelled once so the partial index and its readers agree.</summary>
-    internal static string FreeSpaceReasonSql(string reasonColumn) => reasonColumn + " IN ('" +
-        FreeSpaceRefusal.InsufficientReasonKey + "','" + FreeSpaceRefusal.UnknownSpaceReasonKey + "','" +
-        FreeSpaceRefusal.UnknownReserveReasonKey + "')";
-
-    /// <summary>The one column order every notice reader uses; the first column is notice_id.</summary>
-    internal const string ReadColumns = "n.notice_id, p.pair_id, n.rule, n.kind, n.path, n.detail, n.reason_key";
-
-    /// <summary>One notice row in <see cref="ReadColumns"/> order, decoded by the one shared reader.</summary>
-    internal static Notice ReadNotice(Microsoft.Data.Sqlite.SqliteDataReader reader) => NoticeDetailCodec.Decode(
-        new Notice(reader.GetString(1), (int)reader.GetInt64(2), Enum.Parse<NoticeKind>(reader.GetString(3)),
-            reader.GetString(4), reader.GetString(5), reader.GetString(6), reader.GetString(0)));
+    internal static readonly string VisibleCountSql =
+        "SELECT COUNT(*) FROM notice n INDEXED BY nt_open JOIN pair p ON p.pair_no=n.pair_no WHERE " + VisibleSql("n.state") +
+        " AND NOT (" + IgnoredSql("n.choice") + ");";
 
     private readonly SqliteConnection _connection;
 
@@ -265,7 +249,7 @@ internal sealed partial class NoticeTable
     public IReadOnlyList<Notice> Open(long? pairNo, string? defenderRoot = null, string? reasonKey = null, bool unresolved = false)
     {
         using var command = StoreSchema.Command(_connection, null,
-            "SELECT " + ReadColumns + " FROM notice n " +
+            "SELECT n.notice_id, p.pair_id, n.rule, n.kind, n.path, n.detail, n.reason_key FROM notice n " +
             "JOIN pair p ON p.pair_no=n.pair_no WHERE " + (unresolved ? ActionableSql("n.state") :
                 VisibleSql("n.state") + " AND NOT (" + IgnoredSql("n.choice") + ")") +
             (pairNo is null ? string.Empty : " AND n.pair_no=$p") +
@@ -286,7 +270,10 @@ internal sealed partial class NoticeTable
         }
         var notices = new List<Notice>();
         using var reader = command.ExecuteReader();
-        while (reader.Read()) notices.Add(ReadNotice(reader));
+        while (reader.Read())
+            notices.Add(NoticeDetailCodec.Decode(new Notice(reader.GetString(1), (int)reader.GetInt64(2),
+                Enum.Parse<NoticeKind>(reader.GetString(3)), reader.GetString(4), reader.GetString(5),
+                reader.GetString(6), reader.GetString(0))));
         return notices;
     }
 

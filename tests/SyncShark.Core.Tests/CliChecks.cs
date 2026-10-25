@@ -434,10 +434,8 @@ internal static partial class CliChecks
     {
         var proofList = SyncCliRegistry.Parse(["--cli", "conflicts", "list", "--pair", "fixture", "--limit", "10", "--json"]);
         Require(!SyncCliRegistry.MutatesProductState(proofList) &&
-            SyncCliRegistry.Rows.Single(row => row.Command == "conflicts list").Effect.Contains("failure stage") &&
-            SyncCliRegistry.Rows.Single(row => row.Command == "conflicts list").Effect.Contains(
-                "totalAtLeast", StringComparison.Ordinal),
-            "proof failure listing is a state-free, SQL-bounded read that reports a capped totalAtLeast total");
+            SyncCliRegistry.Rows.Single(row => row.Command == "conflicts list").Effect.Contains("failure stage"),
+            "proof failure listing is a state-free read through the shared notice command");
         foreach (var choice in new[] { "retry-now", "ignore" })
         {
             var command = SyncCliRegistry.Parse(["--cli", "conflicts", "resolve", "--pair", "fixture", "--path", "item.txt",

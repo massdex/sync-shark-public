@@ -134,19 +134,21 @@ internal static class TrayClientChecks
         var exited = false;
         // Inline continuations keep the menu-item updates on this (fixture) thread.
         var actionGate = new TaskCompletionSource<AutoSyncHostReply?>();
-        TrayHostSend send = (request, _, _) =>
+        TrayHostSend send = (request, _, token) =>
         {
             if (request.Command != "status")
             {
                 Interlocked.Increment(ref mutationSends);
                 return actionGate.Task;
             }
-            return Task.FromResult<AutoSyncHostReply?>(++statusCalls == 3
-                ? null
-                : Reply("running", Pair("pair-a", "Pair A", "Running")));
+            // The first two polls answer immediately; the third stays in flight at the 2 s cap and can
+            // only complete as a miss when the tray's own deadline cancels it.
+            return ++statusCalls == 3
+                ? DelayedStatusAsync(token)
+                : Task.FromResult<AutoSyncHostReply?>(Reply("running", Pair("pair-a", "Pair A", "Running")));
         };
 
-        var result = TrayStartup.Start(useCoreV2: true, ["--tray"], send, () => exited = true, diagnostics.Add);
+        var result = TrayStartup.Start(selectedV2, trayArgs, send, () => exited = true, diagnostics.Add);
         Require(result.ExitCode is null && result.Ownership is not null && result.Client is not null,
             "the production startup branch starts one tray client while the product lock is held");
         using var ownership = result.Ownership;
@@ -176,13 +178,25 @@ internal static class TrayClientChecks
                 notice.Message.Contains("Pause was refused: the run is at a safe point.", StringComparison.Ordinal),
             "a nonzero forwarded CLI exit shows the host's stderr diagnostic, distinct from uncertainty");
 
-        // A delayed/missed reply keeps the last known view and says Updating…, with actions disabled.
-        WaitFor(client.RefreshNowAsync());
+        // A reply still in flight at the 2 s cap leaves the poll pending, then applies as a miss.
+        var delayed = client.RefreshNowAsync();
+        PumpFor(TimeSpan.FromMilliseconds(750));
+        Require(!delayed.IsCompleted && client.View.Status == "Working" && client.View.CanAct,
+            "a status reply still in flight is pending, not a miss, until the 2 s cap");
+        WaitFor(delayed);
         Require(client.View.Status.EndsWith("(Updating…)", StringComparison.Ordinal) && !client.View.CanAct,
-            "a missed status reply after a known view says Updating… and disables actions");
+            "a status reply that completes past the 2 s cap is a miss: last known view plus Updating…");
 
         client.ExitTrayForTest();
         Require(exited, "the tray exit action disposes only the client");
+    }
+
+    // A reply that is deliberately slower than the tray's own two-second status cap. It honours the cap's
+    // token, so the poll is still pending at the cap and then records a miss rather than a late success.
+    private static async Task<AutoSyncHostReply?> DelayedStatusAsync(CancellationToken token)
+    {
+        await Task.Delay(TimeSpan.FromSeconds(2) + TimeSpan.FromMilliseconds(250), token).ConfigureAwait(false);
+        return Reply("running", Pair("pair-a", "Pair A", "Running"));
     }
 
     // Every failed observation — I/O, peer verification, parse, uncertain, cancel, unexpected — keeps the last
@@ -282,6 +296,18 @@ internal static class TrayClientChecks
             "\",\"lastResult\":" + result + ",\"lastChecked\":\"2026-10-25T09:00:00Z\",\"urgentPending\":" +
             urgent.ToString(CultureInfo.InvariantCulture) + ",\"planningBacklog\":" +
             planning.ToString(CultureInfo.InvariantCulture) + ",\"reason\":" + reasonJson + "}";
+    }
+
+    // Pump this thread's queues for a bounded instant without waiting for completion, so the fixture can
+    // observe that an in-flight poll is still pending at a chosen point before its deadline.
+    private static void PumpFor(TimeSpan duration)
+    {
+        var until = DateTime.UtcNow + duration;
+        while (DateTime.UtcNow < until)
+        {
+            System.Windows.Forms.Application.DoEvents();
+            Thread.Sleep(1);
+        }
     }
 
     // Pump this thread's WinForms and WPF queues while a task completes, so a continuation posted to a

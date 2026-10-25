@@ -1,7 +1,6 @@
 // Exact no-command migration shapes measured from the retained v21 -> v27 compatibility fixture.
 // Approved core changes: recovery/gap, NOTICE23 terminal/aggregated indexes, INDEX24 retry state,
-// deferred-plan aliases and intent ordering, VERIFY27 evidence ownership, and the two additive
-// bounded-catalog notice indexes (nt_page, nt_free_space). No FoD objects are allowed.
+// deferred-plan aliases and intent ordering, VERIFY27 evidence ownership. No FoD objects are allowed.
 internal static partial class FilesOnDemandCompatibilityChecks
 {
     private static string NormalizeSchema(string text) => System.Text.RegularExpressions.Regex.Replace(text,
@@ -23,8 +22,6 @@ internal static partial class FilesOnDemandCompatibilityChecks
         ["index|nt_restore_path"] = """CREATE INDEX nt_restore_path ON notice(pair_no, path_key) WHERE state IN ('open','aggregated') AND reason_key='recovery-restore-pending'""",
         ["index|nt_restore_path_ready"] = """CREATE INDEX nt_restore_path_ready ON notice(pair_no, path_key) WHERE reason_key='recovery-restore-ready'""",
         ["index|nt_restore_reason_page"] = """CREATE INDEX nt_restore_reason_page ON notice(notice_id) WHERE reason_key='recovery-restore-pending' OR reason_key='recovery-restore-ready'""",
-        ["index|nt_page"] = """CREATE INDEX nt_page ON notice(created, notice_id) WHERE state='open'""",
-        ["index|nt_free_space"] = """CREATE INDEX nt_free_space ON notice(created, notice_id) WHERE state='open' AND reason_key IN ('insufficient-free-space','free-space-unknown','free-space-reserve-unknown')""",
         ["index|nt_terminal"] = """CREATE INDEX nt_terminal ON notice(closed_at,notice_id) WHERE state='closed' AND restore_hold=0""",
         ["index|planning_deferred_pair"] = """CREATE INDEX planning_deferred_pair ON planning_deferred(pair_no,root_no,object_id)""",
         ["index|planning_deferred_pair_version"] = """CREATE INDEX planning_deferred_pair_version ON planning_deferred(pair_no,version,root_no,object_id)""",

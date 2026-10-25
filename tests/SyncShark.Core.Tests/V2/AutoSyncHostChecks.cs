@@ -17,7 +17,7 @@ internal static class AutoSyncHostChecks
         await ReadsNeverLaunchAsync();
         await GuiAdapterSharesHostAsync();
         await ProductionWiringWithEmptyTempStoreAsync();
-        await BoundedConflictCatalogAsync();
+        await OpenConflictCountAsync();
         await ReadsBypassMutationSlotsAsync();
         await SafeStopAsync();
         await DisconnectDoesNotReplayAsync();
@@ -249,9 +249,8 @@ internal static class AutoSyncHostChecks
         await engine.StopAsync();
     }
 
-    // The production catalog reads its page in SQL before materialization and its total is one capped COUNT:
-    // 5,000 open notices must never be read to answer a limit-10 page. The measured proof is the query plan.
-    private static async Task BoundedConflictCatalogAsync()
+    // The tray icon's red is exactly this count: one indexed COUNT over the rows `conflicts list` shows.
+    private static Task OpenConflictCountAsync()
     {
         var root = Path.Combine(Path.GetTempPath(), "autosync-conflict-count-" + Guid.NewGuid().ToString("N"));
         using var store = OpenChoiceStore(root);
@@ -264,44 +263,22 @@ internal static class AutoSyncHostChecks
         store.CloseNotice(ignored.NoticeId!, NoticeChoices.Ignore);
         Require(store.OpenConflictCount() == 1,
             "the open-conflict count matches the visible conflicts list and excludes an ignored notice");
-        store.AddNotices(Enumerable.Range(0, 5000).Select(index => new Notice("pair-1", 0, NoticeKind.KeepBoth,
-            "bulk/" + index + ".txt", "Kept both.", "bulk-kept")).ToArray());
-        var runtime = new V2CliRuntime(null, store, null!, null!, root);
-        var page = await runtime.LoadConflictsAsync(null, null, null, 10, 0, CancellationToken.None);
-        Require(page.Items.Count == 10 && page.TotalOpen == NoticeTable.OpenNoticeCeiling && page.TotalAtLeast && page.HasMore,
-            "a limit-10 page returns ten rows and a capped at-least total, not 5,000 materialized notices");
-        Require(store.OpenConflictCount() == NoticeTable.OpenNoticeCeiling,
-            "the tray status count is the same capped COUNT");
-        PlanBoundedConflictReads(root);
+        PlanOpenConflictCount(root);
+        return Task.CompletedTask;
     }
 
-    private static void PlanBoundedConflictReads(string root)
+    private static void PlanOpenConflictCount(string root)
     {
         using var database = new SqliteConnection(new SqliteConnectionStringBuilder
         { DataSource = Path.Combine(root, "v2", "state.db") }.ToString());
         database.Open();
-        var visible = ConflictCatalog.VisibleFilter("n");
-        var pagePlan = StoreSchema.QueryPlan(database, "conflict-page",
-            ConflictCatalog.Page("nt_page", visible), "$limit", "$offset");
-        var pairPlan = StoreSchema.QueryPlan(database, "conflict-pair-page",
-            ConflictCatalog.Page("nt_open", visible + " AND n.pair_no=$p"), "$p", "$limit", "$offset");
-        var countPlan = StoreSchema.QueryPlan(database, "conflict-count", ConflictCatalog.Count(visible), "$cap");
-        var freePlan = StoreSchema.QueryPlan(database, "conflict-free", ConflictCatalog.FreeSpace(visible), "$cap");
-        Require(pagePlan.Any(line => line.Contains("USING INDEX nt_page", StringComparison.Ordinal)) &&
-            !pagePlan.Any(line => line.Contains("TEMP B-TREE", StringComparison.Ordinal)),
-            "a global conflict page is served by the ordered nt_page index without sorting");
-        Require(pairPlan.Any(line => line.Contains("USING INDEX nt_open", StringComparison.Ordinal)) &&
-            !pairPlan.Any(line => line.Contains("TEMP B-TREE", StringComparison.Ordinal)),
-            "an exact-pair conflict page is served by the ordered nt_open index without sorting");
-        Require(!TableScan(pagePlan) && !TableScan(countPlan) && !TableScan(freePlan),
-            "no bounded conflict read scans the notice table");
-        Require(freePlan.Any(line => line.Contains("USING INDEX nt_free_space", StringComparison.Ordinal)),
-            "the free-space summary reads only its reason-scoped index");
-
-        static bool TableScan(IEnumerable<string> plan) => plan.Any(line =>
-            line.Contains("SCAN n", StringComparison.Ordinal) &&
-            !line.Contains("USING INDEX", StringComparison.Ordinal) &&
-            !line.Contains("USING COVERING INDEX", StringComparison.Ordinal));
+        using var command = StoreSchema.Command(database, null, "EXPLAIN QUERY PLAN " + NoticeTable.VisibleCountSql);
+        using var reader = command.ExecuteReader();
+        var plan = new List<string>();
+        while (reader.Read()) plan.Add(reader.GetString(3));
+        Require(plan.Any(line => line.Contains("nt_open (state=?)")),
+            "the open-conflict count seeks the nt_open index rather than scanning notices");
+        Require(!plan.Any(line => line.Contains("SCAN ")), "the open-conflict count never scans a table");
     }
 
     private static async Task ReadsNeverLaunchAsync()
