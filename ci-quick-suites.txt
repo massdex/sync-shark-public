@@ -1,3 +1,2 @@
 --v2-run-checks
---v2-local-journal-checks
---v2-root-relist-scoped-checks
+--v2-storage-checks

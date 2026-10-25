@@ -29,7 +29,14 @@ public sealed partial class SyncRun
             {
                 lock (_stopGate) _reconciling.Remove(pairId);
                 _reconciliationRunId.Value = null;
-                try { if (_store is SqliteStateStore sql) sql.ClearRemovalObservation(active.Session + ":work"); }
+                try
+                {
+                    if (_store is SqliteStateStore sql)
+                    {
+                        sql.ClearRemovalObservation(active.Session + ":work");
+                        sql.ClearRemovalObservation(active.Session + ":deferred");
+                    }
+                }
                 catch (Exception error) { RunOutput.Observe(error); }
             }
         }
@@ -46,14 +53,26 @@ public sealed partial class SyncRun
         await SelectReconciliationAsync(pair, active, throttle, ct);
         lock (_stopGate) active.Selecting = false;
         var total = new RunReport(pairId, string.Empty, 0, 0, 0, 0, 0, 0, 0, 0, []);
-        while (NextReconciliationBatch(sql, active.Session) is { } batch)
+        long previousDeferred = long.MaxValue;
+        while (true)
         {
-            ct.ThrowIfCancellationRequested();
-            var report = await _admission.WithAsync(pairId,
-                () => ReconcileBatchAsync(pair, batch, progress, ct), ct);
-            total = AddReconciliationReport(total, report);
-            lock (_stopGate) active.LiveProgress = new(RunPhases.Reconcile, null, total.Done, 0);
-            if (report.HaltedBy is not null || report.Cancelled || report.Paused || report.CompletionFailed) break;
+            while (NextReconciliationBatch(sql, active.Session) is { } batch)
+            {
+                ct.ThrowIfCancellationRequested();
+                var report = await _admission.WithAsync(pairId,
+                    () => ReconcileBatchAsync(pair, batch, progress, ct), ct);
+                total = AddReconciliationReport(total, report);
+                lock (_stopGate) active.LiveProgress = new(RunPhases.Reconcile, null, total.Done, 0);
+                if (report.HaltedBy is not null || report.Cancelled || report.Paused || report.CompletionFailed) break;
+            }
+            if (total.HaltedBy is not null || total.Cancelled || total.Paused || total.CompletionFailed) break;
+            var deferred = sql.DeferredReconciliationFolders(active.Session);
+            RunTrace.Emit($"reconciliation deferred folders: remaining={deferred}");
+            // Retry only after the main pass, and only while a pass shrinks the remaining work.
+            // The same admission and fresh-read pipeline is used; saved actions are never replayed.
+            if (deferred == 0 || deferred >= previousDeferred) break;
+            previousDeferred = deferred;
+            sql.RestageReconciliationFolders(active.Session);
         }
         if (total.HaltedBy is null && !total.Cancelled && !total.Paused && !total.CompletionFailed)
             total = await CompleteReconciliationAsync(pair, active, total, ct);
@@ -116,6 +135,10 @@ public sealed partial class SyncRun
             batch.Dispositions.Values.Count(value => value.StartsWith("deferred:", StringComparison.Ordinal) ||
                 value.StartsWith("notice:", StringComparison.Ordinal))) };
         var sql = (SqliteStateStore)_store;
+        sql.StageReconcile(batch.Session + ":deferred", Side.A,
+            batch.RowsA.Where(item => batch.DeferredFolders.Contains(item.Path)).ToArray());
+        sql.StageReconcile(batch.Session + ":deferred", Side.B,
+            batch.RowsB.Where(item => batch.DeferredFolders.Contains(item.Path)).ToArray());
         sql.RetireReconcile(batch.Session + ":work", Side.A, batch.RowsA);
         sql.RetireReconcile(batch.Session + ":work", Side.B, batch.RowsB);
         return report;

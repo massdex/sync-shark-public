@@ -5,6 +5,13 @@ public sealed partial class SyncRun
     private void AccountReconciliationBatch(PairDef pair, ReconcileBatch batch, Plan plan, Tally tally,
         Func<string, bool> settled, Func<string, bool> includeA, Func<string, bool> includeB)
     {
+        foreach (var action in plan.DeferredPlanningActions)
+            if (action.Source?.Kind == ItemKind.Folder || action.ExpectedTarget?.Kind == ItemKind.Folder)
+            {
+                batch.DeferredFolders.Add(action.Path);
+                if (action.FromPath is { } from) batch.DeferredFolders.Add(from);
+                if (action.Source is { } source) batch.DeferredFolders.Add(source.Path);
+            }
         var excluded = ScanPathsNotSynced(pair);
         foreach (var path in batch.Paths)
         {

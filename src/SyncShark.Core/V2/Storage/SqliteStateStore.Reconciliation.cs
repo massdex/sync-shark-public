@@ -66,6 +66,18 @@ public sealed partial class SqliteStateStore
             "AND path_key>$k||'/' AND path_key<$k||'0' LIMIT 1;",
             ("$s", session), ("$side", side.ToString()), ("$k", PathKey.Of(folder))) is not null);
 
+    internal void RestageReconciliationFolders(string session) => InStore(() =>
+    {
+        // The main queue is empty at a pass boundary. Keep side identities while moving the deferred queue.
+        StoreSchema.Execute(_connection, null,
+            "UPDATE temp.removal_observation SET session=$work WHERE session=$deferred;",
+            ("$work", session + ":work"), ("$deferred", session + ":deferred"));
+    });
+
+    internal long DeferredReconciliationFolders(string session) => InStore(() => Convert.ToInt64(
+        StoreSchema.Scalar(_connection, null,
+            "SELECT COUNT(*) FROM temp.removal_observation WHERE session=$s;", ("$s", session + ":deferred"))));
+
     // This page selects candidates only. The targeted reread owns absence authority.
     internal IReadOnlyList<(FileStateReader.Entry Row, bool Seen)> MissingPage(string session, Side side,
         string rootId, string scope, long afterDir, string afterKey, string afterName) => InStore(() =>

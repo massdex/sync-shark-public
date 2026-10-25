@@ -24,6 +24,14 @@ internal static partial class StorageChecks
             store.RetireReconcile(session, Side.A, page);
             Require(store.ReconcilePage(session, Side.A, "", "", 256).Single() == items[^1] &&
                 store.ReconcilePage(session, Side.B, "", "", 256).Single() == items[0], "retirement is exact and side scoped");
+            store.StageReconcile(session + ":deferred", Side.A, [items[0]]);
+            store.StageReconcile(session + ":deferred", Side.B, [items[1]]);
+            Require(store.DeferredReconciliationFolders(session) == 2, "deferred queue counts both sides");
+            store.RestageReconciliationFolders(session);
+            Require(store.DeferredReconciliationFolders(session) == 0 &&
+                store.ReconcilePage(session + ":work", Side.A, "", "", 1).Single() == items[0] &&
+                store.ReconcilePage(session + ":work", Side.B, "", "", 1).Single() == items[1],
+                "restaging preserves each side and current-read selection identity");
             ReconcileMissingPages(store, items);
         }
         using var reopened = SqliteStateStore.Open(folder, Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);

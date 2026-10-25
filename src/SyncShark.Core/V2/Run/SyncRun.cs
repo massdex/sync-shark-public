@@ -1068,7 +1068,13 @@ public sealed partial class SyncRun : ISyncRun
             {
                 // Cursor promotion requires durable retry input for every unfinished item.
                 // If that write failed, retain the previous cursor for safe replay.
-                var retrySaved = completion.Step(() => UpdateRetryWork(pair, plan, tally, retries,
+                // Reconciliation replans only selected paths. Its completion may retire their planning
+                // retries, but must never import saved reviewed actions or unrelated due work.
+                var completionRetries = batch is null ? retries : batch.Paths
+                    .Select(path => _store.SyncRetryAt(pairId, path)).OfType<SyncRetry>()
+                    .Where(retry => retry.Kind == "planning" && !plan.DeferredPlanningActions.Any(
+                        action => PairPath.Same(action.Path, retry.Path))).ToArray();
+                var retrySaved = completion.Step(() => UpdateRetryWork(pair, plan, tally, completionRetries,
                     execution.Pending, evaluated, scan.A.Complete && scan.B.Complete));
                 retrySaved &= completion.Step(() => RetainPlanningFailures(pair, plan));
                 completion.Step(() => CloseResolvedNotices(openNotices, plan, tally, path => evaluated(path) &&

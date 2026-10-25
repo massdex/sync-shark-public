@@ -7,6 +7,7 @@ internal sealed record ReconcileBatch(string Session, IReadOnlyList<string> Path
     internal IReadOnlyList<ItemState> RowsA { get; init; } = [];
     internal IReadOnlyList<ItemState> RowsB { get; init; } = [];
     internal Dictionary<string, string> Dispositions { get; } = new(StringComparer.OrdinalIgnoreCase);
+    internal HashSet<string> DeferredFolders { get; } = new(StringComparer.OrdinalIgnoreCase);
     internal bool Contains(string path) => Paths.Any(scope => PairPath.IsSelfOrUnder(path, scope));
 
     internal bool Contains(SyncAction action) => Contains(action.Path) ||
