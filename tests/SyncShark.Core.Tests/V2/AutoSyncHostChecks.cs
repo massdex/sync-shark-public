@@ -286,7 +286,11 @@ internal static class AutoSyncHostChecks
         while (reader.Read()) plan.Add(reader.GetString(3));
         Require(plan.Any(line => line.Contains("nt_open (state=?)")),
             "the open-conflict count seeks the nt_open index rather than scanning notices");
-        Require(!plan.Any(line => line.Contains("SCAN ")), "the open-conflict count never scans a table");
+        // The bounded inner select is a co-routine ("SCAN (subquery-1)"); only a notice/pair table scan
+        // would mean the count reads the table, so the check ignores the co-routine step.
+        Require(!plan.Any(line => line.Contains("SCAN ", StringComparison.Ordinal) &&
+                                  !line.Contains("(subquery", StringComparison.Ordinal)),
+            "the open-conflict count never scans a table");
     }
 
     private static async Task ReadsNeverLaunchAsync()
