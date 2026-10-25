@@ -97,7 +97,7 @@ public static class FailureRetryOwner
 
     /// <summary>The one folded per-path retry notice identity, shared by publication and clearance.</summary>
     public static string RetryNoticeId(string pairId, string path) =>
-        ShortId.Make("n", pairId, "40", RowCodec.Key(path), "sync-retry");
+        ShortId.Make("n", pairId, "40", PathKey.Of(path), "sync-retry");
 
     /// <summary>One folded "not synced yet" line for a settle refusal. An item retry or the more specific
     /// content-unconfirmed observation owns its own explanation.</summary>
