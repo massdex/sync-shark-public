@@ -64,20 +64,32 @@ internal static partial class RunChecks
                     }
                 };
             }
+            Action<SqliteStateStore>? publishEditedCorrespondence = null;
             if (mode is "other-baseline" or "uncertain-other")
             {
                 var other = fx.B.Seed("Parent/other.json", "cloud-edit");
                 var action = new SyncAction("other-link", 16, ActionKind.Adopt, Side.B, other.Path, null,
                     baseline.A, other, false, "other-link");
-                store.CommitResult(fx.Pair.PairId, gen, action, new(action.ActionId, Outcome.Done, baseline.A, other, null, null));
                 if (mode == "other-baseline")
                 {
-                    var editedOther = fx.B.Seed(other.Path, "later-edit", mtime: other.Mtime.AddMinutes(1));
-                    Require(editedOther.Hash is not null && Content.SameContent(editedOther, other) == false,
-                        "second correspondence is readable but edited against its baseline");
+                    // Publish after planning: otherwise baseline claiming consumes the shared A
+                    // identity and rule 7 rewrites this synthetic link before settlement can see it.
+                    publishEditedCorrespondence = target =>
+                    {
+                        var editGen = target.BeginGeneration(fx.Pair.B.RootId, "concurrent-edit");
+                        target.CommitResult(fx.Pair.PairId, editGen, action,
+                            new(action.ActionId, Outcome.Done, baseline.A, other, null, null));
+                        var editedOther = fx.B.Seed(other.Path, "later-edit", mtime: other.Mtime.AddMinutes(1));
+                        target.WriteSnapshot(new Snapshot(fx.Pair.B.RootId, Side.B, editGen, "concurrent-edit",
+                            [editedOther], []) { IncludesPath = candidate => PairPath.Same(candidate, other.Path) });
+                        Require(editedOther.Hash is not null && Content.SameContent(editedOther, other) == false,
+                            "second correspondence is readable but edited against its baseline");
+                    };
                 }
                 else
                 {
+                    store.CommitResult(fx.Pair.PairId, gen, action,
+                        new(action.ActionId, Outcome.Done, baseline.A, other, null, null));
                     // Every footprint belongs only to the second correspondence's remote path.
                     var pendingOther = new SyncAction("pending-other", 2, ActionKind.Update, Side.B, other.Path, null,
                         other, other with { Hash = "previous", Mtime = other.Mtime.AddMinutes(-1) }, false, "other-link");
@@ -102,7 +114,44 @@ internal static partial class RunChecks
             store.Dispose();
             using var reopened = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var restarted = new SyncRun(reopened, NewExecutor(reopened), fx.Provider, Settings, TimeProvider.System);
-            await restarted.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            void Measure(string stage)
+            {
+                if (mode != "other-baseline") return;
+                Console.WriteLine($"RETRY-MEASUREMENT {stage} debt={reopened.SyncRetryAt(fx.Pair.PairId, baseline.A.Path) is not null}");
+                foreach (var link in reopened.Baselines(fx.Pair.PairId))
+                {
+                    var liveA = reopened.Live(fx.Pair.A.RootId, [link.A.Path]).FirstOrDefault();
+                    var liveB = reopened.Live(fx.Pair.B.RootId, [link.B.Path]).FirstOrDefault();
+                    Console.WriteLine($"RETRY-MEASUREMENT {stage} key={link.ObjectKey}; baseA={link.A}; baseB={link.B}; liveA={liveA}; liveB={liveB}; equal={(liveA is not null && liveB is not null ? Content.SameContent(liveA, liveB) : null)}");
+                }
+                foreach (var notice in reopened.OpenNotices(fx.Pair.PairId))
+                    Console.WriteLine($"RETRY-MEASUREMENT {stage} notice rule={notice.Rule}; path={notice.Path}; reason={notice.ReasonKey}");
+            }
+            Measure("before");
+            var publishedEditedCorrespondence = false;
+            void ObserveCommitted(PairDef pair, IReadOnlyList<CommittedAction> results)
+            {
+                if (mode != "other-baseline") return;
+                foreach (var result in results)
+                    Console.WriteLine($"RETRY-MEASUREMENT committed kind={result.Action.Kind}; rule={result.Action.Rule}; path={result.Action.Path}; key={result.Action.ObjectKey}; outcome={result.Outcome}");
+                if (publishedEditedCorrespondence || !results.Any(result => result.Outcome == Outcome.Done &&
+                    result.Action.Kind == ActionKind.CopyNew && result.Action.Path == "Parent/other.json")) return;
+                publishedEditedCorrespondence = true;
+                publishEditedCorrespondence!(reopened);
+            }
+            reopened.ResultsCommitted += ObserveCommitted;
+            try { await restarted.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default); }
+            finally { reopened.ResultsCommitted -= ObserveCommitted; }
+            Measure("after");
+            if (mode == "other-baseline")
+            {
+                var sibling = reopened.BaselinesAt(fx.Pair.PairId, Side.A, [baseline.A.Path])
+                    .Single(link => link.ObjectKey == "other-link");
+                var edited = reopened.Live(fx.Pair.B.RootId, [sibling.B.Path]).Single();
+                Require(publishedEditedCorrespondence && edited.Hash is not null && edited.Flags == ItemFlags.None &&
+                    !Planner.Unchanged(edited, sibling.B),
+                    "readable edited second correspondence still touches the retry at settlement");
+            }
             var settled = reopened.SyncRetryAt(fx.Pair.PairId, baseline.A.Path) is null;
             Require(settled == (mode is "settle" or "equal-new-identity"), "only fully proved unprotected correspondences settle after cold reopen: " + mode);
             if (mode == "edited")
