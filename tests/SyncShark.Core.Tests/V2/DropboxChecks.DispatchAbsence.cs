@@ -109,6 +109,9 @@ internal static partial class DropboxChecks
                 reopened.Baselines(pair.PairId).Any(b => b.ObjectKey == "key-0") &&
                 reopened.UnresolvedIntents(pair.PairId).Count == 0,
                 "cold reopen retains blocked correspondence and retry but retires definitely unsubmitted intent");
+            if (scenario.StartsWith("paced-", StringComparison.Ordinal))
+                Require(reopened.OpenNotices(pair.PairId).Count(notice => notice.Path == "file-0") == 1,
+                    "dispatch refusal retains exactly one notice for the refused item after cold reopen");
         }
     }
 
@@ -126,25 +129,27 @@ internal static partial class DropboxChecks
             var victim = (await remote.ObserveAsync("small", default))!;
             var pair = new PairDef("folder-dispatch", "Pair A", new("local", SyncProviders.Local, null, "/local", "local"),
                 Root(), [], [], true);
-            h.Known.SavePair(pair);
+            var statePath = Path.Combine(_root, "small-folder-" + Guid.NewGuid().ToString("N"));
+            using var store = SqliteStateStore.Open(statePath, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
+            store.SavePair(pair);
             var adopt = new SyncAction("adopt-folder", 12, ActionKind.Adopt, Side.B, "small", null,
                 original, victim, false, "folder-key");
-            h.Known.CommitResult(pair.PairId, 1, adopt, new(adopt.ActionId, Outcome.Done, original, victim, null, null));
+            store.CommitResult(pair.PairId, 1, adopt, new(adopt.ActionId, Outcome.Done, original, victim, null, null));
             await local.DeleteAsync(new("remove-folder", 23, ActionKind.Delete, Side.A, "small", null,
                 null, original, false, null), default);
             limiter.Resources.ProviderThrottled(new("dropbox:" + Binding().Normalize().ConnectionId,
-                SyncProviderOperation.Write), TimeSpan.FromMinutes(1));
+                SyncProviderOperation.Read), TimeSpan.FromMinutes(1));
             clock.BeforeTimer = () =>
             {
                 clock.BeforeTimer = null;
-                            clock.Advance(TimeSpan.FromMinutes(1));
+                clock.Advance(TimeSpan.FromMinutes(1));
                 if (sourceReturns) local.Seed("small", "", ItemKind.Folder);
                 else h.Wire.SeedFile("small/child.txt", "must survive");
             };
             var action = new SyncAction("delete-folder", 23, ActionKind.Delete, Side.B, "small", null,
                 null, victim, false, "folder-key") { PreserveIgnoredChildren = true };
             var results = new List<ActionResult>();
-            var executor = new Executor(h.Known, V2Settings.Default, ExecutorChecks.Admission(),
+            var executor = new Executor(store, V2Settings.Default, ExecutorChecks.Admission(),
                 isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
             await foreach (var result in executor.ApplyAsync(new(pair.PairId, 2, [action], []), local, remote, default))
                 results.Add(result);
@@ -174,6 +179,12 @@ internal static partial class DropboxChecks
             Require(refused && !h.Wire.Calls.Contains("/2/files/delete_batch") &&
                 await writer.ObserveAsync("unproved", default) is not null,
                 "missing dispatch callback is Unknown and never submits a delete");
+            h.Wire.SeedFolder("unproved-folder");
+            var folder = (await writer.ObserveAsync("unproved-folder", default))!;
+            await ExpectAsync<InvalidOperationException>(() => writer.DeleteAsync(DeleteAction(folder.Path, folder), default));
+            Require(!h.Wire.Calls.Contains("/2/files/delete_v2") &&
+                await writer.ObserveAsync(folder.Path, default) is not null,
+                "missing folder action context never submits a delete");
         }
         finally { ProviderEffectContext.Current.Value = previous; }
     }

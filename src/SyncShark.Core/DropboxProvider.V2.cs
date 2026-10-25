@@ -162,9 +162,10 @@ public sealed partial class DropboxPilotClient
         if (expected.Kind != PilotEntryKind.Directory || !IsExactDropboxObjectIdentity(expected.Id))
             throw new InvalidDataException("An exact Dropbox folder identity is required for an empty-folder delete.");
         var id = expected.Id!;
+        var action = V2.ProviderEffectContext.Current.Value?.Action
+            ?? throw new InvalidOperationException("A Dropbox folder delete requires its action context.");
         async Task ValidateAsync()
         {
-            await V2.DeleteRevalidation.RevalidateCurrentAsync(V2.ProviderEffectContext.Current.Value?.Action);
             await VerifyRootIdentityAsync(ct);
             try
             {
@@ -175,6 +176,7 @@ public sealed partial class DropboxPilotClient
                 throw new DropboxApiException(HttpStatusCode.Conflict, "Dropbox folder changed after inventory.");
             }
             await VerifyFolderChildrenAsync(id, ignoreRules, ct);
+            await V2.DeleteRevalidation.RevalidateCurrentAsync(action);
         }
         using var deleted = await PostConditionalEffectJsonAsync("https://api.dropboxapi.com/2/files/delete_v2",
             new { path = id }, ct, beforeSending: ValidateAsync);
