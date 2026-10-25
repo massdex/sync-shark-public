@@ -66,9 +66,6 @@ internal static partial class Program
 
     private static int RunFixtureMain(string[] args)
     {
-        if (args is ["--tray-client-checks"])
-        { try { return TrayClientChecks.Run(); }
-          catch (Exception error) { Console.Error.WriteLine(error); return 1; } }
         if (args is ["--sparse-planning-correction-checks", var sparseCorrectionRoot])
         { SparsePlanningContextChecks.RunAsync(Path.GetFullPath(sparseCorrectionRoot), correctionsOnly: true).GetAwaiter().GetResult(); return 0; }
         if (args is ["--bounded-presentation-history-checks", var historyRoot])
@@ -1084,7 +1081,9 @@ internal static partial class Program
         window.UpdateLayout();
         if (window.FindName("LocalHierarchyEmptyState") is not Border { Visibility: Visibility.Collapsed } ||
             window.FindName("DropboxHierarchyEmptyState") is not Border { Visibility: Visibility.Visible } ||
-            window.FindName("DropboxHierarchyRootNameText") is not TextBlock { Text: "Sync Shark Pilot" } ||
+            window.FindName("DropboxHierarchyRootNameText") is not TextBlock dropboxHierarchyHeading ||
+            !dropboxHierarchyHeading.Text.Contains(" - ", StringComparison.Ordinal) ||
+            !dropboxHierarchyHeading.Text.Contains("Sync Shark Pilot", StringComparison.Ordinal) ||
             window.FindName("DropboxHierarchyEmptyStateText") is not TextBlock dropboxRootState ||
             !dropboxRootState.Text.Contains("1 file at this level", StringComparison.Ordinal) ||
             window.FindName("FolderSelectionSummary") is not TextBlock hierarchySummary ||

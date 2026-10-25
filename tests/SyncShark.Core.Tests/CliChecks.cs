@@ -495,10 +495,7 @@ internal static partial class CliChecks
         RecoverySelectionRegistryChecks();
         await CliDeadlineChecks.RunAsync();
         Require(SyncCliRegistry.Rows.Single(row => row.Command == "autosync status").Effect.Contains(
-            "planningBacklog", StringComparison.Ordinal) &&
-            SyncCliRegistry.Rows.Single(row => row.Command == "autosync status").Effect.Contains(
-                "open-conflict", StringComparison.Ordinal),
-            "AutoSync status advertises its live planning backlog and open-conflict counts");
+            "planningBacklog", StringComparison.Ordinal), "AutoSync status advertises its live planning backlog count");
         Require(SyncCliRegistry.Rows.Single(row => row.Command == "pairs edit").Effect.Contains(
                     "publishes atomically", StringComparison.Ordinal) &&
                 SyncCliRegistry.Rows.Single(row => row.Command == "pairs edit").Effect.Contains(

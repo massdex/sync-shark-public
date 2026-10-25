@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
-using Massdex.SyncShark.V2;
 
 namespace Massdex.SyncShark;
 
@@ -9,21 +8,10 @@ internal static class ExistingWindowActivation
 {
     // Process-local window message; no new listener, pipe, file, credential or service.
     internal const int ShowMessage = 0x8000 + 113;
-
-    /// <summary>
-    /// Read-only: whether another same-product process already shows the full application window. It goes
-    /// through the same traversal as activation with <c>activate: false</c>, so it posts nothing and never
-    /// touches the foreground; the tray can stand down without stealing focus.
-    /// </summary>
-    internal static bool IsProductWindowPresent() => Visit(request: null, activate: false);
-
-    internal static bool TryRaise(ExplorerRequest? request = null) => Visit(request, activate: true);
-
-    // The one traversal shared by observation and activation. Only activate:true may call
-    // AllowSetForegroundWindow or post/send anything; the tray path can never activate a window.
-    private static bool Visit(ExplorerRequest? request, bool activate)
+    internal static bool TryRaise(ExplorerRequest? request = null)
     {
-        if (Environment.ProcessPath is not { } ownPath) return false;
+        var ownPath = Environment.ProcessPath;
+        if (ownPath is null) return false;
         try { ownPath = ResolveExecutable(ownPath); }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return false; }
         foreach (var process in Process.GetProcessesByName("SyncShark"))
@@ -35,37 +23,26 @@ internal static class ExistingWindowActivation
                 {
                     var otherPath = process.MainModule?.FileName;
                     if (otherPath is null || !string.Equals(ResolveExecutable(otherPath), ownPath, StringComparison.OrdinalIgnoreCase)) continue;
-                    if (activate) AllowSetForegroundWindow((uint)process.Id);
-                    var matched = false;
+                    var raised = false;
+                    AllowSetForegroundWindow((uint)process.Id);
                     EnumWindows((window, _) =>
                     {
                         GetWindowThreadProcessId(window, out var owner);
                         if (owner != process.Id) return true;
                         var title = new System.Text.StringBuilder(100);
                         GetWindowText(window, title, title.Capacity);
-                        if (!IsProductWindowTitle(title.ToString(), activate)) return true;
-                        matched = !activate ||
-                            (request is null ? PostMessage(window, ShowMessage, IntPtr.Zero, IntPtr.Zero)
-                                : SendRequest(window, request));
-                        return !matched;
+                        if (title.ToString() != "Sync Shark") return true;
+                        raised = request is null ? PostMessage(window, ShowMessage, IntPtr.Zero, IntPtr.Zero)
+                            : SendRequest(window, request);
+                        return !raised;
                     }, IntPtr.Zero);
-                    if (matched) return true;
+                    if (raised) return true;
                 }
-                catch (Exception exception) when (exception is System.ComponentModel.Win32Exception or InvalidOperationException or NotSupportedException or IOException or UnauthorizedAccessException)
-                {
-                    // Another process can exit or deny module access between enumeration and inspection; the
-                    // remaining candidates are still valid, and observation never escalates this.
-                }
+                catch (Exception exception) when (exception is System.ComponentModel.Win32Exception or InvalidOperationException or NotSupportedException or IOException or UnauthorizedAccessException) { }
             }
         }
         return false;
     }
-
-    // The full window carries one of these exact titles; the tray and host carry none. Observation also
-    // accepts the legacy core's title, while activation only ever raises the real product window.
-    private static bool IsProductWindowTitle(string title, bool activate) =>
-        string.Equals(title, "Sync Shark", StringComparison.Ordinal) ||
-        (!activate && string.Equals(title, CoreSwitch.LegacyNotice, StringComparison.Ordinal));
     private static bool SendRequest(IntPtr target, ExplorerRequest request)
     {
         // WM_COPYDATA copies a bounded payload synchronously; the receiver queues work only after

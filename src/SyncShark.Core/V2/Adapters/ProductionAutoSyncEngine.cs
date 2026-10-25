@@ -63,9 +63,7 @@ public sealed class ProductionAutoSyncEngine : IAutoSyncHostEngine
     private object ReadStatus()
     {
         var states = _auto.States.ToDictionary(state => state.PairId, StringComparer.Ordinal);
-        // One indexed count for the tray's attention colour; it reads no endpoint and holds no run.
-        var openConflicts = _composition.Store is SqliteStateStore store ? store.OpenConflictCount() : 0;
-        return new { running = true, openConflicts, automationEnabled = _automation.Load().Enabled, intervalMinutes = _automation.Load().IntervalMinutes,
+        return new { running = true, automationEnabled = _automation.Load().Enabled, intervalMinutes = _automation.Load().IntervalMinutes,
             pairs = _composition.Store.Pairs().Select(pair =>
             {
                 states.TryGetValue(pair.PairId, out var state);
