@@ -66,11 +66,12 @@ public partial class App : System.Windows.Application
         }
         // Pure background-tray client. Like the shared-client branch it must precede the product lock and
         // every preference store: it attaches to the one host and never owns an engine or the store.
-        if (TrayStartup.IsTrayRequest(args))
+        var trayRoute = TrayStartup.Decide(useCoreV2, args);
+        if (trayRoute != TrayStartup.Route.NotTray)
         {
             base.OnStartup(e);
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
-            if (!useCoreV2 || args.Length != 1)
+            if (trayRoute == TrayStartup.Route.Invalid)
             {
                 AppDialogWindow.Inform(null, "Tray could not start", "The background tray attaches to the core v2 AutoSync host.",
                     "Start it with --core v2 --tray; nothing was opened or changed.");

@@ -21,9 +21,10 @@ internal static class TrayClientChecks
         TrayNeverTakesTheProductLock();
         ProductionStartupRoute();
         FailedStatusPollKeepsLastKnownView();
+        MenuOpenLoadsConflictsButPollsNeverDo();
         ExitStopsOnlyTheTray();
         Console.WriteLine("PASS tray client: bounded view, production startup route, single-send actions, " +
-            "Updating… on every failed poll, and no product-lock acquisition.");
+            "transition-only diagnostics, menu-time conflict load, and no product-lock acquisition.");
         return 0;
     }
 
@@ -79,18 +80,18 @@ internal static class TrayClientChecks
             "an open-conflict count above zero turns the icon to needs attention");
     }
 
-    // The shared store count is capped, and past 99 the menu says 99+ rather than inventing a number.
+    // The store count saturates at its cap (100), and past 99 the menu says 99+ rather than an exact number.
     private static void CappedConflictTotalShows99Plus()
     {
         using var client = new TrayClient((_, _, _) =>
-            Task.FromResult<AutoSyncHostReply?>(Reply("running", Pair("pair-a", "Pair A", "Idle"), conflicts: 1000)),
+            Task.FromResult<AutoSyncHostReply?>(Reply("running", Pair("pair-a", "Pair A", "Idle"), conflicts: 100)),
             () => { });
         WaitFor(client.RefreshNowAsync());
         Require(client.ConflictStatusText.Contains("99+", StringComparison.Ordinal) &&
-                !client.ConflictStatusText.Contains("1000", StringComparison.Ordinal) &&
+                !client.ConflictStatusText.Contains("100", StringComparison.Ordinal) &&
                 client.View.Status.Contains("99+", StringComparison.Ordinal) &&
-                !client.View.Status.Contains("1000", StringComparison.Ordinal),
-            "a capped conflict count renders 99+ instead of a fabricated exact number");
+                !client.View.Status.Contains("100", StringComparison.Ordinal),
+            "a saturated conflict count renders 99+ instead of a fabricated exact number");
     }
 
     private static void TrayNeverTakesTheProductLock()
@@ -124,10 +125,18 @@ internal static class TrayClientChecks
         Directory.CreateDirectory(root);
         using var productRoot = SyncSharkRuntimePaths.OverrideProductRootForTest(root);
         using var productLock = PilotInstanceLock.Acquire(SyncSharkRuntimePaths.InstanceLockFile);
-        // The same first two startup decisions OnStartup makes, before any lock or WPF type is touched.
+        // The same startup decision App.OnStartup makes, on the real CoreSwitch.Select outputs: the tray
+        // branch is reached only after the switch was removed and only for core v2.
         var (selectedV2, trayArgs, coreError) = CoreSwitch.Select(["--core", "v2", "--tray"], null);
-        Require(coreError is null && selectedV2 && TrayStartup.IsTrayRequest(trayArgs),
-            "the startup branch selects core v2 and recognises --tray before the product lock");
+        Require(coreError is null && selectedV2 &&
+                TrayStartup.Decide(selectedV2, trayArgs) == TrayStartup.Route.Start,
+            "the startup branch's own decision routes real --core v2 --tray arguments to the tray");
+        var legacy = CoreSwitch.Select(["--core", "v1", "--tray"], null);
+        Require(legacy.Error is null && !legacy.UseV2 && TrayStartup.IsTrayRequest(legacy.Args) &&
+                TrayStartup.Decide(legacy.UseV2, legacy.Args) == TrayStartup.Route.Invalid,
+            "a tray request without core v2 is refused by the same startup decision");
+        Require(TrayStartup.Decide(true, []) == TrayStartup.Route.NotTray,
+            "ordinary core v2 startup never enters the tray branch");
         var diagnostics = new List<string>();
         var statusCalls = 0;
         var mutationSends = 0;
@@ -180,7 +189,6 @@ internal static class TrayClientChecks
 
         // A reply still in flight at the 2 s cap leaves the poll pending, then applies as a miss.
         var delayed = client.RefreshNowAsync();
-        PumpFor(TimeSpan.FromMilliseconds(750));
         Require(!delayed.IsCompleted && client.View.Status == "Working" && client.View.CanAct,
             "a status reply still in flight is pending, not a miss, until the 2 s cap");
         WaitFor(delayed);
@@ -200,7 +208,8 @@ internal static class TrayClientChecks
     }
 
     // Every failed observation — I/O, peer verification, parse, uncertain, cancel, unexpected — keeps the last
-    // known view and says Updating… with actions disabled; only an unexpected failure is logged.
+    // known view and says Updating… with actions disabled. The diagnostic is written on a transition only:
+    // each distinct kind once, a repeat quiet, and one recovery after the last failure.
     private static void FailedStatusPollKeepsLastKnownView()
     {
         var calls = 0;
@@ -208,32 +217,107 @@ internal static class TrayClientChecks
         Exception[] failures =
         [
             new IOException("the pipe closed"),
-            new UnauthorizedAccessException("peer verification failed"),
-            new InvalidDataException("malformed reply"),
-            new OperationCanceledException("status deadline cancelled"),
+            new IOException("the pipe closed again"),
             new AutoSyncHostUncertainException("fixture", new TimeoutException("slow reply")),
-            new InvalidOperationException("unexpected provider failure")
+            new IOException("the pipe closed a third time"),
+            new UnauthorizedAccessException("peer verification failed")
         ];
         TrayHostSend send = (request, _, _) =>
         {
             if (request.Command != "status") return Task.FromResult<AutoSyncHostReply?>(OkReply());
             var call = calls++;
-            return Task.FromResult<AutoSyncHostReply?>(call == 0
-                ? Reply("running", Pair("pair-a", "Pair A", "Running"))
-                : throw failures[call - 1]);
+            if (call == 0) return Task.FromResult<AutoSyncHostReply?>(Reply("running", Pair("pair-a", "Pair A", "Running")));
+            return call - 1 < failures.Length
+                ? Task.FromResult<AutoSyncHostReply?>(throw failures[call - 1])
+                : Task.FromResult<AutoSyncHostReply?>(Reply("running", Pair("pair-a", "Pair A", "Running")));
         };
         using var client = new TrayClient(send, () => { }, diagnostics.Add);
         WaitFor(client.RefreshNowAsync());
-        Require(client.View.Status == "Working", "a successful status read sets the view");
+        Require(client.View.Status == "Working" && diagnostics.Count == 0,
+            "a successful status read sets the view and logs no transition");
         foreach (var failure in failures)
         {
             WaitFor(client.RefreshNowAsync());
             Require(client.View.Status.EndsWith("(Updating…)", StringComparison.Ordinal) && !client.View.CanAct,
                 "a failed status poll (" + failure.GetType().Name + ") keeps the last-known plus Updating… view");
         }
+        Require(diagnostics.Count == 3 &&
+                diagnostics[0].Contains("failed (unavailable)", StringComparison.Ordinal) &&
+                diagnostics[1].Contains("failed (uncertain)", StringComparison.Ordinal) &&
+                diagnostics[2].Contains("failed (unavailable)", StringComparison.Ordinal),
+            "status failures log one diagnostic per transition, with unavailable and uncertain kept distinct");
+        WaitFor(client.RefreshNowAsync());
+        Require(client.View.Status == "Working" && diagnostics.Count == 4 &&
+                diagnostics[3].Contains("recovered", StringComparison.Ordinal),
+            "a success after failures logs one recovery and restores the working view");
+    }
+
+    // Polling reads only status; the conflict list is requested once when the menu opens, and its failures
+    // and recovery are logged as transitions too.
+    private static void MenuOpenLoadsConflictsButPollsNeverDo()
+    {
+        var requests = new List<AutoSyncHostRequest>();
+        var diagnostics = new List<string>();
+        var conflictsReplies = new Queue<Func<AutoSyncHostReply?>>();
+        TrayHostSend send = (request, _, _) =>
+        {
+            lock (requests) requests.Add(request);
+            if (!IsConflictsRequest(request))
+                return Task.FromResult<AutoSyncHostReply?>(request.Command == "status"
+                    ? Reply("running", Pair("pair-a", "Pair A", "Running"))
+                    : OkReply());
+            Func<AutoSyncHostReply?> reply;
+            lock (conflictsReplies)
+                reply = conflictsReplies.Count > 0 ? conflictsReplies.Dequeue() : () => ConflictsResult(0, ConflictsStdout(2));
+            return Task.FromResult(reply());
+        };
+        using var client = new TrayClient(send, () => { }, diagnostics.Add);
+        client.StopPollingForTest();
+        WaitFor(client.RefreshNowAsync());
+        WaitFor(client.RefreshNowAsync());
+        Require(ConflictRequestCount(requests) == 0, "status polling never requests the conflict list");
+
+        // An unanswered load, twice: one unavailable transition, then quiet.
+        conflictsReplies.Enqueue(() => null);
+        conflictsReplies.Enqueue(() => null);
+        client.OpenMenuForTest();
+        WaitFor(client.ConflictsLoad);
+        client.OpenMenuForTest();
+        WaitFor(client.ConflictsLoad);
         Require(diagnostics.Count == 1 &&
-                diagnostics[0].Contains("tray status read failed", StringComparison.Ordinal),
-            "only the unexpected status failure is logged through the existing diagnostic path, never an empty catch");
+                diagnostics[0].Contains("conflict list read failed (unavailable)", StringComparison.Ordinal),
+            "an unanswered conflict load logs once on the unavailable transition");
+
+        // A refusal is a distinct transition; a usable reply then logs recovery and fills the rows.
+        conflictsReplies.Enqueue(() => HostRefusal("the conflict catalog is busy"));
+        client.OpenMenuForTest();
+        WaitFor(client.ConflictsLoad);
+        Require(diagnostics.Count == 2 &&
+                diagnostics[1].Contains("conflict list read failed (rejected)", StringComparison.Ordinal),
+            "a refused conflict load logs the distinct rejected transition");
+        conflictsReplies.Enqueue(() => ConflictsResult(0, ConflictsStdout(3)));
+        client.OpenMenuForTest();
+        WaitFor(client.ConflictsLoad);
+        Require(diagnostics.Count == 3 &&
+                diagnostics[2].Contains("conflict list read recovered after rejected", StringComparison.Ordinal),
+            "a usable conflict load logs one recovery after the failure");
+        Require(client.ConflictStatusText.Contains("3", StringComparison.Ordinal),
+            "the menu-visible conflict count comes from the list loaded when the menu opened");
+
+        var before = ConflictRequestCount(requests);
+        client.OpenMenuForTest();
+        WaitFor(client.ConflictsLoad);
+        Require(ConflictRequestCount(requests) == before,
+            "the conflict cache prevents a repeated read within its lifetime");
+    }
+
+    private static bool IsConflictsRequest(AutoSyncHostRequest request) =>
+        string.Equals(request.Command, "cli", StringComparison.Ordinal) &&
+        request.CliArgs is { } args && args.Contains("conflicts", StringComparer.Ordinal);
+
+    private static int ConflictRequestCount(List<AutoSyncHostRequest> requests)
+    {
+        lock (requests) return requests.Count(IsConflictsRequest);
     }
 
     // Exiting the tray never sends the host's stop command and leaves the host transport answering.
@@ -282,6 +366,37 @@ internal static class TrayClientChecks
             "running", true, document.RootElement.Clone(), null);
     }
 
+    private static AutoSyncHostReply HostRefusal(string message)
+    {
+        using var document = JsonDocument.Parse("null");
+        return new AutoSyncHostReply(AutoSyncHostProtocol.Version, Guid.NewGuid().ToString("N"),
+            new AutoSyncHostIdentity("tray-fixture", 4321, DateTimeOffset.UtcNow.AddMinutes(-5)),
+            "running", false, document.RootElement.Clone(), new SyncCliError("busy", message));
+    }
+
+    private static AutoSyncHostReply ConflictsResult(int exitCode, string stdout)
+    {
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(new { exitCode, stdout, stderr = "" }));
+        return new AutoSyncHostReply(AutoSyncHostProtocol.Version, Guid.NewGuid().ToString("N"),
+            new AutoSyncHostIdentity("tray-fixture", 4321, DateTimeOffset.UtcNow.AddMinutes(-5)),
+            "running", true, document.RootElement.Clone(), null);
+    }
+
+    private static string ConflictsStdout(int total)
+    {
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(new
+        {
+            ok = true,
+            data = new
+            {
+                totalOpen = total,
+                items = new[] { new { relativePath = "item.txt", group = "conflict" } },
+                freeSpacePending = Array.Empty<object>()
+            }
+        }));
+        return document.RootElement.GetRawText();
+    }
+
     private static string Pair(string id, string name, string state, string? reason = null, bool lastResult = false,
         long urgent = 0, long planning = 0)
     {
@@ -296,18 +411,6 @@ internal static class TrayClientChecks
             "\",\"lastResult\":" + result + ",\"lastChecked\":\"2026-10-25T09:00:00Z\",\"urgentPending\":" +
             urgent.ToString(CultureInfo.InvariantCulture) + ",\"planningBacklog\":" +
             planning.ToString(CultureInfo.InvariantCulture) + ",\"reason\":" + reasonJson + "}";
-    }
-
-    // Pump this thread's queues for a bounded instant without waiting for completion, so the fixture can
-    // observe that an in-flight poll is still pending at a chosen point before its deadline.
-    private static void PumpFor(TimeSpan duration)
-    {
-        var until = DateTime.UtcNow + duration;
-        while (DateTime.UtcNow < until)
-        {
-            System.Windows.Forms.Application.DoEvents();
-            Thread.Sleep(1);
-        }
     }
 
     // Pump this thread's WinForms and WPF queues while a task completes, so a continuation posted to a

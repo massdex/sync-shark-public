@@ -725,9 +725,9 @@ public sealed partial class SqliteStateStore : IStateStore
 
     public IReadOnlyList<Notice> OpenNotices(string? pairId) => ReadNotices(pairId, unresolved: false);
 
-    /// <summary>The one indexed open-conflict count read by the background host's status reply.</summary>
-    internal int OpenConflictCount() => InStore(() => (int)Math.Min(int.MaxValue,
-        Convert.ToInt64(StoreSchema.Scalar(_connection, null, NoticeTable.VisibleCountSql))));
+    /// <summary>The one indexed, row-bounded open-conflict count read by the background host's status reply.</summary>
+    internal int OpenConflictCount() => InStore(() =>
+        Convert.ToInt32(StoreSchema.Scalar(_connection, null, NoticeTable.VisibleCountSql)));
 
     public IReadOnlyList<Notice> UnresolvedNotices(string? pairId) => ReadNotices(pairId, unresolved: true);
 
