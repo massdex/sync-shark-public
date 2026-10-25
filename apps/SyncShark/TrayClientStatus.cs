@@ -44,7 +44,7 @@ internal sealed record TrayStatusView(string IconState, string Status, string Ho
             : working ? alternate ? "working-light" : "working"
             : allStarting ? "starting" : "idle";
         var status = snapshot.Stopping ? "Stopping"
-            : snapshot.OpenConflicts > 0 ? "Needs attention: " + Count(snapshot.OpenConflicts, "open conflict")
+            : snapshot.OpenConflicts > 0 ? "Needs attention: " + ConflictCountWord(snapshot.OpenConflicts)
             : paused ? "Paused"
             : working ? "Working"
             : allStarting ? "Starting" : "Idle";
@@ -135,6 +135,15 @@ internal sealed record TrayStatusView(string IconState, string Status, string Ho
 
     private static string Count(int value, string label) => value == 1
         ? "1 " + label : value.ToString(CultureInfo.InvariantCulture) + " " + label + "s";
+
+    // The shared count is capped, and past 99 the exact number is noise; the menu and tooltip say 99+.
+    private static bool ConflictCountCapped(int value) => value > 99;
+
+    internal static string ConflictCountShort(int value) =>
+        ConflictCountCapped(value) ? "99+" : value.ToString(CultureInfo.InvariantCulture);
+
+    private static string ConflictCountWord(int value) => ConflictCountCapped(value)
+        ? ConflictCountShort(value) + " open conflicts" : Count(value, "open conflict");
 
     private static bool Is(string? value, string expected) => string.Equals(value, expected, StringComparison.OrdinalIgnoreCase);
 }

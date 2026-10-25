@@ -107,6 +107,8 @@ public sealed record SyncCliConflictData(string ConflictId, string PairId, strin
 public sealed record SyncCliConflictListData(IReadOnlyList<SyncCliConflictData> Items, int Limit, int Offset,
     int Returned, bool HasMore, int TotalOpen)
 {
+    /// <summary>True when the capped total was reached, so <see cref="TotalOpen"/> is a lower bound, never an exact count.</summary>
+    public bool TotalAtLeast { get; init; }
     public IReadOnlyList<V2.FreeSpaceNoticeSummary> FreeSpacePending { get; init; } = [];
 }
 

@@ -66,7 +66,7 @@ public partial class App : System.Windows.Application
         }
         // Pure background-tray client. Like the shared-client branch it must precede the product lock and
         // every preference store: it attaches to the one host and never owns an engine or the store.
-        if (args.Any(value => string.Equals(value, "--tray", StringComparison.OrdinalIgnoreCase)))
+        if (TrayStartup.IsTrayRequest(args))
         {
             base.OnStartup(e);
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
@@ -77,7 +77,12 @@ public partial class App : System.Windows.Application
                 Shutdown(2);
                 return;
             }
-            StartTrayMode();
+            var host = BackgroundHostEntry.Client();
+            var tray = TrayStartup.Start(useCoreV2, args, host.TrySendAsync, () => Shutdown(),
+                message => WriteStartupProgress("tray", message));
+            _trayOwnership = tray.Ownership;
+            _trayClient = tray.Client;
+            if (tray.ExitCode is { } exitCode) Shutdown(exitCode);
             return;
         }
         if (args.Length == 3 && args[0] == "--move-data")
@@ -156,36 +161,6 @@ public partial class App : System.Windows.Application
         try { Console.Error.WriteLine($"Sync Shark startup: [{DateTimeOffset.UtcNow:O}] {phase}; {detail}"); }
         catch (IOException) { /* A closed diagnostic stream cannot break product startup. */ }
         catch (ObjectDisposedException) { /* Logging remains best-effort when a reader disconnects. */ }
-    }
-
-    // One tray icon per user/session; a full window owns the tray role when it is present. Neither the
-    // product lock nor the store is acquired here, so the background host stays the only owner.
-    private void StartTrayMode()
-    {
-        _trayOwnership = TrayClient.TryTakeOwnership();
-        if (_trayOwnership is null)
-        {
-            WriteStartupProgress("tray", "Another tray icon already owns this user and session.");
-            Shutdown(0);
-            return;
-        }
-        if (ExistingWindowActivation.IsProductWindowPresent())
-        {
-            WriteStartupProgress("tray", "A full Sync Shark window owns the tray; this client is standing down.");
-            Shutdown(0);
-            return;
-        }
-        try
-        {
-            _trayClient = new TrayClient(BackgroundHostEntry.Client(), () => Shutdown());
-            _trayClient.Start();
-            WriteStartupProgress("tray", "Tray client attached; it never opens the store or takes the product lock.");
-        }
-        catch (Exception error)
-        {
-            WriteStartupProgress("tray", "Tray client could not start: " + error.Message);
-            Shutdown(1);
-        }
     }
 
     private async void CheckRollbackReadiness()

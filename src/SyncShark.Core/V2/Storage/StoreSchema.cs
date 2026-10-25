@@ -118,6 +118,14 @@ internal static class StoreSchema
         "CREATE INDEX IF NOT EXISTS nt_restore_reason_page ON notice(notice_id) " +
         "WHERE reason_key='recovery-restore-pending' OR reason_key='recovery-restore-ready';";
 
+    // Performance-only, additive indexes for the bounded conflicts catalog: nt_page carries the page order for a
+    // global or account read, and nt_free_space keeps the free-space summary from walking unrelated open notices.
+    // Both are partial on the visible open state, so neither grows with closed history.
+    private static readonly string ConflictCatalogIndexDdl =
+        "CREATE INDEX IF NOT EXISTS nt_page ON notice(created, notice_id) WHERE state='open';" +
+        "CREATE INDEX IF NOT EXISTS nt_free_space ON notice(created, notice_id) WHERE state='open' AND " +
+        NoticeTable.FreeSpaceReasonSql("reason_key") + ";";
+
     // Performance-only, additive index; no persisted row format changes or version bump.
     private const string FlaggedIndexDdl =
         "CREATE INDEX IF NOT EXISTS fs_flagged ON file_state(root_no) WHERE flags != 0;" +
@@ -710,7 +718,7 @@ internal static class StoreSchema
         "planning_deferred_user_pv", "planning_deferred_user_rv", "planning_deferred", "planning_deferred_pair", "planning_deferred_pair_version", "planning_deferred_root_version", "journal_volume", "dir", "root", "pair", "generation", "file_state", "tombstone", "sync_point", "pending_effect", "sync_retry", "sync_retry_due", "sync_retry_kind", "sync_retry_delete_blocked", "sync_retry_delete_review", "sync_retry_review_path", "nt_groupable_delete", "pe_uncertain_delete", "recovery",
         "notice", "notice_legacy_fold", "local_gap", "local_gap_item", "gap_ready", "gap_failed", "gap_waiting", "gap_results", "gap_metadata", "gap_retry_due", "local_rehash", "rehash_retry", "rehash_retry_due", "deletion_evidence", "dir_key", "dir_mapped_key", "fs_obj", "fs_flagged", "fs_refused", "sp_a_obj", "sp_b_obj", "sp_a_dir", "sp_b_dir",
 
-        "removal_review", "pe_unresolved", "pe_intent_order", "rc_pair", "rc_page", "rc_path", "rc_path_missing", "nt_open", "nt_terminal", "nt_restore_page", "nt_restore_path", "nt_restore_path_ready",
+        "removal_review", "pe_unresolved", "pe_intent_order", "rc_pair", "rc_page", "rc_path", "rc_path_missing", "nt_open", "nt_terminal", "nt_page", "nt_free_space", "nt_restore_page", "nt_restore_path", "nt_restore_path_ready",
         "nt_restore_hold_path", "nt_restore_reason_page", "prepare_header", "prepare_row", "prepare_lookup", "prepare_cursor",
         "quarantine_upgrade", "defender_deferral_batch", "fs_quarantine", "defender_deferral", "defender_deferral_updated", "defender_grant", "defender_grant_path",
         "choice_victim", "cv_op", "cv_item", "cv_scan", "choice_restore_receipt", "choice_merge",
@@ -809,6 +817,7 @@ internal static class StoreSchema
         Execute(connection, transaction, RestoreNoticeReadyPathIndexDdl);
         Execute(connection, transaction, RestoreNoticeHoldPathIndexDdl);
         Execute(connection, transaction, RestoreNoticeReasonPageIndexDdl);
+        Execute(connection, transaction, ConflictCatalogIndexDdl);
         Execute(connection, transaction, QuarantineDdl);
         Execute(connection, transaction, "INSERT INTO quarantine_upgrade VALUES('grant-backfill');");
         Execute(connection, transaction, "INSERT INTO quarantine_upgrade VALUES('notice-path-key-backfill');");
@@ -849,6 +858,7 @@ internal static class StoreSchema
         Execute(connection, null, ObservationDdl);
         EnsureFeatureSchema(connection, version, clock);
         Execute(connection, null, LegacyFoldDdl);
+        Execute(connection, null, ConflictCatalogIndexDdl);
         var names = new HashSet<string>(StringComparer.Ordinal);
         using (var command = Command(connection, null,
             "SELECT name FROM sqlite_master WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%';"))

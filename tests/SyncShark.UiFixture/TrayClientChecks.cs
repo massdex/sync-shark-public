@@ -8,16 +8,22 @@ using Massdex.SyncShark.V2;
 namespace SyncShark.UiFixture;
 
 /// <summary>
-/// Focused checks for the pure background tray client: the derived view from canned host replies, and the
-/// fact that tray mode uses its own owner and never takes the product lock.
+/// Focused checks for the pure background tray client: the derived view from canned host replies, the
+/// production startup route with a controlled host, pending/failed actions, and the fact that tray mode
+/// uses its own owner and never takes the product lock.
 /// </summary>
 internal static class TrayClientChecks
 {
     internal static int Run()
     {
         DeriveViewFromCannedReplies();
+        CappedConflictTotalShows99Plus();
         TrayNeverTakesTheProductLock();
-        Console.WriteLine("PASS tray client: derived view from canned replies and no product-lock acquisition.");
+        ProductionStartupRoute();
+        FailedStatusPollKeepsLastKnownView();
+        ExitStopsOnlyTheTray();
+        Console.WriteLine("PASS tray client: bounded view, production startup route, single-send actions, " +
+            "Updating… on every failed poll, and no product-lock acquisition.");
         return 0;
     }
 
@@ -73,6 +79,20 @@ internal static class TrayClientChecks
             "an open-conflict count above zero turns the icon to needs attention");
     }
 
+    // The shared store count is capped, and past 99 the menu says 99+ rather than inventing a number.
+    private static void CappedConflictTotalShows99Plus()
+    {
+        using var client = new TrayClient((_, _, _) =>
+            Task.FromResult<AutoSyncHostReply?>(Reply("running", Pair("pair-a", "Pair A", "Idle"), conflicts: 1000)),
+            () => { });
+        WaitFor(client.RefreshNowAsync());
+        Require(client.ConflictStatusText.Contains("99+", StringComparison.Ordinal) &&
+                !client.ConflictStatusText.Contains("1000", StringComparison.Ordinal) &&
+                client.View.Status.Contains("99+", StringComparison.Ordinal) &&
+                !client.View.Status.Contains("1000", StringComparison.Ordinal),
+            "a capped conflict count renders 99+ instead of a fabricated exact number");
+    }
+
     private static void TrayNeverTakesTheProductLock()
     {
         var root = Path.Combine(Path.GetTempPath(), "tray-client-" + Guid.NewGuid().ToString("N"));
@@ -89,11 +109,136 @@ internal static class TrayClientChecks
         thread.Start();
         thread.Join();
         if (second is not null) { second.Dispose(); throw new InvalidDataException("A second tray icon was admitted."); }
-        using var client = new TrayClient(BackgroundHostEntry.Client(), () => { });
+        using var client = new TrayClient(BackgroundHostEntry.Client().TrySendAsync, () => { });
         client.Start();
         Require(client.View.IconState == "starting" && client.View.Status == "Starting / not yet reachable" &&
                 !client.View.CanAct,
             "tray mode starts while the product lock is held and never acquires it");
+    }
+
+    // The production startup decision (the branch App.OnStartup calls) with the product lock held by the
+    // test, an isolated root and a controlled host: the first reply is real, the next is a miss.
+    private static void ProductionStartupRoute()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "tray-startup-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        using var productRoot = SyncSharkRuntimePaths.OverrideProductRootForTest(root);
+        using var productLock = PilotInstanceLock.Acquire(SyncSharkRuntimePaths.InstanceLockFile);
+        // The same first two startup decisions OnStartup makes, before any lock or WPF type is touched.
+        var (selectedV2, trayArgs, coreError) = CoreSwitch.Select(["--core", "v2", "--tray"], null);
+        Require(coreError is null && selectedV2 && TrayStartup.IsTrayRequest(trayArgs),
+            "the startup branch selects core v2 and recognises --tray before the product lock");
+        var diagnostics = new List<string>();
+        var statusCalls = 0;
+        var mutationSends = 0;
+        var exited = false;
+        // Inline continuations keep the menu-item updates on this (fixture) thread.
+        var actionGate = new TaskCompletionSource<AutoSyncHostReply?>();
+        TrayHostSend send = (request, _, _) =>
+        {
+            if (request.Command != "status")
+            {
+                Interlocked.Increment(ref mutationSends);
+                return actionGate.Task;
+            }
+            return Task.FromResult<AutoSyncHostReply?>(++statusCalls == 3
+                ? null
+                : Reply("running", Pair("pair-a", "Pair A", "Running")));
+        };
+
+        var result = TrayStartup.Start(useCoreV2: true, ["--tray"], send, () => exited = true, diagnostics.Add);
+        Require(result.ExitCode is null && result.Ownership is not null && result.Client is not null,
+            "the production startup branch starts one tray client while the product lock is held");
+        using var ownership = result.Ownership;
+        using var client = result.Client!;
+        client.StopPollingForTest();
+        WaitFor(client.InitialPoll);
+        Require(client.View.Status == "Working" && client.View.CanAct,
+            "the first status reply is applied through the production startup route");
+
+        // One activation forwards exactly one command; a repeat while it is outstanding does nothing, and its
+        // own menu item is disabled immediately although the view otherwise offers actions.
+        var pause = TrayClient.PauseRequest(PauseOption.All[0]);
+        var key = TrayClient.MutationKey(pause);
+        var first = client.SendActionForTestAsync(pause, "Pause");
+        var repeated = client.SendActionForTestAsync(pause, "Pause");
+        Require(mutationSends == 1 && client.View.CanAct && client.IsActionPending(key) &&
+                !client.ActionEnabledForTest(key),
+            "one activation sends once and disables that action while it is outstanding");
+        // A forwarded CLI result keeps its envelope: Ok with a nonzero exit code and stderr.
+        actionGate.SetResult(CliResult(exitCode: 4, stderr: "Pause was refused: the run is at a safe point."));
+        WaitFor(first);
+        WaitFor(repeated);
+        Require(mutationSends == 1 && !client.IsActionPending(key) && client.ActionEnabledForTest(key),
+            "the outstanding action clears after its single reply and the item is usable again");
+        Require(client.LastNotification is { } notice &&
+                notice.Title.Contains("rejected", StringComparison.Ordinal) &&
+                notice.Message.Contains("Pause was refused: the run is at a safe point.", StringComparison.Ordinal),
+            "a nonzero forwarded CLI exit shows the host's stderr diagnostic, distinct from uncertainty");
+
+        // A delayed/missed reply keeps the last known view and says Updating…, with actions disabled.
+        WaitFor(client.RefreshNowAsync());
+        Require(client.View.Status.EndsWith("(Updating…)", StringComparison.Ordinal) && !client.View.CanAct,
+            "a missed status reply after a known view says Updating… and disables actions");
+
+        client.ExitTrayForTest();
+        Require(exited, "the tray exit action disposes only the client");
+    }
+
+    // Every failed observation — I/O, peer verification, parse, uncertain, cancel, unexpected — keeps the last
+    // known view and says Updating… with actions disabled; only an unexpected failure is logged.
+    private static void FailedStatusPollKeepsLastKnownView()
+    {
+        var calls = 0;
+        var diagnostics = new List<string>();
+        Exception[] failures =
+        [
+            new IOException("the pipe closed"),
+            new UnauthorizedAccessException("peer verification failed"),
+            new InvalidDataException("malformed reply"),
+            new OperationCanceledException("status deadline cancelled"),
+            new AutoSyncHostUncertainException("fixture", new TimeoutException("slow reply")),
+            new InvalidOperationException("unexpected provider failure")
+        ];
+        TrayHostSend send = (request, _, _) =>
+        {
+            if (request.Command != "status") return Task.FromResult<AutoSyncHostReply?>(OkReply());
+            var call = calls++;
+            return Task.FromResult<AutoSyncHostReply?>(call == 0
+                ? Reply("running", Pair("pair-a", "Pair A", "Running"))
+                : throw failures[call - 1]);
+        };
+        using var client = new TrayClient(send, () => { }, diagnostics.Add);
+        WaitFor(client.RefreshNowAsync());
+        Require(client.View.Status == "Working", "a successful status read sets the view");
+        foreach (var failure in failures)
+        {
+            WaitFor(client.RefreshNowAsync());
+            Require(client.View.Status.EndsWith("(Updating…)", StringComparison.Ordinal) && !client.View.CanAct,
+                "a failed status poll (" + failure.GetType().Name + ") keeps the last-known plus Updating… view");
+        }
+        Require(diagnostics.Count == 1 &&
+                diagnostics[0].Contains("tray status read failed", StringComparison.Ordinal),
+            "only the unexpected status failure is logged through the existing diagnostic path, never an empty catch");
+    }
+
+    // Exiting the tray never sends the host's stop command and leaves the host transport answering.
+    private static void ExitStopsOnlyTheTray()
+    {
+        var stopped = 0;
+        var exited = false;
+        TrayHostSend send = (request, _, _) =>
+        {
+            if (request.Command == "stop") Interlocked.Increment(ref stopped);
+            return Task.FromResult<AutoSyncHostReply?>(OkReply());
+        };
+        var client = new TrayClient(send, () => exited = true);
+        client.ExitTrayForTest();
+        client.Dispose();
+        Require(exited && stopped == 0, "the tray's Exit sends no host stop command and stops only the client");
+        Require(WaitForResult(send(AutoSyncHostClient.Request("status"), TimeSpan.FromMilliseconds(300),
+                CancellationToken.None)) is not null,
+            "the background host keeps answering after the tray exits");
     }
 
     private static AutoSyncHostReply Reply(string state, string pairs, int conflicts = 0, bool automation = true)
@@ -105,6 +250,22 @@ internal static class TrayClientChecks
         return new AutoSyncHostReply(AutoSyncHostProtocol.Version, Guid.NewGuid().ToString("N"),
             new AutoSyncHostIdentity("tray-fixture", 4321, DateTimeOffset.UtcNow.AddMinutes(-5)),
             state, true, document.RootElement.Clone(), null);
+    }
+
+    private static AutoSyncHostReply OkReply()
+    {
+        using var document = JsonDocument.Parse("{\"queued\":true}");
+        return new AutoSyncHostReply(AutoSyncHostProtocol.Version, Guid.NewGuid().ToString("N"),
+            new AutoSyncHostIdentity("tray-fixture", 4321, DateTimeOffset.UtcNow.AddMinutes(-5)),
+            "running", true, document.RootElement.Clone(), null);
+    }
+
+    private static AutoSyncHostReply CliResult(int exitCode, string stderr)
+    {
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(new { exitCode, stdout = "", stderr }));
+        return new AutoSyncHostReply(AutoSyncHostProtocol.Version, Guid.NewGuid().ToString("N"),
+            new AutoSyncHostIdentity("tray-fixture", 4321, DateTimeOffset.UtcNow.AddMinutes(-5)),
+            "running", true, document.RootElement.Clone(), null);
     }
 
     private static string Pair(string id, string name, string state, string? reason = null, bool lastResult = false,
@@ -121,6 +282,37 @@ internal static class TrayClientChecks
             "\",\"lastResult\":" + result + ",\"lastChecked\":\"2026-10-25T09:00:00Z\",\"urgentPending\":" +
             urgent.ToString(CultureInfo.InvariantCulture) + ",\"planningBacklog\":" +
             planning.ToString(CultureInfo.InvariantCulture) + ",\"reason\":" + reasonJson + "}";
+    }
+
+    // Pump this thread's WinForms and WPF queues while a task completes, so a continuation posted to a
+    // synchronization context installed by the tray's own components can never deadlock the blocking fixture.
+    private static void WaitFor(Task task)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(20);
+        while (!task.IsCompleted)
+        {
+            if (DateTime.UtcNow > deadline)
+                throw new TimeoutException("The tray task did not complete within the fixture deadline.");
+            // WinForms components install their own message-based context; pump those messages. A WPF
+            // dispatcher context needs a dispatcher frame instead (never pumped here, so the tray's own
+            // DispatcherTimer cannot fire during a scripted check).
+            System.Windows.Forms.Application.DoEvents();
+            if (SynchronizationContext.Current is System.Windows.Threading.DispatcherSynchronizationContext)
+            {
+                var frame = new System.Windows.Threading.DispatcherFrame();
+                System.Windows.Threading.Dispatcher.CurrentDispatcher.BeginInvoke(
+                    System.Windows.Threading.DispatcherPriority.Background, new Action(() => frame.Continue = false));
+                System.Windows.Threading.Dispatcher.PushFrame(frame);
+            }
+            Thread.Sleep(1);
+        }
+        task.GetAwaiter().GetResult();
+    }
+
+    private static T WaitForResult<T>(Task<T> task)
+    {
+        WaitFor((Task)task);
+        return task.GetAwaiter().GetResult();
     }
 
     private static void Require(bool condition, string description)

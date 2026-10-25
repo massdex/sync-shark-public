@@ -21,9 +21,11 @@ internal sealed class TrayClient : IDisposable
     private static readonly TimeSpan StatusDeadline = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan ActionDeadline = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan ConflictCacheLifetime = TimeSpan.FromSeconds(5);
+    private static readonly JsonSerializerOptions HostJson = new(JsonSerializerDefaults.Web);
 
-    private readonly AutoSyncHostClient _client;
+    private readonly TrayHostSend _send;
     private readonly Action _exitTray;
+    private readonly Action<string> _diagnostic;
     private readonly DispatcherTimer _timer;
     private readonly NotifyIcon _icon;
     private readonly ContextMenuStrip _menu;
@@ -38,6 +40,10 @@ internal sealed class TrayClient : IDisposable
     private readonly List<ToolStripMenuItem> _pairItems = [];
     private readonly List<ToolStripMenuItem> _syncNowItems = [];
     private readonly List<ToolStripMenuItem> _conflictRows = [];
+    // One outstanding activation per action: a second click while one is in flight does nothing, and the
+    // action's own menu item stays disabled until its single reply (or timeout) has been handled.
+    private readonly HashSet<string> _pendingActions = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, List<ToolStripMenuItem>> _actionItems = new(StringComparer.Ordinal);
     private TrayStatusSnapshot? _lastSnapshot;
     private TrayStatusView _view = TrayStatusView.Starting;
     private TrayConflictList? _conflictList;
@@ -47,18 +53,21 @@ internal sealed class TrayClient : IDisposable
     private Icon? _stateIcon;
     private bool _refreshing;
     private bool _conflictsLoading;
+    private bool _observingWindow;
     private bool _pendingPairs;
     private int _pollCount;
     private bool _disposed;
+    private Task _initialPoll = Task.CompletedTask;
 
     private sealed record TrayConflictList(int Total, IReadOnlyList<string> Rows);
 
-    internal TrayClient(AutoSyncHostClient client, Action exitTray)
+    internal TrayClient(TrayHostSend send, Action exitTray, Action<string>? diagnostic = null)
     {
-        ArgumentNullException.ThrowIfNull(client);
+        ArgumentNullException.ThrowIfNull(send);
         ArgumentNullException.ThrowIfNull(exitTray);
-        _client = client;
+        _send = send;
         _exitTray = exitTray;
+        _diagnostic = diagnostic ?? (message => App.WriteStartupProgress("tray", message));
         _baseIcon = Icon.ExtractAssociatedIcon(Environment.ProcessPath ??
             throw new InvalidOperationException("The executable path is unavailable.")) ?? (Icon)SystemIcons.Application.Clone();
         _menu = new ContextMenuStrip();
@@ -69,12 +78,16 @@ internal sealed class TrayClient : IDisposable
         _conflictsItem = new ToolStripMenuItem("Conflicts: checking…");
         _pauseItem = new ToolStripMenuItem("Pause Sync");
         foreach (var option in PauseOption.All)
-            _pauseItem.DropDownItems.Add(new ToolStripMenuItem(option.Label, null,
+        {
+            var item = new ToolStripMenuItem(option.Label, null,
                 (_, _) => _ = SendMutationAsync(PauseRequest(option), "Pause " + option.Label))
-            { ToolTipText = option.Detail });
+            { ToolTipText = option.Detail };
+            RegisterAction(MutationKey(PauseRequest(option)), item);
+            _pauseItem.DropDownItems.Add(item);
+        }
         _pauseItem.DropDownItems.Add(new ToolStripSeparator());
-        _resumeItem = new ToolStripMenuItem("Resume Sync", null,
-            (_, _) => _ = SendMutationAsync(ResumeRequest(), "Resume"));
+        _resumeItem = new ToolStripMenuItem("Resume Sync", null, (_, _) => _ = SendMutationAsync(ResumeRequest(), "Resume"));
+        RegisterAction(MutationKey(ResumeRequest()), _resumeItem);
         _pauseItem.DropDownItems.Add(_resumeItem);
         _menu.Items.AddRange([
             _statusItem, _hostItem, _pairsSeparator, _waitingItem, _conflictsItem,
@@ -110,6 +123,15 @@ internal sealed class TrayClient : IDisposable
     /// <summary>The current derived view; exposed so the tray's decisions are testable without a host.</summary>
     internal TrayStatusView View => _view;
 
+    /// <summary>The last balloon shown; exposed so a failed forwarded command's diagnostic is observable.</summary>
+    internal (string Title, string Message, bool Warning)? LastNotification { get; private set; }
+
+    /// <summary>The conflicts menu line, so the capped "99+" wording is observable.</summary>
+    internal string ConflictStatusText => _conflictsItem.Text ?? string.Empty;
+
+    /// <summary>The task of the first poll Start began, so a caller can await observable completion.</summary>
+    internal Task InitialPoll => _initialPoll;
+
     /// <summary>The tray's own single-instance owner. A null result means another tray already owns the icon.</summary>
     internal static IDisposable? TryTakeOwnership()
     {
@@ -127,8 +149,31 @@ internal sealed class TrayClient : IDisposable
     internal void Start()
     {
         _timer.Start();
-        _ = RefreshStatusAsync();
+        _initialPoll = RefreshStatusAsync();
     }
+
+    /// <summary>Runs one poll now; the fixture awaits this instead of waiting for the dispatch timer.</summary>
+    internal Task RefreshNowAsync() => RefreshStatusAsync();
+
+    /// <summary>Stops the dispatch poll so a fixture can drive each poll explicitly without a timing race.</summary>
+    internal void StopPollingForTest() => _timer.Stop();
+
+    /// <summary>Sends one action through the same path a menu item uses, for the focused fixture checks.</summary>
+    internal Task SendActionForTestAsync(AutoSyncHostRequest request, string label) => SendMutationAsync(request, label);
+
+    /// <summary>Invokes the tray's own exit action; it never sends a host command.</summary>
+    internal void ExitTrayForTest() => _exitTray();
+
+    /// <summary>Whether the given action is currently outstanding (its item is disabled).</summary>
+    internal bool IsActionPending(string key) => _pendingActions.Contains(key);
+
+    /// <summary>Whether every menu item for the action is enabled.</summary>
+    internal bool ActionEnabledForTest(string key) =>
+        _actionItems.TryGetValue(key, out var items) && items.Count > 0 && items.All(item => item.Enabled);
+
+    /// <summary>The stable identity of one action, so a repeated activation is recognised and ignored.</summary>
+    internal static string MutationKey(AutoSyncHostRequest request) => request.Command + "\u001f" +
+        (request.PairId ?? string.Empty) + "\u001f" + string.Join('\u001e', request.CliArgs ?? []);
 
     private async Task RefreshStatusAsync()
     {
@@ -136,31 +181,53 @@ internal sealed class TrayClient : IDisposable
         _refreshing = true;
         try
         {
-            AutoSyncHostReply? reply = null;
+            var poll = _pollCount++;
+            TrayStatusSnapshot? snapshot = null;
             try
             {
                 using var deadline = new CancellationTokenSource(StatusDeadline);
-                reply = await _client.TrySendAsync(AutoSyncHostClient.Request("status"),
-                    TimeSpan.FromMilliseconds(300), deadline.Token);
+                var reply = await _send(AutoSyncHostClient.Request("status"), TimeSpan.FromMilliseconds(300),
+                    deadline.Token);
+                snapshot = TrayStatusView.Parse(reply);
             }
-            catch (Exception error) when (error is AutoSyncHostUncertainException or OperationCanceledException)
+            catch (Exception error)
             {
-                // A miss keeps the last known state below; a hung or slow read must never freeze the tray.
+                // Every failed observation — I/O, peer verification, parse, timeout or cancellation — is a
+                // miss, so the tray keeps the last known view and says Updating… with actions disabled.
+                if (error is not (AutoSyncHostUncertainException or OperationCanceledException or IOException or
+                    UnauthorizedAccessException or InvalidDataException or JsonException))
+                    _diagnostic("tray status read failed: " + error.GetType().Name + ": " + error.Message);
             }
             if (_disposed) return;
-            var snapshot = TrayStatusView.Parse(reply);
             if (snapshot is not null) _lastSnapshot = snapshot;
-            var updating = snapshot is null && _lastSnapshot is not null;
-            Apply(TrayStatusView.Derive(_lastSnapshot ?? snapshot, updating, _pollCount % 2 == 1));
-            _pollCount++;
-            // A full window cannot coexist with the host, so this is only reachable after the host stops.
-            if (_pollCount % 5 == 0 && ExistingWindowActivation.IsProductWindowPresent()) _exitTray();
+            Apply(TrayStatusView.Derive(_lastSnapshot, _lastSnapshot is not null && snapshot is null, poll % 2 == 1));
+            // Every fifth completed poll, matching the previous cadence; never twice at once.
+            if (poll % 5 == 4) await ObserveProductWindowAsync();
         }
-        catch (Exception)
+        catch (Exception error)
         {
-            // A display-only update must never terminate the client; the next poll retries the existing read.
+            // A display-only update must never terminate the client; the next poll retries the same read.
+            _diagnostic("tray refresh failed: " + error.GetType().Name + ": " + error.Message);
         }
         finally { _refreshing = false; }
+    }
+
+    // Window and module inspection is synchronous and can stall; it runs off the UI dispatcher and only its
+    // result is marshalled back. One observation at a time, and it never activates anything.
+    private async Task ObserveProductWindowAsync()
+    {
+        if (_observingWindow || _disposed) return;
+        _observingWindow = true;
+        try
+        {
+            var present = await Task.Run(ExistingWindowActivation.IsProductWindowPresent).ConfigureAwait(true);
+            if (!_disposed && present) _exitTray();
+        }
+        catch (Exception error)
+        {
+            _diagnostic("tray window observation failed: " + error.GetType().Name + ": " + error.Message);
+        }
+        finally { _observingWindow = false; }
     }
 
     private void Apply(TrayStatusView view)
@@ -175,10 +242,8 @@ internal sealed class TrayClient : IDisposable
         UpdateConflictText(view.OpenConflicts);
         SetIcon(view.IconState);
         _icon.Text = App.FormatTrayTooltip("Sync state: " + view.Status);
-        // No mutation is offered while the host is unreachable, starting or stopping.
-        _pauseItem.Enabled = view.CanAct;
-        _resumeItem.Enabled = view.CanAct;
-        foreach (var item in _syncNowItems) item.Enabled = view.CanAct;
+        // No mutation is offered while the host is unreachable, starting, stopping or already pending.
+        UpdateActionEnabled();
         var signature = PairSignature(view.Pairs);
         if (signature == _pairSignature) return;
         _pairSignature = signature;
@@ -202,6 +267,8 @@ internal sealed class TrayClient : IDisposable
 
     private void RebuildPairs(IReadOnlyList<TrayPairView> pairs)
     {
+        // Unregister the children before their parent rows dispose them.
+        foreach (var item in _syncNowItems) UnregisterAction(item);
         foreach (var item in _pairItems) { _menu.Items.Remove(item); item.Dispose(); }
         _pairItems.Clear();
         _syncNowItems.Clear();
@@ -213,9 +280,9 @@ internal sealed class TrayClient : IDisposable
             item.DropDownItems.Add(ReadOnly(pair.LastResultLine));
             item.DropDownItems.Add(ReadOnly(pair.WaitingLine));
             item.DropDownItems.Add(new ToolStripSeparator());
-            var syncNow = new ToolStripMenuItem("Sync now", null,
-                (_, _) => _ = SendMutationAsync(AutoSyncHostClient.Request("now", pair.PairId), "Sync now"))
-            { Enabled = _view.CanAct };
+            var request = AutoSyncHostClient.Request("now", pair.PairId);
+            var syncNow = new ToolStripMenuItem("Sync now", null, (_, _) => _ = SendMutationAsync(request, "Sync now"));
+            RegisterAction(MutationKey(request), syncNow);
             item.DropDownItems.Add(syncNow);
             _syncNowItems.Add(syncNow);
             _menu.Items.Insert(index++, item);
@@ -225,12 +292,40 @@ internal sealed class TrayClient : IDisposable
 
     private static ToolStripMenuItem ReadOnly(string text) => new(text) { Enabled = false };
 
+    private void RegisterAction(string key, ToolStripMenuItem item)
+    {
+        item.Tag = key;
+        if (!_actionItems.TryGetValue(key, out var items)) _actionItems[key] = items = [];
+        items.Add(item);
+        item.Enabled = _view.CanAct && !_pendingActions.Contains(key);
+    }
+
+    private void UnregisterAction(ToolStripMenuItem item)
+    {
+        if (item.Tag is not string key || !_actionItems.TryGetValue(key, out var items)) return;
+        items.Remove(item);
+        if (items.Count == 0) _actionItems.Remove(key);
+    }
+
+    private void UpdateActionEnabled()
+    {
+        if (_disposed) return;
+        // The parent submenu stays closed to an unreachable/starting/stopping host; each leaf additionally
+        // carries its own pending state.
+        _pauseItem.Enabled = _view.CanAct;
+        foreach (var (key, items) in _actionItems)
+        {
+            var enabled = _view.CanAct && !_pendingActions.Contains(key);
+            foreach (var item in items) item.Enabled = enabled;
+        }
+    }
+
     private void UpdateConflictText(int statusCount)
     {
         var fresh = _conflictList is not null && DateTimeOffset.UtcNow - _conflictsFetchedUtc <= ConflictCacheLifetime;
         var total = fresh ? _conflictList!.Total : statusCount;
         _conflictsItem.Text = total == 0 ? "Conflicts: none open"
-            : "Conflicts: " + total.ToString(CultureInfo.InvariantCulture) + " open" +
+            : "Conflicts: " + TrayStatusView.ConflictCountShort(total) + " open" +
               (fresh ? string.Empty : " — open the menu to load the first " + ConflictLimit);
     }
 
@@ -241,7 +336,7 @@ internal sealed class TrayClient : IDisposable
         try
         {
             using var deadline = new CancellationTokenSource(StatusDeadline);
-            var reply = await _client.TrySendAsync(AutoSyncHostClient.Request("cli") with
+            var reply = await _send(AutoSyncHostClient.Request("cli") with
             {
                 CliArgs = ["--cli", "conflicts", "list", "--limit",
                     ConflictLimit.ToString(CultureInfo.InvariantCulture), "--json"]
@@ -256,10 +351,12 @@ internal sealed class TrayClient : IDisposable
             UpdateConflictText(_view.OpenConflicts);
             RebuildConflictRows(list);
         }
-        catch (Exception error) when (error is IOException or OperationCanceledException or
-            AutoSyncHostUncertainException or InvalidOperationException or JsonException)
+        catch (Exception error)
         {
             // The list is display-only and reloaded next time the menu opens; the status count stays authoritative.
+            if (error is not (IOException or OperationCanceledException or AutoSyncHostUncertainException or
+                InvalidOperationException or JsonException or UnauthorizedAccessException))
+                _diagnostic("tray conflict list read failed: " + error.GetType().Name + ": " + error.Message);
         }
         finally { _conflictsLoading = false; }
     }
@@ -316,36 +413,79 @@ internal sealed class TrayClient : IDisposable
     private async Task SendMutationAsync(AutoSyncHostRequest request, string label)
     {
         if (_disposed) return;
+        var key = MutationKey(request);
+        // One activation per action: while this one is outstanding a repeat click does nothing at all.
+        if (!_pendingActions.Add(key)) return;
+        UpdateActionEnabled();
         try
         {
             using var deadline = new CancellationTokenSource(ActionDeadline);
-            var reply = await _client.TrySendAsync(request, TimeSpan.FromMilliseconds(300), deadline.Token);
-            if (reply is null) Notify(label + " was not sent", "Background sync is not reachable. Nothing was replayed.", true);
-            else if (!reply.Ok)
-                Notify(label + " failed", reply.Error?.Message ?? "The host refused the command; nothing was replayed.", true);
+            try
+            {
+                var reply = await _send(request, TimeSpan.FromMilliseconds(300), deadline.Token);
+                if (reply is null)
+                    Notify(label + " was not sent", "Background sync is not reachable. Nothing was replayed.", true);
+                else if (!reply.Ok)
+                    Notify(label + " was rejected", reply.Error?.Message ??
+                        "The host refused the command; nothing was replayed.", true);
+                else if (RejectedForwardedCli(request, reply, out var diagnostic))
+                    Notify(label + " was rejected", diagnostic, true);
+            }
+            catch (AutoSyncHostUncertainException)
+            {
+                // Sent, but the reply did not arrive: a distinct outcome from a rejection, never replayed.
+                Notify(label + " is uncertain", "The host may have accepted the command, but the reply did not " +
+                    "arrive. The host keeps admitted work; this tray never replays it.", true);
+            }
+            catch (OperationCanceledException)
+            {
+                // The deadline expired before the host accepted the command.
+                Notify(label + " timed out", "The host did not accept the command before the deadline. " +
+                    "Nothing was replayed.", true);
+            }
+            catch (Exception error)
+            {
+                _diagnostic("tray action '" + label + "' failed: " + error.GetType().Name + ": " + error.Message);
+                Notify(label + " was not sent", error.Message + " Nothing was replayed.", true);
+            }
         }
-        catch (AutoSyncHostUncertainException)
+        finally
         {
-            Notify(label + " was sent once", "The reply was uncertain. The host keeps admitted work; this tray never replays it.", true);
+            _pendingActions.Remove(key);
+            UpdateActionEnabled();
         }
-        catch (Exception error)
-        {
-            // The mutation was not admitted. Report it once; a tray never retries a mutation.
-            Notify(label + " was not sent", error.Message + " Nothing was replayed.", true);
-        }
+        // On a timeout the view is refreshed from the host rather than assumed unchanged.
         if (!_disposed) await RefreshStatusAsync();
+    }
+
+    // A forwarded CLI result keeps its existing envelope: Ok carries the command's own exit code and stderr.
+    private static bool RejectedForwardedCli(AutoSyncHostRequest request, AutoSyncHostReply reply, out string diagnostic)
+    {
+        diagnostic = string.Empty;
+        if (!string.Equals(request.Command, "cli", StringComparison.Ordinal) ||
+            reply.Data is not { ValueKind: JsonValueKind.Object } data) return false;
+        HostCliOutput? output;
+        try { output = data.Deserialize<HostCliOutput>(HostJson); }
+        catch (JsonException) { return false; }
+        if (output is null || output.ExitCode == 0) return false;
+        diagnostic = !string.IsNullOrWhiteSpace(output.Stderr) ? output.Stderr.Trim()
+            : !string.IsNullOrWhiteSpace(output.Stdout) ? output.Stdout.Trim()
+            : "The forwarded command exited with code " + output.ExitCode.ToString(CultureInfo.InvariantCulture) +
+              "; nothing was replayed.";
+        return true;
     }
 
     private void Notify(string title, string message, bool warning)
     {
         if (_disposed) return;
+        LastNotification = (title, message, warning);
         _icon.BalloonTipTitle = title;
         _icon.BalloonTipText = message;
         _icon.BalloonTipIcon = warning ? ToolTipIcon.Warning : ToolTipIcon.Info;
         _icon.ShowBalloonTip(5000);
     }
 
-    private static AutoSyncHostRequest PauseRequest(PauseOption option)
+    internal static AutoSyncHostRequest PauseRequest(PauseOption option)
     {
         string[] duration = option.Kind switch
         {
@@ -360,7 +500,7 @@ internal sealed class TrayClient : IDisposable
         };
     }
 
-    private static AutoSyncHostRequest ResumeRequest() =>
+    internal static AutoSyncHostRequest ResumeRequest() =>
         AutoSyncHostClient.Request("cli") with { CliArgs = ["--cli", "resume", "--yes"] };
 
     public void Dispose()

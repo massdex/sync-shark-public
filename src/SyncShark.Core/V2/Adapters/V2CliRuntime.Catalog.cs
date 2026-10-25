@@ -46,6 +46,26 @@ public sealed partial class V2CliRuntime
     public Task<SyncCliConflictListData> LoadConflictsAsync(string? pairId, string? accountId, string? search,
         int limit, int offset, CancellationToken cancellationToken)
     {
+        // The production store pages in SQL before any materialization. A test double keeps the same
+        // composition over its own small rows, so the CLI contract never varies by store.
+        return Task.FromResult(_store is SqliteStateStore storage
+            ? LoadStoredConflicts(storage, pairId, accountId, search, limit, offset)
+            : LoadInMemoryConflicts(pairId, accountId, search, limit, offset));
+    }
+
+    private SyncCliConflictListData LoadStoredConflicts(SqliteStateStore storage, string? pairId, string? accountId,
+        string? search, int limit, int offset)
+    {
+        var page = storage.OpenConflictPage(pairId, accountId, search, limit, offset);
+        // Only a summary that is on this page is expanded; its unlisted details stay a bounded follow-on page.
+        var summaries = page.Items.Where(notice => notice.Path.Length == 0 && NoticeChoices.IsIndexFailure(notice)).ToArray();
+        return ComposeConflicts(page.Items.ToList(), page.Total, page.TotalAtLeast, summaries,
+            storage.OpenFreeSpaceNotices(pairId, accountId, search), search, limit, offset);
+    }
+
+    private SyncCliConflictListData LoadInMemoryConflicts(string? pairId, string? accountId, string? search,
+        int limit, int offset)
+    {
         IEnumerable<Notice> notices = _store.OpenNotices(pairId);
         if (accountId is not null)
             notices = notices.Where(notice => accountId.Equals(AccountOf(notice.PairId), StringComparison.Ordinal));
@@ -54,13 +74,26 @@ public sealed partial class V2CliRuntime
             notices = notices.Where(notice => notice.Path.Contains(search, StringComparison.OrdinalIgnoreCase));
         var all = notices.ToArray();
         var page = all.Skip(offset).Take(limit).ToList();
-        var total = AppendIndexFailureDetails(summaries, search, limit, offset, all.Length, page);
+        return ComposeConflicts(page, all.Length, totalAtLeast: false, summaries, all, search, limit, offset);
+    }
+
+    // One projection for both stores: the physical page, its index-failure detail expansion and the
+    // free-space group summary are composed here only, so the CLI contract has one owner.
+    private SyncCliConflictListData ComposeConflicts(List<Notice> page, long physicalCount, bool totalAtLeast,
+        IReadOnlyList<Notice> summaries, IReadOnlyList<Notice> freeSpace, string? search, int limit, int offset)
+    {
+        var total = AppendIndexFailureDetails(summaries, search, limit, offset,
+            (int)Math.Min(int.MaxValue, physicalCount), page);
         var projected = page.Select(Project).ToArray();
-        return Task.FromResult(new SyncCliConflictListData(projected, limit, offset, projected.Length,
-            (long)offset + projected.Length < total, (int)Math.Min(int.MaxValue, total))
+        // A capped total cannot prove the end: a page that reaches it still reports that more may follow.
+        var hasMore = (long)offset + projected.Length < total ||
+            (totalAtLeast && (long)offset + projected.Length == total);
+        return new SyncCliConflictListData(projected, limit, offset, projected.Length,
+            hasMore, (int)Math.Min(int.MaxValue, total))
         {
-            FreeSpacePending = FreeSpacePresentation.Group(all)
-        });
+            TotalAtLeast = totalAtLeast,
+            FreeSpacePending = FreeSpacePresentation.Group(freeSpace)
+        };
     }
 
     private string? AccountOf(string pairId) => _store.Pair(pairId)?.B.AccountId;
