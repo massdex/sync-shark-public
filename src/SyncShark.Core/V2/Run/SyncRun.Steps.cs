@@ -1385,7 +1385,7 @@ public sealed partial class SyncRun
                     !evaluated(path) && !unsettled.Any(p => PairPath.IsSelfOrUnder(path, p) || PairPath.IsSelfOrUnder(p, path)) &&
                     _store.Live(pair.A.RootId, [path]).Count == 0 && _store.Live(pair.B.RootId, [path]).Count == 0 &&
                     !_store.BaselinesAt(pair.PairId, Side.A, [path]).Any() &&
-                    !_store.BaselinesAt(pair.PairId, Side.B, [path]).Any(), acknowledged);
+                    !_store.BaselinesAt(pair.PairId, Side.B, [path]).Any(), acknowledged, count => Trace($"Deferred planning re-spell decisions: count={count}"));
             }
         _store.AcknowledgeRehash(pair.A.RootId, scan.A.RehashThrough, path => Settled(path) && includeA(path), ct);
         _store.AcknowledgeRehash(pair.B.RootId, scan.B.RehashThrough, path => Settled(path) && includeB(path), ct);

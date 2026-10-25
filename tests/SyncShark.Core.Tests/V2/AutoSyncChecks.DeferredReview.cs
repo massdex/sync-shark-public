@@ -6,6 +6,7 @@ internal static partial class AutoSyncChecks
     {
         await Deferred_OuterFailureReplacesBackoffAsync();
         await Deferred_WatchFaultRebuildsImmediatelyAsync();
+        await Deferred_SecondWatchFaultDegradesAsync();
         await Evidence_NoProgressBacksOffAsync();
     }
 
@@ -31,6 +32,25 @@ internal static partial class AutoSyncChecks
         await rig.ParkedAsync(AutoStatus.Idle);
         Require(rig.Run.Runs("p1") == 2, "rebuilt startup signals cannot cause duplicate catch-up");
         Pass("Deferred_WatchFaultRebuildsImmediately");
+    }
+
+    private static async Task Deferred_SecondWatchFaultDegradesAsync()
+    {
+        await using var rig = new Rig(["p1"]);
+        FailureRetryOwner.RecordDeferredRetry(rig._store, "p1", 1,
+            FailureRetryOwner.Failed(5, rig.Clock.GetUtcNow()));
+        rig.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Partial) with { Deferred = 1 });
+        await rig.StartAsync();
+        await rig.ParkedAsync(AutoStatus.Waiting);
+        rig.WatchA.Fail(new IOException("first watch fault"));
+        await Until(() => rig.Watches.Created == 4 && rig.WatchA.Parked && rig.WatchB.Parked &&
+            rig.Clock.ActiveTimers == 1, "first fault reaches rebuilt startup debounce");
+        rig.WatchA.Fail(new IOException("second watch fault"));
+        await Until(() => rig.State("p1").Reason == AutoSyncReasons.WatchUnavailable &&
+            rig.WatchA.Disposed && rig.WatchB.Disposed && rig.Clock.ActiveTimers == 1,
+            "second death before catch-up degrades to timed polling");
+        Require(rig.Watches.Created == 4, "repeated dead watches cannot rebuild in a tight loop");
+        Pass("Deferred_RepeatFault");
     }
 
     private static async Task Evidence_NoProgressBacksOffAsync()
