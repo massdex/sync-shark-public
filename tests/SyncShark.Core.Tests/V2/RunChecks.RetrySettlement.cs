@@ -102,7 +102,28 @@ internal static partial class RunChecks
             store.Dispose();
             using var reopened = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var restarted = new SyncRun(reopened, NewExecutor(reopened), fx.Provider, Settings, TimeProvider.System);
+            void Measure(string stage)
+            {
+                if (mode != "other-baseline") return;
+                Console.WriteLine($"RETRY-MEASUREMENT {stage} debt={reopened.SyncRetryAt(fx.Pair.PairId, baseline.A.Path) is not null}");
+                foreach (var link in reopened.Baselines(fx.Pair.PairId))
+                {
+                    var liveA = reopened.Live(fx.Pair.A.RootId, [link.A.Path]).FirstOrDefault();
+                    var liveB = reopened.Live(fx.Pair.B.RootId, [link.B.Path]).FirstOrDefault();
+                    Console.WriteLine($"RETRY-MEASUREMENT {stage} key={link.ObjectKey}; baseA={link.A}; baseB={link.B}; liveA={liveA}; liveB={liveB}; equal={(liveA is not null && liveB is not null ? Content.SameContent(liveA, liveB) : null)}");
+                }
+                foreach (var notice in reopened.OpenNotices(fx.Pair.PairId))
+                    Console.WriteLine($"RETRY-MEASUREMENT {stage} notice rule={notice.Rule}; path={notice.Path}; reason={notice.ReasonKey}");
+            }
+            Measure("before");
+            if (mode == "other-baseline")
+                reopened.ResultsCommitted += (_, results) =>
+                {
+                    foreach (var result in results)
+                        Console.WriteLine($"RETRY-MEASUREMENT committed kind={result.Action.Kind}; rule={result.Action.Rule}; path={result.Action.Path}; key={result.Action.ObjectKey}; outcome={result.Outcome}");
+                };
             await restarted.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            Measure("after");
             var settled = reopened.SyncRetryAt(fx.Pair.PairId, baseline.A.Path) is null;
             Require(settled == (mode is "settle" or "equal-new-identity"), "only fully proved unprotected correspondences settle after cold reopen: " + mode);
             if (mode == "edited")
