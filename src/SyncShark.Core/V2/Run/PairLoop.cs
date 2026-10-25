@@ -95,10 +95,7 @@ internal sealed partial class PairLoop
                 catch (OperationCanceledException) when (stop.IsCancellationRequested) { throw; }
                 catch (Exception error)
                 {
-                    RecordFailure(error);
-                    // Never retire a worker because a watch, store read or callback failed.
-                    DisposeWatches();
-                    await Task.Delay(_in.Settings.MinSafetyPoll, _in.Time, stop).ConfigureAwait(false);
+                    await RecoverWorkerFailureAsync(error, stop).ConfigureAwait(false);
                 }
             }
         }
@@ -111,6 +108,16 @@ internal sealed partial class PairLoop
             try { DisposeWatches(); }
             catch (Exception error) { RecordFailure(error); }
         }
+    }
+
+    private async Task RecoverWorkerFailureAsync(Exception error, CancellationToken stop)
+    {
+        RecordFailure(error);
+        try { ScheduleRetry(); }
+        catch (Exception retryError) { RunOutput.Observe(retryError); }
+        // Never retire a worker because a watch, store read or callback failed.
+        DisposeWatches();
+        await Task.Delay(_in.Settings.MinSafetyPoll, _in.Time, stop).ConfigureAwait(false);
     }
 
     // True when a run is due now; false sends the loop back to re-evaluate the pair.
@@ -171,7 +178,10 @@ internal sealed partial class PairLoop
             return await SettleAsync(stop).ConfigureAwait(false);
         }
         _wakeCause = "retry";
-        return await ArmAsync(pair, stop).ConfigureAwait(false);
+        if (_watches.Count > 0) return true;
+        // Rebuilt watches carry startup signals. Consume and debounce them before the retry run,
+        // otherwise that same startup signal schedules a second run immediately afterwards.
+        return await ArmAsync(pair, stop).ConfigureAwait(false) && await TriggeredAsync(stop).ConfigureAwait(false);
     }
 
     // Waits for a change, the safety poll or a Kick. A new watch starts with a signal pending, so startup, Kick,

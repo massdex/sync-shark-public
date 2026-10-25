@@ -200,7 +200,7 @@ public sealed partial class SqliteStateStore
 
     // An empty-path retirement is structural: it may only retire work for an entity that has no current row
     // on its root. When the identity still exists at a different live spelling, the queued spelling is stale
-    // (the object moved): adopt the current spelling, or retire when another row already queues it.
+    // (the object moved): adopt the current spelling without transferring its obligation to another entity.
     // Settled is evaluated here, before the write transaction, because it reads inventory and baselines.
     private DeferredSettlement ClassifyDeferred(DeferredPlanning row, Func<string, bool> settled,
         Func<string, bool>? emptyPath)
@@ -223,11 +223,6 @@ public sealed partial class SqliteStateStore
         if (entry.Respell is { } current)
         {
             // Preserve live work under its current spelling and restart the bounded alias cycle.
-            if (QueuedAt(tx, pair, row.Root, row.ObjectId, current))
-            {
-                if (AcknowledgePlanningVersion(tx, pair, row)) retired.Add(row);
-                return;
-            }
             StoreSchema.Execute(_connection, tx, """
                 UPDATE planning_deferred SET path=$path,alias_dir=-1,alias_key='',alias_name='',alias_unsettled=0
                 WHERE pair_no=$p AND root_no=$r AND object_id=$o AND version=$v;
@@ -250,12 +245,6 @@ public sealed partial class SqliteStateStore
             ("$name", row.AllAliases ? "" : row.NextAliasName),
             ("$held", !row.AllAliases && (row.AliasUnsettled || !entry.Settled) ? 1 : 0));
     }
-
-    private bool QueuedAt(SqliteTransaction tx, long pair, long root, string objectId, string path) =>
-        StoreSchema.Scalar(_connection, tx,
-            "SELECT 1 FROM planning_deferred WHERE pair_no=$p AND root_no=$r AND object_id<>$o " +
-            "AND path COLLATE NOCASE=$path LIMIT 1;",
-            ("$p", pair), ("$r", root), ("$o", objectId), ("$path", path)) is not null;
 
     private readonly record struct DeferredSettlement(DeferredPlanning Row, bool Settled, string? Respell);
 
