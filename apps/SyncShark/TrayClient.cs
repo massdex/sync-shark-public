@@ -11,8 +11,9 @@ namespace Massdex.SyncShark;
 
 /// <summary>
 /// A pure client of the one background host. It never opens the store, constructs an engine or takes the
-/// product lock, so the host keeps syncing when the tray exits. Every read is bounded and every action is
-/// sent once, never replayed.
+/// product lock, so the host keeps syncing when the tray exits. The data it returns and its own waits are
+/// bounded; the host traversal behind a read is not necessarily row-bounded. Every action is sent once,
+/// never replayed.
 /// </summary>
 internal sealed class TrayClient : IDisposable
 {

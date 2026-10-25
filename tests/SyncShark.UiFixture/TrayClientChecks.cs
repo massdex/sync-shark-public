@@ -149,8 +149,8 @@ internal static class TrayClientChecks
                 Interlocked.Increment(ref mutationSends);
                 return actionGate.Task;
             }
-            // The first two polls answer immediately; the third signals that it is in flight at the 2 s cap
-            // and can only complete as a miss when the tray's own deadline cancels it.
+            // The first two polls answer immediately; the third signals after a short intermediate wait that it
+            // is still pending, and can only complete as a miss when the tray's own deadline cancels it.
             return ++statusCalls == 3
                 ? DelayedStatusAsync(token, delayedStarted)
                 : Task.FromResult<AutoSyncHostReply?>(Reply("running", Pair("pair-a", "Pair A", "Running")));
@@ -203,13 +203,15 @@ internal static class TrayClientChecks
         Require(exited, "the tray exit action disposes only the client");
     }
 
-    // A reply that is deliberately slower than the tray's own two-second status cap. It signals that the
-    // request is in flight, then honours the cap's token, so the poll records a miss rather than a late success.
+    // A reply that is deliberately slower than the tray's own two-second status cap. It signals only after a
+    // short intermediate wait, so the fixture observes a genuinely pending poll before the cap, then stays
+    // pending until the cap's token fires and records a miss rather than a late success.
     private static async Task<AutoSyncHostReply?> DelayedStatusAsync(CancellationToken token,
         TaskCompletionSource started)
     {
+        await Task.Delay(TimeSpan.FromMilliseconds(250), token).ConfigureAwait(false);
         started.TrySetResult();
-        await Task.Delay(TimeSpan.FromSeconds(2) + TimeSpan.FromMilliseconds(250), token).ConfigureAwait(false);
+        await Task.Delay(Timeout.InfiniteTimeSpan, token).ConfigureAwait(false);
         return Reply("running", Pair("pair-a", "Pair A", "Running"));
     }
 
@@ -233,9 +235,9 @@ internal static class TrayClientChecks
             if (request.Command != "status") return Task.FromResult<AutoSyncHostReply?>(OkReply());
             var call = calls++;
             if (call == 0) return Task.FromResult<AutoSyncHostReply?>(Reply("running", Pair("pair-a", "Pair A", "Running")));
-            return call - 1 < failures.Length
-                ? Task.FromResult<AutoSyncHostReply?>(throw failures[call - 1])
-                : Task.FromResult<AutoSyncHostReply?>(Reply("running", Pair("pair-a", "Pair A", "Running")));
+            var index = call - 1;
+            if (index < failures.Length) throw failures[index];
+            return Task.FromResult<AutoSyncHostReply?>(Reply("running", Pair("pair-a", "Pair A", "Running")));
         };
         using var client = new TrayClient(send, () => { }, diagnostics.Add);
         WaitFor(client.RefreshNowAsync());
@@ -274,7 +276,9 @@ internal static class TrayClientChecks
                     : OkReply());
             Func<AutoSyncHostReply?> reply;
             lock (conflictsReplies)
-                reply = conflictsReplies.Count > 0 ? conflictsReplies.Dequeue() : () => ConflictsResult(0, ConflictsStdout(2));
+                reply = conflictsReplies.Count > 0
+                    ? conflictsReplies.Dequeue()
+                    : new Func<AutoSyncHostReply?>(() => ConflictsResult(0, ConflictsStdout(2)));
             return Task.FromResult(reply());
         };
         using var client = new TrayClient(send, () => { }, diagnostics.Add);
