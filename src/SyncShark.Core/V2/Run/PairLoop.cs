@@ -17,6 +17,7 @@ internal sealed partial class PairLoop
     private NoticeReason? _held;
     private DateTimeOffset _lastIdleAnnounce = DateTimeOffset.MinValue;
     private DateTimeOffset? _retryAt;
+    private bool _deferredRetry; // ScheduleDeferredRetry owns whether this wait admits watch signals.
     private int _deadWatchRebuilds;
     private RunReport? _last;
     private bool _watchDegraded;
@@ -159,10 +160,16 @@ internal sealed partial class PairLoop
     private async Task<bool> RetryReadyAsync(PairDef pair, DateTimeOffset retryAt, CancellationToken stop)
     {
         Publish(AutoStatus.Waiting, null);
-        // Watch signals stay latched and never bring a retry forward.
-        var wake = await WaitAsync([], retryAt - _in.Time.GetUtcNow(), stop).ConfigureAwait(false);
-        if (wake.Kind == WakeKind.Kick) return false;
+        // Only deferred backlog admits fresh changes; real failures keep their cooldown. The existing
+        // wait consumes latched signals and debounce coalesces them without changing item retry authority.
+        var wake = await WaitAsync(_deferredRetry ? _watches : [], retryAt - _in.Time.GetUtcNow(), stop).ConfigureAwait(false);
+        if (wake.Kind is WakeKind.Kick or WakeKind.Fault) return false;
         _retryAt = null;
+        if (wake.Kind == WakeKind.Signal)
+        {
+            _wakeCause = "watch-signal";
+            return await SettleAsync(stop).ConfigureAwait(false);
+        }
         _wakeCause = "retry";
         return await ArmAsync(pair, stop).ConfigureAwait(false);
     }

@@ -106,8 +106,7 @@ public static class FailureRetryOwner
             return new State(0, DateTimeOffset.MaxValue);
         }
         var id = RunNoticeId(pairId);
-        var previous = store.NoticeById(pairId, id);
-        var state = Failed(previous is { Closed: false } ? previous.Value.Notice.FailureRetry?.Attempts ?? 0 : 0, now);
+        var state = Failed(RunFailureState(store, pairId)?.Attempts ?? 0, now);
         var fix = error is EndpointAccessException ? "Reconnect the account, then Retry." :
             error is StateDamagedException or StateNeedsFreshDatabaseException ?
                 "Restore a verified state backup before retrying; no further effects are safe." :

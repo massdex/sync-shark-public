@@ -181,26 +181,21 @@ public sealed partial class SqliteStateStore
             NextAliasDir = nextDir, NextAliasKey = nextKey, NextAliasName = nextName };
     }
 
-    /// <summary>
-    /// Applies one acknowledgement page. Returns the decision the caller needs for visibility: each queued
-    /// spelling that is still refused, and each spelling this step resolved (settled, retired or re-spelled).
-    /// </summary>
-    internal IReadOnlyList<DeferredSettle> AcknowledgeDeferredPlanning(string pairId, IReadOnlyList<DeferredPlanning> page,
+    /// <summary>Applies one version-guarded acknowledgement page, retaining unresolved entity work.</summary>
+    internal void AcknowledgeDeferredPlanning(string pairId, IReadOnlyList<DeferredPlanning> page,
         Func<string, bool> settled, Func<string, bool>? emptyPath = null,
-        Action<DeferredPlanning>? acknowledged = null) => InStore<IReadOnlyList<DeferredSettle>>(() =>
+        Action<DeferredPlanning>? acknowledged = null) => InStore(() =>
     {
         var pair = PairNo(pairId);
-        if (pair is null) return (IReadOnlyList<DeferredSettle>)Array.Empty<DeferredSettle>();
+        if (pair is null) return;
         // Settlement may read current inventory/baselines through the store. Evaluate under
         // its gate before opening the write transaction; newer work is still version-guarded.
         var rows = page.Select(row => ClassifyDeferred(row, settled, emptyPath)).ToArray();
         using var tx = _connection.BeginTransaction();
         var retired = new List<DeferredPlanning>();
-        var outcome = new List<DeferredSettle>();
-        foreach (var entry in rows) SettleDeferredRow(tx, pair.Value, entry, retired, outcome);
+        foreach (var entry in rows) SettleDeferredRow(tx, pair.Value, entry, retired);
         tx.Commit();
         foreach (var row in retired) acknowledged?.Invoke(row);
-        return (IReadOnlyList<DeferredSettle>)outcome;
     });
 
     // An empty-path retirement is structural: it may only retire work for an entity that has no current row
@@ -210,26 +205,24 @@ public sealed partial class SqliteStateStore
     private DeferredSettlement ClassifyDeferred(DeferredPlanning row, Func<string, bool> settled,
         Func<string, bool>? emptyPath)
     {
-        var refused = row.Paths.Where(path => !settled(path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        if (refused.Count == 0) return new(row, Settled: true, Respell: null, Refused: refused);
-        if (emptyPath is null || !row.Paths.All(emptyPath))
-            return new(row, Settled: false, Respell: null, Refused: refused);
+        if (row.Paths.All(settled)) return new(row, Settled: true, Respell: null);
+        if (emptyPath is null || !emptyPath(row.Path))
+            return new(row, Settled: false, Respell: null);
         if (_reads.ByObject(row.Root, row.ObjectId) is not { } current)
-            return new(row, Settled: true, Respell: null, Refused: refused);
-        var respell = row.Paths.Any(path => PairPath.Same(path, current.Path)) ? null : current.Path;
-        return new(row, Settled: false, Respell: respell,
-            Refused: respell is null ? refused : new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+            return new(row, Settled: row.Paths.All(emptyPath), Respell: null);
+        // Admission includes live aliases as well as the queued spelling. Only the queued spelling
+        // must be empty to re-spell; live aliases remain queued for a fresh complete settlement cycle.
+        var respell = PairPath.Same(row.Path, current.Path) ? null : current.Path;
+        return new(row, Settled: false, Respell: respell);
     }
 
     private void SettleDeferredRow(SqliteTransaction tx, long pair, DeferredSettlement entry,
-        List<DeferredPlanning> retired, List<DeferredSettle> outcome)
+        List<DeferredPlanning> retired)
     {
         var row = entry.Row;
         if (entry.Respell is { } current)
         {
-            // The stale spelling is resolved this run: either the row adopted the current spelling, or another
-            // row already queues it. Neither leaves this spelling as a refusal for the caller to report.
-            outcome.AddRange(row.Paths.Select(path => new DeferredSettle(path, Refused: false)));
+            // Preserve live work under its current spelling and restart the bounded alias cycle.
             if (QueuedAt(tx, pair, row.Root, row.ObjectId, current))
             {
                 if (AcknowledgePlanningVersion(tx, pair, row)) retired.Add(row);
@@ -243,7 +236,6 @@ public sealed partial class SqliteStateStore
         }
         if (row.AllAliases && entry.Settled && !row.AliasUnsettled)
         {
-            outcome.AddRange(row.Paths.Select(path => new DeferredSettle(path, Refused: false)));
             if (AcknowledgePlanningVersion(tx, pair, row)) retired.Add(row);
             return;
         }
@@ -257,7 +249,6 @@ public sealed partial class SqliteStateStore
             ("$dir", row.AllAliases ? -1 : row.NextAliasDir), ("$key", row.AllAliases ? "" : row.NextAliasKey),
             ("$name", row.AllAliases ? "" : row.NextAliasName),
             ("$held", !row.AllAliases && (row.AliasUnsettled || !entry.Settled) ? 1 : 0));
-        outcome.AddRange(row.Paths.Select(path => new DeferredSettle(path, entry.Refused.Contains(path))));
     }
 
     private bool QueuedAt(SqliteTransaction tx, long pair, long root, string objectId, string path) =>
@@ -266,11 +257,7 @@ public sealed partial class SqliteStateStore
             "AND path COLLATE NOCASE=$path LIMIT 1;",
             ("$p", pair), ("$r", root), ("$o", objectId), ("$path", path)) is not null;
 
-    private readonly record struct DeferredSettlement(DeferredPlanning Row, bool Settled, string? Respell,
-        IReadOnlySet<string> Refused);
-
-    /// <summary>One queued spelling's settle disposition, returned to the caller for user-facing visibility.</summary>
-    internal readonly record struct DeferredSettle(string Path, bool Refused);
+    private readonly record struct DeferredSettlement(DeferredPlanning Row, bool Settled, string? Respell);
 
     private bool AcknowledgePlanningVersion(SqliteTransaction tx, long pair, DeferredPlanning row)
     {

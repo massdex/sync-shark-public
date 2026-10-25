@@ -167,14 +167,15 @@ internal static class PlanningDeferredChecks
             var before = local with { Path = "Former/Name", ObjectId = "moved-respell-object" };
             Snapshot(store, pair.A, Side.A, [before]);
             store.DeferPlanning(pair.PairId, [(pair.A.RootId, before)]);
-            var row = store.AdmitDeferredPlanning(pair.PairId, DateTime.UtcNow.Ticks, rotate: false)
-                .Single(item => item.ObjectId == before.ObjectId);
-            LocalChecks.Require(row.Paths.SequenceEqual(["Former/Name"]), "the queue captured the old spelling");
             var after = before with { Path = "Current/Name" };
             Snapshot(store, pair.A, Side.A, [after]);
-            var outcome = store.AcknowledgeDeferredPlanning(pair.PairId, [row], _ => false, _ => true);
-            LocalChecks.Require(outcome.Any(entry => entry.Path == "Former/Name" && !entry.Refused),
-                "the stale spelling is reported resolved, not as a refusal to surface");
+            var row = store.AdmitDeferredPlanning(pair.PairId, DateTime.UtcNow.Ticks, rotate: false)
+                .Single(item => item.ObjectId == before.ObjectId);
+            LocalChecks.Require(row.Path == before.Path && row.Paths.Contains(before.Path) && row.Paths.Contains(after.Path),
+                "a move before admission includes both the stale queued spelling and the live alias");
+            store.AcknowledgeDeferredPlanning(pair.PairId, [row], _ => false, path => path == before.Path);
+            LocalChecks.Require(store.CountDeferredPlanning(pair.PairId) == 1,
+                "re-spelling preserves unresolved live entity work");
             var respelled = store.AdmitDeferredPlanning(pair.PairId, DateTime.UtcNow.Ticks, rotate: false)
                 .Single(item => item.ObjectId == before.ObjectId);
             LocalChecks.Require(respelled.Path == "Current/Name" && respelled.Paths.Contains("Current/Name"),

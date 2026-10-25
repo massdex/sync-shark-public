@@ -6,6 +6,7 @@ internal sealed partial class PairLoop
     // only leftover is held rows waits for the user's decision, not for a retry.
     private void AfterReport(RunReport report)
     {
+        _deferredRetry = false;
         var previous = _last;
         // The report carries its real completion instant, so the tray announces this run at its true time and can
         // order two completions without inventing a timestamp of its own.
@@ -48,6 +49,7 @@ internal sealed partial class PairLoop
 
     private void ScheduleRetry()
     {
+        _deferredRetry = false;
         var now = _in.Time.GetUtcNow();
         var state = FailureRetryOwner.RunFailureState(_in.Store, _pairId);
         _retryAt = state?.RetryAfter ?? FailureRetryOwner.Failed(0, now).RetryAfter;
@@ -58,6 +60,7 @@ internal sealed partial class PairLoop
     // planning backlog shrank) advances the shared exponential tier, so a constant backlog cannot spin at ten seconds.
     private void ScheduleDeferredRetry(RunReport report, RunReport? previous)
     {
+        _deferredRetry = true;
         var now = _in.Time.GetUtcNow();
         var floor = now + _in.Settings.MinSafetyPoll;
         var ceiling = now + TimeSpan.FromSeconds(FailureRetryOwner.MaximumRetrySeconds);

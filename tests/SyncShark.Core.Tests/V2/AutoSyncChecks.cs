@@ -23,9 +23,11 @@ internal static partial class AutoSyncChecks
         await SignalDuringRun_ExactlyOneMoreAsync();
         await PausedOrOff_NoRunsUntilKickAsync();
         await DurableResumeWithoutKickAsync();
+        RunFailure_ExcludesDeferredAttempts();
         await Failed_RetryBacksOffAndResetsAsync();
         await Deferred_BacklogWaitsForEarliestAsync();
         await Deferred_NoProgressBacksOffAsync();
+        await Deferred_FreshSignalsInterruptBackoffAsync();
         await RefusedOrAccess_HeldUntilKickAsync();
         await ClashingLayout_HeldAtStartupAsync();
         await SafetyPoll_RunsAndRebuildsAsync();
@@ -225,6 +227,32 @@ internal static partial class AutoSyncChecks
         Pass("DurableResumeWithoutKick");
     }
 
+    private static void RunFailure_ExcludesDeferredAttempts()
+    {
+        foreach (var priorFailure in new[] { false, true })
+        {
+            using var store = new InMemoryStateStore();
+            store.SavePair(RigPair("p1", true));
+            var now = new ManualClock().GetUtcNow();
+            if (priorFailure)
+            {
+                FailureRetryOwner.RecordRunFailure(store, "p1", new IOException("earlier failure"), now,
+                    StorageFailureClassifier.IsStateDamage);
+                store.CloseNotice(FailureRetryOwner.RunNoticeId("p1"), "resolved");
+            }
+            FailureRetryOwner.RecordDeferredRetry(store, "p1", 1, FailureRetryOwner.Failed(5, now));
+            Require(FailureRetryOwner.RunFailureState(store, "p1") is null,
+                "deferred state is not a real failure episode");
+            var failure = FailureRetryOwner.RecordRunFailure(store, "p1", new IOException("new failure"), now,
+                StorageFailureClassifier.IsStateDamage);
+            Require(failure == FailureRetryOwner.Failed(0, now) &&
+                FailureRetryOwner.RunFailureState(store, "p1") == failure &&
+                FailureRetryOwner.DeferredRetryState(store, "p1") is null,
+                "deferred-to-failure and failure-to-deferred-to-failure start at the first shared tier");
+        }
+        Pass("RunFailure_ExcludesDeferredAttempts");
+    }
+
     private static async Task Failed_RetryBacksOffAndResetsAsync()
     {
         var failed = FakeSyncRun.Report("p1", RunOutcomes.Failed, 0, Failure(Outcome.Failed));
@@ -285,11 +313,12 @@ internal static partial class AutoSyncChecks
         await rig.StartAsync();
         await rig.ParkedAsync(AutoStatus.Waiting);
         // The first report has no previous count, so it opens the shared tier: the due item retry is below the
-        // safety floor, and the tier's AutoRetryDelay is later than that floor.
-        Require(rig.State("p1").RetryAt - rig.Clock.GetUtcNow() == Settings.AutoRetryDelay &&
+        // safety floor, and the shared first tier is later than that floor.
+        var first = FailureRetryOwner.Failed(0, rig.Clock.GetUtcNow()).RetryAfter - rig.Clock.GetUtcNow();
+        Require(rig.State("p1").RetryAt - rig.Clock.GetUtcNow() == first &&
             FailureRetryOwner.DeferredRetryState(rig._store, "p1") is { Attempts: 1 },
             "the first non-shrinking deferred report opens the shared tier and its counter");
-        rig.Clock.Advance(Settings.AutoRetryDelay);
+        rig.Clock.Advance(first);
         await Until(() => rig.Run.Runs("p1") == 2 && rig.State("p1").RetryAt > rig.Clock.GetUtcNow() &&
             rig.Clock.ActiveTimers == 1, "the non-shrinking backlog retries at its tier");
         var second = rig.State("p1").RetryAt - rig.Clock.GetUtcNow();
@@ -302,6 +331,41 @@ internal static partial class AutoSyncChecks
             rig.State("p1").RetryAt - rig.Clock.GetUtcNow() == tuned.MinSafetyPoll,
             "a shrinking backlog resets the backoff and returns to the item deadline");
         Pass("Deferred_NoProgressBacksOff");
+    }
+
+    private static async Task Deferred_FreshSignalsInterruptBackoffAsync()
+    {
+        foreach (var side in new[] { Side.A, Side.B })
+        {
+            await using var rig = new Rig(["p1"]);
+            var due = rig.Clock.GetUtcNow() + TimeSpan.FromSeconds(FailureRetryOwner.MaximumRetrySeconds);
+            rig._store.SaveSyncRetry("p1", new SyncRetry("sleeping.txt", "sync", 6, "Content proof is unavailable", due));
+            FailureRetryOwner.RecordDeferredRetry(rig._store, "p1", 1,
+                FailureRetryOwner.Failed(5, rig.Clock.GetUtcNow()));
+            var partial = FakeSyncRun.Report("p1", RunOutcomes.Partial) with { Deferred = 1 };
+            rig.Run.Then(partial);
+            rig.Run.Then(partial);
+            await rig.StartAsync();
+            await Until(() => rig.Run.Runs("p1") == 1 && rig.State("p1").RetryAt is not null &&
+                rig.WatchA.Parked && rig.WatchB.Parked && rig.Clock.ActiveTimers == 1, "high-tier deferred wait is armed");
+            var deadline = rig.State("p1").RetryAt!.Value;
+            rig.Clock.Advance(TimeSpan.FromSeconds(30));
+            Require(rig.Run.Runs("p1") == 1, "without a new signal the high-tier backoff holds");
+            (side == Side.A ? rig.WatchA : rig.WatchB).Signal();
+            await Until(() => rig.State("p1").RetryAt is null && rig.WatchA.Parked && rig.WatchB.Parked &&
+                rig.Clock.ActiveTimers == 1, "fresh endpoint signal enters the existing debounce");
+            var almostQuiet = Settings.ChangeQuietWindow - TimeSpan.FromMilliseconds(1);
+            rig.Clock.Advance(almostQuiet);
+            Require(rig.Run.Runs("p1") == 1, "fresh work waits for the quiet window");
+            rig.Clock.Advance(TimeSpan.FromMilliseconds(1));
+            await Until(() => rig.Run.Runs("p1") == 2 && rig.State("p1").RetryAt is not null &&
+                rig.WatchA.Parked && rig.WatchB.Parked && rig.Clock.ActiveTimers == 1, "fresh work runs and re-arms deferred wait");
+            Require(rig.Clock.GetUtcNow() < deadline && rig._store.SyncRetryAt("p1", "sleeping.txt")?.RetryAfter == due,
+                "either endpoint wakes before the deferred deadline without advancing sleeping item retries");
+            rig.Clock.Advance(TimeSpan.FromSeconds(30));
+            Require(rig.Run.Runs("p1") == 2, "the consumed signal cannot recreate a ten-second retry spin");
+        }
+        Pass("Deferred_FreshSignalsInterruptBackoff");
     }
 
     private static async Task RefusedOrAccess_HeldUntilKickAsync()
