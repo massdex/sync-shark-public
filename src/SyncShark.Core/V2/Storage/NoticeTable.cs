@@ -14,7 +14,7 @@ internal sealed partial class NoticeTable
     /// The bounded catalog page and total cap. Past it the tray icon only needs to know "any", and the human
     /// total is reported as at-least, so one million open notices never cost an unbounded read.
     /// </summary>
-    internal const int OpenPageCap = 1000;
+    internal const int OpenNoticeCeiling = 1000;
 
     /// <summary>The visible inbox state, exactly 'open'. Aggregated rows stay actionable but hidden, so this is
     /// the same set as <see cref="VisibleSql"/>; the bounded catalog spells it this way so the partial

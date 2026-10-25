@@ -118,14 +118,6 @@ internal static class StoreSchema
         "CREATE INDEX IF NOT EXISTS nt_restore_reason_page ON notice(notice_id) " +
         "WHERE reason_key='recovery-restore-pending' OR reason_key='recovery-restore-ready';";
 
-    // Performance-only, additive indexes for the bounded conflicts catalog: nt_page carries the page order for a
-    // global or account read, and nt_free_space keeps the free-space summary from walking unrelated open notices.
-    // Both are partial on the visible open state, so neither grows with closed history.
-    private static readonly string ConflictCatalogIndexDdl =
-        "CREATE INDEX IF NOT EXISTS nt_page ON notice(created, notice_id) WHERE state='open';" +
-        "CREATE INDEX IF NOT EXISTS nt_free_space ON notice(created, notice_id) WHERE state='open' AND " +
-        NoticeTable.FreeSpaceReasonSql("reason_key") + ";";
-
     // Performance-only, additive index; no persisted row format changes or version bump.
     private const string FlaggedIndexDdl =
         "CREATE INDEX IF NOT EXISTS fs_flagged ON file_state(root_no) WHERE flags != 0;" +
@@ -816,8 +808,7 @@ internal static class StoreSchema
         Execute(connection, transaction, RestoreNoticePathIndexDdl);
         Execute(connection, transaction, RestoreNoticeReadyPathIndexDdl);
         Execute(connection, transaction, RestoreNoticeHoldPathIndexDdl);
-        Execute(connection, transaction, RestoreNoticeReasonPageIndexDdl);
-        Execute(connection, transaction, ConflictCatalogIndexDdl);
+        Execute(connection, transaction, RestoreNoticeReasonPageIndexDdl); SqliteStateStore.EnsureConflictCatalogIndexes(connection, transaction);
         Execute(connection, transaction, QuarantineDdl);
         Execute(connection, transaction, "INSERT INTO quarantine_upgrade VALUES('grant-backfill');");
         Execute(connection, transaction, "INSERT INTO quarantine_upgrade VALUES('notice-path-key-backfill');");
@@ -857,8 +848,7 @@ internal static class StoreSchema
         Execute(connection, null, ClassificationDdl);
         Execute(connection, null, ObservationDdl);
         EnsureFeatureSchema(connection, version, clock);
-        Execute(connection, null, LegacyFoldDdl);
-        Execute(connection, null, ConflictCatalogIndexDdl);
+        Execute(connection, null, LegacyFoldDdl); SqliteStateStore.EnsureConflictCatalogIndexes(connection, null);
         var names = new HashSet<string>(StringComparer.Ordinal);
         using (var command = Command(connection, null,
             "SELECT name FROM sqlite_master WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%';"))

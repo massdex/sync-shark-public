@@ -1782,8 +1782,7 @@ public static class SyncCliRegistry
                                        (run.CompletedUtc?.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) ?? "none"));
                 break;
             case SyncCliConflictListData conflicts:
-                builder.AppendLine($"{conflicts.Returned} conflict(s) shown of " +
-                                   $"{(conflicts.TotalAtLeast ? "at least " : string.Empty)}{conflicts.TotalOpen} open " +
+                builder.AppendLine($"{conflicts.Returned} conflict(s) shown of {(conflicts.TotalAtLeast ? "at least " : string.Empty)}{conflicts.TotalOpen} open " +
                                    $"(offset {conflicts.Offset}, limit {conflicts.Limit}, more={(conflicts.HasMore ? "yes" : "no")})");
                 foreach (var summary in conflicts.FreeSpacePending)
                     builder.AppendLine(summary.Detail);

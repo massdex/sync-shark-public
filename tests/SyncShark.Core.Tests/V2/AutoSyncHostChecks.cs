@@ -268,9 +268,9 @@ internal static class AutoSyncHostChecks
             "bulk/" + index + ".txt", "Kept both.", "bulk-kept")).ToArray());
         var runtime = new V2CliRuntime(null, store, null!, null!, root);
         var page = await runtime.LoadConflictsAsync(null, null, null, 10, 0, CancellationToken.None);
-        Require(page.Items.Count == 10 && page.TotalOpen == NoticeTable.OpenPageCap && page.TotalAtLeast && page.HasMore,
+        Require(page.Items.Count == 10 && page.TotalOpen == NoticeTable.OpenNoticeCeiling && page.TotalAtLeast && page.HasMore,
             "a limit-10 page returns ten rows and a capped at-least total, not 5,000 materialized notices");
-        Require(store.OpenConflictCount() == NoticeTable.OpenPageCap,
+        Require(store.OpenConflictCount() == NoticeTable.OpenNoticeCeiling,
             "the tray status count is the same capped COUNT");
         PlanBoundedConflictReads(root);
     }

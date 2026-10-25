@@ -1,4 +1,5 @@
 using System.Text;
+using Microsoft.Data.Sqlite;
 
 namespace Massdex.SyncShark.V2;
 
@@ -19,11 +20,18 @@ public sealed partial class SqliteStateStore
         var total = CountConflicts(filters, parameters);
         var items = limit <= 0 ? (IReadOnlyList<Notice>)Array.Empty<Notice>()
             : ReadConflictPage(scope, filters, parameters, limit, offset);
-        return new ConflictNoticePage(items, total, total >= NoticeTable.OpenPageCap);
+        return new ConflictNoticePage(items, total, total >= NoticeTable.OpenNoticeCeiling);
     });
 
     /// <summary>The one capped count behind both the tray icon and the catalog total.</summary>
     internal int OpenConflictCount() => (int)Math.Min(int.MaxValue, CountVisibleConflicts(null, null, null));
+
+    /// <summary>The additive bounded-catalog indexes, presence-guarded on every open.</summary>
+    internal static void EnsureConflictCatalogIndexes(SqliteConnection connection, SqliteTransaction? transaction) =>
+        StoreSchema.Execute(connection, transaction,
+            "CREATE INDEX IF NOT EXISTS nt_page ON notice(created, notice_id) WHERE state='open';" +
+            "CREATE INDEX IF NOT EXISTS nt_free_space ON notice(created, notice_id) WHERE state='open' AND " +
+            NoticeTable.FreeSpaceReasonSql("reason_key") + ";");
 
     /// <summary>The free-space notices behind the conflicts page's grouped summary, bounded by the same cap.</summary>
     internal IReadOnlyList<Notice> OpenFreeSpaceNotices(string? pairId, string? accountId, string? search) => InStore(() =>
@@ -33,7 +41,7 @@ public sealed partial class SqliteStateStore
         var (filters, parameters) = ConflictFilters(scope, search);
         using var command = StoreSchema.Command(_connection, null, ConflictCatalog.FreeSpace(filters));
         foreach (var (name, value) in parameters) command.Parameters.AddWithValue(name, value ?? DBNull.Value);
-        command.Parameters.AddWithValue("$cap", NoticeTable.OpenPageCap);
+        command.Parameters.AddWithValue("$cap", NoticeTable.OpenNoticeCeiling);
         return (IReadOnlyList<Notice>)ReadNotices(command);
     });
 
@@ -47,7 +55,7 @@ public sealed partial class SqliteStateStore
 
     private long CountConflicts(string filters, IReadOnlyList<(string Name, object? Value)> parameters) =>
         Convert.ToInt64(StoreSchema.Scalar(_connection, null, ConflictCatalog.Count(filters),
-            [.. parameters, ("$cap", (object?)NoticeTable.OpenPageCap)]));
+            [.. parameters, ("$cap", (object?)NoticeTable.OpenNoticeCeiling)]));
 
     private IReadOnlyList<Notice> ReadConflictPage(ConflictScope scope, string filters,
         IReadOnlyList<(string Name, object? Value)> parameters, int limit, int offset)
@@ -57,7 +65,7 @@ public sealed partial class SqliteStateStore
             ConflictCatalog.Page(scope.PairNo is null ? "nt_page" : "nt_open", filters));
         foreach (var (name, value) in parameters) command.Parameters.AddWithValue(name, value ?? DBNull.Value);
         command.Parameters.AddWithValue("$limit", limit);
-        command.Parameters.AddWithValue("$offset", Math.Max(0, offset));
+        command.Parameters.AddWithValue("$offset", offset < 0 ? 0 : offset);
         return ReadNotices(command);
     }
 
