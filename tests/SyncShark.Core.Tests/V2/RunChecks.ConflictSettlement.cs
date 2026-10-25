@@ -20,6 +20,8 @@ internal static partial class RunChecks
             var notice = store.OpenNotices(fx.Pair.PairId).Single(item => item.Rule == 27);
             var selected = await run.ResolveConflictNoticeAsync(fx.Pair.PairId, notice.NoticeId!, choice, null, default);
             Require(selected.Outcome == Outcome.Done, "existing keep-version choice completes: " + selected.Reason);
+            Require(store.Baselines(fx.Pair.PairId).Count == 1,
+                "keep-version commits one correspondence before the next run");
             var expected = choice == NoticeChoices.KeepA ? a.Hash : b.Hash;
             var next = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
             Require(next.Deleted == 0 && (await fx.A.ObserveAsync(path, default))?.Hash == expected &&

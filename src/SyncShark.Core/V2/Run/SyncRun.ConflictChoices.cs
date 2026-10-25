@@ -297,6 +297,10 @@ public sealed partial class SyncRun
                 var link = _store.BaselinesAt(pairId, side, [path]).SingleOrDefault(basis =>
                     SameConflictItem(originalSide == Side.A ? basis.A : basis.B, original, originalSide == Side.A ? pair.A : pair.B));
                 if (link is null) return Result(Outcome.Skipped, "A copy's identity link changed. Keep both or refresh before choosing again.");
+                if (notice.Rule == 27)
+                    actions[0] = originalSide == (keepA ? Side.A : Side.B)
+                        ? actions[0] with { ObjectKey = link.ObjectKey, SuppressReconciledBaseline = false }
+                        : actions[0] with { ObsoleteBaselineKey = link.ObjectKey };
                 var saved = side == Side.A ? link.A : link.B;
                 var current = await (side == Side.A ? a : b).ObserveAsync(path, token);
                 if (current is null || !SameConflictItem(current, saved, side == Side.A ? pair.A : pair.B))
@@ -322,7 +326,11 @@ public sealed partial class SyncRun
         var b = _endpoints.Writer(pair.B);
         var gen = _store.BeginGeneration(pair.A.RootId, RunKind);
         var completed = operation.Completed.ToHashSet(StringComparer.Ordinal);
-        var remaining = operation.Actions.Where(action => !completed.Contains(action.ActionId)).ToArray();
+        // Rebinding the kept canonical must commit before any redundant copy can leave.
+        var predecessor = operation.Actions.SingleOrDefault(action => action.ObsoleteBaselineKey is not null);
+        var awaitingPredecessor = predecessor is not null && !completed.Contains(predecessor.ActionId);
+        var remaining = operation.Actions.Where(action => !completed.Contains(action.ActionId) &&
+            (!awaitingPredecessor || action.ActionId == predecessor!.ActionId)).ToArray();
         var guards = ActionPredicates(pair, LeftAlone(pair));
         foreach (var folder in remaining.Where(FolderDelete.Expands))
             RevokeProtectedCarriedChoice(folder, guards with { IgnoreRules = null });
@@ -398,6 +406,9 @@ public sealed partial class SyncRun
                 _store.RecordNoticeChoiceFailure(saved.Notice, reason);
             return failure;
         }
+        if (awaitingPredecessor && completed.Contains(predecessor!.ActionId))
+            return await ApplyConflictOperationAsync(pair, noticeId,
+                operation with { Completed = completed.ToArray() }, ct).ConfigureAwait(false);
         if (!owned.All(completed.Contains))
             return Result(Outcome.Skipped, "The saved choice is unfinished. Retry the same choice to resume safely.");
         // Decision 88 / owner: a removed occupant is only "replaced" once the incoming item has arrived. Until then

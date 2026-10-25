@@ -25,6 +25,12 @@
     "discoveryCheck": "The fast discovery check"
   },
   "messages": {
+    "conflict-successor-provenance": "The frozen conflict provenance or successor link is missing. Keep both or refresh and review the versions; no files changed.",
+    "conflict-successor-missing": "A required conflict version is missing. Restore it or keep both and review the remaining versions; no files changed.",
+    "conflict-successor-changed": "An item changed since this notice. Refresh or dismiss it and review the new state; no files changed.",
+    "conflict-successor-foreign": "A different item occupies a conflict successor path. Keep both and review that item before retrying; no files changed.",
+    "conflict-successor-protected": "A conflict successor is excluded, protected, or unreadable. Restore its inclusion or readability and retry; no files changed.",
+    "conflict-successor-proof": "Verified content proof is unavailable for a conflict successor. Retry after content verification, or keep both and review the versions; no files changed.",
     "proof-required": "Required content proof was unavailable.",
     "proof-parent-guard": "Parent identity could not be guarded.",
     "proof-journal-unavailable": "A readable journal checkpoint is unavailable.",
