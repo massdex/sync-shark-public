@@ -281,7 +281,7 @@ public sealed partial class SqliteStateStore
         // A run that published this exact indexed revision has already done the refresh work.
         // Keep a trigger queued for a newer concurrently indexed revision.
         StoreSchema.Execute(_connection, tx, "DELETE FROM storage_refresh WHERE root_id=$r AND object_id=$o AND remote_binding=$b " +
-            "AND EXISTS(SELECT 1 FROM file_state f WHERE f.root_no=(SELECT root_no FROM root WHERE root_id=$b) " +
+            "AND EXISTS(SELECT 1 FROM file_state f INDEXED BY fs_obj WHERE f.root_no=(SELECT root_no FROM root WHERE root_id=$b) " +
             "AND f.object_id=$id AND f.version_id=$rev);",
             ("$r", root), ("$o", item), ("$b", binding), ("$id", remote.Id), ("$rev", remote.Revision));
     }

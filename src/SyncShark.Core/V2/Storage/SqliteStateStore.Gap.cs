@@ -25,7 +25,7 @@ public sealed partial class SqliteStateStore : ILocalGapStore
             StoreSchema.Execute(_connection, tx,
                 "UPDATE local_gap_item SET epoch=$e,metadata_ready=1,metadata_stamp=NULL,hash=NULL,proof_json=NULL,result_seq=0 " +
                 "WHERE root_no=$r AND object_id=$o AND NOT EXISTS(" +
-                "SELECT 1 FROM file_state WHERE root_no=$r AND object_id=$o);",
+                "SELECT 1 FROM file_state INDEXED BY fs_obj WHERE root_no=$r AND object_id=$o);",
                 ("$r", root), ("$o", id), ("$e", epoch));
         tx.Commit();
         _gapSweepAfter[root] = ids.Count < 128 ? "" : ids[^1];

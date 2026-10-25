@@ -314,7 +314,7 @@ internal sealed class FileStateReader
     public List<(long DirNo, string Name, string Path)> ReadObject(long rootNo, string objectId, SqliteTransaction? transaction)
     {
         using var command = StoreSchema.Command(_connection, transaction,
-            "SELECT f.dir_no, f.name, d.path FROM file_state f JOIN dir d ON d.dir_no=f.dir_no WHERE f.root_no=$r AND f.object_id=$o;");
+            "SELECT f.dir_no, f.name, d.path FROM file_state f INDEXED BY fs_obj JOIN dir d ON d.dir_no=f.dir_no WHERE f.root_no=$r AND f.object_id=$o;");
         command.Parameters.AddWithValue("$r", rootNo);
         command.Parameters.AddWithValue("$o", objectId);
         var rows = new List<(long, string, string)>();
