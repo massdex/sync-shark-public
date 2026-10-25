@@ -25,6 +25,14 @@ internal sealed class ItemEligibility(
         return new(held?.Invoke(pair, side, item, purpose));
     }
 
+    // Only admission has fresh classification. Cached planning readers must stay selection-only.
+    internal Result EvaluateObservation(PairDef pair, Side side, ItemState item, bool stubsLeftAlone)
+    {
+        var selected = Evaluate(pair, side, item, Purpose.Plan);
+        if (!selected.Eligible) return selected;
+        return new(CheckClassification(item, stubsLeftAlone && item.Kind == ItemKind.File));
+    }
+
     private static bool InPair(string path)
     {
         if (path.Length == 0) return true; // Existing whole-root scan sentinel.
@@ -85,7 +93,7 @@ internal sealed class ItemEligibility(
             purpose is Purpose.ContentProof or Purpose.ReviewedRemoval ? CheckClassification(item) : null);
     }
 
-    private static string? CheckClassification(ItemState item) =>
+    private static string? CheckClassification(ItemState item, bool rejectPlaceholder = true) =>
         (item.Flags & ItemFlags.Link) != 0 ? "link" :
-        (item.Flags & ItemFlags.Placeholder) != 0 ? "stub" : null;
+        rejectPlaceholder && (item.Flags & ItemFlags.Placeholder) != 0 ? "stub" : null;
 }

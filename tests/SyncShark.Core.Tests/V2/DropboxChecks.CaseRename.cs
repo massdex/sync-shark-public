@@ -53,7 +53,8 @@ internal static partial class DropboxChecks
         var tied = Planner.Decide(pair.PairId, 4,
             [new PlanRow(conflictBase with { B = conflictBase.B with { Mtime = changedLocal.Mtime } },
                 changedLocal, newerRemote with { Mtime = changedLocal.Mtime }, new Evidence(false, false, false, false))], options);
-        Require(tied.Actions.All(action => action.Kind == ActionKind.Hold) && tied.Notices.Count == 1,
+        Require(tied.Actions.All(action => action.Kind == ActionKind.Hold) && tied.Notices.Count == 1 &&
+            tied.Notices.Single().ReasonKey == PlanNotices.NeedDecision.Key,
             "equal metadata timestamps hold under a decision notice, never invent a newest rename");
         Directory.CreateDirectory(Path.Combine(local, "Folder"));
         await File.WriteAllTextAsync(Path.Combine(local, "Folder", "child.txt"), "child");

@@ -42,7 +42,13 @@ public sealed partial class SqliteStateStore
             var pair = Deserialize(json);
             // Retain precisely the same reviewed-removal observation scope that the scan used, not effect authority.
             if (observationPair?.PairId == pair.PairId) pair = observationPair;
-            var eligibility = new ItemEligibility([pair], []);
+            // Reuse the bounded protection reader for link coverage only. Placeholder ancestors
+            // are not boundaries, and this admission never retires existing observation debt.
+            var paths = items.Select(item => item.Path).Distinct(StringComparer.Ordinal).ToArray();
+            var links = ReadPairProtection(_connection, tx, RootNo(pair.A.RootId), RootNo(pair.B.RootId),
+                ItemFlags.Link, paths, _storageEnabled);
+            var covered = paths.Where((_, index) => links[index].Covered).ToHashSet(StringComparer.Ordinal);
+            var eligibility = new ItemEligibility([pair], [], (_, _, item, _) => covered.Contains(item.Path) ? "link" : null);
             var admitted = items.Where(item => PlanningObservationEligible(pair, side, item, eligibility))
                 .Select(item => new { root, id = item.ObjectId, path = item.Path }).ToArray();
             if (admitted.Length > 0)
@@ -50,8 +56,8 @@ public sealed partial class SqliteStateStore
         }
     }
 
-    private static bool PlanningObservationEligible(PairDef pair, Side side, ItemState item,
-        ItemEligibility eligibility) => eligibility.Evaluate(pair, side, item, ItemEligibility.Purpose.Plan).Eligible;
+    private bool PlanningObservationEligible(PairDef pair, Side side, ItemState item,
+        ItemEligibility eligibility) => eligibility.EvaluateObservation(pair, side, item, !_settings.ReplaceOnlineOnlyStubs).Eligible;
 
     public long IndexPlanningWatermark(string rootId) => InStore(() => Convert.ToInt64(StoreSchema.Scalar(_connection, null,
         "SELECT COALESCE(MAX(version),0) FROM planning_deferred WHERE root_no=(SELECT root_no FROM root WHERE root_id=$id);",
