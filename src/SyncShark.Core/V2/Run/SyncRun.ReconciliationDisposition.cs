@@ -27,6 +27,22 @@ public sealed partial class SyncRun
         }
     }
 
+    private void RecordReconciliationBlocker(PairDef pair, ReconcileBatch batch,
+        SqliteStateStore.DeferredPlanning row, string blocker, BothScan scan, Plan plan)
+    {
+        foreach (var path in row.Paths)
+        {
+            // A concrete read/action cause takes precedence over structural acknowledgement diagnostics.
+            var cause = scan.A.IncompleteReasons.GetValueOrDefault(path) ??
+                scan.B.IncompleteReasons.GetValueOrDefault(path) ??
+                _store.SyncRetryAt(pair.PairId, path)?.LastError ?? blocker;
+            batch.Dispositions[path] = "deferred: " + cause;
+            if (!plan.Notices.Any(notice => PlanNotices.HasPathScope(notice) && PairPath.IsSelfOrUnder(path, notice.Path)))
+                WriteNotices([FailureRetryOwner.RetryNotice(pair.PairId, path, cause, 1)]);
+            RunTrace.Emit($"reconciliation acknowledgement blocked: path={path} reason={cause}");
+        }
+    }
+
     private void FinishReconciliationDisposition(PairDef pair, ReconcileBatch batch)
     {
         foreach (var path in batch.Paths)

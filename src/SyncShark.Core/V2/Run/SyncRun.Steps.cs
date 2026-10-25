@@ -1188,10 +1188,7 @@ public sealed partial class SyncRun
                     !_store.BaselinesAt(pair.PairId, Side.A, [path]).Any() &&
                     !_store.BaselinesAt(pair.PairId, Side.B, [path]).Any(), acknowledged,
                     batch is null ? null : (row, reason) =>
-                    {
-                        foreach (var path in row.Paths) batch.Dispositions[path] = "deferred: " + reason;
-                        RunTrace.Emit($"reconciliation acknowledgement blocked: path={row.Path} reason={reason}");
-                    });
+                        RecordReconciliationBlocker(pair, batch, row, reason, scan, plan));
             }
         _store.AcknowledgeRehash(pair.A.RootId, scan.A.RehashThrough, path => Settled(path) && includeA(path), ct, batch?.ObjectIdsA);
         _store.AcknowledgeRehash(pair.B.RootId, scan.B.RehashThrough, path => Settled(path) && includeB(path), ct, batch?.ObjectIdsB);

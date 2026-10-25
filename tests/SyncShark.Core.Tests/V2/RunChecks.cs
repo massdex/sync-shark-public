@@ -10,6 +10,8 @@ internal static partial class RunChecks
     public static async Task RunAsync()
     {
         var failures = new List<string>();
+        await Group(nameof(ReconciliationEveryItemAccountable), ReconciliationEveryItemAccountable, failures);
+        await Group(nameof(ReconciliationRetainedNoticeResolves), ReconciliationRetainedNoticeResolves, failures);
         await Group(nameof(ReconciliationAdmitsAutoSyncBetweenBatches), ReconciliationAdmitsAutoSyncBetweenBatches, failures);
         await Group(nameof(ReconciliationStaleAdoptBetweenBatches), ReconciliationStaleAdoptBetweenBatches, failures);
         await Group(nameof(ReconcileBatchPlansCurrentState), ReconcileBatchPlansCurrentState, failures);
