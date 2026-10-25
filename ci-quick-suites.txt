@@ -1,0 +1,2 @@
+--v2-autosync-checks
+--v2-planning-protection-checks
