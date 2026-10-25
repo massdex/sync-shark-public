@@ -33,11 +33,15 @@ public sealed partial class SyncRun
         foreach (var path in row.Paths)
         {
             // A concrete read/action cause takes precedence over structural acknowledgement diagnostics.
+            var notice = plan.Notices.FirstOrDefault(item => PlanNotices.HasPathScope(item) &&
+                PairPath.IsSelfOrUnder(path, item.Path));
+            var retry = _store.SyncRetryAt(pair.PairId, path);
             var cause = scan.A.IncompleteReasons.GetValueOrDefault(path) ??
-                scan.B.IncompleteReasons.GetValueOrDefault(path) ??
-                _store.SyncRetryAt(pair.PairId, path)?.LastError ?? blocker;
+                scan.B.IncompleteReasons.GetValueOrDefault(path) ?? notice?.Detail ??
+                (retry?.LastError is { Length: > 0 } error ? error : null) ??
+                plan.Notices.FirstOrDefault(item => item.ReasonKey == "planning-degraded")?.Detail ?? blocker;
             batch.Dispositions[path] = "deferred: " + cause;
-            if (!plan.Notices.Any(notice => PlanNotices.HasPathScope(notice) && PairPath.IsSelfOrUnder(path, notice.Path)))
+            if (notice is null || !PairPath.Same(notice.Path, path))
                 WriteNotices([FailureRetryOwner.RetryNotice(pair.PairId, path, cause, 1)]);
             RunTrace.Emit($"reconciliation acknowledgement blocked: path={path} reason={cause}");
         }

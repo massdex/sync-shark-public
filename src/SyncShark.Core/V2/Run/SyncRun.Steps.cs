@@ -1177,23 +1177,34 @@ public sealed partial class SyncRun
             if (action.FromPath is not null) unsettled.Add(action.FromPath);
         }
         bool Settled(string path) => PathSettled(path, evaluated, unsettled);
+        var empty = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        bool EmptySettled(string path)
+        {
+            if (!empty.TryGetValue(path, out var result))
+                empty[path] = result = EmptyPlanningPath(pair, scan, path, evaluated, unsettled, includeA, includeB);
+            return result;
+        }
         if (deferredPlanning is not null && _store is SqliteStateStore deferredStore)
             foreach (var page in deferredPlanning.Chunk(256))
             {
                 ct.ThrowIfCancellationRequested();
-                deferredStore.AcknowledgeDeferredPlanning(pair.PairId, page, Settled, path =>
-                    scan.A.Complete && scan.B.Complete && includeA(path) && includeB(path) &&
-                    !evaluated(path) && !unsettled.Any(p => PairPath.IsSelfOrUnder(path, p) || PairPath.IsSelfOrUnder(p, path)) &&
-                    _store.Live(pair.A.RootId, [path]).Count == 0 && _store.Live(pair.B.RootId, [path]).Count == 0 &&
-                    !_store.BaselinesAt(pair.PairId, Side.A, [path]).Any() &&
-                    !_store.BaselinesAt(pair.PairId, Side.B, [path]).Any(), acknowledged,
+                deferredStore.AcknowledgeDeferredPlanning(pair.PairId, page, Settled, EmptySettled, acknowledged,
                     batch is null ? null : (row, reason) =>
                         RecordReconciliationBlocker(pair, batch, row, reason, scan, plan));
             }
         _store.AcknowledgeRehash(pair.A.RootId, scan.A.RehashThrough, path => Settled(path) && includeA(path), ct, batch?.ObjectIdsA);
         _store.AcknowledgeRehash(pair.B.RootId, scan.B.RehashThrough, path => Settled(path) && includeB(path), ct, batch?.ObjectIdsB);
-        if (batch is not null) AccountReconciliationBatch(pair, batch, plan, tally, Settled, includeA, includeB);
+        if (batch is not null) AccountReconciliationBatch(pair, batch, plan, tally,
+            path => Settled(path) || EmptySettled(path), includeA, includeB);
     }
+
+    private bool EmptyPlanningPath(PairDef pair, BothScan scan, string path, Func<string, bool> evaluated,
+        SortedSet<string> unsettled, Func<string, bool> includeA, Func<string, bool> includeB) =>
+        scan.A.Complete && scan.B.Complete && includeA(path) && includeB(path) && !evaluated(path) &&
+        !ScanFailures(scan).Concat(unsettled).Any(p => PairPath.IsSelfOrUnder(path, p) || PairPath.IsSelfOrUnder(p, path)) &&
+        _store.Live(pair.A.RootId, [path]).Count == 0 && _store.Live(pair.B.RootId, [path]).Count == 0 &&
+        !_store.BaselinesAt(pair.PairId, Side.A, [path]).Any() &&
+        !_store.BaselinesAt(pair.PairId, Side.B, [path]).Any();
 
     private static bool PathSettled(string path, Func<string, bool> evaluated, SortedSet<string> unsettled)
     {

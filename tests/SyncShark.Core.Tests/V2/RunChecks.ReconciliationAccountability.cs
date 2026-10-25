@@ -13,16 +13,20 @@ internal static partial class RunChecks
             var fx = Build(suppliedStore: store);
             store.MarkFirstSyncDone(fx.Pair.PairId);
             var selected = fx.A.Seed("selected.txt", "current");
-            SelectionSnapshot(store, fx.Pair.A, Side.A, [selected]);
-            store.DeferPlanning(fx.Pair.PairId, [(fx.Pair.A.RootId, selected)], urgent: true);
-            var batch = BatchFor(selected);
+            var gone = fx.A.Seed("gone.txt", "removed before repair");
+            SelectionSnapshot(store, fx.Pair.A, Side.A, [selected, gone]);
+            await fx.A.DeleteAsync(new SyncAction("remove-gone", 6, ActionKind.Delete, Side.A,
+                gone.Path, null, null, gone, false, gone.ObjectId), default);
+            store.DeferPlanning(fx.Pair.PairId, [(fx.Pair.A.RootId, selected), (fx.Pair.A.RootId, gone)], urgent: true);
+            var batch = BatchFor(selected, gone);
             var report = await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default,
                 new RunOptions { Batch = batch });
             Require(report.Failed == 0 && batch.Paths.All(batch.Dispositions.ContainsKey),
                 "each selected item receives an accountable disposition from completion");
             Require(batch.Dispositions[selected.Path].StartsWith("actioned:", StringComparison.Ordinal) &&
+                batch.Dispositions[gone.Path].StartsWith("settled:", StringComparison.Ordinal) &&
                 store.CountDeferredPlanning(fx.Pair.PairId) == 0,
-                "a completed selected copy is actioned and retires its planning debt");
+                "a copy is actioned and a verified empty path is settled, retiring both debts");
         }
         finally { DeleteFixture(folder); }
     }
@@ -53,6 +57,7 @@ internal static partial class RunChecks
                 CancellationToken.None, page, null, batch]);
             var notices = store.OpenNotices(fx.Pair.PairId).Where(n => n.Path == selected.Path).ToArray();
             Require(store.CountDeferredPlanning(fx.Pair.PairId) == 1 && notices.Length == 1 &&
+                notices[0].Detail.Contains("Metadata access denied", StringComparison.Ordinal) &&
                 batch.Dispositions[selected.Path].Contains("Metadata access denied", StringComparison.Ordinal),
                 "retained same-spelling work has one item notice and its observed blocker");
             await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default,
