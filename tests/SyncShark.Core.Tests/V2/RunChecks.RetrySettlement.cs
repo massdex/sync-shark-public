@@ -67,8 +67,6 @@ internal static partial class RunChecks
             Require(settled == (mode == "settle"), "only fully proved unprotected correspondences settle after cold reopen: " + mode);
             if (mode == "edited")
             {
-                foreach (var notice in reopened.OpenNotices(fx.Pair.PairId).Where(n => n.Path == baseline.A.Path))
-                    Console.WriteLine($"EDITED RETRY NOTICE rule={notice.Rule}; kind={notice.Kind}; reason={notice.ReasonKey}; path={notice.Path}");
                 Require(!settled && reopened.OpenNotices(fx.Pair.PairId).Any(n => n.Path == baseline.A.Path),
                     "edited item retains retry debt and an open notice for its path");
             }
