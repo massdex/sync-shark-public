@@ -144,11 +144,39 @@ jobs:
             -p:SyncSharkZigPath=$env:ZIG_EXE
           exit $LASTEXITCODE
 
+      # The GUI/app fixture is a separate WPF executable that references the app
+      # project. Build it into the same allocation so its output sits beside the
+      # app's (build\ci\bin\<project>\<configuration>\<framework>) and the copied
+      # native Explorer/Discovery helpers come along to the ui-tests job.
+      - name: Build UI fixture
+        if: ${{ !startsWith(github.ref, 'refs/heads/quick/') }}
+        shell: pwsh
+        run: |
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE 'build\ci'
+          dotnet build 'tests/SyncShark.UiFixture/SyncShark.UiFixture.csproj' -c $env:CONFIGURATION --nologo `
+            -p:SyncSharkBuildRoot=$buildRoot `
+            -p:SyncSharkZigPath=$env:ZIG_EXE
+          exit $LASTEXITCODE
+
       - name: Upload test binaries
         uses: actions/upload-artifact@v4
         with:
           name: sync-shark-tests
           path: tests/SyncShark.Core.Tests/bin/${{ env.CONFIGURATION }}/net8.0
+          if-no-files-found: error
+          retention-days: 7
+
+      # The ui-tests job needs the app plus the fixture and its copied helpers.
+      # With these two paths the artifact root is build/ci/bin, so downloading it
+      # there restores the layout the fixture resolves its sibling outputs from.
+      - name: Upload UI fixture binaries
+        if: ${{ !startsWith(github.ref, 'refs/heads/quick/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-shark-ui-fixture
+          path: |
+            build/ci/bin/SyncShark/${{ env.CONFIGURATION }}
+            build/ci/bin/SyncShark.UiFixture/${{ env.CONFIGURATION }}
           if-no-files-found: error
           retention-days: 7
 
@@ -512,6 +540,239 @@ jobs:
             foreach ($r in $results) {
               $md += "| $($r.Suite) | $($r.Result) | $($r.Exit) | $($r.Seconds) |"
             }
+            $md += ''
+            $md | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          }
+
+          if ($failed.Count -gt 0) { exit 1 }
+          exit 0
+
+  # GUI/app checks from tests/SyncShark.UiFixture: the selectors that drive the
+  # real WPF surfaces over isolated state (the *-ui-checks family plus the named
+  # tray, window-close, settings-bridge, pair, endpoint and first-sync checks).
+  # Checks that need installed state, live provider accounts, native Explorer,
+  # a real display/DPI probe, a seeded database or a second fixture root stay
+  # out. Each selector is its own step; every step records its outcome and the
+  # final step fails the job after all checks have reported, like the shards.
+  ui-tests:
+    name: ui-tests
+    needs: build
+    if: ${{ !startsWith(github.ref, 'refs/heads/quick/') }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Artifact root is build/ci/bin, so this restores
+      # build/ci/bin/SyncShark/<configuration> and SyncShark.UiFixture/<configuration>.
+      - name: Download UI fixture binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: sync-shark-ui-fixture
+          path: build/ci/bin
+
+      # Checks that load the focused core remote fixture resolve
+      # build/ci/bin/SyncShark.Core.Tests/<configuration>/net8.0/SyncShark.Core.Tests.dll.
+      - name: Download core test binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: sync-shark-tests
+          path: build/ci/bin/SyncShark.Core.Tests/${{ env.CONFIGURATION }}/net8.0
+
+      - name: 'UI check: app settings bridge'
+        id: ui-cli-settings
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector cli-settings-checks
+
+      - name: 'UI check: iteration'
+        id: ui-iteration
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector iteration-ui-checks
+
+      - name: 'UI check: tray tooltip'
+        id: ui-tray-tooltip
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector tray-tooltip-contract -Arguments none
+
+      - name: 'UI check: window close'
+        id: ui-window-close
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector window-close-contract -Arguments none
+
+      - name: 'UI check: foundation'
+        id: ui-foundation
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector ui-foundation-checks
+
+      - name: 'UI check: workspace'
+        id: ui-workspace
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector workspace-ui-checks
+
+      - name: 'UI check: pairs'
+        id: ui-pairs
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector pairs-ui-contract
+
+      - name: 'UI check: activity account'
+        id: ui-activity-account
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector activity-account-ui-checks
+
+      - name: 'UI check: authorization pending'
+        id: ui-authorization-pending
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector authorization-pending-ui-checks
+
+      - name: 'UI check: endpoint hierarchy'
+        id: ui-endpoint-hierarchy
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector endpoint-hierarchy-ui-checks
+
+      - name: 'UI check: endpoint pair'
+        id: ui-endpoint-pair
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector endpoint-pair-ui-checks
+
+      - name: 'UI check: endpoint policy'
+        id: ui-endpoint-policy
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector endpoint-policy-ui-checks
+
+      - name: 'UI check: endpoint reversed'
+        id: ui-endpoint-reversed
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector endpoint-reversed-ui-checks
+
+      - name: 'UI check: endpoint review'
+        id: ui-endpoint-review
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector endpoint-review-checks
+
+      - name: 'UI check: endpoint location action'
+        id: ui-endpoint-location
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector endpoint-location-action-checks
+
+      - name: 'UI check: first sync context'
+        id: ui-first-sync-context
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector first-sync-context-checks
+
+      - name: 'UI check: first sync feedback'
+        id: ui-first-sync-feedback
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector first-sync-feedback-checks
+
+      - name: 'UI check: identity recovery'
+        id: ui-identity-recovery
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector identity-recovery-ui-checks
+
+      - name: 'UI check: local folder creation'
+        id: ui-local-folder-creation
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector local-folder-creation-ui-checks
+
+      - name: 'UI check: notice options'
+        id: ui-notice-options
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector notice-options-ui-checks
+
+      - name: 'UI check: pair storage'
+        id: ui-pair-storage
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector pair-storage-ui-checks
+
+      - name: 'UI check: recovery'
+        id: ui-recovery
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector recovery-ui-checks
+
+      - name: 'UI check: run history'
+        id: ui-run-history
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector run-history-ui-checks
+
+      - name: 'UI check: shared drive account'
+        id: ui-shared-drive-account
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector shared-drive-account-ui-checks
+
+      - name: 'UI check: source correction'
+        id: ui-source-correction
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector source-ui-correction-checks
+
+      - name: 'UI check: startup loading'
+        id: ui-startup-loading
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector startup-loading-ui-checks
+
+      # Takes the fixture root plus the focused core remote assembly.
+      - name: 'UI check: mixed file retry'
+        id: ui-mixed-file-retry
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector mixed-file-retry-ui-checks -Arguments assembly
+
+      - name: 'UI check: pair failure presentation'
+        id: ui-pair-failure
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector pair-failure-presentation-checks -Arguments none
+
+      # Run every check before failing, so one red selector never hides the rest.
+      - name: Enforce UI check results
+        if: always()
+        shell: pwsh
+        env:
+          UI_STEP_OUTCOMES: ${{ toJSON(steps) }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $outcomes = $env:UI_STEP_OUTCOMES | ConvertFrom-Json
+          $results = @()
+          foreach ($property in $outcomes.PSObject.Properties) {
+            if (-not $property.Name.StartsWith('ui-')) { continue }
+            $results += [pscustomobject]@{ Step = $property.Name; Result = $property.Value.outcome }
+          }
+          Write-Host ""
+          Write-Host "SUMMARY"
+          Write-Host ("{0,-34} {1,-10}" -f 'STEP', 'RESULT')
+          foreach ($result in $results) { Write-Host ("{0,-34} {1,-10}" -f $result.Step, $result.Result) }
+          $failed = @($results | Where-Object { $_.Result -ne 'success' })
+          Write-Host "TOTAL checks=$($results.Count) failed=$($failed.Count)"
+
+          if ($env:GITHUB_STEP_SUMMARY) {
+            $md = @('## Sync Shark UI check results', '', '| Step | Result |', '| --- | --- |')
+            foreach ($result in $results) { $md += "| $($result.Step) | $($result.Result) |" }
             $md += ''
             $md | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           }

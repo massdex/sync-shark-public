@@ -1,4 +1,4 @@
-ï»¿namespace Massdex.SyncShark.V2;
+namespace Massdex.SyncShark.V2;
 
 public sealed partial class SqliteStateStore
 {
