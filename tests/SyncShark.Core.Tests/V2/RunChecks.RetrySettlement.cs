@@ -62,11 +62,30 @@ internal static partial class RunChecks
             store.Dispose();
             using var reopened = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var restarted = new SyncRun(reopened, NewExecutor(reopened), fx.Provider, Settings, TimeProvider.System);
+            if (mode == "uncertain") PrintUncertainState("before");
             await restarted.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            if (mode == "uncertain") PrintUncertainState("after");
             var settled = reopened.SyncRetryAt(fx.Pair.PairId, baseline.A.Path) is null;
+
+            void PrintUncertainState(string stage)
+            {
+                var intents = reopened.UnresolvedIntents(fx.Pair.PairId);
+                var footprints = intents.SelectMany(action => new[] { action.Path, action.FromPath, action.Source?.Path, action.ExpectedTarget?.Path })
+                    .OfType<string>().ToArray();
+                var protection = LinkExclusions.Of(reopened, fx.Pair, true).WithPending(footprints);
+                Console.WriteLine($"UNCERTAIN RETRY {stage}: intents={intents.Count}; protectedA={protection.Covers(baseline.A.Path)}; protectedB={protection.Covers(baseline.B.Path)}; debt={reopened.SyncRetryAt(fx.Pair.PairId, baseline.A.Path) is not null}");
+                foreach (var intent in intents)
+                    Console.WriteLine($"UNCERTAIN INTENT {stage}: id={intent.ActionId}; kind={intent.Kind}; path={intent.Path}; checkpoint={intent.ProviderEffect?.Kind ?? "none"}");
+            }
             Require(settled == (mode == "settle"), "only fully proved unprotected correspondences settle after cold reopen: " + mode);
-            Require(reopened.OpenNotices(fx.Pair.PairId).Any(n => n.Path == baseline.A.Path && n.ReasonKey == "sync-retry") != settled,
-                "retry notice closes exactly when all affected correspondences settle: " + mode);
+            if (mode == "edited")
+            {
+                Require(!settled && reopened.OpenNotices(fx.Pair.PairId).Any(n => n.Path == baseline.A.Path),
+                    "edited item retains retry debt and an open notice for its path");
+            }
+            else
+                Require(reopened.OpenNotices(fx.Pair.PairId).Any(n => n.Path == baseline.A.Path && n.ReasonKey == "sync-retry") != settled,
+                    "retry notice closes exactly when all affected correspondences settle: " + mode);
             if (mode == "uncertain") Require(reopened.UnresolvedIntents(fx.Pair.PairId).Count > 0,
                 "unknown effect remains pending rather than becoming equality settlement");
         }

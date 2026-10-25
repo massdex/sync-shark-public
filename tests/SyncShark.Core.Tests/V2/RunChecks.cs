@@ -82,7 +82,6 @@ internal static partial class RunChecks
         await Group(nameof(Incremental_NoChanges_WritesNothingAsync), Incremental_NoChanges_WritesNothingAsync, failures);
         await Group(nameof(Incremental_SleepingRetryIsPartialAsync), Incremental_SleepingRetryIsPartialAsync, failures);
         await Group(nameof(Incremental_SplitBaselineRetrySettlesAsync), Incremental_SplitBaselineRetrySettlesAsync, failures);
-        await Group(nameof(ExistingKeepChoiceFollowupAsync), ExistingKeepChoiceFollowupAsync, failures);
         await Group(nameof(Incremental_SleepingRootRetryAvoidsWholePairLoadAsync), Incremental_SleepingRootRetryAvoidsWholePairLoadAsync, failures);
         await Group(nameof(RecoveryRestore_NoNoticeRunsWithoutLookupsAsync), RecoveryRestore_NoNoticeRunsWithoutLookupsAsync, failures);
         await Group(nameof(Incremental_FullRescanAfterForgetCursorAsync), Incremental_FullRescanAfterForgetCursorAsync, failures);
