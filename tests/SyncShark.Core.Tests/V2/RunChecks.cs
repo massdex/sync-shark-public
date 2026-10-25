@@ -10,6 +10,7 @@ internal static partial class RunChecks
     public static async Task RunAsync()
     {
         var failures = new List<string>();
+        await Group(nameof(ReconcileSubtreeScopeOnly), ReconcileSubtreeScopeOnly, failures);
         await Group(nameof(ReconciliationEveryItemAccountable), ReconciliationEveryItemAccountable, failures);
         await Group(nameof(ReconciliationRetainedNoticeResolves), ReconciliationRetainedNoticeResolves, failures);
         await Group(nameof(ReconciliationAdmitsAutoSyncBetweenBatches), ReconciliationAdmitsAutoSyncBetweenBatches, failures);

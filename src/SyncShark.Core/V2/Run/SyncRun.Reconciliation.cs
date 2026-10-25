@@ -43,8 +43,7 @@ public sealed partial class SyncRun
         var sql = _store as SqliteStateStore ?? throw new InvalidOperationException(MessageCatalog.Default.Template("reconciliation-staging-required"));
         await _endpoints.PrepareAsync(pair, ct);
         var throttle = new ProgressThrottle(progress, _time, _settings.ProgressInterval);
-        foreach (var side in ReconciliationSides(pair, active.Decision.Trigger))
-            await SelectAsync(pair, side, active.Decision, active.Session, throttle, ct);
+        await SelectReconciliationAsync(pair, active, throttle, ct);
         lock (_stopGate) active.Selecting = false;
         var total = new RunReport(pairId, string.Empty, 0, 0, 0, 0, 0, 0, 0, 0, []);
         while (NextReconciliationBatch(sql, active.Session) is { } batch)
@@ -56,6 +55,8 @@ public sealed partial class SyncRun
             lock (_stopGate) active.LiveProgress = new(RunPhases.Reconcile, null, total.Done, 0);
             if (report.HaltedBy is not null || report.Cancelled || report.Paused || report.CompletionFailed) break;
         }
+        if (total.HaltedBy is null && !total.Cancelled && !total.Paused && !total.CompletionFailed)
+            total = await CompleteReconciliationAsync(pair, active, total, ct);
         throttle.Flush();
         return total;
     }

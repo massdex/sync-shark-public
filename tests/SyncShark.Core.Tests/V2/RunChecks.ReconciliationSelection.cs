@@ -76,9 +76,13 @@ internal static partial class RunChecks
             item.Path == "hash.txt" ? item with { Hash = new string('a', 64) } : item).ToArray();
         foreach (var item in old) SelectionBaseline(store, pair, item with { ObjectId = "other-" + item.ObjectId }, item);
         SelectionSnapshot(store, root, Side.B, old);
+        string? basis = null;
         var counts = await fx.Run().SelectAsync(pair, Side.B,
             new(null, ReconciliationScope.Root, ReconciliationTrigger.DropboxReset), "dropbox-selection",
-            new ProgressThrottle(new RecordingProgress(), TimeProvider.System, TimeSpan.Zero), default);
+            new ProgressThrottle(new RecordingProgress(), TimeProvider.System, TimeSpan.Zero), default,
+            cursor => { basis = cursor; wire.LatestCursor = "later-provider-cursor"; });
+        Require(basis == snapshot.CursorAfter && store.Cursor(root.RootId) == "selection-cursor",
+            "selection returns the listing basis, never a later cursor, without acknowledging it early");
         Require(store.ReconcilePage("dropbox-selection:work", Side.B, "", "", 256).Select(item => item.Path)
             .ToHashSet().SetEquals(["rev.txt", "hash.txt"]), "Dropbox selection uses revision or content hash, not metadata alone");
         Require(counts.Changed == 2 && counts.New == 0 && counts.Missing == 0,

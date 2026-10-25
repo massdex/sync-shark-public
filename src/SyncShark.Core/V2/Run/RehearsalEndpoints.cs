@@ -5,7 +5,7 @@ using System.Text;
 namespace Massdex.SyncShark.V2;
 
 /// <summary>Run-scoped virtual effects over write-denying, read-through endpoints. Only changed paths are retained.</summary>
-internal sealed class RehearsalEndpoints(IEndpointProvider real, RehearsalOverlay storage, Action<RehearsalEffect> record,
+internal sealed partial class RehearsalEndpoints(IEndpointProvider real, RehearsalOverlay storage, Action<RehearsalEffect> record,
     IStateStore? store = null) : IEndpointProvider, IAsyncDisposable
 {
     private readonly PlanOnlyEndpoints _reads = new(real);
@@ -58,18 +58,6 @@ internal sealed class RehearsalEndpoints(IEndpointProvider real, RehearsalOverla
     }
     internal static Delta Apply(IInventorySource inventory, Delta delta, Func<string, bool> include, bool echo = false) =>
         inventory is Overlay overlay ? echo ? overlay.Echo(overlay.Apply(delta, include), include) : overlay.Apply(delta, include) : delta;
-
-    internal static async Task<IReadOnlyDictionary<string, string>> HydrateAsync(IInventorySource inventory, DropboxInventory cloud,
-        IReadOnlyList<string> prefixes, Func<IReadOnlyList<DropboxChange>, Task> accept, CancellationToken ct)
-    {
-        if (inventory is not Overlay overlay) return await cloud.HydratePrefixesAsync(prefixes, accept, ct);
-        var failures = await cloud.HydratePrefixesAsync(prefixes, page => accept(page.Where(row => !overlay.Try(row.Path, out _)).ToArray()), ct);
-        foreach (var prefix in prefixes.Distinct(StringComparer.OrdinalIgnoreCase)
-            .Where(prefix => !prefixes.Any(parent => !PairPath.Same(prefix, parent) && PairPath.IsSelfOrUnder(prefix, parent))))
-            foreach (var page in overlay.StoredItems(prefix).Chunk(256))
-                await accept(page.Select(item => new DropboxChange(item.Path, DropboxItems.ToEntry(item))).ToArray());
-        return failures;
-    }
 
     private class Overlay(RootDef root, Side side, RehearsalOverlay storage, Action<RehearsalEffect> record) : IEndpointWriter, IInventorySource, ISourceAbsenceProbe, IRecoveryRecordReader, IRecoveryAvailability
     {

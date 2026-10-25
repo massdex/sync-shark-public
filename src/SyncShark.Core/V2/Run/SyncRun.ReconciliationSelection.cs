@@ -3,7 +3,7 @@ namespace Massdex.SyncShark.V2;
 public sealed partial class SyncRun
 {
     internal async Task<SelectionCounts> SelectAsync(PairDef pair, Side side, StateMonitorDecision decision,
-        string session, ProgressThrottle throttle, CancellationToken ct)
+        string session, ProgressThrottle throttle, CancellationToken ct, Action<string>? listingBasis = null)
     {
         var sql = _store as SqliteStateStore ?? throw new InvalidOperationException("Reconciliation requires persistent staging.");
         var root = side == Side.A ? pair.A : pair.B;
@@ -27,7 +27,7 @@ public sealed partial class SyncRun
                 counts = await SelectLocalAsync(pair, side, local, decision, scope, session, sql, eligibility, accounted, ct);
             else
             {
-                await EnumerateSelectionAsync(root, inventory, scope, accept, throttle, ct);
+                await EnumerateSelectionAsync(root, inventory, scope, accept, throttle, ct, listingBasis);
                 counts = SelectStaged(pair, side, session, sql, eligibility, accounted,
                     RehearsalEndpoints.Unwrap(inventory) is DropboxInventory, ct);
             }
@@ -39,13 +39,14 @@ public sealed partial class SyncRun
     }
 
     private async Task EnumerateSelectionAsync(RootDef root, IInventorySource inventory, ReconciliationScope scope,
-        Func<IReadOnlyList<ItemState>, Task> accept, ProgressThrottle throttle, CancellationToken ct)
+        Func<IReadOnlyList<ItemState>, Task> accept, ProgressThrottle throttle, CancellationToken ct,
+        Action<string>? listingBasis)
     {
         if (RehearsalEndpoints.Unwrap(inventory) is DropboxInventory dropbox)
         {
             RunTrace.Emit("reconciliation selection source: Dropbox prefix hydration");
             var failures = await RehearsalEndpoints.HydrateAsync(inventory, dropbox, scope.ReadScopes.ToArray(), rows =>
-                accept(rows.Where(row => row.Entry is not null).Select(row => DropboxItems.ToItem(row.Entry!)).ToArray()), ct);
+                accept(rows.Where(row => row.Entry is not null).Select(row => DropboxItems.ToItem(row.Entry!)).ToArray()), ct, listingBasis);
             if (failures.Count > 0) throw new IOException(string.Join("; ", failures.Values));
             return;
         }

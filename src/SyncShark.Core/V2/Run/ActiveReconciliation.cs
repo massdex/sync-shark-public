@@ -5,6 +5,8 @@ internal sealed class ActiveReconciliation(StateMonitorDecision decision, string
 {
     internal StateMonitorDecision Decision { get; } = decision;
     internal string Session { get; } = session;
+    internal Dictionary<string, string> GapEpochs { get; } = new(StringComparer.Ordinal);
+    internal Dictionary<string, string> ListingBases { get; } = new(StringComparer.Ordinal);
     internal bool Selecting { get; set; } = true;
     internal RunProgress? LiveProgress { get; set; }
 }
