@@ -134,12 +134,23 @@ public static partial class Planner
         public bool Protects(SyncAction action) => action.Kind == ActionKind.Delete &&
             (action.Target == Side.A ? protectedA : protectedB).Contains(action.Path);
 
+        // Mapping is character-for-character. Preserve provider-only characters and ancestor
+        // spelling while letting the caller's leaf-case rename reach the provider identity.
+        private static string WithRequestedLeafCase(string original, string requested)
+        {
+            var mapped = DropboxNameMapping.Map(original);
+            var result = original.ToCharArray();
+            for (var i = original.LastIndexOf('/') + 1; i < original.Length; i++)
+                if (mapped[i] == original[i]) result[i] = requested[i];
+            return new string(result);
+        }
+
         public string TargetPath(Side target, string path)
         {
             var own = target == Side.A ? cloudA : cloudB;
             var otherMapped = target == Side.A ? mappedB : mappedA;
             if (own.Count == 0) return otherMapped ? DropboxNameMapping.Map(path) : path;
-            if (own.TryGetValue(path, out var original)) return original;
+            if (own.TryGetValue(path, out var original)) return WithRequestedLeafCase(original, path);
             foreach (var ancestor in PairPath.Ancestors(path))
                 if (own.TryGetValue(ancestor, out original)) return original + path[ancestor.Length..];
             return path;

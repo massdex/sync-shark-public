@@ -5,6 +5,7 @@ internal static partial class PlannerChecks
     private static void CaseEquivalentMoves_AdoptOrUpdate()
     {
         UnchangedLeafCaseMismatch();
+        LeafCaseDecisionAndMappingConverge();
         AncestorDrift_OneSidedEdit();
         AncestorDrift_DeletionAndReplacement();
         foreach (var changed in new[] { Side.A, Side.B })
@@ -92,6 +93,40 @@ internal static partial class PlannerChecks
         var local = F("Parent/report_.txt", "local", "same");
         var cloud = F("Parent/report:.txt", "cloud", "same") with { IdentityJson = DropboxNameMapping.Fact("Parent/report:.txt") };
         AssertEmpty(Decide(Row(Base("mapped", local, cloud), local, cloud)));
+    }
+
+    private static void LeafCaseDecisionAndMappingConverge()
+    {
+        var folderA = D("Parent/Photos", "folder-a");
+        var folderB = D("Parent/photos", "folder-b", DateTimeOffset.UnixEpoch);
+        AssertEmpty(Decide(Row(Base("folder-case", folderA, folderB), folderA, folderB)));
+        foreach (var winner in new[] { Side.A, Side.B })
+        foreach (var mapped in new[] { false, true })
+        foreach (var tied in new[] { false, true })
+        {
+            var a = F("Parent/Report_.txt", "a", "same", mtime: !tied && winner == Side.A ? T0.AddMinutes(1) : T0);
+            var cloudPath = mapped ? "parent/report:.txt" : "parent/report_.txt";
+            var b = F(cloudPath, "b", "same", mtime: !tied && winner == Side.B ? T0.AddMinutes(1) : T0)
+                with { IdentityJson = mapped ? DropboxNameMapping.Fact(cloudPath) : null };
+            var row = Row(Base("leaf-followup", a, b), a, b);
+            var plan = Decide(row);
+            if (tied)
+            {
+                Require(plan.Actions.Single() is { Kind: ActionKind.Hold, Rule: 20 } &&
+                    plan.Notices.Any(n => n.Kind == NoticeKind.UserDecision), "tied spelling offers a decision");
+                plan = Planner.Decide(PairId, Gen, [row], Opt(winners: new Dictionary<string, Side?> { [a.Path] = winner }));
+            }
+            var destination = winner == Side.B ? "parent/report_.txt" : mapped ? "parent/Report:.txt" : a.Path;
+            Require(plan.Actions.Count == 1 && plan.Actions.Single() is { Kind: ActionKind.Move, Rule: 20 } move &&
+                move.Target == Opposite(winner) && move.Path == destination &&
+                move.FromPath == (winner == Side.A ? b.Path : a.Path) &&
+                move.ExpectedTarget == (winner == Side.A ? b : a),
+                "automatic and explicit winners propagate leaf case while preserving mapped characters and cloud ancestors");
+            var landedA = winner == Side.B ? a with { Path = destination } : a;
+            var landedB = winner == Side.A ? b with { Path = destination,
+                IdentityJson = mapped ? DropboxNameMapping.Fact(destination) : null } : b;
+            AssertEmpty(Decide(Row(Base("leaf-followup", landedA, landedB), landedA, landedB)));
+        }
     }
 
     private static void AncestorDrift_DeletionAndReplacement()

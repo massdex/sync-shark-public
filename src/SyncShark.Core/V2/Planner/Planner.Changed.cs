@@ -36,7 +36,7 @@ public static partial class Planner
 
     private static void ChangedMove(Context ctx, PlanRow row, Side target, ItemState source, ItemState current, string key)
     {
-        var rule = source.Kind == ItemKind.Folder ? 25 : PairPath.Same(source.Path, current.Path) ? 20 : 9;
+        var rule = source.Kind == ItemKind.Folder ? 25 : DropboxNameMapping.SamePlace(source, current) ? 20 : 9;
         var path = ctx.Mapping.TargetPath(target, source.Path);
         if (PairPath.SameLeafLocation(path, current.Path))
         {
