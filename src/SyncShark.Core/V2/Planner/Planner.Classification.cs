@@ -25,7 +25,7 @@ public static partial class Planner
     }
 
     /// <summary>Whether this side's content and location are unchanged under the planner's classification rules.</summary>
-    public static bool Unchanged(ItemState current, ItemState baseline) =>
+    internal static bool Unchanged(ItemState current, ItemState baseline) =>
         ClassifySide(current, baseline, false, true) == RowState.Same;
 
     private static bool PathEqual(string x, string y) => string.Equals(x, y, StringComparison.Ordinal);
