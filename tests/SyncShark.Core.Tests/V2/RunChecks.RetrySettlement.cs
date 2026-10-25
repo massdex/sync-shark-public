@@ -42,7 +42,14 @@ internal static partial class RunChecks
                     baseline.B, baseline.A with { Hash = "previous", Mtime = baseline.A.Mtime.AddMinutes(-1) }, false, baseline.ObjectKey);
                 store.RecordIntents(fx.Pair.PairId, [action]);
                 store.CommitResult(fx.Pair.PairId, gen, action, new(action.ActionId, Outcome.Uncertain, null, null, null, "effect outcome unknown"));
-                fx.Provider.AddWriter(fx.Pair.A, new HashlessObserver(fx.WriterA));
+                // Keep the effect genuinely unresolved: a hashless read alone retires this
+                // checkpoint-free update as superseded instead of exercising pending protection.
+                fx.WriterA.OnRead = observedPath =>
+                {
+                    if (PairPath.Same(observedPath, baseline.A.Path))
+                        throw new HttpRequestException("Fixture observation temporarily unavailable", null,
+                            System.Net.HttpStatusCode.ServiceUnavailable);
+                };
             }
             if (mode == "other-baseline")
             {
@@ -62,21 +69,8 @@ internal static partial class RunChecks
             store.Dispose();
             using var reopened = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var restarted = new SyncRun(reopened, NewExecutor(reopened), fx.Provider, Settings, TimeProvider.System);
-            if (mode == "uncertain") PrintUncertainState("before");
             await restarted.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
-            if (mode == "uncertain") PrintUncertainState("after");
             var settled = reopened.SyncRetryAt(fx.Pair.PairId, baseline.A.Path) is null;
-
-            void PrintUncertainState(string stage)
-            {
-                var intents = reopened.UnresolvedIntents(fx.Pair.PairId);
-                var footprints = intents.SelectMany(action => new[] { action.Path, action.FromPath, action.Source?.Path, action.ExpectedTarget?.Path })
-                    .OfType<string>().ToArray();
-                var protection = LinkExclusions.Of(reopened, fx.Pair, true).WithPending(footprints);
-                Console.WriteLine($"UNCERTAIN RETRY {stage}: intents={intents.Count}; protectedA={protection.Covers(baseline.A.Path)}; protectedB={protection.Covers(baseline.B.Path)}; debt={reopened.SyncRetryAt(fx.Pair.PairId, baseline.A.Path) is not null}");
-                foreach (var intent in intents)
-                    Console.WriteLine($"UNCERTAIN INTENT {stage}: id={intent.ActionId}; kind={intent.Kind}; path={intent.Path}; checkpoint={intent.ProviderEffect?.Kind ?? "none"}");
-            }
             Require(settled == (mode == "settle"), "only fully proved unprotected correspondences settle after cold reopen: " + mode);
             if (mode == "edited")
             {
