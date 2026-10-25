@@ -58,6 +58,10 @@ internal sealed class TrayClient : IDisposable
     private int _pollCount;
     private bool _disposed;
     private Task _initialPoll = Task.CompletedTask;
+    private Task _conflictsLoad = Task.CompletedTask;
+    // The last logged failure kind per read, so a diagnostic is written on a transition only, never per poll.
+    private string? _statusFailure;
+    private string? _conflictFailure;
 
     private sealed record TrayConflictList(int Total, IReadOnlyList<string> Rows);
 
@@ -109,7 +113,7 @@ internal sealed class TrayClient : IDisposable
         _menu.Opening += (_, _) =>
         {
             if (_pendingPairs) { _pendingPairs = false; RebuildPairs(_view.Pairs); }
-            if (DateTimeOffset.UtcNow - _conflictsFetchedUtc > ConflictCacheLifetime) _ = LoadConflictsAsync();
+            if (DateTimeOffset.UtcNow - _conflictsFetchedUtc > ConflictCacheLifetime) _conflictsLoad = LoadConflictsAsync();
         };
         _menu.Closed += (_, _) =>
         {
@@ -132,6 +136,12 @@ internal sealed class TrayClient : IDisposable
     /// <summary>The task of the first poll Start began, so a caller can await observable completion.</summary>
     internal Task InitialPoll => _initialPoll;
 
+    /// <summary>The last menu-open conflict load, so a caller can await it instead of guessing a delay.</summary>
+    internal Task ConflictsLoad => _conflictsLoad;
+
+    /// <summary>Raises the production menu-open path without showing a window, for the focused fixture checks.</summary>
+    internal void OpenMenuForTest() => _menu.Opening?.Invoke(_menu, EventArgs.Empty);
+
     /// <summary>The tray's own single-instance owner. A null result means another tray already owns the icon.</summary>
     internal static IDisposable? TryTakeOwnership()
     {
@@ -150,6 +160,9 @@ internal sealed class TrayClient : IDisposable
     {
         _timer.Start();
         _initialPoll = RefreshStatusAsync();
+        // A full window owns the tray role. The observation is synchronous native work, so it starts
+        // immediately off the dispatcher; finding a window stands this client down without blocking startup.
+        _ = ObserveProductWindowAsync();
     }
 
     /// <summary>Runs one poll now; the fixture awaits this instead of waiting for the dispatch timer.</summary>
@@ -183,21 +196,33 @@ internal sealed class TrayClient : IDisposable
         {
             var poll = _pollCount++;
             TrayStatusSnapshot? snapshot = null;
+            string? failure = null;
+            var detail = string.Empty;
             try
             {
                 using var deadline = new CancellationTokenSource(StatusDeadline);
                 var reply = await _send(AutoSyncHostClient.Request("status"), TimeSpan.FromMilliseconds(300),
                     deadline.Token);
-                snapshot = TrayStatusView.Parse(reply);
+                if (reply is { Ok: false })
+                {
+                    failure = "rejected";
+                    detail = reply.Error?.Message ?? "the host refused the status read";
+                }
+                else snapshot = TrayStatusView.Parse(reply);
+                if (snapshot is null && failure is null)
+                {
+                    failure = "unavailable";
+                    detail = "the host did not answer";
+                }
             }
             catch (Exception error)
             {
                 // Every failed observation — I/O, peer verification, parse, timeout or cancellation — is a
                 // miss, so the tray keeps the last known view and says Updating… with actions disabled.
-                if (error is not (AutoSyncHostUncertainException or OperationCanceledException or IOException or
-                    UnauthorizedAccessException or InvalidDataException or JsonException))
-                    _diagnostic("tray status read failed: " + error.GetType().Name + ": " + error.Message);
+                failure = FailureKind(error);
+                detail = error.GetType().Name + ": " + error.Message;
             }
+            NoteStatusRead(failure, detail);
             if (_disposed) return;
             if (snapshot is not null) _lastSnapshot = snapshot;
             Apply(TrayStatusView.Derive(_lastSnapshot, _lastSnapshot is not null && snapshot is null, poll % 2 == 1));
@@ -333,6 +358,8 @@ internal sealed class TrayClient : IDisposable
     {
         if (_conflictsLoading || _disposed) return;
         _conflictsLoading = true;
+        string? failure = null;
+        var detail = string.Empty;
         try
         {
             using var deadline = new CancellationTokenSource(StatusDeadline);
@@ -341,24 +368,79 @@ internal sealed class TrayClient : IDisposable
                 CliArgs = ["--cli", "conflicts", "list", "--limit",
                     ConflictLimit.ToString(CultureInfo.InvariantCulture), "--json"]
             }, TimeSpan.FromMilliseconds(300), deadline.Token);
-            if (_disposed || reply is null || !reply.Ok || reply.Data is not { } element ||
-                element.ValueKind != JsonValueKind.Object) return;
-            var data = element;
-            if (Int(data, "exitCode") != 0 || Text(data, "stdout") is not { Length: > 0 } output) return;
-            if (!TryParseConflicts(output, out var list)) return;
-            _conflictList = list;
-            _conflictsFetchedUtc = DateTimeOffset.UtcNow;
-            UpdateConflictText(_view.OpenConflicts);
-            RebuildConflictRows(list);
+            if (reply is null)
+            {
+                failure = "unavailable";
+                detail = "the host did not answer";
+            }
+            else if (!reply.Ok)
+            {
+                failure = "rejected";
+                detail = reply.Error?.Message ?? "the host refused the conflict list";
+            }
+            else if (reply.Data is not { } element || element.ValueKind != JsonValueKind.Object)
+            {
+                failure = "rejected";
+                detail = "the host reply carried no conflict list";
+            }
+            else if (Int(element, "exitCode") is not 0)
+            {
+                failure = "rejected";
+                detail = "conflicts list exited with code " +
+                    Int(element, "exitCode").ToString(CultureInfo.InvariantCulture);
+            }
+            else if (Text(element, "stdout") is not { Length: > 0 } output)
+            {
+                failure = "rejected";
+                detail = "the conflict list was empty";
+            }
+            else if (!TryParseConflicts(output, out var list))
+            {
+                failure = "rejected";
+                detail = "the conflict list could not be read";
+            }
+            else if (!_disposed)
+            {
+                _conflictList = list;
+                _conflictsFetchedUtc = DateTimeOffset.UtcNow;
+                UpdateConflictText(_view.OpenConflicts);
+                RebuildConflictRows(list);
+            }
         }
         catch (Exception error)
         {
             // The list is display-only and reloaded next time the menu opens; the status count stays authoritative.
-            if (error is not (IOException or OperationCanceledException or AutoSyncHostUncertainException or
-                InvalidOperationException or JsonException or UnauthorizedAccessException))
-                _diagnostic("tray conflict list read failed: " + error.GetType().Name + ": " + error.Message);
+            failure = FailureKind(error);
+            detail = error.GetType().Name + ": " + error.Message;
         }
         finally { _conflictsLoading = false; }
+        if (!_disposed) NoteConflictRead(failure, detail);
+    }
+
+    // The distinct failure kinds the tray reports: uncertain (sent, no reply), timed out, rejected (the host
+    // refused) and unavailable (nothing answered or the answer could not be read).
+    private static string FailureKind(Exception error) => error switch
+    {
+        AutoSyncHostUncertainException => "uncertain",
+        OperationCanceledException => "timed out",
+        _ => "unavailable"
+    };
+
+    // One diagnostic per transition, never one per failed poll, so a healthy or sustained failure is quiet.
+    private void NoteStatusRead(string? failure, string detail)
+    {
+        if (string.Equals(failure, _statusFailure, StringComparison.Ordinal)) return;
+        if (failure is null) _diagnostic("tray status read recovered after " + _statusFailure + ".");
+        else _diagnostic("tray status read failed (" + failure + "): " + detail);
+        _statusFailure = failure;
+    }
+
+    private void NoteConflictRead(string? failure, string detail)
+    {
+        if (string.Equals(failure, _conflictFailure, StringComparison.Ordinal)) return;
+        if (failure is null) _diagnostic("tray conflict list read recovered after " + _conflictFailure + ".");
+        else _diagnostic("tray conflict list read failed (" + failure + "): " + detail);
+        _conflictFailure = failure;
     }
 
     private static bool TryParseConflicts(string stdout, out TrayConflictList list)

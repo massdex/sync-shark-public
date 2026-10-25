@@ -249,7 +249,8 @@ internal static class AutoSyncHostChecks
         await engine.StopAsync();
     }
 
-    // The tray icon's red is exactly this count: one indexed COUNT over the rows `conflicts list` shows.
+    // The tray icon's red is exactly this count: one indexed, row-bounded COUNT over the rows `conflicts list`
+    // shows. Past the cap the count is the saturation value, never the true total.
     private static Task OpenConflictCountAsync()
     {
         var root = Path.Combine(Path.GetTempPath(), "autosync-conflict-count-" + Guid.NewGuid().ToString("N"));
@@ -263,6 +264,13 @@ internal static class AutoSyncHostChecks
         store.CloseNotice(ignored.NoticeId!, NoticeChoices.Ignore);
         Require(store.OpenConflictCount() == 1,
             "the open-conflict count matches the visible conflicts list and excludes an ignored notice");
+        // More visible rows than the cap: the count saturates instead of reading the whole table.
+        store.AddNotices(Enumerable.Range(0, NoticeTable.AttentionCountCap + 50).Select(index =>
+            new Notice("pair-1", 0, NoticeKind.KeepBoth, "bulk/" + index + ".txt", "Kept both.", "bulk-kept")).ToArray());
+        Require(store.OpenNotices("pair-1").Count > NoticeTable.AttentionCountCap,
+            "the saturation check has more visible notices than the cap");
+        Require(store.OpenConflictCount() == NoticeTable.AttentionCountCap,
+            "more than the cap of open conflicts returns the saturation value, not the true total");
         PlanOpenConflictCount(root);
         return Task.CompletedTask;
     }

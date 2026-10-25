@@ -10,9 +10,26 @@ internal static class TrayStartup
     /// <summary><see cref="ExitCode"/> null means the client is running; otherwise the caller must shut down.</summary>
     internal sealed record Result(IDisposable? Ownership, TrayClient? Client, int? ExitCode, string Detail);
 
+    /// <summary>The tray branch's routing decision, made after the core switch removed its own arguments.</summary>
+    internal enum Route { NotTray, Start, Invalid }
+
     /// <summary>The one tray-request predicate the startup branch uses, after the core switch removed its own args.</summary>
     internal static bool IsTrayRequest(IReadOnlyList<string> args) =>
         args.Any(value => string.Equals(value, "--tray", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// The one routing decision <c>App.OnStartup</c> makes for the tray: a <c>--tray</c> left after the core switch
+    /// is a start only when core v2 was selected and no other argument remains. Anything else is refused, so a
+    /// reordered or weakened startup branch fails the focused fixture check.
+    /// </summary>
+    internal static Route Decide(bool useCoreV2, IReadOnlyList<string> args) =>
+        !IsTrayRequest(args) ? Route.NotTray
+        : StartsTray(useCoreV2, args) ? Route.Start
+        : Route.Invalid;
+
+    /// <summary>Whether these already-switched arguments are exactly the core v2 tray request.</summary>
+    internal static bool StartsTray(bool useCoreV2, IReadOnlyList<string> args) =>
+        useCoreV2 && args.Count == 1 && string.Equals(args[0], "--tray", StringComparison.OrdinalIgnoreCase);
 
     internal static Result Start(bool useCoreV2, IReadOnlyList<string> args, TrayHostSend send, Action exitTray,
         Action<string> diagnostic)
@@ -21,7 +38,7 @@ internal static class TrayStartup
         ArgumentNullException.ThrowIfNull(send);
         ArgumentNullException.ThrowIfNull(exitTray);
         ArgumentNullException.ThrowIfNull(diagnostic);
-        if (!useCoreV2 || args.Count != 1 || !string.Equals(args[0], "--tray", StringComparison.OrdinalIgnoreCase))
+        if (!StartsTray(useCoreV2, args))
             return new Result(null, null, 2, "The background tray attaches to the core v2 AutoSync host.");
         var ownership = TrayClient.TryTakeOwnership();
         if (ownership is null)
@@ -30,15 +47,10 @@ internal static class TrayStartup
             diagnostic(duplicate);
             return new Result(null, null, 0, duplicate);
         }
-        if (ExistingWindowActivation.IsProductWindowPresent())
-        {
-            ownership.Dispose();
-            const string standingDown = "A full Sync Shark window owns the tray; this client is standing down.";
-            diagnostic(standingDown);
-            return new Result(null, null, 0, standingDown);
-        }
         try
         {
+            // A full window owns the tray role. That observation is native synchronous work, so the client
+            // performs it off the dispatcher immediately at startup instead of blocking this path.
             var client = new TrayClient(send, exitTray, diagnostic);
             client.Start();
             const string attached = "Tray client attached; it never opens the store or takes the product lock.";
