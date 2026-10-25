@@ -7,7 +7,8 @@ public sealed partial class SyncRun
     private (IReadOnlyList<SqliteStateStore.DeferredPlanning> Rows, IReadOnlyList<SyncAction> Adopts, int Candidates)
         PlanSettlePage(PairDef pair, BothScan scan, LinkExclusions links,
             IReadOnlyList<SqliteStateStore.DeferredPlanning> ordinary, IReadOnlyList<string> touched,
-            Func<string, bool> includeA, Func<string, bool> includeB, CancellationToken ct)
+            Func<string, bool> includeA, Func<string, bool> includeB, CancellationToken ct,
+            SqliteStateStore.PlanningProtectionRun? protectionRun)
     {
         if (_store is not SqliteStateStore store || scan.AnyFull || !scan.A.Complete || !scan.B.Complete)
             return ([], [], 0);
@@ -23,13 +24,13 @@ public sealed partial class SyncRun
         var touchedIndex = new PendingPathIndex(touched);
         foreach (var chunk in candidates.Where(row => row.Paths.All(path =>
                      includeA(path) && includeB(path) && !notSynced(path))).Chunk(128))
-            EvaluateSettleChunk(pair, scan, protection, touchedIndex, accepted, adopts, chunk, ct);
+            EvaluateSettleChunk(pair, scan, protection, touchedIndex, accepted, adopts, chunk, ct, protectionRun);
         return (accepted, adopts.Distinct().ToArray(), candidates.Count);
     }
 
     private void EvaluateSettleChunk(PairDef pair, BothScan scan, LinkExclusions protection,
         PendingPathIndex touched, List<SqliteStateStore.DeferredPlanning> accepted, List<SyncAction> adopts,
-        SqliteStateStore.DeferredPlanning[] initial, CancellationToken ct)
+        SqliteStateStore.DeferredPlanning[] initial, CancellationToken ct, SqliteStateStore.PlanningProtectionRun? protectionRun)
     {
         void Evaluate(SqliteStateStore.DeferredPlanning[] chunk)
         {
@@ -41,7 +42,7 @@ public sealed partial class SyncRun
             var page = FilterSettleProtection(pair, chunk, guarded, touched);
             if (page.Length == 0) return;
             paths = page.SelectMany(row => row.Paths).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-            var scope = LoadSettleScope(pair, guarded, page, paths, ct);
+            var scope = LoadSettleScope(pair, guarded, page, paths, ct, protectionRun);
             var rows = JoinRows(scope, scan, false);
             var plan = Decide(pair, scan, rows, null, scope, guarded);
             var evaluated = EvaluatedPaths(rows);
@@ -72,11 +73,13 @@ public sealed partial class SyncRun
     }
 
     private RunScope.Scope LoadSettleScope(PairDef pair, LinkExclusions guarded,
-        SqliteStateStore.DeferredPlanning[] page, string[] paths, CancellationToken ct)
+        SqliteStateStore.DeferredPlanning[] page, string[] paths, CancellationToken ct,
+        SqliteStateStore.PlanningProtectionRun? protectionRun)
     {
         var predicates = Predicates(pair, guarded);
         var scanner = new RunScope(_store, predicates.A, predicates.B, guarded,
-            rules: PairInclude.IgnoreRules(pair), restoreProtection: RecoveryProtection(pair), cancellationToken: ct);
+            rules: PairInclude.IgnoreRules(pair), restoreProtection: RecoveryProtection(pair), cancellationToken: ct,
+            protectionRun: protectionRun);
         return scanner.LoadTouched(pair, paths,
             page.Where(row => row.RootId == pair.A.RootId).Select(row => row.ObjectId).ToArray(),
             page.Where(row => row.RootId == pair.B.RootId).Select(row => row.ObjectId).ToArray());

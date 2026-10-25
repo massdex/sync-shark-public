@@ -909,9 +909,10 @@ public sealed partial class SyncRun : ISyncRun
             noticeHeldPaths.Concat(retryHeld.Select(item => item.Path)),
             (path, descendants) => retryProtection(path, descendants));
         var predicates = Predicates(pair, links);
+        using var protectionRun = (_store as SqliteStateStore)?.OpenPlanningProtectionRun(pair);
         var scanner = new RunScope(_store, predicates.A, predicates.B, links, rules: PairInclude.IgnoreRules(pair),
             decisions: decisions, activeRetries: activeRetries,
-            restoreProtection: incrementalRestore, persistDeferred: true, cancellationToken: ct);
+            restoreProtection: incrementalRestore, persistDeferred: true, cancellationToken: ct, protectionRun: protectionRun);
         retryPaths = retryPaths.Concat(recoveryTouched).Concat(retries.Select(item => item.Path))
             .Concat(deferredPlanning.SelectMany(item => item.Paths)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var rootDebtSettling = rootsComplete && (scan.A.RootDebtSettles || scan.B.RootDebtSettles);
@@ -978,7 +979,7 @@ public sealed partial class SyncRun : ISyncRun
         deciding = null!;
         inventory = null;
         var planningBacklog = 0;
-        var settlement = PlanSettlePage(pair, scan, links, deferredPlanning, touched, predicates.A, predicates.B, ct);
+        var settlement = PlanSettlePage(pair, scan, links, deferredPlanning, touched, predicates.A, predicates.B, ct, protectionRun);
         settleEvaluated.UnionWith(settlement.Rows.SelectMany(row => row.Paths));
         deferredPlanning = deferredPlanning.Concat(settlement.Rows).ToArray();
         decided = decided with { Actions = decided.Actions.Concat(settlement.Adopts).ToArray() };
