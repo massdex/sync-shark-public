@@ -63,7 +63,7 @@ public sealed partial class V2CliRuntime
             snapshot.A?.Size, snapshot.B?.Size, snapshot.A?.Mtime, snapshot.B?.Mtime, snapshot.Token,
             IsFolder(snapshot));
 
-    // A folder on either side: shown in the list but refused by decisions resolve (Astra round 3).
+    // A folder on either side: the shared decision owner admits only frozen case-only spelling choices.
     private static bool IsFolder(DecisionSnapshot snapshot) =>
         snapshot.A?.Kind == ItemKind.Folder || snapshot.B?.Kind == ItemKind.Folder;
 

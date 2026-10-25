@@ -15,17 +15,7 @@ internal static partial class EffectResolver
         CancellationToken ct, Func<Exception, bool> isStateDamage, TimeSpan? unknownCommitGracePeriod = null, TimeProvider? timeProvider = null,
         ProviderJobCheckCache? jobChecks = null, string? materializationBlock = null,
         ItemState? historicalDeleteSource = null, RecoveryRef? preserved = null, bool deleteRestorePending = true)
-    {
-        var result = await ResolveCoreAsync(x, target, source, ct, isStateDamage, unknownCommitGracePeriod,
-            timeProvider, jobChecks, materializationBlock, historicalDeleteSource, preserved, deleteRestorePending)
-            .ConfigureAwait(false);
-        return await FolderCaseMoveProof.VerifyAsync(x, result, target, source, ct, isStateDamage).ConfigureAwait(false);
-    }
 
-    private static async Task<ActionResult> ResolveCoreAsync(SyncAction x, IEndpointWriter target, IEndpointWriter source,
-        CancellationToken ct, Func<Exception, bool> isStateDamage, TimeSpan? unknownCommitGracePeriod,
-        TimeProvider? timeProvider, ProviderJobCheckCache? jobChecks, string? materializationBlock,
-        ItemState? historicalDeleteSource, RecoveryRef? preserved, bool deleteRestorePending)
     {
         ArgumentNullException.ThrowIfNull(isStateDamage);
         // Restore creates only: without the atomic receipt we cannot claim ownership. Abandon the
@@ -75,7 +65,7 @@ internal static partial class EffectResolver
                 {
                     var moved = await target.ObserveAsync(x.Path, ct).ConfigureAwait(false);
                     if (moved?.ObjectId == x.ExpectedTarget?.ObjectId)
-                        return await DoneAsync(x, moved, target, ct, preserved).ConfigureAwait(false);
+                        return await VerifiedMoveDoneAsync(x, moved, target, source, ct, preserved, isStateDamage).ConfigureAwait(false);
                 }
                 return Unverified(x, "Provider recovery remains pending.");
             }
@@ -190,7 +180,7 @@ internal static partial class EffectResolver
                     return await PreservedButAbsentAsync(x, preserved).ConfigureAwait(false);
                 return Skipped(x, SameAsExpected(obs, x.ExpectedTarget) ? NotApplied : Superseded);
             case ActionKind.Move:
-                return await ResolveMoveAsync(x, obs, target, ct, preserved, isStateDamage: isStateDamage).ConfigureAwait(false);
+                return await ResolveVerifiedMoveAsync(x, obs, target, source, ct, preserved, isStateDamage).ConfigureAwait(false);
             case ActionKind.Delete:
                 // Typed expired/invalid job + elapsed grace ends verify-only waiting, not deletion
                 // authority. Without a trusted original identity retain history and park a user review.

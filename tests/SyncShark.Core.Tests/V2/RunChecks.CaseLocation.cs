@@ -45,9 +45,42 @@ internal static partial class RunChecks
         }
         await FolderSpellingChoicesAsync();
         await NonCaseFolderChoiceRefusedAsync();
+        await StaleFolderIdentityRefusedAsync();
         await AncestorOnlyCaseLocationAsync();
         await AncestorDriftEditColdReopenAsync();
         Console.WriteLine("PASS CaseLocation: known and unknown content through SQLite and SyncRun");
+    }
+
+    private static async Task StaleFolderIdentityRefusedAsync()
+    {
+        foreach (var winner in new[] { Side.A, Side.B })
+        {
+            var fx = Build();
+            fx.A.Seed("Parent", "", ItemKind.Folder);
+            var run = fx.Run();
+            await FirstSyncAsync(run, fx);
+            await fx.A.MoveAsync(new("rename-a", 25, ActionKind.Move, Side.A, "PARENT", "Parent", null, null, false, null), default);
+            await fx.B.MoveAsync(new("rename-b", 25, ActionKind.Move, Side.B, "parent", "Parent", null, null, false, null), default);
+            await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            var notice = fx.Store.OpenNotices(fx.Pair.PairId).Single(n => n.Rule == 20);
+            var snapshot = (await run.ObserveDecisionsAsync(fx.Pair.PairId, [(notice.NoticeId!, notice.Path)], default)).Single();
+            var loser = winner == Side.A ? fx.B : fx.A;
+            var path = winner == Side.A ? "parent" : "PARENT";
+            await loser.MoveAsync(new("retain-original", 25, ActionKind.Move, winner == Side.A ? Side.B : Side.A,
+                "Retained", path, null, null, false, null), default);
+            var replacement = loser.Seed(path, "", ItemKind.Folder);
+            var calls = fx.WriterA.Calls + fx.WriterB.Calls;
+            var refused = false;
+            try { await run.ResolveDecisionAsync(fx.Pair.PairId, notice.Path, snapshot.Token, winner, new RecordingProgress(), default); }
+            catch (SyncRunRefusedException error) { refused = error.Message.Contains("identity or exact spelling changed", StringComparison.Ordinal); }
+            Require(refused && fx.WriterA.Calls + fx.WriterB.Calls == calls &&
+                (await loser.ObserveAsync(path, default))?.ObjectId == replacement.ObjectId &&
+                await loser.ObserveAsync("Retained", default) is not null,
+                "stale folder identity cannot transfer spelling authority onto a replacement");
+            Require(fx.Store.OpenNotices(fx.Pair.PairId).Any(n => n.ReasonKey == "stale-spelling") &&
+                !fx.Store.OpenNotices(fx.Pair.PairId).Any(n => n.NoticeId == notice.NoticeId),
+                "obsolete identity authority is replaced by a visible refresh notice");
+        }
     }
 
     private static async Task NonCaseFolderChoiceRefusedAsync()

@@ -14,7 +14,7 @@ public sealed partial class SyncRun
     // Folder decisions remain refused without subtree evidence (B-172), except an identity-bound
     // case-only spelling choice: it moves one folder and never authorizes descendant effects.
     private const string DecisionFolderNotResolvable =
-        "folder decisions can't be resolved yet — decide the files inside, or use a per-path choice";
+        "folder decisions can't be resolved yet â€” decide the files inside, or use a per-path choice";
 
     /// <summary>The reason a resolved decision could not be applied; the CLI surfaces it with the run result.</summary>
     internal const string DecisionNotApplied = "decision could not be applied";
@@ -81,21 +81,7 @@ public sealed partial class SyncRun
             }
             if (caseChoice && !CaseChoiceStillCurrent(pairId, notice, observedA, observedB))
             {
-                const string stale = "The folder or file identity or exact spelling changed since this notice was raised. Refresh the decision; nothing was changed.";
-                var refreshed = notice with { NoticeId = null, Detail = stale, ConflictOperation = null };
-                if (observedA is not null && observedB is not null &&
-                    observedA.ObjectId == notice.ConflictVersions!.Base!.A.ObjectId &&
-                    observedB.ObjectId == notice.ConflictVersions.Base.B.ObjectId &&
-                    DropboxNameMapping.SamePlace(observedA, observedB) &&
-                    !PairPath.SameLeafLocation(DropboxNameMapping.MatchPath(observedA), DropboxNameMapping.MatchPath(observedB)))
-                    refreshed = refreshed with { ConflictVersions = notice.ConflictVersions with { A = observedA, B = observedB } };
-                else
-                    // Retire obsolete authority and release the row to ordinary planning, never transfer
-                    // the old identity's choice onto its replacement or keep an impossible choice open.
-                    refreshed = refreshed with { Kind = NoticeKind.Info, ReasonKey = "stale-spelling", ConflictVersions = null };
-                WriteNotices([refreshed]);
-                _store.CloseNotice(noticeId, "stale-spelling");
-                throw new SyncRunRefusedException(stale);
+                RefreshStaleSpellingNotice(notice, observedA, observedB);
             }
             if (!caseChoice && (observedA?.Kind == ItemKind.Folder || observedB?.Kind == ItemKind.Folder))
                 throw new SyncRunRefusedException(DecisionFolderNotResolvable);
@@ -107,17 +93,7 @@ public sealed partial class SyncRun
                 new Dictionary<string, Side>(StringComparer.OrdinalIgnoreCase) { [notice.Path] = winner },
                 notice.NoticeId, sink, token);
             if (caseChoice)
-            {
-                var afterA = await ObserveAsync(_endpoints.Writer(pair.A), observedA!.Path, token).ConfigureAwait(false);
-                var afterB = await ObserveAsync(_endpoints.Writer(pair.B), observedB!.Path, token).ConfigureAwait(false);
-                var chosen = DropboxNameMapping.MatchPath(winner == Side.A ? observedA : observedB!);
-                if (afterA is not null && afterB is not null &&
-                    afterA.ObjectId == observedA.ObjectId && afterB.ObjectId == observedB.ObjectId &&
-                    PairPath.SameLeafLocation(DropboxNameMapping.MatchPath(afterA), chosen) &&
-                    PairPath.SameLeafLocation(DropboxNameMapping.MatchPath(afterB), chosen) &&
-                    !_store.UnresolvedIntents(pairId).Any(action => PairPath.IsSelfOrUnder(action.Path, notice.Path)))
-                    _store.CloseNotice(noticeId, winner == Side.A ? "A" : "B");
-            }
+                await CloseProvedSpellingChoiceAsync(pair, notice, observedA!, observedB!, winner, token).ConfigureAwait(false);
             // The notice closes only on evidence, so a still-open one means the decision did not take effect.
             if (!_store.UnresolvedNotices(pairId).Any(open => open.NoticeId == notice.NoticeId)) return report;
             var (refusedA, refusedB) = ProviderRefusedPaths.Load(_store, pair);
@@ -134,6 +110,60 @@ public sealed partial class SyncRun
                 Failed = report.Failed + 1
             };
         }, ct, admissionPairId: pairId);
+
+    private async Task CloseProvedSpellingChoiceAsync(PairDef pair, Notice notice, ItemState a, ItemState b,
+        Side winner, CancellationToken ct)
+    {
+        var afterA = await ObserveAsync(_endpoints.Writer(pair.A), a.Path, ct).ConfigureAwait(false);
+        var afterB = await ObserveAsync(_endpoints.Writer(pair.B), b.Path, ct).ConfigureAwait(false);
+        var chosen = DropboxNameMapping.MatchPath(winner == Side.A ? a : b);
+        if (afterA is not null && afterB is not null && afterA.ObjectId == a.ObjectId && afterB.ObjectId == b.ObjectId &&
+            PairPath.SameLeafLocation(DropboxNameMapping.MatchPath(afterA), chosen) &&
+            PairPath.SameLeafLocation(DropboxNameMapping.MatchPath(afterB), chosen) &&
+            !_store.UnresolvedIntents(pair.PairId).Any(action => PairPath.IsSelfOrUnder(action.Path, notice.Path)))
+            _store.CloseNotice(notice.NoticeId!, winner == Side.A ? "A" : "B");
+    }
+
+    private static async Task<bool> ConflictRetryCurrentAsync(SyncAction action,
+        IEndpointWriter a, IEndpointWriter b, CancellationToken ct)
+    {
+        if (action.ExpectedTarget is { Kind: ItemKind.Folder } folder &&
+            await (action.Target == Side.A ? a : b).ObserveAsync(folder.Path, ct).ConfigureAwait(false) is { } now &&
+            now.ObjectId != folder.ObjectId) return false;
+        return await FolderSpellingRetryCurrentAsync(action, a, b, ct).ConfigureAwait(false);
+    }
+
+    private static async Task<bool> FolderSpellingRetryCurrentAsync(SyncAction action,
+        IEndpointWriter a, IEndpointWriter b, CancellationToken ct)
+    {
+        if (action is not { Kind: ActionKind.Move, Source.Kind: ItemKind.Folder,
+            ExpectedTarget.Kind: ItemKind.Folder, FromPath: not null } move ||
+            !PairPath.Same(move.Path, move.FromPath)) return true;
+        var source = await (move.Target == Side.A ? b : a).ObserveAsync(move.Source.Path, ct).ConfigureAwait(false);
+        var target = await (move.Target == Side.A ? a : b).ObserveAsync(move.FromPath, ct).ConfigureAwait(false);
+        return source?.ObjectId == move.Source.ObjectId && source.Path == move.Source.Path &&
+            target?.ObjectId == move.ExpectedTarget.ObjectId && target.Path == move.ExpectedTarget.Path;
+    }
+
+    private void RefreshStaleSpellingNotice(Notice notice, ItemState? observedA, ItemState? observedB)
+    {
+        var noticeId = notice.NoticeId!;
+        const string stale = "The folder or file identity or exact spelling changed since this notice was raised. Refresh the decision; nothing was changed.";
+        var refreshed = notice with { NoticeId = null, Detail = stale, ConflictOperation = null };
+        if (observedA is not null && observedB is not null &&
+            observedA.ObjectId == notice.ConflictVersions!.Base!.A.ObjectId &&
+            observedB.ObjectId == notice.ConflictVersions.Base.B.ObjectId &&
+            DropboxNameMapping.SamePlace(observedA, observedB) &&
+            !PairPath.SameLeafLocation(DropboxNameMapping.MatchPath(observedA), DropboxNameMapping.MatchPath(observedB)))
+            refreshed = refreshed with { ConflictVersions = notice.ConflictVersions with { A = observedA, B = observedB } };
+        else
+            // Retire obsolete authority and release the row to ordinary planning, never transfer
+            // the old identity's choice onto its replacement or keep an impossible choice open.
+            refreshed = refreshed with { Kind = NoticeKind.Info, ReasonKey = "stale-spelling", ConflictVersions = null };
+        WriteNotices([refreshed]);
+        _store.CloseNotice(noticeId, "stale-spelling");
+        throw new SyncRunRefusedException(stale);
+    }
 
     private async Task<RunReport> ApplyFolderSpellingChoiceAsync(PairDef pair, Notice notice,
         ItemState a, ItemState b, Side winner, CancellationToken ct)

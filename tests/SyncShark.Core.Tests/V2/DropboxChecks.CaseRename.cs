@@ -89,10 +89,15 @@ internal static partial class DropboxChecks
         await CaseSensitiveFolderOccupancyAsync(local, writer);
         var conflict = Planner.Decide(pair.PairId, 4,
             [new PlanRow(conflictBase, changedLocal, newerRemote, new Evidence(false, false, false, false))], options);
-        Require(conflict.Actions.Single().Kind == ActionKind.Move && conflict.Actions.Single().Target == Side.A &&
-            conflict.Notices.Single().Kind == NoticeKind.AutoConflict,
-            "both-sided case conflict chooses newer metadata under the existing conflict notice");
-        await foreach (var result in executor.ApplyAsync(conflict, writer, remote, CancellationToken.None))
+        Require(conflict.Actions.Single().Kind == ActionKind.Hold &&
+            conflict.Notices.Single().Kind == NoticeKind.UserDecision,
+            "both baseline-relative renames require a choice even with different metadata times");
+        var chosen = Planner.Decide(pair.PairId, 5,
+            [new PlanRow(conflictBase, changedLocal, newerRemote, new Evidence(false, false, false, false))],
+            options with { Winners = new Dictionary<string, Side?> { [changedLocal.Path] = Side.B } });
+        Require(chosen.Actions.Single().Kind == ActionKind.Move && chosen.Actions.Single().Target == Side.A,
+            "explicit case choice emits one Move toward the selected spelling");
+        await foreach (var result in executor.ApplyAsync(chosen, writer, remote, CancellationToken.None))
             Require(result.Outcome == Outcome.Done, "case conflict converges without delete or create");
     }
 
