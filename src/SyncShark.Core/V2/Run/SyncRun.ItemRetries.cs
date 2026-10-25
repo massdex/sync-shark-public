@@ -61,11 +61,11 @@ public sealed partial class SyncRun
             var refused = (a?.Flags.HasFlag(ItemFlags.ProviderNameRefused) ?? false) ||
                 (b?.Flags.HasFlag(ItemFlags.ProviderNameRefused) ?? false);
             var absent = scanComplete && a is null && b is null && !uncertain.Contains(item.Path);
-            var equal = evaluated(item.Path) && !uncertain.Contains(item.Path) &&
-                (a is not null && b is not null && Content.SameContent(a, b) == true ||
-                 !remaining.Contains(item.Path) && UnchangedRetryBaseline(pair, item.Path,
-                     candidate => !leftAlone.Covers(candidate) && includes.A(candidate) && includes.B(candidate) &&
-                         !uncertain.Contains(candidate) && !remaining.Contains(candidate) && !decisions.Contains(candidate)));
+            var equal = evaluated(item.Path) && !uncertain.Contains(item.Path) && !remaining.Contains(item.Path) &&
+                (UnchangedRetryBaseline(pair, item.Path,
+                    candidate => !leftAlone.Covers(candidate) && includes.A(candidate) && includes.B(candidate) &&
+                        !uncertain.Contains(candidate) && !remaining.Contains(candidate) && !decisions.Contains(candidate))
+                    ?? (a is not null && b is not null && Content.SameContent(a, b) == true));
             if (item.Held is not null)
                 RunLog.Trace($"Held retry completion evidence: path={item.Path}; kind={item.Kind}; reprobe={item.ReprobeEvidence}; due={item.RetryAfter:O}; current={_store.SyncRetryAt(pair.PairId, item.Path)?.Kind}; remaining={remaining.Contains(item.Path)}; pending={pending.Contains(item.Path, StringComparer.OrdinalIgnoreCase)}; settled={settled.Contains(item.Path)}; equal={equal}; evaluated={evaluated(item.Path)}; absent={absent}; decision={decisions.Contains(item.Path)}; excluded={excluded}; notSynced={notSynced}");
             if (notSynced || decisions.Contains(item.Path) || refused || absent || !remaining.Contains(item.Path) && (settled.Contains(item.Path) || equal ||
@@ -112,24 +112,25 @@ public sealed partial class SyncRun
         .GroupBy(action => action.Path, StringComparer.OrdinalIgnoreCase)
         .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
 
-    // A successful correspondence can have different paths (keep-both successors). Compare
-    // each exact identity with its own baseline, using the planner's metadata/version rule.
-    private bool UnchangedRetryBaseline(PairDef pair, string path, Func<string, bool> unprotected)
+    // Every correspondence must prove live equality or unchanged identities against its successful
+    // baseline. Null means no correspondence exists; the caller retains ordinary path equality.
+    private bool? UnchangedRetryBaseline(PairDef pair, string path, Func<string, bool> unprotected)
     {
+        var found = false;
         foreach (var baseline in _store.BaselinesAt(pair.PairId, Side.A, [path])
             .Concat(_store.BaselinesAt(pair.PairId, Side.B, [path])).DistinctBy(item => item.ObjectKey))
         {
-            if (!unprotected(baseline.A.Path) || !unprotected(baseline.B.Path) ||
-                Content.SameContent(baseline.A, baseline.B) != true) continue;
+            found = true;
+            if (!unprotected(baseline.A.Path) || !unprotected(baseline.B.Path)) return false;
             var a = _store.Live(pair.A.RootId, [baseline.A.Path]).FirstOrDefault();
             var b = _store.Live(pair.B.RootId, [baseline.B.Path]).FirstOrDefault();
-            if (a is null || b is null || a.ObjectId != baseline.A.ObjectId || b.ObjectId != baseline.B.ObjectId ||
-                a.Flags != ItemFlags.None || b.Flags != ItemFlags.None ||
-                !PairPath.SameLeafLocation(a.Path, baseline.A.Path) || !PairPath.SameLeafLocation(b.Path, baseline.B.Path)) continue;
-            if (Content.SameVersion(a, baseline.A) == true && Content.SameVersion(b, baseline.B) == true)
-                return true;
+            if (a is null || b is null || a.Flags != ItemFlags.None || b.Flags != ItemFlags.None) return false;
+            if (Content.SameContent(a, b) == true) continue;
+            if (Content.SameContent(baseline.A, baseline.B) != true ||
+                a.ObjectId != baseline.A.ObjectId || b.ObjectId != baseline.B.ObjectId ||
+                !Planner.Unchanged(a, baseline.A) || !Planner.Unchanged(b, baseline.B)) return false;
         }
-        return false;
+        return found ? true : null;
     }
 
     internal void SaveFailedRetry(PairDef pair, string path, string? reason, SyncRetry? old,

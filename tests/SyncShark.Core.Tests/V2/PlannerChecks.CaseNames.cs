@@ -5,6 +5,7 @@ internal static partial class PlannerChecks
     private static void CaseEquivalentMoves_AdoptOrUpdate()
     {
         AncestorDrift_OneSidedEdit();
+        AncestorDrift_DeletionAndReplacement();
         foreach (var changed in new[] { Side.A, Side.B })
         foreach (var exact in new[] { false, true })
         foreach (var folder in new[] { false, true })
@@ -40,6 +41,31 @@ internal static partial class PlannerChecks
                 a, b with { Hash = "h2" }));
             Require(divergent.Actions.Count == 1 && divergent.Actions.Single() is { Kind: ActionKind.Hold, Rule: 29 },
                 "unchanged divergent baseline content requires a decision, never an arbitrary spelling winner");
+        }
+    }
+
+    private static void AncestorDrift_DeletionAndReplacement()
+    {
+        foreach (var survivor in new[] { Side.A, Side.B })
+        {
+            var a = F("Parent/capsules/work/item.json", "a", "same");
+            var b = F(a.Path, "b", "same");
+            var baseline = Base("drift-delete", a, b);
+            var current = (survivor == Side.A ? a : b) with { Path = "Parent/Capsules/work/item.json" };
+            var row = Row(baseline, survivor == Side.A ? current : null, survivor == Side.B ? current : null,
+                Ev(A: survivor == Side.B, B: survivor == Side.A));
+            var plan = Planner.Decide(PairId, Gen, [row], Opt() with { ProviderA = SyncProviders.Local, ProviderB = SyncProviders.Local });
+            Require(plan.Actions.Count == 1 && plan.Actions.Single() is { Kind: ActionKind.Delete, Rule: 6, RecoveryFirst: true } deletion &&
+                deletion.Target == survivor && deletion.ExpectedTarget == current,
+                "ancestor drift does not defeat evidenced deletion; both mirrors preserve the victim first");
+            var unknown = Decide(row with { Ev = new Evidence(false, false, false, false) });
+            Require(!unknown.Actions.Any(action => action.Kind == ActionKind.Delete), "unknown absence never authorizes a drifted survivor deletion");
+            var replacement = D(a.Path, "replacement");
+            var replaced = Decide(Row(baseline, survivor == Side.A ? current : replacement, survivor == Side.B ? current : replacement));
+            Require(replaced.Actions.Count == 2 && replaced.Actions.All(action => action.Rule == 26 && action.Target == survivor) &&
+                replaced.Actions.Any(action => action.Kind == ActionKind.Delete && action.RecoveryFirst && action.ExpectedTarget == current) &&
+                replaced.Actions.Any(action => action.Kind == ActionKind.MkDir),
+                "replacement against ancestor drift is rule 26 with recovery-first removal, in both directions");
         }
     }
 

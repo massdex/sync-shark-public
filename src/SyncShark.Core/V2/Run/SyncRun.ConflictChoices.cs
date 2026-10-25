@@ -297,6 +297,8 @@ public sealed partial class SyncRun
                 var link = _store.BaselinesAt(pairId, side, [path]).SingleOrDefault(basis =>
                     SameConflictItem(originalSide == Side.A ? basis.A : basis.B, original, originalSide == Side.A ? pair.A : pair.B));
                 if (link is null) return Result(Outcome.Skipped, "A copy's identity link changed. Keep both or refresh before choosing again.");
+                if (notice.Rule == 27)
+                    actions[0] = BindConflictCorrespondence(actions[0], link.ObjectKey, originalSide == (keepA ? Side.A : Side.B));
                 var saved = side == Side.A ? link.A : link.B;
                 var current = await (side == Side.A ? a : b).ObserveAsync(path, token);
                 if (current is null || !SameConflictItem(current, saved, side == Side.A ? pair.A : pair.B))
@@ -322,7 +324,7 @@ public sealed partial class SyncRun
         var b = _endpoints.Writer(pair.B);
         var gen = _store.BeginGeneration(pair.A.RootId, RunKind);
         var completed = operation.Completed.ToHashSet(StringComparer.Ordinal);
-        var remaining = operation.Actions.Where(action => !completed.Contains(action.ActionId)).ToArray();
+        var remaining = operation.ReadyActions();
         var guards = ActionPredicates(pair, LeftAlone(pair));
         foreach (var folder in remaining.Where(FolderDelete.Expands))
             RevokeProtectedCarriedChoice(folder, guards with { IgnoreRules = null });
@@ -354,7 +356,7 @@ public sealed partial class SyncRun
                     return Result(Outcome.Skipped, "A different folder now occupies " + folder.Path + ". Nothing further was removed; earlier removals remain recoverable.");
                 retry.Add(item.Action with { ProviderEffect = null, CallerOwnsNotice = true });
             }
-            else return item.Result;
+            else return RecordConflictChoiceFailure(pair.PairId, noticeId, item.Result);
         }
         void Save()
         {
@@ -371,11 +373,7 @@ public sealed partial class SyncRun
         {
             if (!operation.Actions.Any(original => original.ActionId == retry[index].ActionId && FolderDelete.Expands(original))) continue;
             if (await RemoveFrozenContentsAsync(pair, retry[index], gen, a, b, ct).ConfigureAwait(false) is { } stopped)
-            {
-                if (stopped.Reason is { } reason && _store.NoticeById(pair.PairId, noticeId) is { } saved)
-                    _store.RecordNoticeChoiceFailure(saved.Notice, reason);
-                return stopped;
-            }
+                return RecordConflictChoiceFailure(pair.PairId, noticeId, stopped);
             retry[index] = retry[index] with { DescendantsPlanned = true, ContentsSettled = true, FrozenChoiceId = retry[index].ActionId };
         }
         ActionResult? failure = null;
@@ -393,11 +391,10 @@ public sealed partial class SyncRun
             else if (owned.Contains(result.ActionId)) { completed.Add(result.ActionId); Save(); }
         }
         if (failure is not null)
-        {
-            if (failure.Reason is { } reason && _store.NoticeById(pair.PairId, noticeId) is { } saved)
-                _store.RecordNoticeChoiceFailure(saved.Notice, reason);
-            return failure;
-        }
+            return RecordConflictChoiceFailure(pair.PairId, noticeId, failure);
+        if (!owned.All(completed.Contains) && remaining.All(action => completed.Contains(action.ActionId)))
+            return await ApplyConflictOperationAsync(pair, noticeId,
+                operation with { Completed = completed.ToArray() }, ct).ConfigureAwait(false);
         if (!owned.All(completed.Contains))
             return Result(Outcome.Skipped, "The saved choice is unfinished. Retry the same choice to resume safely.");
         // Decision 88 / owner: a removed occupant is only "replaced" once the incoming item has arrived. Until then

@@ -2,6 +2,13 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SyncRun
 {
+    private ActionResult RecordConflictChoiceFailure(string pairId, string noticeId, ActionResult failure)
+    {
+        if (failure.Reason is { } reason && _store.NoticeById(pairId, noticeId) is { } saved)
+            _store.RecordNoticeChoiceFailure(saved.Notice, reason);
+        return failure;
+    }
+
     // UI and CLI share this boundary; the legacy throwing entry point remains available
     // to internal callers that deliberately handle admission refusal themselves.
     internal async Task<NoticeChoiceResult> ApplyRetryNoticeChoiceResultAsync(

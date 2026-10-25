@@ -24,6 +24,10 @@ public static partial class Planner
         return PathEqual(cur.Path, baseSameSide.Path) ? RowState.Edited : RowState.MovedEdited;
     }
 
+    /// <summary>Whether this side's content and location are unchanged under the planner's classification rules.</summary>
+    internal static bool Unchanged(ItemState current, ItemState baseline) =>
+        ClassifySide(current, baseline, false, true) == RowState.Same;
+
     private static bool PathEqual(string x, string y) => string.Equals(x, y, StringComparison.Ordinal);
 
     private static bool BaselineSpellingChanged(PlanRow row) => row.Base is not null &&

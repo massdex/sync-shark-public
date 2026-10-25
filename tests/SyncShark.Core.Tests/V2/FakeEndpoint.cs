@@ -50,6 +50,9 @@ internal sealed class FakeEndpoint : IInventorySource, IEndpointWriter, ISourceA
     /// <summary>Report files without a content hash from inventory, as the real local scan does; HashAsync has them.</summary>
     public bool InventoryWithoutHashes { get; set; }
 
+    /// <summary>Model LocalWriter's unhashed observations for explicit conflict content-proof checks.</summary>
+    public bool ObserveWithoutHashes { get; set; }
+
     /// <summary>Use the real Dropbox hash when paired with the scripted Dropbox wire.</summary>
     public bool DropboxHashes { get; set; }
 
@@ -223,7 +226,9 @@ internal sealed class FakeEndpoint : IInventorySource, IEndpointWriter, ISourceA
         ct.ThrowIfCancellationRequested();
         lock (_gate)
         {
-            return Task.FromResult(_items.TryGetValue(path, out var entry) ? entry.State : null);
+            return Task.FromResult(_items.TryGetValue(path, out var entry)
+                ? ObserveWithoutHashes && entry.State.Kind == ItemKind.File ? entry.State with { Hash = null } : entry.State
+                : null);
         }
     }
 
