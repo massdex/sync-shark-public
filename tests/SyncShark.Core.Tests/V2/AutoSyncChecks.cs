@@ -284,10 +284,12 @@ internal static partial class AutoSyncChecks
         rig.Run.Then(partial with { Deferred = 139 });
         await rig.StartAsync();
         await rig.ParkedAsync(AutoStatus.Waiting);
-        Require(rig.State("p1").RetryAt - rig.Clock.GetUtcNow() == tuned.MinSafetyPoll &&
+        // The first report has no previous count, so it opens the shared tier: the due item retry is below the
+        // safety floor, and the tier's AutoRetryDelay is later than that floor.
+        Require(rig.State("p1").RetryAt - rig.Clock.GetUtcNow() == Settings.AutoRetryDelay &&
             FailureRetryOwner.DeferredRetryState(rig._store, "p1") is { Attempts: 1 },
-            "a due item retry is clamped to the safety floor while the non-shrinking backlog starts its counter");
-        rig.Clock.Advance(tuned.MinSafetyPoll);
+            "the first non-shrinking deferred report opens the shared tier and its counter");
+        rig.Clock.Advance(Settings.AutoRetryDelay);
         await Until(() => rig.Run.Runs("p1") == 2 && rig.State("p1").RetryAt > rig.Clock.GetUtcNow() &&
             rig.Clock.ActiveTimers == 1, "the non-shrinking backlog retries at its tier");
         var second = rig.State("p1").RetryAt - rig.Clock.GetUtcNow();
