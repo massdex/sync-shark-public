@@ -30,8 +30,9 @@ internal sealed partial class PairLoop
             catch (Exception error) { RunOutput.Observe(error); }
         }
         // SyncRun already recorded a returned report's failure. The host never counts or publishes it twice.
-        if (report.CompletionFailed || report.Outcome == RunOutcomes.Failed || report.FailureCount > 0 || report.Failures.Count > 0 ||
-            report.DeletionEvidencePending.Count > 0) ScheduleRetry();
+        if (report.CompletionFailed || report.Outcome == RunOutcomes.Failed || report.FailureCount > 0 || report.Failures.Count > 0)
+            ScheduleRetry();
+        else if (report.DeletionEvidencePending.Count > 0) ScheduleDeferredRetry(report, previous);
         else if (report.JournalBacklog || DrainedPlanning(report, previous))
         {
             FailureRetryOwner.ResetDeferredRetry(_in.Store, _pairId);
@@ -71,15 +72,18 @@ internal sealed partial class PairLoop
         {
             FailureRetryOwner.ResetDeferredRetry(_in.Store, _pairId);
             _retryAt = deadline;
+            RunLog.Trace($"Deferred retry: progress reset; retryAt={deadline:O}; deferred={report.Deferred}; evidence={report.DeletionEvidencePending.Count}");
             return;
         }
         var state = FailureRetryOwner.Failed(FailureRetryOwner.DeferredRetryState(_in.Store, _pairId)?.Attempts ?? 0, now);
-        FailureRetryOwner.RecordDeferredRetry(_in.Store, _pairId, report.Deferred, state);
+        FailureRetryOwner.RecordDeferredRetry(_in.Store, _pairId, Math.Max(report.Deferred, report.DeletionEvidencePending.Count), state);
         // No earlier than the shared tier and never before an item could actually be due.
         if (state.RetryAfter > deadline) deadline = state.RetryAfter;
         _retryAt = deadline;
+        RunLog.Trace($"Deferred retry: no progress; tier={state.Attempts}; retryAt={deadline:O}; deferred={report.Deferred}; evidence={report.DeletionEvidencePending.Count}");
     }
 
     private static bool Progressed(RunReport report, RunReport? previous) => previous is { } prior &&
-        (report.Deferred < prior.Deferred || report.PlanningBacklog < prior.PlanningBacklog);
+        (report.Deferred < prior.Deferred || report.PlanningBacklog < prior.PlanningBacklog ||
+         report.DeletionEvidencePending.Count < prior.DeletionEvidencePending.Count);
 }

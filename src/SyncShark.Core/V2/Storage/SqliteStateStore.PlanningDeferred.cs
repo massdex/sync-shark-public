@@ -222,6 +222,7 @@ public sealed partial class SqliteStateStore
         var row = entry.Row;
         if (entry.Respell is { } current)
         {
+            RunLog.Trace($"Deferred planning re-spell: pair={pair}; entity={row.ObjectId}; version={row.Version}; from={row.Path}; to={current}");
             // Preserve live work under its current spelling and restart the bounded alias cycle.
             StoreSchema.Execute(_connection, tx, """
                 UPDATE planning_deferred SET path=$path,alias_dir=-1,alias_key='',alias_name='',alias_unsettled=0

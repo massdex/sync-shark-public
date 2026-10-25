@@ -115,6 +115,7 @@ internal sealed partial class PairLoop
         RecordFailure(error);
         try { ScheduleRetry(); }
         catch (Exception retryError) { RunOutput.Observe(retryError); }
+        RunLog.Trace($"Outer worker failure cooldown: retryAt={_retryAt:O}; containment={_in.Settings.MinSafetyPoll}; cause={error.Message}");
         // Never retire a worker because a watch, store read or callback failed.
         DisposeWatches();
         await Task.Delay(_in.Settings.MinSafetyPoll, _in.Time, stop).ConfigureAwait(false);
@@ -170,6 +171,7 @@ internal sealed partial class PairLoop
         // Only deferred backlog admits fresh changes; real failures keep their cooldown. The existing
         // wait consumes latched signals and debounce coalesces them without changing item retry authority.
         var wake = await WaitAsync(_deferredRetry ? _watches : [], retryAt - _in.Time.GetUtcNow(), stop).ConfigureAwait(false);
+        if (wake.Kind == WakeKind.Fault && _deferredRetry) _retryAt = null;
         if (wake.Kind is WakeKind.Kick or WakeKind.Fault) return false;
         _retryAt = null;
         if (wake.Kind == WakeKind.Signal)
@@ -313,6 +315,7 @@ internal sealed partial class PairLoop
 
     private void Hold(Exception error, bool record = true)
     {
+        _deferredRetry = false;
         if (record) RecordFailure(error);
         _held = error switch
         {

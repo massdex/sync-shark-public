@@ -373,7 +373,7 @@ internal sealed class FakeSyncRun : ISyncRun
         else if (report.Outcome is RunOutcomes.Complete or RunOutcomes.Partial)
         {
             // Mirror the completion owner: a deferred backlog keeps its schedule counter on the run notice.
-            if (!FailureRetryOwner.KeepsDeferredNotice(store, report.PairId, report.Deferred))
+            if (!FailureRetryOwner.KeepsDeferredNotice(store, report.PairId, Math.Max(report.Deferred, report.DeletionEvidencePending.Count)))
                 store.CloseNotice(FailureRetryOwner.RunNoticeId(report.PairId), "resolved");
         }
         return report;

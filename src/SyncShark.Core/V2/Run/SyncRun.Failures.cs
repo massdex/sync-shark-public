@@ -140,7 +140,7 @@ public sealed partial class SyncRun
     {
         var completion = new CompletionSteps(this, pairId, ct);
         if (_store is SqliteStateStore sql) completion.Step(sql.RetryResultMaintenance);
-        if (completion.Step(() => CloseUnavailable(pairId, report.Deferred)) && report.IncludesRetryDebt)
+        if (completion.Step(() => CloseUnavailable(pairId, Math.Max(report.Deferred, report.DeletionEvidencePending.Count))) && report.IncludesRetryDebt)
             completion.Step(() => report = report with { Deferred = _store.CountSyncRetries(pairId) });
         return completion.Finish(report);
     }
