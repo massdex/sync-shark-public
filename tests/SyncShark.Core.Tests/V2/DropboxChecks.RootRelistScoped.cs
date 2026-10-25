@@ -82,7 +82,7 @@ internal static partial class DropboxChecks
             RootDebtSettles = result.RootSettles };
         var record = typeof(SyncRun).GetMethod("RecordScanRetries", BindingFlags.Instance | BindingFlags.NonPublic)
             ?? throw new InvalidOperationException("Missing scan retry owner.");
-        record.Invoke(run, [pair, new SyncRun.BothScan(clean, cloud), null]);
+        record.Invoke(run, [pair, new SyncRun.BothScan(clean, cloud)]);
         Require(store.SyncRetryAt(pair.PairId, string.Empty) is null &&
             store.SyncRetryAt(pair.PairId, poison.Path)?.LastError == DropboxPathIdentity.MalformedReason,
             "root retry retires while exact per-item retry remains durable");

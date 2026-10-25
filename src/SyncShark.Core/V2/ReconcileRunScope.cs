@@ -14,12 +14,4 @@ internal sealed class ReconcileRunScope : IDisposable
     internal HashSet<string> MissingAnchors { get; } = new(StringComparer.Ordinal);
     internal ReconcileRunScope() => Ambient.Value = this;
     public void Dispose() => Ambient.Value = _previous;
-
-    internal static void LogExpansion(IReadOnlyList<SyncAction> requested, IEnumerable<SyncAction> expanded)
-    {
-        var requestedPaths = requested.Select(action => action.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var extraPaths = expanded.Select(action => action.Path).Distinct(StringComparer.OrdinalIgnoreCase)
-            .Count(path => !requestedPaths.Contains(path));
-        if (extraPaths > 0) RunTrace.Emit($"recovery group expanded: {extraPaths} extra paths");
-    }
 }

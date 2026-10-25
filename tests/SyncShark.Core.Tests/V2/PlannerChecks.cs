@@ -56,7 +56,6 @@ internal static partial class PlannerChecks
         Rule19_OneSideOnlyOtherDeleted();
         Rule19b_LaterDeletionWins();
         CreationObservationNeverDeletes();
-        UnknownCoverage();
         Rule20_CaseOnlyRename();
         CaseEquivalentMoves_AdoptOrUpdate();
         CaseEquivalentChildren_OnlyTopmostFolderNotices();

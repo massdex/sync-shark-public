@@ -63,7 +63,8 @@ internal static class JournalLookupChecks
     {
         using var db = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Path.Combine(folder, "v2", "state.db") }.ToString());
         db.Open();
-        foreach (var sql in new[] { FileStateReader.ByObjectSql, SqliteStateStore.JournalMultipleNamesSql })
+        foreach (var sql in new[] { FileStateReader.ByObjectSql, SqliteStateStore.JournalMultipleNamesSql,
+            SqliteStateStore.AcknowledgeRehashIdentitySql })
         {
             using var cmd = StoreSchema.Command(db, null, "EXPLAIN QUERY PLAN " + sql);
             cmd.Parameters.AddWithValue("$r", 1); cmd.Parameters.AddWithValue("$o", Id(4));

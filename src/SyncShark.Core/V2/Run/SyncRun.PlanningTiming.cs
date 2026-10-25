@@ -46,11 +46,7 @@ public sealed partial class SyncRun
         // This retires scheduling, never content proof, baselines or independent reviewed authority.
         // The queue owner still checks versions and requires a complete successful alias cycle.
         if (_endpoints is not PlanOnlyEndpoints && excluded.Length > 0)
-        {
-            var retired = 0;
-            store.AcknowledgeDeferredPlanning(pair.PairId, excluded, notSynced, acknowledged: _ => retired++);
-            RunLog.Trace($"Planning intake retired {retired} non-work entities from {excluded.Length} candidates.");
-        }
+            store.AcknowledgeDeferredPlanning(pair.PairId, excluded, notSynced);
         return page.Except(excluded).ToArray();
     }
 }

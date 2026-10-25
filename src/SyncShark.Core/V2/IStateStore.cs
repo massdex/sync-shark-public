@@ -202,7 +202,7 @@ public partial interface IStateStore : IDisposable
     /// <summary>Captures the retry pass boundary; zero means this root has no pending pass.</summary>
     long RehashWatermark(string rootId);
     /// <summary>Acknowledge verified queue obligations only after all their current aliases were settled.</summary>
-    void AcknowledgeRehash(string rootId, long through, Func<string, bool> settled, CancellationToken ct = default, IReadOnlyCollection<string>? objectIds = null);
+    void AcknowledgeRehash(string rootId, long through, Func<string, bool> settled, CancellationToken ct = default);
     IReadOnlyList<ItemState> RehashCandidates(string rootId, int limit, long through);
     IReadOnlyList<string> ObjectPaths(string rootId, string objectId, int offset, int limit) =>
         Live(rootId).Where(item => item.ObjectId == objectId).Select(item => item.Path).Skip(offset).Take(limit).ToArray();

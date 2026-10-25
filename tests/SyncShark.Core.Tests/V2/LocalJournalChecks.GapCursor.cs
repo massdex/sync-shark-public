@@ -91,24 +91,6 @@ internal static partial class LocalJournalChecks
             gaps.BeginGap(root.RootId, "0000000000000001:400", 200, true);
             LocalChecks.Require(gaps.GapEpoch(root.RootId)!.Epoch != epochId && gaps.GapEpoch(root.RootId)!.Boundary == 200,
                 "genuinely later overflow after discharge starts a new proof boundary");
-            CheckReconciliationEpochCompletion(store, root.RootId, epochId);
         }
-    }
-
-    private static void CheckReconciliationEpochCompletion(SqliteStateStore store, string rootId, string priorEpoch)
-    {
-        var gaps = (ILocalGapStore)store;
-        var current = gaps.GapEpoch(rootId)!;
-        var cursor = store.Cursor(rootId);
-        store.CompleteGapInventory(rootId, priorEpoch);
-        LocalChecks.Require(store.GapInventoryPending(rootId),
-            "stale reconciliation completion preserves the newer inventory obligation");
-        store.CompleteGapInventory("missing-root", current.Epoch);
-        LocalChecks.Require(store.GapInventoryPending(rootId),
-            "completion for another root cannot settle the inventory obligation");
-        store.CompleteGapInventory(rootId, current.Epoch);
-        LocalChecks.Require(!store.GapInventoryPending(rootId) && gaps.GapEpoch(rootId) == current &&
-            store.Cursor(rootId) == cursor,
-            "exact reconciliation completion clears only its inventory marker, preserving epoch and cursor");
     }
 }

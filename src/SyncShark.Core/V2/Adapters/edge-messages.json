@@ -1,10 +1,5 @@
 {
   "templates": {
-    "reconciliation-active": "Reconciliation is already active for this pair.",
-    "reconciliation-staging-required": "Reconciliation requires persistent staging.",
-    "reconciliation-excluded": "excluded: existing sync boundary",
-    "reconciliation-settled": "settled: verified no-op",
-    "reconciliation-unsettled": "The selected path was not settled by the admitted plan. Its read or planning protection remains unresolved." ,
     "command": "{what} is not in core v2 yet. The legacy compatibility engine requires explicit --core v1 and uses separate legacy state.",
     "notice": "{what} is not in core v2 yet."
   },

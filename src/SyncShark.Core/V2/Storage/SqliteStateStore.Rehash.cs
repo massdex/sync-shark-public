@@ -1,4 +1,4 @@
-namespace Massdex.SyncShark.V2;
+﻿namespace Massdex.SyncShark.V2;
 
 public sealed partial class SqliteStateStore
 {
@@ -29,7 +29,7 @@ public sealed partial class SqliteStateStore
         var root = RootNo(rootId);
         if (root is null || limit <= 0) return Array.Empty<string>();
         using var cmd = StoreSchema.Command(_connection, null,
-            "SELECT d.path,f.name FROM file_state f JOIN dir d ON d.dir_no=f.dir_no " +
+            "SELECT d.path,f.name FROM file_state f INDEXED BY fs_obj JOIN dir d ON d.dir_no=f.dir_no " +
             "WHERE f.root_no=$r AND f.object_id=$o ORDER BY f.dir_no,f.name_key,f.name LIMIT $n OFFSET $skip;");
         cmd.Parameters.AddWithValue("$r", root.Value); cmd.Parameters.AddWithValue("$o", objectId);
         cmd.Parameters.AddWithValue("$n", limit); cmd.Parameters.AddWithValue("$skip", offset);
@@ -51,7 +51,7 @@ public sealed partial class SqliteStateStore
     public bool HasPendingRehashVerification(string rootId) => InStore(() =>
         StoreSchema.Scalar(_connection, null,
             "SELECT 1 FROM local_rehash q WHERE q.root_no=(SELECT root_no FROM root WHERE root_id=$id) AND " + NotGapOwnedSql + " AND " +
-            "EXISTS(SELECT 1 FROM file_state f WHERE f.root_no=q.root_no AND f.object_id=q.object_id AND " +
+            "EXISTS(SELECT 1 FROM file_state f INDEXED BY fs_obj WHERE f.root_no=q.root_no AND f.object_id=q.object_id AND " +
             VerificationNeededSql + " AND " + VerificationEligibleSql + ") LIMIT 1;", ("$id", rootId)) is not null);
 
     public void RequireRehash(string rootId, ItemState item, string reason) => RequireRehashBatch(rootId, [item], reason);
@@ -80,7 +80,7 @@ public sealed partial class SqliteStateStore
             "ON CONFLICT(root_no,object_id) DO UPDATE SET last_attempt=excluded.last_attempt,reason=excluded.reason,evidence_revision=excluded.evidence_revision;",
             ("$r", root), ("$o", item.ObjectId), ("$why", reason), ("$order", NextRehashOrder(root, tx)));
         StoreSchema.Execute(_connection, tx,
-            "UPDATE file_state SET flags=flags | 256,hash=NULL WHERE root_no=$r AND object_id=$o;",
+            "UPDATE file_state INDEXED BY fs_obj SET flags=flags | 256,hash=NULL WHERE root_no=$r AND object_id=$o;",
             ("$r", root), ("$o", item.ObjectId));
     }
 
@@ -109,7 +109,7 @@ public sealed partial class SqliteStateStore
             "SELECT 1 FROM file_state f WHERE f.root_no=$r AND (f.flags & 256)!=0 AND " +
             "f.dir_no IN (SELECT dir_no FROM dir WHERE path_key=$k OR (path_key >= $lo AND path_key < $hi)) LIMIT 1;",
             ("$r", root.Value), ("$k", key), ("$lo", key.Length == 0 ? "" : key + "/"),
-            ("$hi", key.Length == 0 ? "ï¿¿" : key + "0")) is not null;
+            ("$hi", key.Length == 0 ? "￿" : key + "0")) is not null;
     });
 
     public IReadOnlyList<string> RehashReasons(string rootId, int limit) => InStore(() =>
@@ -117,7 +117,7 @@ public sealed partial class SqliteStateStore
         var root = RootNo(rootId);
         if (root is null || limit <= 0) return Array.Empty<string>();
         using var cmd = StoreSchema.Command(_connection, null,
-            "SELECT d.path,f.name,q.reason FROM local_rehash q CROSS JOIN file_state f JOIN dir d ON d.dir_no=f.dir_no " +
+            "SELECT d.path,f.name,q.reason FROM local_rehash q CROSS JOIN file_state f INDEXED BY fs_obj JOIN dir d ON d.dir_no=f.dir_no " +
             "WHERE q.root_no=$r AND f.root_no=q.root_no AND f.object_id=q.object_id AND (f.flags & 256)!=0 LIMIT $limit;");
         cmd.Parameters.AddWithValue("$r", root.Value); cmd.Parameters.AddWithValue("$limit", limit);
         var result = new List<string>();
@@ -126,14 +126,28 @@ public sealed partial class SqliteStateStore
         return result.ToArray();
     });
 
-    public void AcknowledgeRehash(string rootId, long through, Func<string, bool> settled, CancellationToken ct = default, IReadOnlyCollection<string>? objectIds = null)
+    internal const string AcknowledgeRehashIdentitySql =
+        "SELECT d.path,f.name,f.flags,f.hash FROM file_state f INDEXED BY fs_obj JOIN dir d ON d.dir_no=f.dir_no WHERE f.root_no=$r AND f.object_id=$o;";
+
+    public void AcknowledgeRehash(string rootId, long through, Func<string, bool> settled, CancellationToken ct = default)
     {
         using var admission = FairStoreGate.WithCancellation(ct);
         var after = "";
         while (true)
         {
             ct.ThrowIfCancellationRequested();
-            var page = ReadRehashAcknowledgementPage(rootId, through, after, objectIds);
+            var page = InStore(() =>
+            {
+                var root = RootNo(rootId);
+                if (root is null) return Array.Empty<string>();
+                using var cmd = StoreSchema.Command(_connection, null,
+                    "SELECT object_id FROM local_rehash WHERE root_no=$r AND object_id>$after AND last_attempt<=$through ORDER BY object_id LIMIT 128;");
+                cmd.Parameters.AddWithValue("$r", root.Value); cmd.Parameters.AddWithValue("$after", after);
+                cmd.Parameters.AddWithValue("$through", through);
+                var ids = new List<string>(); using var reader = cmd.ExecuteReader();
+                while (reader.Read()) ids.Add(reader.GetString(0));
+                return ids.ToArray();
+            });
             if (page.Length == 0) return;
             InStore(() =>
             {
@@ -144,8 +158,7 @@ public sealed partial class SqliteStateStore
                 {
                     ct.ThrowIfCancellationRequested();
                     var any = false; var all = true;
-                    using (var cmd = StoreSchema.Command(_connection, tx,
-                        RehashAcknowledgementAliasesSql))
+                    using (var cmd = StoreSchema.Command(_connection, tx, AcknowledgeRehashIdentitySql))
                     {
                         cmd.Parameters.AddWithValue("$r", root.Value); cmd.Parameters.AddWithValue("$o", id);
                         using var reader = cmd.ExecuteReader();

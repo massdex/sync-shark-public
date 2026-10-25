@@ -104,8 +104,8 @@ public static partial class Planner
         var isDeletedB = b is null && DeletedAt(deletedB, pathB, out atB);
         return new Evidence(isDeletedA, isDeletedB, Covered(c, Side.A, pathA), Covered(c, Side.B, pathB), atA, atB)
         {
-            CreationObservedA = c.Unknown?.Invoke(Side.A, pathA) != true && c.ExactA.Contains(pathA) && PairPath.Observed(pathA, c.IncompleteA),
-            CreationObservedB = c.Unknown?.Invoke(Side.B, pathB) != true && c.ExactB.Contains(pathB) && PairPath.Observed(pathB, c.IncompleteB)
+            CreationObservedA = c.ExactA.Contains(pathA) && PairPath.Observed(pathA, c.IncompleteA),
+            CreationObservedB = c.ExactB.Contains(pathB) && PairPath.Observed(pathB, c.IncompleteB)
         };
     }
 
@@ -190,7 +190,6 @@ public static partial class Planner
     /// <summary>True when a complete inventory covers the path (no incomplete subtree above it; an empty one covers all).</summary>
     private sealed class JoinCoverage(Completeness completeness)
     {
-        public readonly Func<Side, string, bool>? Unknown = completeness.Unknown;
         public readonly bool CompleteA = completeness.CompleteA;
         public readonly bool CompleteB = completeness.CompleteB;
         public readonly IReadOnlySet<string> ExactA = completeness.ExactCreationObservedA;
@@ -201,7 +200,6 @@ public static partial class Planner
 
     private static bool Covered(JoinCoverage c, Side side, string path)
     {
-        if (c.Unknown?.Invoke(side, path) == true) return false;
         if (!(side == Side.A ? c.CompleteA : c.CompleteB)) return false;
         var incomplete = side == Side.A ? c.IncompleteA : c.IncompleteB;
         return PairPath.Observed(path, incomplete);

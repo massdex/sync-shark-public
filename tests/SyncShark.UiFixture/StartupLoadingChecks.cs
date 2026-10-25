@@ -319,11 +319,20 @@ internal static class StartupLoadingChecks
             Pump((Task)typeof(MainWindow).GetMethod("OfferStartupRepairAsync", flags)!.Invoke(window, null)!);
             Pump(window.AuthorityHost.Authority.RegisterObjectAsync("object-repair-pending", "directory"));
             var fixtureAdmission = window.AuthorityHost.Authority.CreateAcceptedCommandAdmissionAsync(null, "reconcile", "pair-startup-repair", null, null, "{}", SyncAuthorityCommandPurpose.NormalEffect).GetAwaiter().GetResult();
+            // A fresh action must carry exact current planning authority for its object; seed the
+            // same object-scoped cut the production planner binds, on this pair's registered roots.
+            var repairPlanningAuthority = FixturePlanningAuthority.CurrentAsync(window.AuthorityHost.Authority,
+                "pair-startup-repair", "root-repair-local", "root-repair-cloud", "object-repair-pending").GetAwaiter().GetResult();
+            // An absent-destination action also needs its own fresh registration ticket; a bare
+            // retained operation id is not an insertion grant.
+            var repairRegistration = window.AuthorityHost.Authority.ReserveActionAsync(
+                "idempotency-repair-pending", fixtureAdmission).GetAwaiter().GetResult();
             Pump(window.AuthorityHost.Authority.CreateOperationAsync(new SyncAuthorityOperationPlan(
-                "operation-repair-pending", "idempotency-repair-pending", SyncAuthorityOperationKind.Reconcile,
-                "pair-startup-repair", "object-repair-pending", 2, profileId, "{}", 1,
+                repairRegistration.OperationId, "idempotency-repair-pending", SyncAuthorityOperationKind.Reconcile,
+                "pair-startup-repair", "object-repair-pending", repairPlanningAuthority.ConfigurationRevision, profileId, "{}", 1,
                 [new SyncAuthorityMember("member-repair-pending", "pair-startup-repair", "object-repair-pending",
-                    "affected", "root-repair-local", null, null, null, "repair.txt", "{}")], [], []), fixtureAdmission));
+                    "affected", "root-repair-local", null, null, null, "repair.txt", "{}")], [], [],
+                PlanningAuthorities: [repairPlanningAuthority]), fixtureAdmission, reservation: repairRegistration.Reservation));
             MainWindow.StartupRepairConfirmationForTest = () => true;
             try { repair.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); }
             finally { MainWindow.StartupRepairConfirmationForTest = null; }

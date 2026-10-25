@@ -35,29 +35,6 @@ internal static partial class RunChecks
                 store.CloseNotice(notice.NoticeId!, "resolved");
         }
         await IndexFailureCapAsync(store, fx);
-        await IntakeRetirementIsLoggedAsync();
-    }
-
-    private static async Task IntakeRetirementIsLoggedAsync()
-    {
-        var folder = FixtureFolder("intake-retirement");
-        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
-        var fx = Build(suppliedStore: store);
-        var item = fx.A.Seed("Excluded/file.txt", "retained");
-        var gen = store.BeginGeneration(fx.Pair.A.RootId, "full");
-        store.WriteSnapshot(await fx.A.FullAsync(gen, _ => true, SilentProgress, default));
-        store.SavePair(fx.Pair with { Excluded = ["Excluded"] });
-        store.DeferPlanning(fx.Pair.PairId, [(fx.Pair.A.RootId, item)]);
-        using var log = RunLog.Open(folder, "pair", "intake", false);
-        var page = fx.Run().AdmitPlanningPage(fx.Pair.PairId, store.Pair(fx.Pair.PairId));
-        log.Dispose();
-        await log.Completion;
-        Require(page.Count == 0 && store.CountDeferredPlanning(fx.Pair.PairId) == 0,
-            "intake retires excluded scheduling debt through ordinary acknowledgement");
-        Require(File.ReadAllText(log.Path!).Contains("Planning intake retired 1 non-work entities from 1 candidates.", StringComparison.Ordinal),
-            "intake logs the committed retirement count, not merely selected candidates");
-        Require(await fx.A.ObserveAsync(item.Path, default) is not null && fx.WriterA.Calls + fx.WriterB.Calls == 0,
-            "retiring scheduling debt leaves the excluded file untouched");
     }
 
     private static async Task IndexFailureCapAsync(SqliteStateStore store, Fixture fx)

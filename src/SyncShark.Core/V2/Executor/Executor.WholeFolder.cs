@@ -301,7 +301,6 @@ public sealed partial class Executor
                 }, ct).ConfigureAwait(false);
                 ct.ThrowIfCancellationRequested();
             }
-            ReconcileRunScope.LogExpansion(intents, recovery.Trees.SelectMany(tree => tree.Actions));
             var committer = new StoreCommitter(_store, _storeGate, recovery.PairId, gen);
             var trees = recovery.Trees.Select(RecoveryTree).ToArray();
             IReadOnlyList<FolderTreeOutcome> ended;
@@ -379,7 +378,8 @@ public sealed partial class Executor
                     await StoreAsync(() => _store.AddNotices([notice]), CancellationToken.None).ConfigureAwait(false);
             }
             else
-                await StoreAsync(() => CloseStuckJobNotice(recovery.PairId, anchor), CancellationToken.None).ConfigureAwait(false);
+                await StoreAsync(() => CloseStuckJobNotice(recovery.PairId, anchor), CancellationToken.None)
+                    .ConfigureAwait(false);
         }
         return resolved;
     }

@@ -28,7 +28,7 @@ public sealed partial class SqliteStateStore
             SELECT 1 FROM local_rehash h WHERE h.root_no=g.root_no AND h.object_id=g.object_id AND h.failure_count>0)
         )
         SELECT f.object_id,d.path,f.name,w.reason
-        FROM failures w JOIN file_state f ON f.root_no=$root AND f.object_id=w.object_id
+        FROM failures w JOIN file_state f INDEXED BY fs_obj ON f.root_no=$root AND f.object_id=w.object_id
         JOIN dir d ON d.dir_no=f.dir_no
         WHERE substr(w.reason,1,length($prefix))=$prefix
           AND CASE WHEN json_valid(substr(w.reason,length($prefix)+1))

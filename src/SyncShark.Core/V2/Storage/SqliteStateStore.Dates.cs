@@ -105,7 +105,7 @@ public sealed partial class SqliteStateStore : IDateRepairStore
                     $"UPDATE sync_point SET {prefix}_mtime=$time, {prefix}_object_id=$id, {prefix}_version_id=$version WHERE pair_no=$p AND object_key=$key;",
                     ("$time", RowCodec.MtimeTicks(observed)), ("$id", item.ObjectId), ("$version", (object?)item.VersionId ?? DBNull.Value), ("$p", RequirePair(baseline.PairId)), ("$key", baseline.ObjectKey));
                 StoreSchema.Execute(_connection, transaction,
-                    "UPDATE file_state SET mtime=$time,hash=$hash WHERE root_no=$root AND object_id=$id AND size=$size AND (hash=$hash OR hash IS NULL);",
+                    "UPDATE file_state INDEXED BY fs_obj SET mtime=$time,hash=$hash WHERE root_no=$root AND object_id=$id AND size=$size AND (hash=$hash OR hash IS NULL);",
                     ("$time", RowCodec.MtimeTicks(observed)), ("$root", rootNo),
                     ("$id", item.ObjectId), ("$size", item.Size), ("$hash", Convert.FromHexString(hash)));
                 _notices.CloseWhere(transaction, "resolved",

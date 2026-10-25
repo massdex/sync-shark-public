@@ -25,7 +25,7 @@ public sealed partial class SqliteStateStore : ILocalGapStore
             StoreSchema.Execute(_connection, tx,
                 "UPDATE local_gap_item SET epoch=$e,metadata_ready=1,metadata_stamp=NULL,hash=NULL,proof_json=NULL,result_seq=0 " +
                 "WHERE root_no=$r AND object_id=$o AND NOT EXISTS(" +
-                "SELECT 1 FROM file_state WHERE root_no=$r AND object_id=$o);",
+                "SELECT 1 FROM file_state INDEXED BY fs_obj WHERE root_no=$r AND object_id=$o);",
                 ("$r", root), ("$o", id), ("$e", epoch));
         tx.Commit();
         _gapSweepAfter[root] = ids.Count < 128 ? "" : ids[^1];
@@ -176,11 +176,6 @@ public sealed partial class SqliteStateStore : ILocalGapStore
         StoreSchema.Scalar(_connection, null,
             "SELECT 1 FROM local_gap g JOIN root r ON r.root_no=g.root_no WHERE r.root_id=$id AND g.inventory_pending=1;",
             ("$id", rootId)) is not null);
-
-    internal void CompleteGapInventory(string rootId, string epoch) => InIndexingStore(() =>
-        StoreSchema.Execute(_connection, null,
-            "UPDATE local_gap SET inventory_pending=0 WHERE root_no=(SELECT root_no FROM root WHERE root_id=$r) AND epoch=$e;",
-            ("$r", rootId), ("$e", epoch)));
 
     internal void SettleGapInventory(long completedGeneration, bool cursorHeldForEvidence = false) => InIndexingStore(() =>
         SettleGapInventory(null, completedGeneration, cursorHeldForEvidence));

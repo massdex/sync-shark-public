@@ -154,10 +154,10 @@ internal sealed partial class InMemoryStateStore : IStateStore
         lock (_gate) return _rehash.Where(p => p.Key.Root == rootId).Select(p => p.Value.Attempt).DefaultIfEmpty().Max();
     }
 
-    public void AcknowledgeRehash(string rootId, long through, Func<string, bool> settled, CancellationToken ct = default, IReadOnlyCollection<string>? objectIds = null)
+    public void AcknowledgeRehash(string rootId, long through, Func<string, bool> settled, CancellationToken ct = default)
     {
         lock (_gate)
-            foreach (var key in _rehash.Where(p => p.Key.Root == rootId && p.Value.Attempt <= through && (objectIds is null || objectIds.Contains(p.Key.Object))).Select(p => p.Key).ToArray())
+            foreach (var key in _rehash.Where(p => p.Key.Root == rootId && p.Value.Attempt <= through).Select(p => p.Key).ToArray())
             {
                 ct.ThrowIfCancellationRequested();
                 var aliases = LiveRows(rootId).Values.Where(r => r.State.ObjectId == key.Object).Select(r => r.State).ToArray();

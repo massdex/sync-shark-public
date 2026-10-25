@@ -118,7 +118,7 @@ public sealed partial class SqliteStateStore
         var opposite = side == Side.A ? "b" : "a";
         // Starting at a candidate entity, both joins use object indexes. No root-wide refused list is built.
         var protectedSql = "((f.flags & 64) != 0 OR (f.kind=1 AND EXISTS (" +
-            $"SELECT 1 FROM sync_point sp JOIN file_state src ON src.root_no=$other AND src.object_id=sp.{opposite}_object_id " +
+            $"SELECT 1 FROM sync_point sp JOIN file_state src INDEXED BY fs_obj ON src.root_no=$other AND src.object_id=sp.{opposite}_object_id " +
             $"WHERE sp.pair_no=$pair AND sp.{own}_object_id=f.object_id AND src.kind=1 AND (src.flags & 64)!=0)))";
         var current = path;
         while (current.Length > 0)
