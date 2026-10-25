@@ -55,6 +55,7 @@ internal static partial class PlannerChecks
         Rule18_OneSideOnly();
         Rule19_OneSideOnlyOtherDeleted();
         Rule19b_LaterDeletionWins();
+        CreationObservationNeverDeletes();
         Rule20_CaseOnlyRename();
         CaseEquivalentMoves_AdoptOrUpdate();
         CaseEquivalentChildren_OnlyTopmostFolderNotices();
@@ -369,10 +370,14 @@ internal static partial class PlannerChecks
 
     private static void Rule20_CaseOnlyRename()
     {
-        var row = Row(Base("k1", F("Doc.txt", "idA", "h1"), F("Doc.txt", "idB", "h1")),
-            F("doc.txt", "idA", "h1"), F("Doc.txt", "idB", "h1"));
-        var plan = Decide(row);
-        AssertActions(plan, new Exp(ActionKind.Move, Side.B, "doc.txt", "Doc.txt", false, 20, "doc.txt", "k1"));
-        AssertNotices(plan);
+        foreach (var changed in new[] { Side.A, Side.B })
+        {
+            var a = F(changed == Side.A ? "doc.txt" : "Doc.txt", "idA", "h1");
+            var b = F(changed == Side.B ? "doc.txt" : "Doc.txt", "idB", "h1");
+            var row = Row(Base("k1", a with { Path = "Doc.txt" }, b with { Path = "Doc.txt" }), a, b);
+            var plan = Decide(row);
+            AssertActions(plan, new Exp(ActionKind.Move, Opposite(changed), "doc.txt", "Doc.txt", false, 20, "doc.txt", "k1"));
+            AssertNotices(plan);
+        }
     }
 }

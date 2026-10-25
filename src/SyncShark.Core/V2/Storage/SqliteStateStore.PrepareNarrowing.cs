@@ -151,7 +151,7 @@ public sealed partial class SqliteStateStore
                 StoreSchema.Execute(_connection, tx,
                     "UPDATE prepare_header SET metadata_json=$m,digest=$d WHERE pair_id=$p AND generation=$g;",
                     ("$p", previous.PairId), ("$g", header.Generation), ("$m", json), ("$d", digest));
-                StoreSchema.Execute(_connection, tx, "UPDATE pair SET def_json=$j WHERE pair_id=$p;",
+                StoreSchema.Execute(_connection, tx, "UPDATE pair SET def_json=" + PreservePlanningCursors("$j") + " WHERE pair_id=$p;",
                     ("$j", JsonSerializer.Serialize(updated, RowCodec.Json)), ("$p", previous.PairId));
                 // Narrowing removes coverage only. The old complete inventory/cursor still covers
                 // every retained path; predicates filter retired paths without a provider relist.

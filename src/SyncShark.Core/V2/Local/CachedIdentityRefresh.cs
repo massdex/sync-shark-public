@@ -74,9 +74,9 @@ internal static class CachedIdentityRefresh
     {
         if (TryQueue(known, root, item, error, now))
             return new(LocalGapHashOutcome.IdentityChanged, Reason: PendingReason);
-        return new(LocalGapHashOutcome.Unverifiable,
+        return new LocalGapHashResult(LocalGapHashOutcome.Unverifiable,
             Reason: string.Format(MessageCatalog.Default.Message("cachedContentOpenFailed"), error),
-            QuarantineCode: error is 225 or 226 ? error : null);
+            QuarantineCode: error is 225 or 226 ? error : null).At(ContentProofFailure.StageKind.ContentOpen, error);
     }
 
     internal static void Observed(IStateStore known, string pairId, string path, string rootId) =>
@@ -98,12 +98,14 @@ internal static class CachedIdentityRefresh
         if (known.ByObject(root.RootId, item.ObjectId) is null) return true;
         var queued = false;
         var pairs = known.Pairs();
+        var eligibility = new ItemEligibility(pairs, []);
         foreach (var pair in pairs.Where(pair => pair.A.RootId == root.RootId || pair.B.RootId == root.RootId))
         {
             // Deliberately skipped work is handled, not an indexing failure. Other pairs
             // sharing this root still decide independently whether they need rediscovery.
             queued = true;
-            if (PairInclude.NotSynced(pair, item.Path, item.Kind == ItemKind.Folder, pairs, [])) continue;
+            if (!eligibility.Evaluate(pair, Side.A, item, ItemEligibility.Purpose.Plan).Eligible ||
+                !eligibility.Evaluate(pair, Side.B, item, ItemEligibility.Purpose.Plan).Eligible) continue;
             known.UpdateSyncRetry(pair.PairId, item.Path, prior =>
             {
                 if (prior is null) return new(item.Path, "scan", 0, PendingReason,

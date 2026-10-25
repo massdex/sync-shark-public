@@ -161,7 +161,7 @@ public sealed partial class SyncRun
                 if (_store.SyncRetryAt(notice.PairId, notice.Path)?.PendingNotice is { DeliveryRetry: { } delivery } pending &&
                     delivery.RetryAfter > _time.GetUtcNow() && pending.ReasonKey == notice.ReasonKey)
                     continue; // Repeated publication is not another delivery attempt before its durable deadline.
-                if (notice.ReasonKey == PlanNotices.CannotRead.Key && _store.Pair(notice.PairId) is { } unreadablePair)
+                if (PlanNotices.NeedsObservation(notice) && _store.Pair(notice.PairId) is { } unreadablePair)
                 {
                     var prior = _store.SyncRetryAt(notice.PairId, notice.Path);
                     if (prior is null || prior.Kind == "scan" && prior.RetryAfter <= _time.GetUtcNow())

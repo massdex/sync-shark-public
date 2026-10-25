@@ -25,16 +25,23 @@ internal sealed partial class LocalGapWorker
 
     private void RetainInterruptedHash(RootDef root, LocalGapEpoch epoch, ItemState item, LocalGapHashResult result)
     {
+        if (result.Outcome == LocalGapHashOutcome.Held) return;
+        if (result.Failure is { Stage: ContentProofFailure.StageKind.Journal or ContentProofFailure.StageKind.VolumeOpen or ContentProofFailure.StageKind.RootOpen } rootFailure &&
+            store is IStateStore known)
+        {
+            if (known.IndexRetryDue(root.RootId)) known.RecordIndexFailure(root.RootId, rootFailure.Encode());
+            return;
+        }
         // IO owns the observed cause; live pause state cannot reinterpret the result.
-        var reason = result.Reason ?? "file/journal proof unavailable or changed; make offline/cloud content available, then retry sync";
+        var reason = result.Diagnostic ?? MessageCatalog.Default.Message("proof-interrupted");
         if (result.Outcome == LocalGapHashOutcome.ChangedDuringRead)
             store.DeferGapHash(root.RootId, epoch, item, nameof(LocalGapHashOutcome.ChangedDuringRead));
         else if (result.Outcome == LocalGapHashOutcome.Unverifiable)
             store.FailGapItem(root.RootId, epoch, item, reason);
         store.SetGapStatus(root.RootId, false, result.Outcome switch
         {
-            LocalGapHashOutcome.Paused => "content verification paused during read; retry when activity/power allows",
-            LocalGapHashOutcome.Disabled => "content verification disabled by byte-rate setting",
+            LocalGapHashOutcome.Paused => MessageCatalog.Default.Message("proof-paused"),
+            LocalGapHashOutcome.Disabled => MessageCatalog.Default.Message("proof-disabled"),
             _ => $"{reason} for {item.Path}; retry pending"
         });
         RunTrace.Emit($"local gap verification interrupted or changed; retained for restart: {item.Path}");

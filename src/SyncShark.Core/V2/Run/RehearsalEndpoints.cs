@@ -245,16 +245,16 @@ internal sealed class RehearsalEndpoints(IEndpointProvider real, RehearsalOverla
         }
         public Task<IReadOnlyDictionary<string, DateTimeOffset>> DeletionTimesAsync(IReadOnlyList<string> paths, CancellationToken ct) =>
             Inventory.DeletionTimesAsync(paths.Where(path => !Try(path, out _)).ToArray(), ct);
-        public async Task VerifyPendingAsync(Func<string, bool> include, Action<string> touched, CancellationToken ct)
-        {
-            await Inventory.VerifyPendingAsync(path => include(path) && !Try(path, out _), touched, ct);
-            // The rehearsal container owns indexing; a sync publication pass never starts or stops it.
-        }
-        public async Task ReadSubtreeAsync(string path, Func<IReadOnlyList<ItemState>, Task> accept, CancellationToken ct, IProgress<string>? progress = null)
+        // The rehearsal container owns indexing; a sync publication pass never starts or stops it.
+        public Task VerifyPendingAsync(Func<string, bool> include, Action<string> touched, CancellationToken ct) =>
+            Inventory.VerifyPendingAsync(path => include(path) && !Try(path, out _), touched, ct);
+        public Task ReadSubtreeAsync(string path, Func<IReadOnlyList<ItemState>, Task> accept, CancellationToken ct,
+            IProgress<string>? progress = null) => ReadSubtreeAsync(path, accept, ct, progress, null);
+        public async Task ReadSubtreeAsync(string path, Func<IReadOnlyList<ItemState>, Task> accept, CancellationToken ct, IProgress<string>? progress, PairDef? reviewedRemoval)
         {
             if (Try(path, out var simulated) && simulated is null) return;
             if (!Try(path, out _) || await Reader.ObserveAsync(path, ct) is not null)
-                await Inventory.ReadSubtreeAsync(path, page => accept(page.Where(item => !Try(item.Path, out _)).ToArray()), ct, progress);
+                await Inventory.ReadSubtreeAsync(path, page => accept(page.Where(item => !Try(item.Path, out _)).ToArray()), ct, progress, reviewedRemoval);
             foreach (var page in storage.Items(root.RootId, path).Chunk(256)) await accept(page);
         }
     }

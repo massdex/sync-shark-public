@@ -63,6 +63,15 @@ public sealed partial class LocalInventory : IInventorySource
         _rootIdentity = new PilotDirectoryIdentity(_volume, _rootFileId);
     }
 
+    /// <summary>Scopes carried-child proof to this reviewed folder while reusing ordinary subtree observation.</summary>
+    public async Task ReadSubtreeAsync(string path, Func<IReadOnlyList<ItemState>, Task> accept, CancellationToken ct,
+        IProgress<string>? progress, PairDef? reviewedRemoval)
+    {
+        var io = GapIo ??= new LocalGapIo(_known, _settings, _productOwnedPaths, time: _clock);
+        using var proofPass = io.BeginProofPass(_root, [], reviewedRemoval, path);
+        await ReadSubtreeAsync(path, accept, ct, progress).ConfigureAwait(false);
+    }
+
     public async Task ReadSubtreeAsync(string path, Func<IReadOnlyList<ItemState>, Task> accept, CancellationToken ct,
         IProgress<string>? progress = null)
     {
@@ -276,18 +285,18 @@ public sealed partial class LocalInventory : IInventorySource
         var through = _known.RehashWatermark(_root.RootId);
         if (through == 0) return 0;
         var io = GapIo ??= new LocalGapIo(_known, _settings, _productOwnedPaths, time: _clock);
-        var urgentCount = 0;
-        while (budget.CanStart)
+        var page = VerificationPage(io, through);
+        using var proofPass = io.BeginProofPass(_root, page.Select(row => row.Item).ToArray());
+        foreach (var (item, urgent) in page)
         {
             ct.ThrowIfCancellationRequested();
-            var (item, urgent) = NextVerificationItem(io, through, ref urgentCount);
-            if (item is null) break;
             if (!budget.Admit(item.Size)) break;
             VerificationProgress?.Invoke(budget.Items, backlog);
             var revision = _known.RehashRevision(_root.RootId, item.ObjectId);
-            if (!include(item.Path) || io.Excluded(_root, item))
+            if (RetireExcludedProof(io, item, revision)) continue;
+            if (!include(item.Path))
             {
-                _known.FailIndexingRehash(_root.RootId, item, revision, "content verification deferred by current selection or product-owned exclusion");
+                _known.FailIndexingRehash(_root.RootId, item, revision, MessageCatalog.Default.Message("proof-selection-deferred"));
                 continue;
             }
             LocalGapHashResult result;
@@ -300,16 +309,7 @@ public sealed partial class LocalInventory : IInventorySource
             }
             ct.ThrowIfCancellationRequested();
             if (result.Outcome is LocalGapHashOutcome.Paused or LocalGapHashOutcome.Disabled) break;
-            if (result.QuarantineCode is { } code)
-                PersistQuarantine(new PilotDecision(item.Path, PilotDecisionKind.Blocked, result.Reason ?? "content reader reported quarantine")
-                    { QuarantineCode = code, QuarantineFile = true });
-            if (result is { Outcome: LocalGapHashOutcome.Verified, Hash: { } hash, Proof: { } proof } &&
-                LocalGapWorker.Matches(item, proof.File) &&
-                _known.CompleteIndexingRehash(_root.RootId, item, hash, revision))
-                CompletePointerVerification(item);
-            else if (result.Outcome != LocalGapHashOutcome.IdentityChanged)
-                _known.FailIndexingRehash(_root.RootId, item, revision,
-                    result.Reason ?? "content or stored identity changed during verification; retry on next indexing pass");
+            CompleteContentProof(item, revision, result);
         }
         return budget.Items;
     }
@@ -381,10 +381,13 @@ public sealed partial class LocalInventory : IInventorySource
         Dictionary<string, string> hashes, CancellationToken ct)
     {
         var io = GapIo ??= new LocalGapIo(_known, _settings, _productOwnedPaths, time: _clock);
+        using var proofPass = io.BeginProofPass(_root, rows.Take(VerificationBudget.MaximumItems).ToArray());
         foreach (var item in rows)
         {
             ct.ThrowIfCancellationRequested();
-            if (item.Kind != ItemKind.File || (item.Flags & VerificationBudget.BlockedFlags) != 0 || io.Excluded(_root, item)) continue;
+            if (item.Kind != ItemKind.File) continue;
+            if (RetireExcludedProof(io, item, _known.RehashRevision(_root.RootId, item.ObjectId))) continue;
+            if ((item.Flags & VerificationBudget.BlockedFlags) != 0) continue;
             // Persist before reading. Missing/paused/over-budget proof is durable indexing work;
             // the caller owns its per-effect failure notice and may proceed with unrelated effects.
             _known.RequireRehash(_root.RootId, item, "content proof pending");
@@ -398,27 +401,7 @@ public sealed partial class LocalInventory : IInventorySource
                 continue;
             }
             ct.ThrowIfCancellationRequested();
-            if (proof.QuarantineCode is { } code)
-                PersistQuarantine(new PilotDecision(item.Path, PilotDecisionKind.Blocked, proof.Reason ?? "content reader reported quarantine")
-                    { QuarantineCode = code, QuarantineFile = true });
-            if (proof is { Outcome: LocalGapHashOutcome.Verified, Hash: { } hash, Proof: { } evidence })
-            {
-                if (!LocalGapWorker.Matches(item, evidence.File))
-                    RunTrace.Emit($"content proof rejected ({_root.RootId}): {item.Path}: native identity or metadata changed");
-                else if (_known.CompleteIndexingRehash(_root.RootId, item, hash, revision))
-                {
-                    hashes[item.Path] = hash;
-                    CompletePointerVerification(item);
-                }
-                else
-                    RunTrace.Emit($"content proof publication rejected ({_root.RootId}): {item.Path}: captured-revision={revision}; current-revision={_known.RehashRevision(_root.RootId, item.ObjectId)}; newer obligation or observation");
-            }
-            else
-            {
-                RunTrace.Emit($"content proof unavailable ({_root.RootId}): {item.Path}: outcome={proof.Outcome}; reason={proof.Reason ?? "not supplied"}");
-                if (proof.Outcome == LocalGapHashOutcome.Unverifiable)
-                    _known.FailIndexingRehash(_root.RootId, item, revision, proof.Reason ?? "content proof unavailable or changed");
-            }
+            if (CompleteContentProof(item, revision, proof)) hashes[item.Path] = proof.Hash!;
         }
     }
 

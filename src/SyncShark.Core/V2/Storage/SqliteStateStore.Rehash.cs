@@ -193,6 +193,22 @@ public sealed partial class SqliteStateStore
         return rows.Count == 1 && VerificationPolicy.AlreadyVerified(rows[0].Item, expected, hash);
     });
 
+    public bool RetireIndexingRehash(string rootId, ItemState item, long revision) => InIndexingStore(() =>
+    {
+        var root = RootNo(rootId);
+        if (root is null || revision == 0 || RehashRevision(rootId, item.ObjectId) != revision) return false;
+        using var tx = _connection.BeginTransaction();
+        var current = _reads.ByObject(root.Value, item.ObjectId, tx);
+        if (current is null || !SameGapItem(current with { Hash = item.Hash, Flags = item.Flags }, item)) return false;
+        // No content evidence is written. A later inclusion/observation must verify afresh.
+        StoreSchema.Execute(_connection, tx,
+            "DELETE FROM local_rehash WHERE root_no=$r AND object_id=$o AND evidence_revision=$v;",
+            ("$r", root.Value), ("$o", item.ObjectId), ("$v", revision));
+        CloseIndexItemFailure(tx, rootId, item.Path);
+        tx.Commit();
+        return true;
+    });
+
     public bool CompleteRehash(string rootId, ItemState expected, string hash) => InIndexingStore(() =>
     {
         var root = RootNo(rootId);
@@ -218,6 +234,7 @@ public sealed partial class SqliteStateStore
             "UPDATE local_rehash SET failure_count=0,retry_after=0,last_attempt=$order WHERE root_no=$r AND object_id=$o;",
             ("$r", root.Value), ("$o", expected.ObjectId), ("$order", NextRehashOrder(root.Value, tx)));
         // The queue is also the durable planning obligation. Only settled execution acknowledges it.
+        CloseIndexItemFailure(tx, rootId, expected.Path);
         tx.Commit();
         return true;
     });

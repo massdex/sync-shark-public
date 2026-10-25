@@ -18,7 +18,8 @@ public sealed class AutoSync
 
     /// <summary>Creates continuous sync over the store, run and watch source; the edge supplies pause and poll interval.</summary>
     public AutoSync(IStateStore store, ISyncRun run, IChangeWatchSource watches, V2Settings settings,
-        Func<PairDef, bool> paused, Func<TimeSpan> safetyPoll, TimeProvider time)
+        Func<PairDef, bool> paused, Func<TimeSpan> safetyPoll, TimeProvider time,
+        Func<string, string, IDisposable>? beginRunLog = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(run);
@@ -27,7 +28,8 @@ public sealed class AutoSync
         ArgumentNullException.ThrowIfNull(paused);
         ArgumentNullException.ThrowIfNull(safetyPoll);
         ArgumentNullException.ThrowIfNull(time);
-        _inputs = new AutoSyncInputs(store, run, watches, settings, paused, safetyPoll, time, Publish);
+        _inputs = new AutoSyncInputs(store, run, watches, settings, paused, safetyPoll, time, Publish)
+        { BeginRunLog = beginRunLog };
     }
 
     /// <summary>Raised on every state change of a pair (tray colour, run balloon).</summary>

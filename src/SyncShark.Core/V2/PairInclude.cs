@@ -38,8 +38,8 @@ internal static class PairInclude
     }
 
     /// <summary>Only explicit pair exclusions, not temporary holds or unreadable inventory.</summary>
-    internal static bool Excludes(PairDef pair, string path) =>
-        Covered(path, pair.Excluded.Select(Normalize).Where(boundary => boundary.Length > 0), false);
+    internal static bool Excludes(PairDef pair, string path, bool rejectAncestors = false) =>
+        Covered(path, pair.Excluded.Select(Normalize).Where(boundary => boundary.Length > 0), rejectAncestors);
 
     // Rebuildable reviewed removals bypass explicit exclusions, but never ignore rules.
     internal static bool NotSynced(PairDef pair, string path, bool isDirectory, bool rebuildable = false) =>
@@ -62,6 +62,15 @@ internal static class PairInclude
         IReadOnlyList<PairDef> allPairs, IReadOnlyList<string> productOwned)
     {
         path = Normalize(path);
+        return ProductBoundary(path, rejectAncestors, productOwned) ??
+            NestedRoots(side == Side.A ? pair.A : pair.B, pair.PairId, allPairs)
+                .FirstOrDefault(boundary => PairPath.IsSelfOrUnder(path, boundary) ||
+                    rejectAncestors && PairPath.IsUnder(boundary, path));
+    }
+
+    internal static string? ProductBoundary(string path, bool rejectAncestors, IReadOnlyList<string> productOwned)
+    {
+        path = Normalize(path);
         if (ArtifactPaths.IsArtifactPath(path))
         {
             var segments = path.Split('/');
@@ -71,9 +80,7 @@ internal static class PairInclude
                 if (ArtifactPaths.IsArtifactPath(prefix)) return prefix;
             }
         }
-        var root = side == Side.A ? pair.A : pair.B;
         return productOwned.Select(Normalize).Where(boundary => boundary.Length > 0)
-            .Concat(NestedRoots(root, pair.PairId, allPairs))
             .FirstOrDefault(boundary => PairPath.IsSelfOrUnder(path, boundary) ||
                 rejectAncestors && PairPath.IsUnder(boundary, path));
     }

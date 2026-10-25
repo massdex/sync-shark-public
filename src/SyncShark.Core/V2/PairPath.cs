@@ -6,6 +6,10 @@ public static class PairPath
     /// <summary>True when the two paths name the same item (identity and occupancy compare case-insensitively).</summary>
     public static bool Same(string x, string y) => string.Equals(x, y, StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>Ancestor case alone is not a leaf rename; a changed leaf spelling still propagates.</summary>
+    public static bool SameLeafLocation(string x, string y) => Same(x, y) &&
+        string.Equals(x[(x.LastIndexOf('/') + 1)..], y[(y.LastIndexOf('/') + 1)..], StringComparison.Ordinal);
+
     /// <summary>True when <paramref name="path"/> is strictly inside <paramref name="prefix"/>'s folder.</summary>
     public static bool IsUnder(string path, string prefix) =>
         prefix.Length > 0 && path.Length > prefix.Length &&

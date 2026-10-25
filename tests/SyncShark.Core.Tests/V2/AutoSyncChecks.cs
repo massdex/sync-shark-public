@@ -14,6 +14,8 @@ internal static partial class AutoSyncChecks
     public static async Task RunAsync()
     {
         var clock = Stopwatch.StartNew();
+        Require(Settings.ChangeMaxDelay == TimeSpan.FromSeconds(5), "continuous changes run within the five-second maximum delay");
+        await RunTimingLogAsync();
         await JournalBacklog_ImmediateRunsAsync();
         await PlanningBacklog_DrainSignalAsync();
         await Burst_OneRunAsync();
@@ -497,7 +499,7 @@ internal static partial class AutoSyncChecks
         internal readonly InMemoryStateStore _store = new();
         private readonly string[] _pairIds;
 
-        public Rig(string[] pairIds, bool enabled = true)
+        public Rig(string[] pairIds, bool enabled = true, Func<string, string, IDisposable>? beginRunLog = null)
         {
             _pairIds = pairIds;
             Run.FailureStore = _store;
@@ -508,7 +510,7 @@ internal static partial class AutoSyncChecks
                 _store.MarkFirstSyncDone(id);
             }
             Auto = new AutoSync(_store, Run, Watches, Settings, pair => { if (ThrowEligibility) { ThrowEligibility = false; throw new IOException("eligibility fault"); } return Paused || pair.PairId == PausedPair; },
-                () => PollInterval, Clock);
+                () => PollInterval, Clock, beginRunLog);
         }
 
         /// <summary>Saves or replaces one pair in the rig's store.</summary>

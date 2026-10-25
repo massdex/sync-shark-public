@@ -13,6 +13,13 @@ public static class PlanNotices
 
     /// <summary>An item could not be read and was skipped (rule 30).</summary>
     public static readonly NoticeReason CannotRead = new("unreadable", "skipped: cannot read");
+    public static readonly NoticeReason DestinationUnobserved = new("destination-unobserved",
+        MessageCatalog.Default.Message("destination-unobserved"));
+
+    internal static readonly NoticeReason[] ObservationReasons = [CannotRead, DestinationUnobserved];
+
+    internal static bool NeedsObservation(Notice notice) =>
+        ObservationReasons.Any(reason => notice.ReasonKey == reason.Key);
 
     /// <summary>A cloud-native item is present, but needs an explicit export rather than download.</summary>
     public static readonly NoticeReason ExportRequired = new("export-required",

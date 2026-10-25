@@ -49,12 +49,15 @@ public sealed partial class V2CliRuntime
         IEnumerable<Notice> notices = _store.OpenNotices(pairId);
         if (accountId is not null)
             notices = notices.Where(notice => accountId.Equals(AccountOf(notice.PairId), StringComparison.Ordinal));
+        var summaries = notices.Where(notice => notice.Path.Length == 0 && NoticeChoices.IsIndexFailure(notice)).ToArray();
         if (!string.IsNullOrEmpty(search))
             notices = notices.Where(notice => notice.Path.Contains(search, StringComparison.OrdinalIgnoreCase));
         var all = notices.ToArray();
-        var page = all.Skip(offset).Take(limit).Select(Project).ToArray();
-        return Task.FromResult(new SyncCliConflictListData(page, limit, offset, page.Length,
-            offset + page.Length < all.Length, all.Length)
+        var page = all.Skip(offset).Take(limit).ToList();
+        var total = AppendIndexFailureDetails(summaries, search, limit, offset, all.Length, page);
+        var projected = page.Select(Project).ToArray();
+        return Task.FromResult(new SyncCliConflictListData(projected, limit, offset, projected.Length,
+            (long)offset + projected.Length < total, (int)Math.Min(int.MaxValue, total))
         {
             FreeSpacePending = FreeSpacePresentation.Group(all)
         });

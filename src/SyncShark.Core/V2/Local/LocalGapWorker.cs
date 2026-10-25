@@ -187,6 +187,7 @@ internal sealed partial class LocalGapWorker(ILocalGapStore store, ILocalGapIo i
     {
         var page = store.GapHashWorkPage(root.RootId, epoch, 16, includeBulk: !io.Paused);
         if (page.Count == 0) return false;
+        using var proofPass = io.BeginProofPass(root, page.Select(row => row.Item).ToArray());
         using var availability = io.OpenProbes(root);
         if (availability.UnavailableReason is { } unavailable)
         {
@@ -212,6 +213,11 @@ internal sealed partial class LocalGapWorker(ILocalGapStore store, ILocalGapIo i
                 if (result is { Outcome: LocalGapHashOutcome.Verified, Hash: { } hash, Proof: { } proof })
                 {
                     store.StageGapHash(root.RootId, epoch, item, hash, proof);
+                    completed = true;
+                }
+                else if (result.Outcome == LocalGapHashOutcome.NotPairWork)
+                {
+                    store.RetireGapItem(root.RootId, epoch, item);
                     completed = true;
                 }
                 else

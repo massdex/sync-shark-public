@@ -159,7 +159,7 @@ public sealed partial class SqliteStateStore
             }
             StoreSchema.Execute(_connection, transaction, clearIgnore.ToString(), clearParameters.ToArray());
         }
-        StoreSchema.Execute(_connection, transaction, "UPDATE pair SET def_json=$j WHERE pair_no=$p;",
+        StoreSchema.Execute(_connection, transaction, "UPDATE pair SET def_json=" + PreservePlanningCursors("$j") + " WHERE pair_no=$p;",
             ("$j", JsonSerializer.Serialize(included, RowCodec.Json)), ("$p", pairNo));
         StoreSchema.Execute(_connection, transaction, "UPDATE root SET cursor=NULL WHERE root_no=$a OR root_no=$b;",
             ("$a", rootA), ("$b", rootB));

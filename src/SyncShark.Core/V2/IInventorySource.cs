@@ -8,6 +8,10 @@ public interface IInventorySource
         IProgress<string>? progress = null) =>
         throw new NotSupportedException("Subtree listing not implemented; a whole-root scan will not be used for removal review.");
 
+    /// <summary>Observe a reviewed enclosing removal; only its carried children may bypass ignore selection for proof.</summary>
+    Task ReadSubtreeAsync(string path, Func<IReadOnlyList<ItemState>, Task> accept, CancellationToken ct,
+        IProgress<string>? progress, PairDef? reviewedRemoval) => ReadSubtreeAsync(path, accept, ct, progress);
+
     /// <summary>After reconciliation is stored, publish completed verification in bounded pages and report affected paths.
     /// Local content proof runs independently in indexing; this foreground hook never drains pending hashes.</summary>
     Task VerifyPendingAsync(Func<string, bool> include, Action<string> touched, CancellationToken ct) => Task.CompletedTask;

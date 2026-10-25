@@ -37,24 +37,6 @@ public static partial class Planner
             return;
         }
         var same = Content.SameContent(row.A!, row.B!);
-        if (same == true && sA == RowState.Moved && sB == RowState.Moved &&
-            PairPath.Same(row.A!.Path, row.Base!.A.Path) &&
-            PairPath.Same(row.B!.Path, row.Base.B.Path) && !PathEqual(row.A.Path, row.B.Path))
-        {
-            // Both identities changed only spelling. Resolve metadata by newest time;
-            // ties remain a decision notice, never a destructive content operation.
-            if (!ModificationTime.IsPlausible(row.A.Mtime, ctx.Options.ObservedAt) ||
-                !ModificationTime.IsPlausible(row.B.Mtime, ctx.Options.ObservedAt) ||
-                (row.A.Mtime - row.B.Mtime).Duration() <= ctx.Options.TieWindow)
-                Hold(ctx, row, 20, PlanNotices.NeedDecision);
-            else
-            {
-                var winner = row.A.Mtime > row.B.Mtime ? Side.A : Side.B;
-                ChangedAgainstSame(ctx, row, winner, RowState.Moved, key);
-                AddNotice(ctx, 20, NoticeKind.AutoConflict, PrimaryPath(row), PlanNotices.AutoConflict);
-            }
-            return;
-        }
         if (same == true)
             AdoptAction(ctx, row, 3, Side.B, row.B!.Path, row.A!, row.B!, key);           // rule 3
         else if (same is null)
@@ -94,45 +76,6 @@ public static partial class Planner
             paths.Add(ctx.Mapping.TargetPath(Side.B, path));
         }
         ctx.Held.AddRange(paths);
-    }
-
-    /// <summary>The changed side against an unchanged one (rules 2, 9, 20, 25, 28).</summary>
-    private static void ChangedAgainstSame(Context ctx, PlanRow row, Side changed, RowState s, string key)
-    {
-        var same = Opposite(changed);
-        var curS = changed == Side.A ? row.A! : row.B!;
-        var curT = same == Side.A ? row.A! : row.B!;
-        switch (s)
-        {
-            case RowState.Edited:
-                Emit(ctx, row, 2, ActionKind.Update, same, curT.Path, null, curS, curT, false, key); // rule 2
-                return;
-            case RowState.Moved:
-                var rule = curS.Kind == ItemKind.Folder ? 25 : PairPath.Same(curS.Path, curT.Path) ? 20 : 9;
-                if (PathEqual(ctx.Mapping.TargetPath(same, curS.Path), curT.Path))
-                {
-                    // Both endpoints already have the exact requested spelling.
-                    AdoptAction(ctx, row, rule, Side.B, row.B!.Path, row.A!, row.B!, key);
-                    return;
-                }
-                Emit(ctx, row, rule, ActionKind.Move, same, curS.Path, curT.Path, curS, curT, false, key); // rules 9/20/25
-                return;
-            case RowState.MovedEdited:
-                if (PathEqual(ctx.Mapping.TargetPath(same, curS.Path), curT.Path))
-                {
-                    // The content still needs propagating, but no move or invented target spelling does.
-                    Emit(ctx, row, 28, ActionKind.Update, same, curT.Path, null, curS, curT, false, key);
-                    return;
-                }
-                var old = changed == Side.A ? row.Base!.A : row.Base!.B;
-                var moveSource = curS with { Hash = old.Hash, Size = old.Size, VersionId = old.VersionId, Mtime = old.Mtime };
-                Emit(ctx, row, 28, ActionKind.Move, same, curS.Path, curT.Path, moveSource, curT, false, key); // rule 28
-                var destination = ctx.Mapping.TargetPath(same, curS.Path);
-                Emit(ctx, row, 28, ActionKind.Update, same, destination, null, curS, curT with { Path = destination }, false, key);
-                return;
-            default:
-                throw new InvalidOperationException("Planner: unhandled row");
-        }
     }
 
     /// <summary>Both sides changed to different places: copy each to the other side (rules 10 and 11).</summary>

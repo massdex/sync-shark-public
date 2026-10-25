@@ -229,7 +229,9 @@ public sealed partial class SqliteStateStore
         return delete.ExecuteNonQuery() != 0;
     }
 
-    internal int CountDeferredPlanning(string pairId) => InStore(() => (int)Math.Min(int.MaxValue,
+    internal int CountDeferredPlanning(string pairId, bool verificationOnly = false) => InStore(() => (int)Math.Min(int.MaxValue,
         Convert.ToInt64(StoreSchema.Scalar(_connection, null,
-            "SELECT COUNT(*) FROM planning_deferred WHERE pair_no=$p;", ("$p", PairNo(pairId))))));
+            "SELECT COUNT(*) FROM planning_deferred WHERE pair_no=$p" +
+            (verificationOnly ? " AND reason<>$observation" : "") + ";",
+            ("$p", PairNo(pairId)), ("$observation", ObservationPlanningReason)))));
 }

@@ -432,6 +432,16 @@ internal static partial class CliChecks
 
     internal static async Task RunAsync(string root, string? capabilitiesPath = null)
     {
+        var proofList = SyncCliRegistry.Parse(["--cli", "conflicts", "list", "--pair", "fixture", "--limit", "10", "--json"]);
+        Require(!SyncCliRegistry.MutatesProductState(proofList) &&
+            SyncCliRegistry.Rows.Single(row => row.Command == "conflicts list").Effect.Contains("failure stage"),
+            "proof failure listing is a state-free read through the shared notice command");
+        foreach (var choice in new[] { "retry-now", "ignore" })
+        {
+            var command = SyncCliRegistry.Parse(["--cli", "conflicts", "resolve", "--pair", "fixture", "--path", "item.txt",
+                "--key", "exact-notice", "--generation", "0", "--choice", choice, "--yes"]);
+            Require(SyncCliRegistry.MutatesProductState(command), "proof notice choices require an exact confirmed target");
+        }
         await Massdex.SyncShark.V2.RunChecks.LiveCliOptionsAsync(Path.Combine(root, "v2-live-options"));
         var boundedLive = SyncCliRegistry.Parse(["--cli", "run", "--pair", "fixture", "--yes",
             "--max-planned", "0", "--export", Path.Combine(root, "live-effects.csv")]);

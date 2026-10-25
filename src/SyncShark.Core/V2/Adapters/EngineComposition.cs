@@ -112,7 +112,7 @@ public sealed class EngineComposition : IDisposable
             var observed = new ObservedExecutor(new Executor(store, settings, limiter.Resources, isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException));
             var endpoints = new ProductionEndpoints(store, settings, time, paths, installationId,
                 dropbox, host.ContentPausedForTest);
-            var run = new SyncRun(store, observed, endpoints, settings, time, endpoints.ProductOwnedRelative);
+            var run = BindRun(store, observed, endpoints, settings, time);
             return new EngineComposition(store, run, observed, endpoints, new ProductionRootProbe(dropbox), settings,
                 paths, time, longpollHttp);
         }
@@ -141,6 +141,14 @@ public sealed class EngineComposition : IDisposable
 
     /// <summary>Creates continuous sync on the first call and starts it on every call (restarts after a stop).</summary>
     /// <remarks>The CLI never calls this. A non-positive safety interval is floored to one minute.</remarks>
+    private static SyncRun BindRun(SqliteStateStore store, ObservedExecutor observed, ProductionEndpoints endpoints,
+        V2Settings settings, TimeProvider time)
+    {
+        var run = new SyncRun(store, observed, endpoints, settings, time, endpoints.ProductOwnedRelative);
+        endpoints.BindEligibility(run);
+        return run;
+    }
+
     public AutoSync StartAutoSync(Func<PairDef, bool> paused, Func<TimeSpan> safetyPoll)
     {
         ArgumentNullException.ThrowIfNull(paused);
@@ -149,7 +157,13 @@ public sealed class EngineComposition : IDisposable
         lock (_autoGate)
         {
             if (_auto is null) Endpoints.SafetyPoll = () => Floor(safetyPoll());
-            _auto ??= new AutoSync(Store, Run, Endpoints, Settings, paused, () => Floor(safetyPoll()), _time);
+            _auto ??= new AutoSync(Store, Run, Endpoints, Settings, paused, () => Floor(safetyPoll()), _time,
+                (pairId, cause) =>
+                {
+                    var log = RunLog.Open(Paths.ProductRoot, pairId, "autosync", verbose: false);
+                    log.Summary("wake-cause=" + cause);
+                    return log;
+                });
             auto = _auto;
         }
         Endpoints.Indexing?.Start(paused, pairId => auto.Kick(pairId));

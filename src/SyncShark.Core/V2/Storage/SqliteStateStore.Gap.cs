@@ -99,10 +99,13 @@ public sealed partial class SqliteStateStore : ILocalGapStore
         var current = _reads.ByObject(root.Value, item.ObjectId);
         if (current is not null && !SameGapItem(current, item)) return;
         // Retirement is staged too: a planner may still be reading protection for this root.
-        StoreSchema.Execute(_connection, null,
+        using var tx = _connection.BeginTransaction();
+        StoreSchema.Execute(_connection, tx,
             "UPDATE local_gap_item SET metadata_ready=1,metadata_stamp=" + GapObservationSql("$r", "$o") + ",expected_json=$j,hash=NULL,proof_json=NULL,result_seq=0 " +
             "WHERE root_no=$r AND object_id=$o AND epoch=$e;",
             ("$r", root.Value), ("$o", item.ObjectId), ("$e", epoch.Epoch), ("$j", JsonSerializer.Serialize(item)));
+        CloseIndexItemFailure(tx, rootId, item.Path);
+        tx.Commit();
     });
 
     bool ILocalGapStore.IsIncompleteInitialInventory(string rootId) => InStore(() =>
@@ -249,7 +252,11 @@ public sealed partial class SqliteStateStore : ILocalGapStore
         if (items.Count > 128) throw new ArgumentOutOfRangeException(nameof(items));
         var root = RootNo(rootId);
         if (root is null || ReadGap(root)?.Epoch != epoch.Epoch) return;
-        var observed = items.Select(entry => (entry.Item, entry.RequiresHash, Current: _reads.ByObject(root.Value, entry.Item.ObjectId))).ToArray();
+        var eligibility = new ItemEligibility(Pairs(), []);
+        var observed = items.Select(entry => (entry.Item,
+            RequiresHash: entry.RequiresHash && !eligibility.EvaluateRoot(rootId, entry.Item,
+                ItemEligibility.Purpose.ContentProof).NotPairWork,
+            Current: _reads.ByObject(root.Value, entry.Item.ObjectId))).ToArray();
         using var tx = _connection.BeginTransaction();
         foreach (var (item, requiresHash, current) in observed)
         {

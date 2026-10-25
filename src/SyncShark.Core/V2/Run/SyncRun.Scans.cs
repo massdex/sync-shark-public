@@ -44,6 +44,7 @@ public sealed partial class SyncRun
         IReadOnlyList<string> ChangePaths, IReadOnlyList<string> ChangeObjectIds,
         IReadOnlyDictionary<string, DateTimeOffset?> Deleted, IReadOnlyList<string> PreviousPaths)
     {
+        internal HashSet<string> ExactCreationObserved { get; init; } = new(StringComparer.OrdinalIgnoreCase);
         public bool JournalBacklog { get; init; }
         internal bool AllItemsChanged { get; init; }
         internal bool WalkObserved { get; init; } // Actual snapshot, not merely full planning coverage.

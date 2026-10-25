@@ -8,7 +8,7 @@ using System.Text;
 namespace Massdex.SyncShark.V2;
 
 /// <summary>Shared mappings, object-id helpers and the one exception translation for the local endpoint.</summary>
-internal static class LocalItems
+internal static partial class LocalItems
 {
     private const string ObjectIdPrefix = "id:local:";
     private const int ShortIdLength = 32;
@@ -260,33 +260,6 @@ internal static class LocalItems
     }
 
     private enum AncestorState { Safe, Absent, Unsafe }
-
-    /// <summary>The scoped-refresh paths whose ancestors are verified, holding those ancestors until disposed.</summary>
-    internal sealed class RefreshGuard : IDisposable
-    {
-        private readonly List<PilotDirectoryLease> _leases = new();
-
-        /// <summary>Paths whose every ancestor is held, inside the root and the recorded object.</summary>
-        public List<string> Safe { get; } = new();
-
-        /// <summary>Unsafe ancestors whose whole subtree is reported not known.</summary>
-        public List<string> Incomplete { get; } = new();
-        internal List<PilotDecision> Quarantine { get; } = new();
-        internal void RecordFailure(string path, Exception error)
-        {
-            if (QuarantineFailure.NativeCode(error) is { } code)
-                Quarantine.Add(new PilotDecision(path, PilotDecisionKind.Blocked, error.Message) { QuarantineCode = code });
-        }
-
-        internal void Hold(PilotDirectoryLease lease) => _leases.Add(lease);
-
-        /// <summary>Releases every held ancestor.</summary>
-        public void Dispose()
-        {
-            foreach (var lease in _leases) lease.Dispose();
-            _leases.Clear();
-        }
-    }
 
     /// <summary>A stable private control-namespace id for one pair root; deterministic per root.</summary>
     public static string NamespaceId(string rootId) =>

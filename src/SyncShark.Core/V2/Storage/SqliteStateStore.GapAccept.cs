@@ -32,6 +32,7 @@ public sealed partial class SqliteStateStore
             ("$why", "journal gap verified; planning pending"));
         StoreSchema.Execute(_connection, tx, "DELETE FROM local_gap_item WHERE root_no=$r AND object_id=$o;",
             ("$r", root.Value), ("$o", current.ObjectId));
+        CloseIndexItemFailure(tx, rootId, current.Path);
         tx.Commit();
         // Progress describes the latest completed action, not a failure whose entity row was
         // just retired. Other unresolved failures still come from their durable work rows.

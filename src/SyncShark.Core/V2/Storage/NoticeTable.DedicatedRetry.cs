@@ -23,10 +23,13 @@ internal sealed partial class NoticeTable
     private Notice FoldUnreadableRetry(SqliteTransaction transaction, long pairNo, Notice notice)
     {
         // Refresh exact scan debt even while its cause is suppressed, rather than duplicating it.
-        var id = ShortId.Make("n", notice.PairId, "30", RowCodec.Key(notice.Path), "unreadable");
-        return ById(pairNo, id, transaction) is { Closed: false } unreadable
-            ? unreadable.Notice with { Detail = notice.Detail, CauseKey = notice.CauseKey, CauseIdentity = notice.CauseIdentity,
-                FailureRetry = notice.FailureRetry ?? unreadable.Notice.FailureRetry }
-            : notice;
+        foreach (var reason in PlanNotices.ObservationReasons)
+        {
+            var id = ShortId.Make("n", notice.PairId, "30", RowCodec.Key(notice.Path), reason.Key);
+            if (ById(pairNo, id, transaction) is { Closed: false } observation)
+                return observation.Notice with { Detail = notice.Detail, CauseKey = notice.CauseKey, CauseIdentity = notice.CauseIdentity,
+                    FailureRetry = notice.FailureRetry ?? observation.Notice.FailureRetry };
+        }
+        return notice;
     }
 }

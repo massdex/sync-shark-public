@@ -8,6 +8,8 @@ internal interface ILocalGapIo
     ILocalGapProbe OpenProbes(RootDef root) => new DelegatingGapProbe(this, root);
     string PauseReason => Paused ? "content verification paused for activity or power" : "content verification running";
     bool Excluded(RootDef root, ItemState item) => false;
+    IDisposable? BeginProofPass(RootDef root, IReadOnlyList<ItemState> items,
+        PairDef? reviewedRemoval = null, string? reviewedFolder = null) => null;
     Task<LocalGapHashResult> HashAsync(RootDef root, ItemState item, CancellationToken ct);
     Task<LocalGapHashResult> HashAsync(RootDef root, ItemState item, bool urgent, CancellationToken ct) => HashAsync(root, item, ct);
 }

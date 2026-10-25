@@ -102,7 +102,11 @@ public static partial class Planner
         var atB = default(DateTimeOffset?);
         var isDeletedA = a is null && DeletedAt(deletedA, pathA, out atA);
         var isDeletedB = b is null && DeletedAt(deletedB, pathB, out atB);
-        return new Evidence(isDeletedA, isDeletedB, Covered(c, Side.A, pathA), Covered(c, Side.B, pathB), atA, atB);
+        return new Evidence(isDeletedA, isDeletedB, Covered(c, Side.A, pathA), Covered(c, Side.B, pathB), atA, atB)
+        {
+            CreationObservedA = c.ExactA.Contains(pathA) && PairPath.Observed(pathA, c.IncompleteA),
+            CreationObservedB = c.ExactB.Contains(pathB) && PairPath.Observed(pathB, c.IncompleteB)
+        };
     }
 
     /// <summary>Fills the side's items by object id (the last wins) and returns them by case-insensitive path.</summary>
@@ -188,6 +192,8 @@ public static partial class Planner
     {
         public readonly bool CompleteA = completeness.CompleteA;
         public readonly bool CompleteB = completeness.CompleteB;
+        public readonly IReadOnlySet<string> ExactA = completeness.ExactCreationObservedA;
+        public readonly IReadOnlySet<string> ExactB = completeness.ExactCreationObservedB;
         public readonly HashSet<string> IncompleteA = new(completeness.IncompleteSubtreesA, StringComparer.OrdinalIgnoreCase);
         public readonly HashSet<string> IncompleteB = new(completeness.IncompleteSubtreesB, StringComparer.OrdinalIgnoreCase);
     }

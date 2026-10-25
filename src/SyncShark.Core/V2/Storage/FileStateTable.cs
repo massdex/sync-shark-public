@@ -3,7 +3,7 @@ using Microsoft.Data.Sqlite;
 namespace Massdex.SyncShark.V2;
 
 /// <summary>Writes the live rows of file_state and the local-deletion tombstones.</summary>
-internal sealed class FileStateTable
+internal sealed partial class FileStateTable
 {
     private readonly SqliteConnection _connection;
     private readonly DirTable _dir;
@@ -18,6 +18,7 @@ internal sealed class FileStateTable
     /// </summary>
     internal Action<SqliteTransaction, long, string>? OnLinkWritten { get; set; }
     internal Action? AfterSnapshotCompared { get; set; }
+    internal Action<SqliteTransaction, long, IReadOnlyList<ItemState>>? OnInventoryObserved { get; set; }
 
     /// <param name="baselined">Whether an object of a root is a side of some baseline .</param>
     public FileStateTable(SqliteConnection connection, DirTable dir, FileStateReader reader, V2Settings settings,
@@ -169,7 +170,7 @@ internal sealed class FileStateTable
             var replay = initialLoad
                 ? incoming.PathEntries().Select(entry => new SnapshotChanges.Change(entry, entry.Item, false))
                 : changes.Read();
-            foreach (var change in replay)
+            foreach (var change in RetainSnapshotObservations(batch.Transaction, rootNo, replay))
             {
                 if (!initialLoad) snapshot.ChangedObject?.Invoke(change.Entry.Item.ObjectId);
                 if (!initialLoad && change.Incoming is { } changed && changed.ObjectId != change.Entry.Item.ObjectId)
@@ -236,27 +237,6 @@ internal sealed class FileStateTable
             "SELECT 1 FROM local_rehash WHERE root_no=$r AND NOT EXISTS " +
             "(SELECT 1 FROM file_state f WHERE f.root_no=local_rehash.root_no AND f.object_id=local_rehash.object_id) LIMIT 1;",
             ("$r", rootNo)) is not null;
-
-    /// <summary>Applies a delta's deletes then upserts, each in list order, tombstoning every real deletion.</summary>
-    public void WriteDelta(Delta delta, long rootNo)
-    {
-        var evidence = delta.DisplacementEvidence;
-        using var verifier = evidence is { IncompleteSubtrees.Count: > 0 } ? evidence.OpenAbsenceVerifier?.Invoke() : null;
-        if (verifier is not null) evidence = evidence! with { VerifyAbsence = verifier.Check };
-        Func<ItemState, bool>? confirmDisplacement = evidence is null ? null : evidence.CanCloseAbsent;
-        var suppressed = delta.Changes.Where(change => change.Kind == ChangeKind.Upsert &&
-                (delta.IncludesPath?.Invoke(change.Path) ?? true))
-            .Select(change => change.ObjectId).ToHashSet(StringComparer.Ordinal);
-        using var batch = new StoreBatch(_connection, _settings.StoreBatchRows);
-        var retainedAliases = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var change in delta.Changes)
-            if (change.Kind == ChangeKind.Delete) Delete(change, rootNo, suppressed, batch, delta.IncludesPath, delta.ChangedObject, retainedAliases);
-        var now = _clock.GetUtcNow();
-        foreach (var change in delta.Changes)
-            if (change.Kind == ChangeKind.Upsert && (delta.IncludesPath?.Invoke(change.Path) ?? true))
-                Step(batch, Upsert(change, rootNo, suppressed, now, batch, delta.IncludesPath, confirmDisplacement, retainedAliases));
-        batch.Flush();
-    }
 
     internal void HoldQuarantine(SqliteTransaction transaction, long rootNo, ItemState item)
     {
@@ -431,7 +411,7 @@ internal sealed class FileStateTable
                 DeleteRow(rootNo, moved.DirNo, moved.Name, batch);
                 wrote = true;
             }
-        if (live is null && atKey.Count == 1 && atKey[0].Item.ObjectId != state.ObjectId)
+        if (live is null && atKey.Count == 1 && atKey[0].Item.ObjectId != state.ObjectId && !suppressed.Contains(atKey[0].Item.ObjectId))
             wrote |= RemoveAt(rootNo, atKey[0].DirNo, atKey[0].Name, now, suppressed, batch);
         if (live is null) return Insert(FileStateReader.Entry.Of(parent, name, state), rootNo, batch, debtReconciled: true);
         var merged = RowCodec.CarryHash(state, live.Value.Item);

@@ -53,6 +53,7 @@ public sealed partial class SqliteStateStore : IStateStore
             (rootNo, objectId, transaction) =>
                 _points.HasBaseline(transaction, RootSides(rootNo, transaction), objectId));
         _files.OnLinkWritten = ForgetUnderLink;
+        _files.OnInventoryObserved = RetainIncrementalPlanning;
         _intents = new IntentTable(connection);
         _recoveries = new RecoveryTable(connection);
         _notices = new NoticeTable(connection, clock);
@@ -335,8 +336,7 @@ public sealed partial class SqliteStateStore : IStateStore
         var rootNoB = RootNoCreate(pair.B.RootId, transaction);
         StoreSchema.Execute(_connection, transaction,
             "INSERT INTO pair(pair_id, def_json, first_sync_done) VALUES($id, $json, 0) " +
-            "ON CONFLICT(pair_id) DO UPDATE SET def_json=json_set(excluded.def_json,'$.PlanningSettleCursor', " +
-            "json_extract(pair.def_json,'$.PlanningSettleCursor'));",
+            "ON CONFLICT(pair_id) DO UPDATE SET def_json=" + PreservePlanningCursors("excluded.def_json", "pair.def_json") + ";",
             ("$id", pair.PairId), ("$json", JsonSerializer.Serialize(pair, RowCodec.Json)));
         var pairNo = (long)StoreSchema.Scalar(_connection, transaction,
             "SELECT pair_no FROM pair WHERE pair_id=$id;", ("$id", pair.PairId))!;
@@ -980,60 +980,6 @@ public sealed partial class SqliteStateStore : IStateStore
     public void RemoveDeletionEvidence(string pairId, string rootId, IReadOnlyList<string> paths) =>
         InStore(() => _deletionEvidence.Remove(RequirePair(pairId),
             RootNo(rootId) ?? throw new InvalidOperationException($"Unknown root {rootId}"), paths));
-
-    public void Prune()
-    {
-        InStore(() => TryResultMaintenance());
-        if (Volatile.Read(ref _resultMaintenanceHalt) is not null) return;
-        var cutoff = NowMs() - (long)_settings.HistoryRetention.TotalMilliseconds;
-        PrunePages("generation", "finished IS NOT NULL AND finished < $cutoff AND gen < $pin",
-            transaction => [("$cutoff", cutoff), ("$pin", Pin(transaction))]);
-        while (InStore(() =>
-        {
-            using var transaction = _connection.BeginTransaction();
-            var changed = _notices.PrunePage(transaction, cutoff, 512);
-            transaction.Commit();
-            return changed != 0;
-        }, nameof(Prune))) { }
-        InStore(() =>
-        {
-            using var transaction = _connection.BeginTransaction();
-            // Only fully resolved deferrals age out: proceeded, released, or the entity is gone on both sides (no live row
-            // in any root and no baseline). Pending and Keep-held rows of a live entity are never pruned, on any root type.
-            StoreSchema.Execute(_connection, transaction,
-                "DELETE FROM defender_deferral WHERE object_id IN (SELECT q.object_id FROM defender_deferral q " +
-                "WHERE q.updated<$cutoff AND (q.consent IN ($proceed,$released) OR (" +
-                "NOT EXISTS (SELECT 1 FROM root r CROSS JOIN file_state f INDEXED BY fs_obj ON f.root_no=r.root_no AND f.object_id=q.object_id) AND " +
-                "NOT EXISTS (SELECT 1 FROM pair p CROSS JOIN sync_point s INDEXED BY sp_a_obj ON s.pair_no=p.pair_no AND s.a_object_id=q.object_id) AND " +
-                "NOT EXISTS (SELECT 1 FROM pair p CROSS JOIN sync_point s INDEXED BY sp_b_obj ON s.pair_no=p.pair_no AND s.b_object_id=q.object_id))) " +
-                "ORDER BY q.updated LIMIT 512);",
-                ("$cutoff", (_clock.GetUtcNow() - _settings.HistoryRetention).UtcTicks),
-                ("$proceed", (long)DefenderConsent.Proceed), ("$released", (long)DefenderConsent.Released));
-            transaction.Commit();
-        });
-        PrunePages("choice_merge", "NOT EXISTS (SELECT 1 FROM notice n WHERE n.notice_id=choice_merge.notice_id AND " + NoticeTable.ActionableSql("n.state") + ")", _ => []);
-        InStore(() =>
-        {
-            using var transaction = _connection.BeginTransaction();
-            _runHistory.Prune(transaction, NowMs(), _settings.HistoryRetention, _settings.RunSummaryMaximumRows);
-            transaction.Commit();
-        });
-        // Directory liveness calculation and removal are ONE atomic unit: releasing between
-        // them could delete a directory newly referenced by a concurrent publication.
-        InStore(() =>
-        {
-            using var transaction = _connection.BeginTransaction();
-            StoreSchema.Execute(_connection, transaction, "DROP TABLE IF EXISTS used;");
-            StoreSchema.Execute(_connection, transaction,
-                "CREATE TEMP TABLE used AS SELECT DISTINCT dir_no FROM file_state " +
-                "UNION SELECT a_dir FROM sync_point UNION SELECT b_dir FROM sync_point WHERE b_dir IS NOT NULL " +
-                "UNION SELECT dir_no FROM tombstone;");
-            StoreSchema.Execute(_connection, transaction, "DELETE FROM dir WHERE dir_no NOT IN (SELECT dir_no FROM used);");
-            StoreSchema.Execute(_connection, transaction, "DROP TABLE used;");
-            transaction.Commit();
-            _dir.ClearCache();
-        });
-    }
 
     private void PrunePages(string table, string predicate,
         Func<SqliteTransaction, (string Name, object? Value)[]> parameters)

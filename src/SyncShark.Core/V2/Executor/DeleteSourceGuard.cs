@@ -165,7 +165,7 @@ internal static partial class DeleteSourceGuard
                 if (db is not null) db.StageRemovalItems(session, action.Target, children, ordinalPaths: true);
                 else memory!.AddRange(children);
                 return Task.CompletedTask;
-            }, ct).ConfigureAwait(false);
+            }, ct, progress: null, reviewedRemoval: folder ? pair : null).ConfigureAwait(false);
             return (valid && rootSeen ? FolderDelete.SignatureOrdered(db is not null
                 ? db.RemovalObservation(session, action.Target)
                 : memory!.OrderBy(item => item.Path, StringComparer.Ordinal)) : null, hasCarried, files, folders, bytes);

@@ -255,8 +255,9 @@ public sealed partial class SqliteStateStore
 
     private void CloseRetryNotices(SqliteTransaction transaction, string pairId, string path)
     {
-        _notices.CloseWhere(transaction, "resolved", "notice_id=$id;",
-            ("$id", NoticeTable.Id(new Notice(pairId, 30, NoticeKind.Info, path, "", "unreadable"))));
+        foreach (var reason in PlanNotices.ObservationReasons)
+            _notices.CloseWhere(transaction, "resolved", "notice_id=$id;",
+                ("$id", NoticeTable.Id(new Notice(pairId, 30, NoticeKind.Info, path, "", reason.Key))));
         _notices.CloseWhere(transaction, "resolved",
             "notice_id=$id;",
             ("$id", ShortId.Make("n", pairId, "40", RowCodec.Key(path), "sync-retry")));

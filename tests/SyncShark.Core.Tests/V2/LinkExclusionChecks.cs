@@ -494,8 +494,9 @@ internal static class LinkExclusionChecks
                         new RecordingProgress(), CancellationToken.None, null, scenario == 0 ? null : resolution);
                     Require(report.Skipped == 1 && report.FailureCount == 0 && report.Done == 0 &&
                             report.Uploaded == 0 && report.Downloaded == 0 && report.Deleted == 0 && report.Moved == 0 &&
-                            store.OpenNotices(pair.PairId).Any(n => n.ReasonKey == "outside-pair-area" && n.Path == candidate.Path),
-                        label + ": safety skip and outside-pair notice (" + shape + ")");
+                            store.OpenNotices(pair.PairId).Any(n => n.ReasonKey ==
+                                PlanNotices.OutsidePairArea.Key && n.Rule == 33 && n.Path == candidate.Path),
+                        label + ": safety skip and exact eligibility notice (" + shape + ")");
                     Require(writerA.Calls == 0 && writerB.Calls == 0 && localReads.IsEmpty && cloudReads.IsEmpty &&
                             !linking.HashReads.Any(p => PairPath.IsSelfOrUnder(p, linkPath)),
                         label + ": no writes, observations, content reads or hashes through the link (" + shape + ")");

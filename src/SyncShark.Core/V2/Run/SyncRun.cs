@@ -873,12 +873,12 @@ public sealed partial class SyncRun : ISyncRun
         // Finding 1 (Astra): a link or stub that disappears in this run still protects its path for the whole run.
         // The restore refresh above may have frozen a new intent; take the run's hold snapshot after it.
         ResetRecoveryProtection();
-        var current = LeftAlone(pair);
         var retryCount = _store.CountSyncRetries(pairId);
         var retries = _store.DueSyncRetries(pairId, _time.GetUtcNow(), 256, CachedIdentityRefresh.PendingReason)
             .Where(retry => retry.Path.Length != 0 || retry.Kind != "run").ToArray();
         ct.ThrowIfCancellationRequested();
-        var deferredPlanning = AdmitPlanningPage(pairId);
+        var deferredPlanning = AdmitPlanningPage(pairId, pair);
+        var current = LeftAlone(pair); // Admission may retire non-work; summaries must observe that transition.
         using var planningTiming = new RunBoundaryTiming("planning", _settings.EnableRunInstrumentation);
         var activeRetries = CachedIdentityRefresh.ActiveRetryPaths(retries);
         var retryHeld = retries.Where(item => item.Held is not null).Select(item => item.Held!).ToArray();
@@ -1201,7 +1201,8 @@ public sealed partial class SyncRun : ISyncRun
     private sealed record ActionGuard(Func<string, bool> A, Func<string, bool> B, Func<string, bool> StrictA,
         Func<string, bool> StrictB, Side? RebuildableCloud = null, IReadOnlySet<string>? RebuildableFolders = null,
         Func<string, bool>? RebuildableDelete = null, IReadOnlyList<SyncIgnoreRule>? IgnoreRules = null,
-        Func<IEnumerable<string>, ActionGuard>? Prepare = null);
+        Func<IEnumerable<string>, ActionGuard>? Prepare = null,
+        Func<SyncAction, ItemEligibility.Result>? Explain = null);
 
     private static IEnumerable<(SyncAction Action, ActionGuard Guard)> GuardedActions(
         IEnumerable<SyncAction> actions, ActionGuard guard)
@@ -1221,9 +1222,14 @@ public sealed partial class SyncRun : ISyncRun
     {
         var plain = BuildPredicates(pair, PairInclude.For);
         var strict = BuildPredicates(pair, PairInclude.ForAction);
+        var eligibility = new ItemEligibility(_store.Pairs(), _productOwned(pair), (_, _, item, _) =>
+            links.CoversLink(item.Path) || links.ContainsLink(item.Path) ? "link" :
+            links.CoversStub(item.Path) || links.ContainsStub(item.Path) ? "stub" :
+            links.Covers(item.Path) || links.Contains(item.Path) ? "held:protection" : null);
         var guard = new ActionGuard(links.Narrow(plain.A), links.Narrow(plain.B), links.NarrowAction(strict.A),
             links.NarrowAction(strict.B), IgnoreRules: PairInclude.IgnoreRules(pair),
-            Prepare: links.RequiresBatch ? paths => ActionPredicates(pair, links.ForPaths(paths), rebuildables) : null);
+            Prepare: links.RequiresBatch ? paths => ActionPredicates(pair, links.ForPaths(paths), rebuildables) : null,
+            Explain: action => eligibility.ExplainEffect(pair, action));
         if (rebuildables is not { Folders.Count: > 0 } chosen ||
             RebuildableSelection.Sides(pair)?.Cloud is not { } cloud || chosen.Cloud != cloud)
             return guard;
@@ -1341,18 +1347,39 @@ public sealed partial class SyncRun : ISyncRun
                 !pair.Excluded.Any(path => PairPath.IsSelfOrUnder(retry.Path, path)))
             .Select(retry => retry.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
+    internal string? EligibilityHold(PairDef pair, Side side, ItemState item, ItemEligibility.Purpose purpose)
+    {
+        var protection = Protection(pair, purpose: purpose, proofItem: item,
+            proofRoot: side == Side.A ? pair.A.RootId : pair.B.RootId).ForPaths([item.Path]);
+        return protection.Covers(item.Path) || item.Kind == ItemKind.Folder && protection.Contains(item.Path)
+            ? "held:protection" : null;
+    }
+
     // One composition owner for preview, reviewed apply, incremental planning and repair admission.
     // Active retries and explicit decisions are input authority, never a different stage policy.
     private LinkExclusions Protection(PairDef pair, BothScan? scan = null, LinkExclusions? before = null,
         IReadOnlyDictionary<string, Side>? decisions = null, IReadOnlySet<string>? activeRetries = null,
-        IEnumerable<string>? additional = null, Func<string, bool, bool>? retryLookup = null)
+        IEnumerable<string>? additional = null, Func<string, bool, bool>? retryLookup = null,
+        ItemEligibility.Purpose purpose = ItemEligibility.Purpose.Plan, ItemState? proofItem = null,
+        string? proofRoot = null, IReadOnlySet<string>? proofPaths = null)
     {
-        var links = LeftAlone(pair).WithPending(PendingDecisions(pair.PairId, decisions))
+        var proving = purpose == ItemEligibility.Purpose.ContentProof;
+        var retries = _store.ReadSyncRetries(pair.PairId);
+        var ownProofPaths = retries.Where(retry => proving &&
+            (proofItem is not null && PairPath.Same(retry.Path, proofItem.Path) || proofPaths?.Contains(retry.Path) == true) &&
+            CachedIdentityRefresh.NeedsObservation(retry) && retry.PendingNotice?.Kind != NoticeKind.UserDecision &&
+            (retry.ReadRoots is null || retry.ReadRoots.Count == 1 && retry.ReadRoots.Contains(proofRoot!)))
+            .Select(retry => retry.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var initial = proving ? LinkExclusions.HoldsOf(_store, pair) : LeftAlone(pair);
+        // Background proof queries do not reuse a run's cached restore snapshot.
+        var proofRestore = proving ? RecoveryRestoreProtection.Create(_store, pair.PairId) : null;
+        var links = initial.WithPending(PendingDecisions(pair.PairId, decisions))
             .WithPending(OutstandingFootprints(pair.PairId))
             // Identity refresh must remain inventory-visible and uses the bounded retry
             // protection owner below, never a root-sized pending-path collection.
-            .WithPending(_store.ReadSyncRetries(pair.PairId)
+            .WithPending(retries
                 .Where(retry => RetryProtectionDomain.Includes(retry) && !CachedIdentityRefresh.Pending(retry))
+                .Where(retry => !ownProofPaths.Contains(retry.Path))
                 .Where(retry => retry.Kind == "scan" || retry.ReadRoots is { Count: > 0 } ||
                     retry.PendingNotice is not null)
                 .Select(retry => retry.Path));
@@ -1362,8 +1389,10 @@ public sealed partial class SyncRun : ISyncRun
                 .WithPending(scan.A.PendingDeletionEvidence.Keys.Concat(scan.B.PendingDeletionEvidence.Keys));
         if (additional is not null) links = links.WithPending(additional);
         var retry = retryLookup ?? RetryProtection.Create(_store, pair.PairId,
-            activeRetries ?? ActiveFirstSyncRetries(pair));
-        return links.WithRetryProtection(retry);
+            proving ? ownProofPaths :
+                activeRetries ?? ActiveFirstSyncRetries(pair));
+        return links.WithRetryProtection((path, descendants) => retry(path, descendants) ||
+            proofRestore?.Covers(path, descendants) == true);
     }
 
     // Links always, and online-only stubs while their replacement is off (decision 57), are left alone this run.
@@ -1435,108 +1464,6 @@ public sealed partial class SyncRun : ISyncRun
         var pairs = _store.Pairs();
         var owned = _productOwned(pair);
         return (make(pair, Side.A, pairs, owned), make(pair, Side.B, pairs, owned));
-    }
-
-    private static bool Allowed(ActionGuard guard, SyncAction action)
-    {
-        var directory = (action.ExpectedTarget ?? action.Source)?.Kind == ItemKind.Folder || action.Kind == ActionKind.MkDir;
-        if (guard.IgnoreRules is { Count: > 0 } rules &&
-            (SyncIgnorePolicy.IsIgnored(action.Path, directory, rules) ||
-             action.FromPath is { } from && SyncIgnorePolicy.IsIgnored(from, directory, rules) ||
-             action.Source is { } source && SyncIgnorePolicy.IsIgnored(source.Path, source.Kind == ItemKind.Folder, rules))) return false;
-        // A copy can name an allowed destination but still read an excluded source (e.g. a rebased move).
-        var sourceInclude = action.Target == Side.A ? guard.B : guard.A;
-        if (action.Source is { } sourceState && !sourceInclude(sourceState.Path)) return false;
-        // Only a reviewed rebuildable folder's cloud-only removal ignores local links; every other guard still applies.
-        if (IsApprovedRebuildableDelete(guard, action)) return guard.RebuildableDelete!(action.Path);
-        var strict = action.Kind is ActionKind.Move or ActionKind.Delete;
-        var include = (action.Target, strict) switch
-        {
-            (Side.A, true) => guard.StrictA,
-            (Side.A, false) => guard.A,
-            (_, true) => guard.StrictB,
-            _ => guard.B
-        };
-        return include(action.Path) && (action.FromPath is null || include(action.FromPath));
-    }
-
-    internal Plan FilterNarrowedPrepare(PairDef pair, Plan plan, IReadOnlyList<string> rules) =>
-        rules.Count == 0 ? plan : ApplySafetyFilter(pair, null, plan with { NarrowedIgnoreRules = rules });
-
-    private bool CarriesNewlyIgnored(PairDef pair, SyncAction action, IReadOnlyList<SyncIgnoreRule> rules)
-    {
-        if (rules.Count == 0 || action.Kind is not (ActionKind.Delete or ActionKind.Move) ||
-            (action.ExpectedTarget ?? action.Source)?.Kind != ItemKind.Folder) return false;
-        var root = action.Target == Side.A ? pair.A : pair.B;
-        return _store.AnyLiveIgnoredUnder(root.RootId, action.Path, rules) ||
-            action.FromPath is { } from && _store.AnyLiveIgnoredUnder(root.RootId, from, rules);
-    }
-
-    private Plan ApplySafetyFilter(PairDef pair, ActionGuard? predicates, Plan plan)
-    {
-        var kept = new List<SyncAction>();
-        var skipped = new List<SyncAction>(plan.SkippedActions);
-        var rules = SyncIgnorePolicy.Normalize(plan.NarrowedIgnoreRules.SelectMany(SyncIgnorePolicy.Parse).ToArray());
-        var notices = new List<Notice>(plan.Notices);
-        var blocked = predicates is null
-            ? plan.Actions.Where(action => CarriesNewlyIgnored(pair, action, rules)).ToHashSet()
-            : GuardedActions(plan.Actions, predicates).Where(entry =>
-                !Allowed(entry.Guard, entry.Action) || CarriesNewlyIgnored(pair, entry.Action, rules))
-                .Select(entry => entry.Action).ToHashSet();
-        // Collision cleanup can have the occupant's ObjectKey rather than the move's. Follow shared paths
-        // as well as keys, transitively, so no destination delete or baseline forget runs without its move.
-        // Index only the skipped component so a single skip cannot multiply whole-plan memory.
-        if (blocked.Count > 0 || plan.SkippedActions.Count > 0)
-        {
-            var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var keys = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var action in blocked.Concat(plan.SkippedActions)) Index(action);
-            // Keep only the blocked connected component, never dictionaries of the whole plan.
-            // Repeat a streaming pass for reverse-ordered links; most plans settle in one pass.
-            bool changed;
-            do
-            {
-                changed = false;
-                foreach (var action in plan.Actions)
-                {
-                    if (blocked.Contains(action) ||
-                        !(action.ObjectKey is { } key && keys.Contains(key) || RowPaths(action).Any(paths.Contains))) continue;
-                    blocked.Add(action);
-                    Index(action);
-                    changed = true;
-                }
-            } while (changed);
-            void Index(SyncAction action)
-            {
-                foreach (var path in RowPaths(action)) paths.Add(path);
-                if (action.ObjectKey is { } key) keys.Add(key);
-            }
-        }
-        foreach (var action in plan.Actions)
-        {
-            if (!blocked.Contains(action))
-            {
-                kept.Add(action);
-                continue;
-            }
-            PlanProvenance.Current.Value?.Rejected(action, "protection");
-            skipped.Add(action);
-            if (action.RebuildableRemove && CarriesNewlyIgnored(pair, action, rules))
-                notices.Add(new Notice(pair.PairId, 40, NoticeKind.UserDecision, action.Path,
-                    "The reviewed cloud removal was skipped because new ignore rules protect files inside. Nothing was removed." +
-                    NoticeChoices.RemovalAttentionHelp, "reviewed-removal-skipped", RemovalSides: [action.Target]));
-            notices.Add(new Notice(pair.PairId, OutsidePairRule, NoticeKind.Info, action.Path,
-                PlanNotices.OutsidePairArea.Detail +
-                " Entire planned effect, including any folder contents and related collision cleanup, skipped; no changes applied." +
-                " Normal subsequent sync may retain or copy included contents. Reviewed rebuildable exclusions are retained at completion." +
-                " Leave the protection in place, or include the item and resync.",
-                PlanNotices.OutsidePairArea.Key));
-        }
-        // An active exclusion is one pair-level notice, raised by every plan so it stays open while it applies.
-        if (pair.Excluded.Count > 0 && !notices.Any(notice => notice.ReasonKey == PlanNotices.PairExcluded.Key))
-            notices.Add(new Notice(pair.PairId, OutsidePairRule, NoticeKind.Info, string.Empty,
-                PlanNotices.PairExcluded.Detail + ": " + string.Join(", ", pair.Excluded), PlanNotices.PairExcluded.Key));
-        return plan with { Actions = kept, Notices = notices, SkippedActions = skipped };
     }
 
     // Finding 1: a run never reports Complete while retry debt or unreleased deletion evidence

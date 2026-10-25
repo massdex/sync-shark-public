@@ -220,7 +220,7 @@ public static class SyncCliRegistry
             "waits for a change or completion of exactly the named job, within the stated bound; same complete counters and explicitly bounded active-file sample as jobs status", "the running application",
             "running-application", "--key,--seconds", NeedsApplication: true),
         new("conflicts list", "conflicts list [--pair <exact-id>] [--account <exact-id>] [--search <text>] [--group <group>] [--limit 1..200] [--offset <n>]",
-            SyncCliRequestKind.State, "none", "open conflicts with group, recommendation and generation",
+            SyncCliRequestKind.State, "none", "open conflicts with group, recommendation and generation; capped content-proof notices and paginated retained diagnostics include failure stage and native error; overflow Retry/Ignore targets the root summary",
             "the product state or the running application", "direct|running-application",
             "--pair,--account,--search,--group,--limit,--offset"),
         new("conflicts select", "conflicts select --account <exact-id> [--pair <exact-id>] [--search <text>] [--group <group>]",

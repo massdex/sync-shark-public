@@ -44,6 +44,21 @@ internal static partial class RunChecks
         var gaps = (ILocalGapStore)store;
         Require(!CachedIdentityRefresh.Verified(store, store.SyncRetryAt(pair.PairId, original.Path)!, root.RootId),
             "unchanged identity without accepted content proof retains its failure debt");
+        var eligibility = new ItemEligibility(store.Pairs(), [], fx.Run().EligibilityHold);
+        var side = pair.A.RootId == root.RootId ? Side.A : Side.B;
+        Require(eligibility.Evaluate(pair, side, original, ItemEligibility.Purpose.ContentProof).Eligible,
+            "own cached-identity retry must permit the proof that retires it");
+        Require(!eligibility.Evaluate(pair, side, original, ItemEligibility.Purpose.Plan).Eligible &&
+            !eligibility.Evaluate(pair, side, original, ItemEligibility.Purpose.Settle).Eligible,
+            "proof recovery never releases planning or settlement protection");
+        store.AddNotices([new Notice(pair.PairId, 40, NoticeKind.UserDecision, original.Path,
+            "Choose how to resolve this item.", "proof-decision-check")]);
+        Require(!eligibility.Evaluate(pair, side, original, ItemEligibility.Purpose.ContentProof).Eligible,
+            "a decision on the same path still blocks proof through a cached-identity retry");
+        var decision = store.OpenNotices(pair.PairId).Single(n => n.ReasonKey == "proof-decision-check");
+        store.CloseNotice(decision.NoticeId!, "resolved");
+        Require(eligibility.Evaluate(pair, side, original, ItemEligibility.Purpose.ContentProof).Eligible,
+            "removing the decision permits proof without clearing the cached-identity retry first");
         var id = LocalItems.ParseObjectId(original.ObjectId);
         var proof = new LocalGapProof(store.Cursor(root.RootId)!, new(id.Volume, id.FileId, 99,
             original.Size, original.Mtime.UtcDateTime.ToFileTimeUtc()));

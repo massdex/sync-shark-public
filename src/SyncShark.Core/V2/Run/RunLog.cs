@@ -37,7 +37,8 @@ internal sealed class RunLog : RunTrace, IDisposable
         RunTrace.Slot.Value = this;
         try
         {
-            _directory = System.IO.Path.GetFullPath(System.IO.Path.Combine(root, "v2", "logs"));
+            _directory = System.IO.Path.GetFullPath(System.IO.Path.Combine(root, "v2", "logs",
+                command == "autosync" ? "autosync" : string.Empty));
             var stamp = DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss-fff", CultureInfo.InvariantCulture);
             var stem = stamp + "-" + Guid.NewGuid().ToString("N")[..8] + "-" + Safe(pair) + "-" + Safe(command);
             Path = System.IO.Path.Combine(_directory, stem + ".log");

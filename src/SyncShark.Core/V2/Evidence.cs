@@ -4,4 +4,9 @@
 /// DeletedHash* is the last Dropbox revision's content hash when the history supplies one.</summary>
 public sealed record Evidence(bool DeletedA, bool DeletedB, bool KnownA, bool KnownB,
     DateTimeOffset? DeletedAtA = null, DateTimeOffset? DeletedAtB = null,
-    string? DeletedHashA = null, string? DeletedHashB = null);
+    string? DeletedHashA = null, string? DeletedHashB = null)
+{
+    // Exact observations satisfy only no-baseline creation, never deletion or Forget coverage.
+    public bool CreationObservedA { get; init; }
+    public bool CreationObservedB { get; init; }
+}

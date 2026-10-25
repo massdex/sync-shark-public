@@ -2,15 +2,19 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SyncRun
 {
-    private Func<string, bool> ScanPathsNotSynced(PairDef pair)
+    private Func<string, bool> ScanPathsNotSynced(PairDef pair,
+        ItemEligibility.Purpose purpose = ItemEligibility.Purpose.Plan,
+        Func<PairDef, Side, ItemState, ItemEligibility.Purpose, string?>? held = null)
     {
         var pairs = _store.Pairs();
-        var owned = _productOwned(pair);
+        var eligibility = new ItemEligibility(pairs, _productOwned(pair), held);
         return path =>
         {
             var item = _store.Live(pair.A.RootId, [path]).FirstOrDefault() ??
-                _store.Live(pair.B.RootId, [path]).FirstOrDefault();
-            return PairInclude.NotSynced(pair, path, item?.Kind == ItemKind.Folder, pairs, owned);
+                _store.Live(pair.B.RootId, [path]).FirstOrDefault() ??
+                new ItemState(path, ItemKind.File, string.Empty, null, null, 0, DateTimeOffset.MinValue, ItemFlags.None);
+            return !eligibility.Evaluate(pair, Side.A, item, purpose).Eligible ||
+                !eligibility.Evaluate(pair, Side.B, item, purpose).Eligible;
         };
     }
 

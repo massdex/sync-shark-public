@@ -360,10 +360,10 @@ internal sealed partial class ActionRunner
         Task<ActionResult?> SettleAsync(ActionResult result, bool definitelyNotApplied = false) =>
             SettleEffectAsync(action, result, recoveryHolder, target, definitelyNotApplied, ct);
 
-        ItemState? newT;
+        (ItemState? Target, string? SourceHash) effect;
         try
         {
-            newT = await EffectAsync(action, target, source, recoveryHolder, deferPreserve, ct).ConfigureAwait(false);
+            effect = await EffectAsync(action, target, source, recoveryHolder, deferPreserve, ct).ConfigureAwait(false);
         }
         catch (Exception error) when (QuarantineFailure.IsQuarantine(error))
         {
@@ -461,19 +461,18 @@ internal sealed partial class ActionRunner
                 : Failed(action, Describe(e)), e)).ConfigureAwait(false);
         }
 
-        var done = DoneResult(action, newT, recoveryHolder.Reference);
-        await SettleAsync(done).ConfigureAwait(false);
-        return done;
+        var done = DoneResult(action, effect.Target, recoveryHolder.Reference, effect.SourceHash);
+        return await SettleAsync(done).ConfigureAwait(false);
     }
 
-    private async Task<ItemState?> EffectAsync(SyncAction action, IEndpointWriter target, IEndpointWriter source,
+    private async Task<(ItemState? Target, string? SourceHash)> EffectAsync(SyncAction action, IEndpointWriter target, IEndpointWriter source,
         RecoveryHolder recoveryHolder, bool deferPreserve, CancellationToken ct) => action.Kind switch
         {
             ActionKind.CopyNew or ActionKind.Update or ActionKind.KeepBoth =>
                 await CopyAsync(action, target, source, recoveryHolder, deferPreserve, ct).ConfigureAwait(false),
-            ActionKind.Move => await target.MoveAsync(action, ct).ConfigureAwait(false),
-            ActionKind.Delete => await DeleteAsync(action, target, ct).ConfigureAwait(false),
-            ActionKind.MkDir => await target.MkDirAsync(action.Path, ct).ConfigureAwait(false),
+            ActionKind.Move => (await target.MoveAsync(action, ct).ConfigureAwait(false), null),
+            ActionKind.Delete => (await DeleteAsync(action, target, ct).ConfigureAwait(false), null),
+            ActionKind.MkDir => (await target.MkDirAsync(action.Path, ct).ConfigureAwait(false), null),
             _ => throw new InvalidOperationException(UnexpectedKind + action.Kind),
         };
 
@@ -481,7 +480,7 @@ internal sealed partial class ActionRunner
         action.Kind is ActionKind.CopyNew or ActionKind.Update or ActionKind.KeepBoth &&
         target is ISyncDirectDownloadTarget && source is ISyncDirectDownloadSource;
 
-    private async Task<ItemState?> CopyAsync(SyncAction action, IEndpointWriter target, IEndpointWriter source,
+    private async Task<(ItemState? Target, string? SourceHash)> CopyAsync(SyncAction action, IEndpointWriter target, IEndpointWriter source,
         RecoveryHolder recoveryHolder, bool deferPreserve, CancellationToken ct)
     {
         if (action.Source is null) throw new InvalidOperationException("Source missing for " + action.ActionId);
@@ -489,7 +488,7 @@ internal sealed partial class ActionRunner
         {
             if (target is not IOwnedPointerUpdateTarget pointers)
                 throw new IOException("The endpoint cannot update online-only metadata. Reconnect the owned root and retry.");
-            return await pointers.UpdateOwnedPointerAsync(action, source, ct).ConfigureAwait(false);
+            return (await pointers.UpdateOwnedPointerAsync(action, source, ct).ConfigureAwait(false), null);
         }
         // A remote source and a local target download straight into the target's own temporary file: no product
         // spool, so the target volume holds one copy. Any other pair keeps the streaming handoff.
@@ -497,13 +496,19 @@ internal sealed partial class ActionRunner
         {
             Func<SyncDownloadStage, CancellationToken, Task> preservedAfterVerify =
                 (stage, token) => PreserveAfterVerifyAsync(action, target, recoveryHolder, stage, token);
-            return await direct.PutDownloadedAsync(action, remote, preservedAfterVerify, ct).ConfigureAwait(false);
+            return (await direct.PutDownloadedAsync(action, remote, preservedAfterVerify, ct).ConfigureAwait(false), action.Source.Hash);
         }
         var content = await source.OpenReadAsync(action.Source, ct).ConfigureAwait(false);
-        await using var owner = new SyncUploadSource(content, () => _quota.CheckUploadStart(action));
+        var proof = action.Source.Hash is null ? new TransferHashStream(content) : null;
+        var transferred = (Stream?)proof ?? content;
+        await using var owner = new SyncUploadSource(transferred, () => _quota.CheckUploadStart(action));
         var previous = SyncUploadSource.Current.Value;
         SyncUploadSource.Current.Value = owner;
-        try { return await target.PutAsync(action, content, ct).ConfigureAwait(false); }
+        try
+        {
+            var result = await target.PutAsync(action, transferred, ct).ConfigureAwait(false);
+            return (result, action.Source.Hash ?? proof?.CompletedHash(action.Source.Size));
+        }
         finally { SyncUploadSource.Current.Value = previous; }
     }
 
@@ -632,12 +637,23 @@ internal sealed partial class ActionRunner
         ? new ActionResult(action.ActionId, Outcome.Done, action.Source, action.ExpectedTarget, null, null)
         : new ActionResult(action.ActionId, Outcome.Done, null, null, null, null);
 
-    private static ActionResult DoneResult(SyncAction action, ItemState? newT, RecoveryRef? recovery)
+    private static ActionResult DoneResult(SyncAction action, ItemState? newT, RecoveryRef? recovery, string? transferredHash)
     {
         if (action.Kind == ActionKind.Delete) return new ActionResult(action.ActionId, Outcome.Done, null, null, recovery, null);
+        var source = action.Source;
+        // Destination metadata alone is not source evidence. Bind it to bytes consumed by this transfer.
+        if (action.Kind is ActionKind.CopyNew or ActionKind.Update or ActionKind.KeepBoth &&
+            !OwnedPointerUpdates.IsMetadataUpdate(action) && source is { Kind: ItemKind.File, Hash: null })
+        {
+            if (newT is not { Kind: ItemKind.File } || source.Size != newT.Size ||
+                Content.SameHash(transferredHash, newT.Hash) != true)
+                return new(action.ActionId, Outcome.Uncertain, null, null, recovery,
+                    MessageCatalog.Default.Message("proof-required"));
+            source = source with { Hash = transferredHash };
+        }
         return action.Target == Side.A
-            ? new ActionResult(action.ActionId, Outcome.Done, newT, action.Source, recovery, null)
-            : new ActionResult(action.ActionId, Outcome.Done, action.Source, newT, recovery, null);
+            ? new ActionResult(action.ActionId, Outcome.Done, newT, source, recovery, null)
+            : new ActionResult(action.ActionId, Outcome.Done, source, newT, recovery, null);
     }
 
     private static ActionResult Skipped(SyncAction action, string reason) =>

@@ -2,11 +2,12 @@ using System.Buffers;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
+using ProofStage = Massdex.SyncShark.V2.ContentProofFailure.StageKind;
 
 namespace Massdex.SyncShark.V2;
 
 /// <summary>Full-sharing, low-priority streaming IO. Metadata probes never open file contents.</summary>
-internal sealed class LocalGapIo(IStateStore known, V2Settings settings, IReadOnlySet<string> owned,
+internal sealed partial class LocalGapIo(IStateStore known, V2Settings settings, IReadOnlySet<string> owned,
     Func<bool>? pauseOverride = null, TimeProvider? time = null) : ILocalGapIo
 {
     public TimeProvider Time => time ?? TimeProvider.System;
@@ -22,8 +23,12 @@ internal sealed class LocalGapIo(IStateStore known, V2Settings settings, IReadOn
     private NtfsUsnCheckpoint? Checkpoint(string path) => CheckpointForCheck is { } read ? read(path) :
         NtfsUsnJournal.TryReadCheckpoint(path, out var proof) ? proof : null;
 
-    private NtfsFileUsn? FileProof(SafeFileHandle file) => FileUsnForCheck is { } read ? read(file) :
-        NtfsUsnJournal.TryReadFileUsn(file, out var proof) ? proof : null;
+    private NtfsFileUsn? FileProof(SafeFileHandle file, out string? reason)
+    {
+        reason = null;
+        if (FileUsnForCheck is { } read) return read(file);
+        return NtfsUsnJournal.TryReadFileUsn(file, out var proof, out reason) ? proof : null;
+    }
 
     public bool Paused
     {
@@ -39,8 +44,26 @@ internal sealed class LocalGapIo(IStateStore known, V2Settings settings, IReadOn
 
     public string PauseReason => Paused ? "content verification paused: user active, on battery, or power/input status unavailable; metadata continues" : "content verification running";
 
-    public bool Excluded(RootDef root, ItemState item) =>
-        LocalItems.IsExcluded(item.Path, LocalItems.ProductOwnedRelative(root.RootPath, owned));
+    internal Func<PairDef, Side, ItemState, ItemEligibility.Purpose, string?>? EligibilityHeld { get; set; }
+
+    public bool Excluded(RootDef root, ItemState item) => Eligibility(root, item, checkHolds: false).NotPairWork;
+
+    private ItemEligibility.Result Eligibility(RootDef root, ItemState item, bool checkHolds)
+    {
+        var pass = _proofPass.Value;
+        var eligibility = pass?.RootId == root.RootId ? (checkHolds ? pass.Proof : pass.Selection) :
+            new ItemEligibility(known.Pairs(), LocalItems.ProductOwnedRelative(root.RootPath, owned).ToArray(),
+                checkHolds ? EligibilityHeld : null);
+        // Only the removal owner supplies this pair and enclosing-folder scope.
+        if (pass?.RootId == root.RootId && pass.ReviewedRemoval(item) is { } pair)
+        {
+            var side = pair.A.RootId == root.RootId ? Side.A : Side.B;
+            var boundary = pass.Selection.Evaluate(pair, side == Side.A ? Side.B : Side.A,
+                item, ItemEligibility.Purpose.ReviewedRemoval);
+            return boundary.Eligible ? eligibility.Evaluate(pair, side, item, ItemEligibility.Purpose.ReviewedRemoval) : boundary;
+        }
+        return eligibility.EvaluateRoot(root.RootId, item, ItemEligibility.Purpose.ContentProof);
+    }
 
     public ILocalGapProbe OpenProbes(RootDef root) => new FileIdProbes(root, Checkpoint);
 
@@ -97,50 +120,91 @@ internal sealed class LocalGapIo(IStateStore known, V2Settings settings, IReadOn
         public void Dispose() => _volume.Dispose();
     }
 
-    private LocalGapProof? ProbePath(RootDef root, ItemState item)
+    private LocalGapProof? ProbePath(RootDef root, ItemState item, out ContentProofFailure? failure)
     {
-        if (LocalItems.IsExcluded(item.Path, LocalItems.ProductOwnedRelative(root.RootPath, owned))) return null;
-        var identity = LocalItems.ParseObjectId(root.RootObjectId);
-        using var lease = PilotDirectoryLease.Open(root.RootPath, new PilotDirectoryIdentity(identity.Volume, identity.FileId));
-        using var guard = LocalItems.GuardRefreshPaths(root.RootPath, root.RootId, known, [item.Path]);
-        if (guard.Safe.Count == 0 || Checkpoint(root.RootPath) is not { } checkpoint) return null;
-        using var file = NtfsUsnJournal.OpenGapMetadata(Path.Combine(root.RootPath, item.Path.Replace('/', Path.DirectorySeparatorChar)));
-        if (file.IsInvalid || FileProof(file) is not { } proof) return null;
-        return new(checkpoint.Cursor, proof);
+        failure = new(ProofStage.PathIdentity, MessageCatalog.Default.Message("proof-path-unavailable"));
+        try
+        {
+            if (Eligibility(root, item, checkHolds: true) is { Eligible: false } eligibility)
+            { failure = new(ProofStage.Eligibility, eligibility.Reason!); return null; }
+            var identity = LocalItems.ParseObjectId(root.RootObjectId);
+            using var lease = PilotDirectoryLease.Open(root.RootPath, new PilotDirectoryIdentity(identity.Volume, identity.FileId));
+            using var guard = LocalItems.GuardRefreshPaths(root.RootPath, root.RootId, known, [item.Path]);
+            if (guard.Safe.Count == 0) { failure = guard.Failure ?? failure; return null; }
+            if (Checkpoint(root.RootPath) is not { } checkpoint)
+            { failure = new(ProofStage.Journal, MessageCatalog.Default.Message("proof-journal-unavailable")); return null; }
+            using var file = NtfsUsnJournal.OpenGapMetadata(LocalItems.FullPath(root.RootPath, item.Path));
+            if (file.IsInvalid) { failure = failure with { NativeError = Marshal.GetLastWin32Error() }; return null; }
+            if (FileProof(file, out var reason) is not { } proof)
+            { failure = ContentProofFailure.FromDiagnostic(ProofStage.PathIdentity, reason ?? failure.Cause); return null; }
+            failure = null;
+            return new(checkpoint.Cursor, proof);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception or ArgumentException)
+        { failure = ContentProofFailure.FromException(ProofStage.PathIdentity, error); return null; }
     }
 
     public Task<LocalGapHashResult> HashAsync(RootDef root, ItemState item, CancellationToken ct) => HashAsync(root, item, false, ct);
 
     public async Task<LocalGapHashResult> HashAsync(RootDef root, ItemState item, bool urgent, CancellationToken ct)
     {
-        ct.ThrowIfCancellationRequested();
-        if (!urgent && Paused) return new(LocalGapHashOutcome.Paused);
-        if (settings.LocalGapBytesPerSecond <= 0) return new(LocalGapHashOutcome.Disabled);
-        if (LocalItems.IsExcluded(item.Path, LocalItems.ProductOwnedRelative(root.RootPath, owned)))
-            return new(LocalGapHashOutcome.Unverifiable);
-        var identity = LocalItems.ParseObjectId(root.RootObjectId);
-        using var lease = PilotDirectoryLease.Open(root.RootPath, new PilotDirectoryIdentity(identity.Volume, identity.FileId));
+        var stage = ProofStage.Eligibility;
+        try
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!urgent && Paused) return new(LocalGapHashOutcome.Paused);
+            if (settings.LocalGapBytesPerSecond <= 0) return new(LocalGapHashOutcome.Disabled);
+            if (Eligibility(root, item, checkHolds: true) is { Eligible: false } eligibility)
+                return eligibility.NotPairWork ? new(LocalGapHashOutcome.NotPairWork, Reason: eligibility.Reason) :
+                    new(LocalGapHashOutcome.Held, Reason: eligibility.Reason);
+            stage = ProofStage.RootOpen;
+            var identity = LocalItems.ParseObjectId(root.RootObjectId);
+            using var lease = PilotDirectoryLease.Open(root.RootPath, new PilotDirectoryIdentity(identity.Volume, identity.FileId));
+            stage = ProofStage.Classification;
+            if (await RefreshClassificationAsync(root, item, lease, ct).ConfigureAwait(false) is { } rejection)
+                return rejection.Outcome == LocalGapHashOutcome.Unverifiable && rejection.Failure is null ? rejection.At(stage) : rejection;
+            return await HashResidentAsync(root, item, urgent, lease, ct, next => stage = next).ConfigureAwait(false);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception or ArgumentException)
+        {
+            NativeIoDiagnostic.LogOnce("content proof " + stage, error);
+            return new(LocalGapHashOutcome.Unverifiable, Reason: error.Message, QuarantineCode: QuarantineFailure.NativeCode(error))
+            { Failure = ContentProofFailure.FromException(stage, error) };
+        }
+    }
+
+    private async Task<LocalGapHashResult> HashResidentAsync(RootDef root, ItemState item, bool urgent,
+        PilotDirectoryLease lease, CancellationToken ct, Action<ProofStage> setStage)
+    {
+        ProofStage stage;
+        setStage(stage = ProofStage.ParentIdentity);
         using var guard = LocalItems.GuardRefreshPaths(root.RootPath, root.RootId, known, [item.Path]);
-        if (guard.Safe.Count == 0 || Checkpoint(root.RootPath) is not { } checkpoint) return new(LocalGapHashOutcome.Unverifiable);
+        if (guard.Safe.Count == 0) return new(LocalGapHashOutcome.Unverifiable, Reason: MessageCatalog.Default.Message("proof-parent-guard"))
+        { Failure = guard.Failure ?? new(stage, MessageCatalog.Default.Message("proof-parent-guard")) };
+        setStage(stage = ProofStage.Journal);
+        if (Checkpoint(root.RootPath) is not { } checkpoint)
+            return LocalGapHashResult.Failed(stage, MessageCatalog.Default.Message("proof-journal-unavailable"));
+        setStage(stage = ProofStage.VolumeOpen);
         var fileIdentity = LocalItems.ParseObjectId(item.ObjectId);
         using var volume = NtfsUsnJournal.OpenGapVolume(root.RootPath);
-        if (volume.IsInvalid) return new(LocalGapHashOutcome.Unverifiable);
-        // A path-open file handle can pin its parent even with DELETE sharing. Open only by ID.
+        if (volume.IsInvalid) return LocalGapHashResult.Failed(stage, MessageCatalog.Default.Message("proof-volume-open"), Marshal.GetLastWin32Error());
+        setStage(stage = ProofStage.ContentOpen);
+        // The content handle is no-recall and opened by identity, never through a cached path.
         using var handle = NtfsUsnJournal.OpenGapContent(volume, fileIdentity.FileId);
-        if (handle.IsInvalid)
-        {
-            return FailedOpen(root, item, Marshal.GetLastWin32Error(), guard, lease);
-        }
-        if (FileProof(handle) is not { } before || !LocalGapWorker.Matches(item, before))
-            return new(LocalGapHashOutcome.Unverifiable, Reason: "file identity or journal proof unavailable");
-        // The file alone is pinned with READ|WRITE|DELETE sharing. Never deny parent renames
-        // during a large hash or its rate-limit waits. Next-run probing validates the path again.
+        if (handle.IsInvalid) return FailedOpen(root, item, Marshal.GetLastWin32Error(), guard, lease);
+        setStage(stage = ProofStage.BeforeRead);
+        if (FileProof(handle, out var beforeFailure) is not { } before || !LocalGapWorker.Matches(item, before))
+            return LocalGapHashResult.Failed(stage, beforeFailure ?? MessageCatalog.Default.Message("proof-before-read"));
         guard.Dispose();
         lease.Dispose();
+        setStage(stage = ProofStage.Read);
         using var stream = new FileStream(handle, FileAccess.Read, ContentBufferBytes, isAsync: false);
         var content = await ReadHashAsync(stream, urgent, ct).ConfigureAwait(false);
         if (content is null) return new(LocalGapHashOutcome.Paused);
-        return ValidateHash(root, item, urgent, checkpoint, before, FileProof(handle), content.Value);
+        setStage(stage = ProofStage.AfterRead);
+        var after = FileProof(handle, out var afterFailure);
+        if (after is null) return LocalGapHashResult.Failed(stage, afterFailure ?? MessageCatalog.Default.Message("proof-after-unavailable"));
+        return ValidateHash(root, item, urgent, checkpoint, before, after, content.Value);
     }
 
     private LocalGapHashResult ValidateHash(RootDef root, ItemState item, bool urgent, NtfsUsnCheckpoint checkpoint,
@@ -148,11 +212,16 @@ internal sealed class LocalGapIo(IStateStore known, V2Settings settings, IReadOn
     {
         if (after is null || Checkpoint(root.RootPath) is not { } through ||
             through.JournalId != checkpoint.JournalId || through.NextUsn < checkpoint.NextUsn)
-            return new(LocalGapHashOutcome.Unverifiable);
+            return LocalGapHashResult.Failed(ProofStage.AfterRead, MessageCatalog.Default.Message("proof-journal-changed"));
         if (before != after || content.Bytes != item.Size)
-            return new(urgent ? LocalGapHashOutcome.ChangedDuringRead : LocalGapHashOutcome.Unverifiable);
-        if (ProbePath(root, item) is not { } pathProof) return new(LocalGapHashOutcome.Unverifiable);
-        if (pathProof.File != after) return new(urgent ? LocalGapHashOutcome.ChangedDuringRead : LocalGapHashOutcome.Unverifiable);
+            return LocalGapHashResult.Failed(ProofStage.AfterRead, MessageCatalog.Default.Message("proof-content-changed"),
+                outcome: urgent ? LocalGapHashOutcome.ChangedDuringRead : LocalGapHashOutcome.Unverifiable);
+        if (ProbePath(root, item, out var failure) is not { } pathProof)
+            return failure?.Cause.StartsWith("held:", StringComparison.Ordinal) == true
+                ? new(LocalGapHashOutcome.Held, Reason: failure.Cause)
+                : new(LocalGapHashOutcome.Unverifiable, Reason: failure?.Cause) { Failure = failure };
+        if (pathProof.File != after) return LocalGapHashResult.Failed(ProofStage.PathIdentity, MessageCatalog.Default.Message("proof-path-changed"),
+            outcome: urgent ? LocalGapHashOutcome.ChangedDuringRead : LocalGapHashOutcome.Unverifiable);
         // Promotion checks this file's USN and metadata in the same journal on a later run.
         return new(LocalGapHashOutcome.Verified, content.Hash, new LocalGapProof(checkpoint.Cursor, after!));
     }

@@ -25,14 +25,28 @@ public sealed partial class SyncRun
     }
 
     // One oldest-first intake page. Apply rotates it; previews never mutate the queue.
-    internal IReadOnlyList<SqliteStateStore.DeferredPlanning> AdmitPlanningPage(string pairId)
+    internal IReadOnlyList<SqliteStateStore.DeferredPlanning> AdmitPlanningPage(string pairId, PairDef? observedPair = null)
     {
         using var timing = new RunBoundaryTiming("intake", _settings.EnableRunInstrumentation);
         IReadOnlyList<SqliteStateStore.DeferredPlanning> page = _store is SqliteStateStore store
             ? store.AdmitDeferredPlanning(pairId, _time.GetUtcNow().UtcTicks,
                 rotate: _endpoints is not PlanOnlyEndpoints) : [];
+        if (observedPair is not null && _store is SqliteStateStore retirement)
+            page = RetireNonWorkPlanning(retirement, observedPair, page);
         timing.Entities = page.Count;
         timing.Aliases = page.Sum(row => (long)row.Paths.Count);
         return page;
+    }
+
+    private IReadOnlyList<SqliteStateStore.DeferredPlanning> RetireNonWorkPlanning(SqliteStateStore store,
+        PairDef pair, IReadOnlyList<SqliteStateStore.DeferredPlanning> page)
+    {
+        var notSynced = ScanPathsNotSynced(pair);
+        var excluded = page.Where(row => row.Paths.Count > 0 && row.Paths.All(notSynced)).ToArray();
+        // This retires scheduling, never content proof, baselines or independent reviewed authority.
+        // The queue owner still checks versions and requires a complete successful alias cycle.
+        if (_endpoints is not PlanOnlyEndpoints && excluded.Length > 0)
+            store.AcknowledgeDeferredPlanning(pair.PairId, excluded, notSynced);
+        return page.Except(excluded).ToArray();
     }
 }

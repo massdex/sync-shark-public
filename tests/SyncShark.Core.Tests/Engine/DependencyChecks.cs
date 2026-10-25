@@ -110,6 +110,9 @@ internal sealed class DependencyChecks
         if (type.DeclaringType != null) Reference(type.DeclaringType, from, site, caller);
         var definition = type.IsGenericType ? type.GetGenericTypeDefinition() : type;
         var ns = definition.Namespace ?? "";
+        if (caller?.DeclaringType is { } declaring && member is not null &&
+            !EligibilityCallAllowed(Top(declaring).Name, declaring.Name + "." + caller.Name, Top(definition).Name, member))
+            Error("Eligibility ownership", $"{site} -> {type.FullName}.{member}");
         // SQL belongs Storage (engineering standards sections 1.1/6.2).
         // This is independent of assembly identity and applies even to catch-only references.
         if (from != "Storage" && (ns == "Microsoft.Data" || ns.StartsWith("Microsoft.Data.", StringComparison.Ordinal)))
@@ -141,6 +144,21 @@ internal sealed class DependencyChecks
             type == typeof(Environment) && !IteratorThreadId(caller, member) ||
             (type == typeof(DateTime) || type == typeof(DateTimeOffset)) && member is "get_Now" or "get_UtcNow" or "get_Today";
         if (forbidden) Error(from + " -> Effects", $"{site} -> {type.FullName}{Suffix(member)}");
+    }
+
+    // Enforce the migrated eligibility surfaces, without banning the scanner's own classification
+    // or unrelated inventory/effect guards. Async and iterator names contain their source method.
+    private static bool EligibilityCallAllowed(string owner, string method, string target, string member)
+    {
+        if (target == "NtfsUsnJournal" && member == "OpenGapContent") return owner == "LocalGapIo";
+        var consumer = owner == "CachedIdentityRefresh" || owner == "LocalGapIo" ||
+            owner == "LocalGapWorker" || owner == "LocalInventory" &&
+                (method.Contains("HashProofsAsync") || method.Contains("VerifyIndexingPassAsync")) ||
+            owner == "SyncRun" && (method.Contains("ScanPathsNotSynced") || method.Contains("ApplySafetyFilter") ||
+                method.Contains("FilterSettleProtection"));
+        var individual = target == "PairInclude" && member is "NotSynced" or "Excludes" or "PermanentBoundary" ||
+            target == "LocalItems" && member == "IsExcluded";
+        return !consumer || !individual || owner == "ItemEligibility";
     }
 
     private static string Suffix(string? member) => member == null ? "" : "." + member;
@@ -362,6 +380,13 @@ internal sealed class DependencyChecks
         static void Require(bool condition, string message)
         { if (!condition) throw new InvalidOperationException("Checker probe failed: " + message); }
         var core = typeof(V2.ItemState).Assembly;
+        var eligibilityProbe = new DependencyChecks(core, new());
+        eligibilityProbe.Reference(typeof(V2.PairInclude), "Local", "direct eligibility bypass",
+            typeof(V2.LocalInventory).GetMethod("HashProofsAsync", Declared), "NotSynced");
+        Require(eligibilityProbe.failures.ContainsKey("Eligibility ownership"), "direct eligibility bypass fails");
+        Require(EligibilityCallAllowed("ItemEligibility", "Evaluate", "PairInclude", "NotSynced"), "stack owns selection");
+        Require(!EligibilityCallAllowed("LocalInventory", "HashProofsAsync", "NtfsUsnJournal", "OpenGapContent") &&
+            EligibilityCallAllowed("LocalGapIo", "HashAsync", "NtfsUsnJournal", "OpenGapContent"), "one content-open owner");
         foreach (var module in EngineLayoutSourceMap.Modules)
         {
             var probe = new DependencyChecks(core, new());

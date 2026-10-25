@@ -4,6 +4,9 @@ internal static partial class RunChecks
 {
     internal static async Task CachedIdentityExclusionsAsync(string folder)
     {
+        await ExactCreationObservationAsync(Path.Combine(folder, "creation-observation"));
+        await PlanningObservationHandoffAsync(Path.Combine(folder, "handoff"));
+        await ItemEligibilityContentAsync(Path.Combine(folder, "eligibility"));
         await ScanBoundaryRetirementAsync(Path.Combine(folder, "boundaries"));
         await LocalCatchUpNoticeLifecycleAsync(Path.Combine(folder, "notice"));
         foreach (var ignored in new[] { false, true })

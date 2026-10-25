@@ -45,6 +45,8 @@ public sealed record V2Settings(
     internal const int JournalRecordsPerPage = 256;
     internal static readonly TimeSpan JournalStoreSlice = TimeSpan.FromMilliseconds(200);
     internal const int ScanRetryScopeLimit = 256;
+    internal const int PlanningObservationBatchRows = 256;
+    internal static readonly TimeSpan StorePruneInterval = TimeSpan.FromHours(1);
 
     // Diagnostic write batches bound commit latency without buffering a root-sized set.
     internal const int DefaultProvenanceBatchRows = 512;
@@ -103,7 +105,7 @@ public sealed record V2Settings(
         ProgressDrainTimeout: TimeSpan.FromSeconds(10),
         // Continuous sync (continuous-sync.md section 4): quiet window is v1's; long-poll allows 30-480 s.
         ChangeQuietWindow: TimeSpan.FromMilliseconds(750),
-        ChangeMaxDelay: TimeSpan.FromSeconds(30),
+        ChangeMaxDelay: TimeSpan.FromSeconds(5),
         DropboxLongpollTimeout: TimeSpan.FromSeconds(120),
         AutoRetryDelay: TimeSpan.FromSeconds(10),
         // Floor for the edge's safety-poll interval (v1's minimum sync interval), so a bad value cannot spin.

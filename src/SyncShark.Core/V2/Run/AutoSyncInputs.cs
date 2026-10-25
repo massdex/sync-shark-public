@@ -4,6 +4,8 @@ namespace Massdex.SyncShark.V2;
 internal sealed record AutoSyncInputs(IStateStore Store, ISyncRun Run, IChangeWatchSource Watches, V2Settings Settings,
     Func<PairDef, bool> Paused, Func<TimeSpan> SafetyPoll, TimeProvider Time, Action<PairAutoState> Publish)
 {
+    internal Func<string, string, IDisposable>? BeginRunLog { get; init; }
+
     /// <summary>The edge's safety-poll interval, never below <see cref="V2Settings.MinSafetyPoll"/> (zero or negative included).</summary>
     public TimeSpan SafetyInterval()
     {

@@ -28,7 +28,7 @@ internal static class RetryNoticeFold
         Action<string> closeGeneric, Func<Notice, Notice> foldUnreadable)
     {
         if (notice.ReasonKey is ExecutionReasons.ConflictCopyBlocked or InterruptedDelete.UnverifiedReason or
-            "deletion-evidence-pending" or "unreadable")
+            "deletion-evidence-pending" || PlanNotices.NeedsObservation(notice))
             closeGeneric(notice.ReasonKey == "deletion-evidence-pending" ? "evidence-pending" : "superseded");
         if (notice.ReasonKey is not ("content-unconfirmed" or "sync-retry")) return false;
         if (exists(ExecutionReasons.ConflictCopyBlocked) || exists(InterruptedDelete.UnverifiedReason)) return true;

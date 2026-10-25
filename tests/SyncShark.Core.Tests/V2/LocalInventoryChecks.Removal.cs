@@ -33,16 +33,28 @@ internal static partial class LocalInventoryChecks
             LocalChecks.Require(!await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(action, pair, store, inventory, default, isStateDamage: StorageFailureClassifier.IsStateDamage),
                 "real local new child vetoes on " + side);
             var consentPair = pair with { IgnoreRules = ["FileExtension:tmp"] };
+            store.SavePair(consentPair);
+            var contentReads = 0;
+            inventory.GapIo = new LocalGapIo(store, V2Settings.Default, new HashSet<string>(), () => false)
+                { AfterContentReadForCheck = _ => contentReads++ };
             LocalChecks.Seed(directory, "consented/original.tmp", "data");
             var consentRows = new List<ItemState>();
             await inventory.ReadSubtreeAsync("consented", page => { consentRows.AddRange(page); return Task.CompletedTask; }, default);
+            var ordinaryHashes = await inventory.HashAsync(["consented/original.tmp"], default);
+            LocalChecks.Require(contentReads == 0 && ordinaryHashes.Count == 0 &&
+                consentRows.Single(item => item.Kind == ItemKind.File).Hash is null,
+                "without reviewed removal, ignored children receive no content work on " + side);
             var proposed = new SyncAction("consent", 23, ActionKind.Delete, side, "consented", null, null,
                 consentRows.Single(item => item.Path == "consented"), true, null)
                 { CarriedIgnoredBudget = new CarriedIgnoredContent(1, 0, 4), FrozenVictimSignature = FolderDelete.Signature([]) };
             var consent = await DeleteSourceGuard.RecordRemovalConsentAsync(proposed, consentPair, store, inventory, default, isStateDamage: StorageFailureClassifier.IsStateDamage);
+            LocalChecks.Require(contentReads > 0, "reviewed enclosing removal proves its carried ignored bytes on " + side);
             LocalChecks.Require(consent.RemovalReviewChoice && consent.FrozenRemovalSignature is not (null or "unproven") &&
                 await DeleteSourceGuard.ReviewedRemovalUnchangedAsync(consent, consentPair, store, inventory, default, isStateDamage: StorageFailureClassifier.IsStateDamage),
                 "consent freezes complete carried observation together with authority on " + side);
+            var reviewedReads = contentReads;
+            LocalChecks.Require((await inventory.HashAsync(["consented/original.tmp"], default)).Count == 0 &&
+                contentReads == reviewedReads, "reviewed proof scope cannot leak into ordinary content work on " + side);
             var plannedConsent = await DeleteSourceGuard.RecordRemovalConsentAsync(
                 proposed with { ActionId = "planned-consent", DescendantsPlanned = true, PreserveIgnoredChildren = false },
                 consentPair, store, inventory, default, isStateDamage: StorageFailureClassifier.IsStateDamage);

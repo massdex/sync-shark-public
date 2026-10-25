@@ -94,7 +94,12 @@ public sealed partial class SqliteStateStore
             "UPDATE local_gap_item SET failure_count=$n,failure_reason=$why,retry_after=$due,retry_allowed=1 WHERE root_no=$r AND object_id=$o AND epoch=$e;",
             ("$r", root), ("$o", objectId), ("$e", epoch), ("$n", retry.Attempts),
             ("$why", reason), ("$due", retry.RetryAfter.ToUnixTimeMilliseconds()));
-        if (owner is { } noticeOwner) PublishIndexFailure(tx, noticeOwner, rootId, cause, reason, retry);
+        if (owner is { } noticeOwner)
+        {
+            PublishIndexFailure(tx, noticeOwner, rootId, cause, reason, retry);
+            if (ContentProofFailure.Decode(reason) is not null && _reads.ByObject(root, objectId, tx) is { } item)
+                PublishIndexItemFailure(tx, noticeOwner, rootId, cause, reason, retry, item.Path);
+        }
     }
 
     /// <summary>Records one background rehash failure against its exact attempt revision; a stale attempt is refused.</summary>
@@ -113,7 +118,12 @@ public sealed partial class SqliteStateStore
             "UPDATE local_rehash SET failure_count=$n,retry_after=$due,reason=$why WHERE root_no=$r AND object_id=$o AND evidence_revision=$v;",
             ("$r", root.Value), ("$o", item.ObjectId), ("$v", revision), ("$n", retry.Attempts),
             ("$due", retry.RetryAfter.ToUnixTimeMilliseconds()), ("$why", reason));
-        if (owner is { } noticeOwner) PublishIndexFailure(tx, noticeOwner, rootId, RehashCause, reason, retry);
+        if (owner is { } noticeOwner)
+        {
+            PublishIndexFailure(tx, noticeOwner, rootId, RehashCause, reason, retry);
+            if (ContentProofFailure.Decode(reason) is not null)
+                PublishIndexItemFailure(tx, noticeOwner, rootId, RehashCause, reason, retry, item.Path);
+        }
         tx.Commit();
         return true;
     });
@@ -174,15 +184,15 @@ public sealed partial class SqliteStateStore
     /// cause reopens the same row with the current evidence, and the structured failure state always follows it.
     /// </summary>
     private void PublishIndexFailure(SqliteTransaction transaction, (string PairId, long PairNo) owner,
-        string rootId, string cause, string reason, FailureRetryOwner.State retry)
+        string rootId, string cause, string reason, FailureRetryOwner.State retry, string path = "")
     {
         var reasonKey = IndexFailurePrefix + rootId;
-        var notice = new Notice(owner.PairId, 40, NoticeKind.Info, string.Empty,
-            "Indexing could not verify this root: " + reason + ". Files remain protected and will retry automatically. " +
-            "Check access and the journal, then Retry; Ignore hides this episode without abandoning verification.",
+        var notice = new Notice(owner.PairId, 40, NoticeKind.Info, path,
+            MessageCatalog.Default.Message(path.Length == 0 ? "proof-notice-root" : "proof-notice-item") +
+            (ContentProofFailure.Decode(reason)?.Display ?? reason) + MessageCatalog.Default.Message("proof-notice-guidance"),
             reasonKey)
         { FailureRetry = retry, CauseKey = IndexCause(rootId, cause) };
-        var previous = ReadIndexNotice(transaction, owner, rootId);
+        var previous = ReadIndexNotice(transaction, owner, rootId, path);
         if (previous is { Choice: NoticeChoices.Ignore } prior &&
             !string.Equals(prior.Notice.CauseKey, notice.CauseKey, StringComparison.Ordinal))
         {
@@ -194,19 +204,24 @@ public sealed partial class SqliteStateStore
     }
 
     private (Notice Notice, string State, string? Choice)? ReadIndexNotice(SqliteTransaction transaction,
-        (string PairId, long PairNo) owner, string rootId)
+        (string PairId, long PairNo) owner, string rootId, string path = "")
     {
         using var command = StoreSchema.Command(_connection, transaction,
-            "SELECT notice_id,path,detail,state,choice FROM notice WHERE pair_no=$p AND reason_key=$r " +
+            "SELECT notice_id,path,detail,state,choice FROM notice WHERE pair_no=$p AND reason_key=$r AND path_key=$path " +
             "ORDER BY created DESC,notice_id DESC LIMIT 1;");
         command.Parameters.AddWithValue("$p", owner.PairNo);
         command.Parameters.AddWithValue("$r", IndexFailurePrefix + rootId);
+        command.Parameters.AddWithValue("$path", RowCodec.Key(path));
         using var reader = command.ExecuteReader();
         if (!reader.Read()) return null;
         var notice = NoticeDetailCodec.Decode(new Notice(owner.PairId, 40, NoticeKind.Info,
             reader.GetString(1), reader.GetString(2), IndexFailurePrefix + rootId, reader.GetString(0)));
         return (notice, reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetString(4));
     }
+
+    private void CloseIndexItemFailure(SqliteTransaction tx, string rootId, string path) =>
+        _notices.CloseWhere(tx, "resolved", "reason_key=$reason AND path_key=$path;",
+            ("$reason", IndexFailurePrefix + rootId), ("$path", RowCodec.Key(path)));
 
     /// <summary>Summary suppression belongs to the root and failure class, never the latest item's detail.</summary>
     private static string IndexCause(string rootId, string failureKind) =>

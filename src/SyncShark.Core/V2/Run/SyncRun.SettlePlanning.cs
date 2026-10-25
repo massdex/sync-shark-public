@@ -37,7 +37,7 @@ public sealed partial class SyncRun
             // Split oversized alias chunks too; one entity must not block its neighbours.
             if (paths.Length > 1024) { Split(chunk); return; }
             var guarded = protection.ForPaths(paths);
-            var page = FilterSettleProtection(chunk, guarded, touched);
+            var page = FilterSettleProtection(pair, chunk, guarded, touched);
             if (page.Length == 0) return;
             paths = page.SelectMany(row => row.Paths).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             var scope = LoadSettleScope(pair, guarded, page, paths, ct);
@@ -61,10 +61,14 @@ public sealed partial class SyncRun
         Evaluate(initial);
     }
 
-    private static SqliteStateStore.DeferredPlanning[] FilterSettleProtection(
-        SqliteStateStore.DeferredPlanning[] chunk, LinkExclusions guarded, IReadOnlyList<string> touched) =>
-        chunk.Where(row => row.Paths.All(path => !guarded.Covers(path) && !guarded.Contains(path) &&
+    private SqliteStateStore.DeferredPlanning[] FilterSettleProtection(PairDef pair,
+        SqliteStateStore.DeferredPlanning[] chunk, LinkExclusions guarded, IReadOnlyList<string> touched)
+    {
+        var notSynced = ScanPathsNotSynced(pair, ItemEligibility.Purpose.Settle,
+            (_, _, item, _) => guarded.Covers(item.Path) || guarded.Contains(item.Path) ? "held:protection" : null);
+        return chunk.Where(row => row.Paths.All(path => !notSynced(path) &&
             !touched.Any(other => PairPath.IsSelfOrUnder(path, other) || PairPath.IsSelfOrUnder(other, path)))).ToArray();
+    }
 
     private RunScope.Scope LoadSettleScope(PairDef pair, LinkExclusions guarded,
         SqliteStateStore.DeferredPlanning[] page, string[] paths, CancellationToken ct)

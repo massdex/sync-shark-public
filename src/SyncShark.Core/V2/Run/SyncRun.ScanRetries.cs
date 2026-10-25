@@ -27,11 +27,12 @@ public sealed partial class SyncRun
     }
 
     private async Task<(IReadOnlyList<string> Touched, IReadOnlyList<string> Incomplete,
-        IReadOnlyDictionary<string, string> Reasons, bool RootSettles)> RetryScanScopesAsync(
+        IReadOnlyDictionary<string, string> Reasons, bool RootSettles, IReadOnlyList<string> Observed)> RetryScanScopesAsync(
         PairDef pair, RootDef root, Side side, IInventorySource inventory, string cursor, long gen,
         Func<string, bool> include, Action<string> changed, ProgressThrottle throttle, CancellationToken ct, bool rootFeedComplete = false)
     {
         var touched = new List<string>();
+        var exactObserved = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var incomplete = new List<string>();
         var reasons = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var remaining = V2Settings.ScanRetryScopeLimit;
@@ -150,9 +151,15 @@ public sealed partial class SyncRun
             // Finding 2 (review-rc3-2): a due root retry whose re-read failed observed nothing, so it
             // must not touch "" and plan the whole pair without settling. Ordinary scopes stay touched.
             touched.AddRange(rootSettles ? scopes : scopes.Where(scope => scope.Length > 0));
+            exactObserved.UnionWith(SuccessfullyObservedScopes(scopes, include, incomplete));
         }
-        return (touched, incomplete, reasons, rootDebtSettles);
+        return (touched, incomplete, reasons, rootDebtSettles, exactObserved.ToArray());
     }
+
+    private static IEnumerable<string> SuccessfullyObservedScopes(IEnumerable<string> attempted,
+        Func<string, bool> include, IReadOnlyList<string> incomplete) => attempted.Where(scope =>
+        scope.Length > 0 && include(scope) && !incomplete.Any(failed => failed.Length == 0 ||
+            PairPath.IsSelfOrUnder(scope, failed) || PairPath.IsUnder(failed, scope)));
 
     private void RetireScanRetries(PairDef pair, IReadOnlyCollection<string> failed, Func<string, bool> notSynced)
     {

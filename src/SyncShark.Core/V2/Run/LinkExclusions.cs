@@ -86,7 +86,7 @@ internal sealed class LinkExclusions
             pending: HoldPaths(store, pair),
             nonLocalLinks: nonLocalLinks, rehash: new RehashProtection(store, pair),
             heldCount: (int)Math.Min(int.MaxValue, (long)store.CountHeldIntents(pair.PairId) +
-                (store is SqliteStateStore sqlite ? sqlite.CountDeferredPlanning(pair.PairId) : 0)));
+                (store is SqliteStateStore sqlite ? sqlite.CountDeferredPlanning(pair.PairId, verificationOnly: true) : 0)));
     }
 
     // Evidence observations may inspect links/stubs, but must not retire debt under a real hold.

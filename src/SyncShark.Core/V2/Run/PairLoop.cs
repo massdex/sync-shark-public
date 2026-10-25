@@ -25,6 +25,7 @@ internal sealed partial class PairLoop
     private DateTimeOffset _pollAt;
     private int _watchAttempts;
     private bool _watchStateLoaded;
+    private string _wakeCause = "startup";
 
     internal PairLoop(string pairId, AutoSyncInputs inputs)
     {
@@ -126,6 +127,7 @@ internal sealed partial class PairLoop
             if (now >= _pollAt && (_retryAt is null || now >= _retryAt))
             {
                 _pollAt = now + _in.SafetyInterval();
+                _wakeCause = "safety-poll";
                 _retryAt = null;
                 return true;
             }
@@ -151,16 +153,19 @@ internal sealed partial class PairLoop
             }
             return false;
         }
-        if (_retryAt is { } retryAt)
-        {
-            Publish(AutoStatus.Waiting, null);
-            // Watches are not waited on here: their signals stay latched and never bring a retry forward.
-            var wake = await WaitAsync([], retryAt - _in.Time.GetUtcNow(), stop).ConfigureAwait(false);
-            if (wake.Kind == WakeKind.Kick) return false;
-            _retryAt = null;
-            return await ArmAsync(pair, stop).ConfigureAwait(false);
-        }
+        if (_retryAt is { } retryAt) return await RetryReadyAsync(pair, retryAt, stop).ConfigureAwait(false);
         return await ArmAsync(pair, stop).ConfigureAwait(false) && await TriggeredAsync(stop).ConfigureAwait(false);
+    }
+
+    private async Task<bool> RetryReadyAsync(PairDef pair, DateTimeOffset retryAt, CancellationToken stop)
+    {
+        Publish(AutoStatus.Waiting, null);
+        // Watch signals stay latched and never bring a retry forward.
+        var wake = await WaitAsync([], retryAt - _in.Time.GetUtcNow(), stop).ConfigureAwait(false);
+        if (wake.Kind == WakeKind.Kick) return false;
+        _retryAt = null;
+        _wakeCause = "retry";
+        return await ArmAsync(pair, stop).ConfigureAwait(false);
     }
 
     // Waits for a change, the safety poll or a Kick. A new watch starts with a signal pending, so startup, Kick,
@@ -171,7 +176,7 @@ internal sealed partial class PairLoop
         AnnounceIdle();
         var wake = await WaitAsync(_watches, _in.SafetyInterval(), stop).ConfigureAwait(false);
         if (wake.Kind == WakeKind.Signal) return await SettleAsync(stop).ConfigureAwait(false);
-        if (wake.Kind == WakeKind.Timeout) DisposeWatches();
+        if (wake.Kind == WakeKind.Timeout) { _wakeCause = "safety-poll"; DisposeWatches(); }
         return false;
     }
 
@@ -255,6 +260,8 @@ internal sealed partial class PairLoop
                 if (_in.Ineligible(_in.Store.Pair(_pairId)) is not null) source.Cancel();
             }
             Publish(AutoStatus.Running, null);
+            using var log = _in.BeginRunLog?.Invoke(_pairId, _wakeCause);
+            _wakeCause = "watch-signal";
             AfterReport(await _in.Run.IncrementalAsync(_pairId, NoProgress, source.Token).ConfigureAwait(false));
             _deadWatchRebuilds = 0;
         }
@@ -320,6 +327,7 @@ internal sealed partial class PairLoop
             _watchDegraded = false;
         }
         if (wake.Kind != WakeKind.Kick) return wake;
+        _wakeCause = "kick";
         lock (_lock) _kick = NewKick();
         _held = null;
         _retryAt = null;

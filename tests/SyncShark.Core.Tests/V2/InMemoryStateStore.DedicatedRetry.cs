@@ -15,7 +15,7 @@ internal sealed partial class InMemoryStateStore
             {
                 if (Find("sync-retry", 40) is { NoticeId: { } id }) CloseNotice(id, choice);
             },
-            retry => Find("unreadable", 30) is { } unreadable
+            retry => PlanNotices.ObservationReasons.Select(reason => Find(reason.Key, 30)).FirstOrDefault(found => found is not null) is { } unreadable
                 ? unreadable with { Detail = retry.Detail, CauseKey = retry.CauseKey,
                     CauseIdentity = retry.CauseIdentity, FailureRetry = retry.FailureRetry ?? unreadable.FailureRetry }
                 : retry);

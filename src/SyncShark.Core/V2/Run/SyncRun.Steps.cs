@@ -761,7 +761,8 @@ public sealed partial class SyncRun
             hydrate.Length > 0 || observationOnly, paths, ids, deleted, previous)
             { JournalBacklog = delta.JournalBacklog, IncompleteSubtrees = delta.IncompleteSubtrees, IncompleteReasons = delta.IncompleteReasons, ObservedCoverage = observationStore is null ? null : coverage, RehashThrough = _store.RehashWatermark(root.RootId),
                 PendingDeletionEvidence = delta.PendingDeletionEvidence, ReleasedDeletionEvidence = delta.ReleasedDeletionEvidence,
-                RootDebtSettles = retryReads.RootSettles, UserChanges = delta.Changes };
+                RootDebtSettles = retryReads.RootSettles, UserChanges = delta.Changes,
+                ExactCreationObserved = new(retryReads.Observed, StringComparer.OrdinalIgnoreCase) };
     }
 
     // The full snapshot must be installed first: journal name resolution uses its object/parent rows.
@@ -925,6 +926,8 @@ public sealed partial class SyncRun
         throttle.Report(RunPhases.Comparing, null, 0, 0);
         var comparison = System.Diagnostics.Stopwatch.StartNew();
         var rows = JoinRows(loadScope(), scan, firstSync);
+        if (await ObserveCreationDestinationsAsync(pair, scan, rows, ct).ConfigureAwait(false))
+            rows = JoinRows(loadScope(), scan, firstSync);
         var requests = Planner.HashRequests(rows);
         RunLog.Trace($"comparison scope/join: elapsed-ms={comparison.ElapsedMilliseconds}; rows={rows.Count}; hash-a={requests.PathsA.Count}; hash-b={requests.PathsB.Count}");
         if (requests.PathsA.Count == 0 && requests.PathsB.Count == 0) return rows;
@@ -945,7 +948,8 @@ public sealed partial class SyncRun
         var completeness = new Completeness(scan.A.Complete || scan.A.ScopedFullCoverage,
             scan.B.Complete || scan.B.ScopedFullCoverage,
             scan.A.IncompleteSubtrees.ToHashSet(StringComparer.OrdinalIgnoreCase),
-            scan.B.IncompleteSubtrees.ToHashSet(StringComparer.OrdinalIgnoreCase));
+            scan.B.IncompleteSubtrees.ToHashSet(StringComparer.OrdinalIgnoreCase))
+        { ExactCreationObservedA = scan.A.ExactCreationObserved, ExactCreationObservedB = scan.B.ExactCreationObserved };
         return Planner.Join(scope.Baselines, scope.A, scope.B, scan.A.Deleted, scan.B.Deleted, completeness, firstSync, scope.ContextA, scope.ContextB, scope.ProtectedAliases);
     }
 

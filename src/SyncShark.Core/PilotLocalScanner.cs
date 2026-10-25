@@ -390,8 +390,7 @@ public sealed class PilotLocalScanner
                 {
                     await DrainAsync();
                     if (include || (traverseDirectory?.Invoke(relative) ?? true))
-                        decisions.Add(new PilotDecision(relative, PilotDecisionKind.Blocked,
-                            "Local path attributes could not be read safely.") { QuarantineCode = V2.QuarantineFailure.NativeCode(exception) });
+                        decisions.Add(PilotDecision.MetadataFailure(relative, exception));
                     continue;
                 }
 

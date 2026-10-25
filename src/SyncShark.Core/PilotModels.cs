@@ -51,6 +51,13 @@ public sealed record PilotUploadResult(string FileId, string Revision, long Size
 
 public sealed record PilotDecision(string RelativePath, PilotDecisionKind Kind, string Reason)
 {
+    internal static PilotDecision MetadataFailure(string path, Exception error) =>
+        new(path, PilotDecisionKind.Blocked, V2.MessageCatalog.Default.Message("proof-metadata-unavailable") + error.Message)
+        {
+            QuarantineCode = V2.QuarantineFailure.NativeCode(error),
+            NativeError = V2.ContentProofFailure.FromException(V2.ContentProofFailure.StageKind.Classification, error).NativeError
+        };
+    public int? NativeError { get; init; }
     public int? QuarantineCode { get; init; }
     public bool DefenderHistoryMatch { get; init; }
     public bool DefenderHistoryUnknown { get; init; }

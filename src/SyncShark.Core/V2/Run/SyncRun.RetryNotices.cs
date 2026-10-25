@@ -384,7 +384,7 @@ public sealed partial class SyncRun
                 // Never manufacture an empty-path retry or grant deletion authority from a notice button.
                 if (notice.Path.Length == 0)
                     return NoticeChoices.Result(choice, notice);
-                if (notice.ReasonKey == PlanNotices.CannotRead.Key)
+                if (PlanNotices.NeedsObservation(notice))
                 {
                     var unreadable = _store.SyncRetryAt(pairId, notice.Path) ??
                         new SyncRetry(notice.Path, "scan", 0, notice.Detail, DateTimeOffset.MinValue);

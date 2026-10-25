@@ -35,8 +35,8 @@ internal static partial class PlannerChecks
         var unknown = Decide(false, row2 with { Ev = new Evidence(false, false, false, false) });
         AssertNoActions(unknown);
         AssertNotices(unknown, new NExp(30, NoticeKind.Info, "q"));
-        Require(unknown.Notices.Single().ReasonKey == PlanNotices.CannotRead.Key,
-            "unobserved counterpart retains the exact scan retry handoff");
+        Require(unknown.Notices.Single().ReasonKey == PlanNotices.DestinationUnobserved.Key,
+            "unobserved counterpart has its distinct exact scan retry reason");
     }
 
     /// <summary>Finding 4: Adopt stays Target B / Source A when the completed move lands on side A.</summary>

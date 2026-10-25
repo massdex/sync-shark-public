@@ -1112,6 +1112,7 @@ internal static partial class ExecutorChecks
         public bool HasPendingRehashVerification(string rootId) => _inner.HasPendingRehashVerification(rootId);
         public long RehashPendingCount(string rootId) => _inner.RehashPendingCount(rootId);
         public bool FailIndexingRehash(string rootId, ItemState item, long revision, string reason) => _inner.FailIndexingRehash(rootId, item, revision, reason);
+        public bool RetireIndexingRehash(string rootId, ItemState item, long revision) => _inner.RetireIndexingRehash(rootId, item, revision);
         public void RecordIndexFailure(string rootId, string reason) => _inner.RecordIndexFailure(rootId, reason);
         public bool DeferIndexObservation(string rootId, Side side, ItemState observed, ItemState? expectedPrior, string reason) => _inner.DeferIndexObservation(rootId, side, observed, expectedPrior, reason);
         public IReadOnlyList<ItemState> RehashCandidates(string rootId, int limit) => _inner.RehashCandidates(rootId, limit);

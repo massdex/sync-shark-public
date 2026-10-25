@@ -10,6 +10,11 @@ internal static partial class RunChecks
     public static async Task RunAsync()
     {
         var failures = new List<string>();
+        await Group(nameof(EligibilityRegressionAsync), EligibilityRegressionAsync, failures);
+        await Group(nameof(CaseLocationAsync), CaseLocationAsync, failures);
+        await Group(nameof(CaseSensitiveRenameAndCreateAsync), CaseSensitiveRenameAndCreateAsync, failures);
+        await Group(nameof(MoveSettlementReportAsync), MoveSettlementReportAsync, failures);
+        await Group(nameof(MoveEditedBaselineProofAsync), MoveEditedBaselineProofAsync, failures);
         await Group(nameof(DuplicatePlanActionsAsync), DuplicatePlanActionsAsync, failures);
         await Group(nameof(ProvenanceAsync), ProvenanceAsync, failures);
         await Group(nameof(RehearsalAsync), RehearsalAsync, failures);
@@ -1752,8 +1757,9 @@ internal static partial class RunChecks
         var callsBefore = fx.WriterB.Calls;
         await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), CancellationToken.None);
         Require(fx.WriterB.Calls == callsBefore, "a delete of a folder holding an excluded subtree is dropped");
-        Require(fx.Store.OpenNotices(fx.Pair.PairId).Any(notice => notice.Rule == 33),
-            "the drop is reported as a notice");
+        Require(fx.Store.OpenNotices(fx.Pair.PairId).Any(notice => notice.Rule == 33 &&
+                notice.ReasonKey == PlanNotices.OutsidePairArea.Key && notice.Path == "ex"),
+            "an exclusion remains outside the user's selected pair area under rule 33");
         Console.WriteLine("PASS SafetyFilter_DropsOutsidePairArea");
     }
 
@@ -1796,8 +1802,9 @@ internal static partial class RunChecks
             var kind = move ? "move" : "delete";
             Require(fx.WriterB.Calls == callsBefore, "a " + kind + " of a folder holding a product-owned folder is dropped" +
                 $" (moves {fx.WriterB.Moves}, deletes {fx.WriterB.Deletes}, mkdirs {fx.WriterB.MkDirs}, puts {fx.WriterB.Puts})");
-            Require(fx.Store.OpenNotices(fx.Pair.PairId).Any(notice => notice.Rule == 33),
-                "the dropped " + kind + " is reported as a notice");
+            Require(fx.Store.OpenNotices(fx.Pair.PairId).Any(notice => notice.Rule == 33 &&
+                    notice.ReasonKey == PlanNotices.OutsidePairArea.Key),
+                "the dropped " + kind + " reports the product-owned boundary outside the pair area");
         }
         Console.WriteLine("PASS ProductOwned_AncestorMoveAndDeleteDropped");
     }
@@ -2169,12 +2176,12 @@ internal static partial class RunChecks
 
     private static Executor NewExecutor(IStateStore store) => new(store, Settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
 
-    private static Fixture Build(bool enabled = true, bool record = false, string pairId = "p1", IStateStore? suppliedStore = null, bool localLocal = false, string accountId = "acc", bool displayRoot = false)
+    private static Fixture Build(bool enabled = true, bool record = false, string pairId = "p1", IStateStore? suppliedStore = null, bool localLocal = false, string accountId = "acc", bool displayRoot = false, bool caseSensitiveA = false)
     {
         var inner = suppliedStore ?? new InMemoryStateStore();
         var recorder = record ? new RecordingStore(inner) : null;
         IStateStore store = recorder is not null ? recorder : inner;
-        var a = new FakeEndpoint(Side.A, "ra");
+        var a = new FakeEndpoint(Side.A, "ra", caseSensitiveA);
         var b = new FakeEndpoint(Side.B, "rb");
         var writerA = new CountingWriter(a);
         var writerB = new CountingWriter(b);

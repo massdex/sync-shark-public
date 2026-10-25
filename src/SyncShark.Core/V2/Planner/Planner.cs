@@ -212,11 +212,10 @@ public static partial class Planner
         }
         // A no-baseline source does not prove its destination was observed. Missing coverage
         // is unknown, never a vacant target, including when a first-sync choice requests a copy.
-        // CannotRead is the existing exact scan-retry handoff owned by Run/Storage.
-        if (row.Base is null && (row.A is null) != (row.B is null) &&
-            (row.A is null ? !row.Ev.KnownA && !row.Ev.DeletedA : !row.Ev.KnownB && !row.Ev.DeletedB))
+        // Exact creation observation is deliberately separate from deletion/Forget coverage.
+        if (NeedsCreationObservation(row))
         {
-            AddNotice(ctx, 30, NoticeKind.Info, PrimaryPath(row), PlanNotices.CannotRead);
+            AddNotice(ctx, 30, NoticeKind.Info, PrimaryPath(row), PlanNotices.DestinationUnobserved);
             return;
         }
         // a path the reviewed prepare saw on both sides is ordinary ongoing sync when it becomes
