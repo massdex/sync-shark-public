@@ -662,11 +662,16 @@ internal static partial class Program
             await database.RegisterMembershipAsync(id + "-membership", id, sourceRoot, path, 1);
             await database.RegisterObjectVersionAsync(id + "-version", id, sourceSide, "{}", hash, 340880);
             var fixtureAdmission = await database.CreateAcceptedCommandAdmissionAsync(null, "run_pair", pair.Id, null, null, "{}", SyncAuthorityCommandPurpose.NormalEffect);
+            // A fresh action must carry exact current planning authority for its object; the fixture
+            // seeds the same object-scoped cut the production planner binds, on the pair's true roots.
+            var planningAuthority = await FixturePlanningAuthority.CurrentAsync(database, pair.Id,
+                pair.Id + "-local", pair.Id + "-remote", id);
             await database.CreateOperationAsync(new SyncAuthorityOperationPlan(id, id + "-key",
                 index == 0 ? SyncAuthorityOperationKind.CreateRemote : SyncAuthorityOperationKind.CreateLocal,
-                pair.Id, id, pair.PolicyRevision, "inspection-profile", "{}", pair.Priority,
+                pair.Id, id, planningAuthority.ConfigurationRevision, "inspection-profile", "{}", pair.Priority,
                 [new(id + "-source", pair.Id, id, "source", sourceRoot, id + "-membership", id + "-version", 1, path, "{\"kind\":\"file\"}"),
-                 new(id + "-destination", pair.Id, id, "destination", destinationRoot, null, null, null, path, "{\"kind\":\"file\",\"absent\":true}")], [], []), fixtureAdmission);
+                 new(id + "-destination", pair.Id, id, "destination", destinationRoot, null, null, null, path, "{\"kind\":\"file\",\"absent\":true}")], [], [],
+                PlanningAuthorities: [planningAuthority]), fixtureAdmission);
             if (index == 0)
             {
                 var lease = await database.AcquireOperationLeaseAsync(id, "inspection-seed", TimeSpan.FromMinutes(1));

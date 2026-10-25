@@ -473,8 +473,12 @@ internal static class WorkspaceUiChecks
             // producer that could not retain an event is named instead of being hidden.
             Set(window, "_activityHasMore", true); Set(window, "_activityLoadFailed", false); Set(window, "_activityLoadFailure", null);
             var partialCount = Query<string>(window, "ActivityCountText");
-            Require(partialCount.Contains("more available", StringComparison.Ordinal) &&
-                    !partialCount.Contains(" of ", StringComparison.Ordinal),
+            // The count sentence is the loaded-scope statement that ends at the first full stop; the
+            // retained-window detail the product appends after it is a separate policy description and
+            // is not a count, so the no-invented-total check applies to the sentence alone.
+            var partialCountSentence = partialCount.Split('.', 2)[0];
+            Require(partialCountSentence.Contains("more available", StringComparison.Ordinal) &&
+                    !partialCountSentence.Contains(" of ", StringComparison.Ordinal),
                 "A partially loaded list says more are available and states no invented total: " + partialCount);
             Set(window, "_activityHasMore", false);
             Require(Query<string>(window, "ActivityCountText").Contains("all retained matches loaded", StringComparison.Ordinal),
