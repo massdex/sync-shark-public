@@ -187,7 +187,7 @@ public sealed partial class SqliteStateStore
     /// </summary>
     internal IReadOnlyList<DeferredSettle> AcknowledgeDeferredPlanning(string pairId, IReadOnlyList<DeferredPlanning> page,
         Func<string, bool> settled, Func<string, bool>? emptyPath = null,
-        Action<DeferredPlanning>? acknowledged = null) => InStore(() =>
+        Action<DeferredPlanning>? acknowledged = null) => InStore<IReadOnlyList<DeferredSettle>>(() =>
     {
         var pair = PairNo(pairId);
         if (pair is null) return (IReadOnlyList<DeferredSettle>)Array.Empty<DeferredSettle>();

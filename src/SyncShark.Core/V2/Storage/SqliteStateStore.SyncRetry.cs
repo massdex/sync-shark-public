@@ -155,7 +155,7 @@ public sealed partial class SqliteStateStore
 
     // One bounded index seek: MIN(retry_after) over the pair's scheduling debt. MaxValue decision holds are
     // excluded by the same bound CountSyncRetries uses, so they never move a deferred wake.
-    public DateTimeOffset? EarliestSyncRetryAfter(string pairId) => InStore(() =>
+    public DateTimeOffset? EarliestSyncRetryAfter(string pairId) => InStore<DateTimeOffset?>(() =>
     {
         var value = StoreSchema.Scalar(_connection, null,
             "SELECT MIN(retry_after) FROM sync_retry INDEXED BY sync_retry_due WHERE pair_no=$p AND retry_after<$held;",
