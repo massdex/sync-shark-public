@@ -1377,62 +1377,18 @@ public sealed partial class SyncRun
             return !unsettled.GetViewBetween(path + "/", path + "0").Any();
         }
         if (deferredPlanning is not null && _store is SqliteStateStore deferredStore)
-            AcknowledgeDeferredPages(pair, scan, Settled, evaluated, includeA, includeB, unsettled, ct,
-                deferredStore, deferredPlanning, acknowledged);
+            foreach (var page in deferredPlanning.Chunk(256))
+            {
+                ct.ThrowIfCancellationRequested();
+                deferredStore.AcknowledgeDeferredPlanning(pair.PairId, page, Settled, path =>
+                    scan.A.Complete && scan.B.Complete && includeA(path) && includeB(path) &&
+                    !evaluated(path) && !unsettled.Any(p => PairPath.IsSelfOrUnder(path, p) || PairPath.IsSelfOrUnder(p, path)) &&
+                    _store.Live(pair.A.RootId, [path]).Count == 0 && _store.Live(pair.B.RootId, [path]).Count == 0 &&
+                    !_store.BaselinesAt(pair.PairId, Side.A, [path]).Any() &&
+                    !_store.BaselinesAt(pair.PairId, Side.B, [path]).Any(), acknowledged);
+            }
         _store.AcknowledgeRehash(pair.A.RootId, scan.A.RehashThrough, path => Settled(path) && includeA(path), ct);
         _store.AcknowledgeRehash(pair.B.RootId, scan.B.RehashThrough, path => Settled(path) && includeB(path), ct);
-    }
-
-    private void AcknowledgeDeferredPages(PairDef pair, BothScan scan, Func<string, bool> settled,
-        Func<string, bool> evaluated, Func<string, bool> includeA, Func<string, bool> includeB,
-        SortedSet<string> unsettled, CancellationToken ct, SqliteStateStore store,
-        IEnumerable<SqliteStateStore.DeferredPlanning> deferredPlanning,
-        Action<SqliteStateStore.DeferredPlanning>? acknowledged)
-    {
-        var outcome = new List<SqliteStateStore.DeferredSettle>();
-        foreach (var page in deferredPlanning.Chunk(256))
-        {
-            ct.ThrowIfCancellationRequested();
-            outcome.AddRange(store.AcknowledgeDeferredPlanning(pair.PairId, page, settled, path =>
-                scan.A.Complete && scan.B.Complete && includeA(path) && includeB(path) &&
-                !evaluated(path) && !unsettled.Any(p => PairPath.IsSelfOrUnder(path, p) || PairPath.IsSelfOrUnder(p, path)) &&
-                _store.Live(pair.A.RootId, [path]).Count == 0 && _store.Live(pair.B.RootId, [path]).Count == 0 &&
-                !_store.BaselinesAt(pair.PairId, Side.A, [path]).Any() &&
-                !_store.BaselinesAt(pair.PairId, Side.B, [path]).Any(), acknowledged));
-        }
-        // RQ-032: a queued entity this step keeps refusing must name its exact blocking reason. The queue
-        // owner decided which spellings were refused versus resolved; report only the refused.
-        if (scan.A.Complete && scan.B.Complete)
-            ReportDeferredRefusals(pair.PairId, outcome, evaluated, unsettled);
-    }
-
-    // One folded "not synced yet" line per refused path, through the existing retry-notice owner and its
-    // specificity fold; the stable identity dedupes across runs and the line closes when the path settles.
-    private void ReportDeferredRefusals(string pairId, IReadOnlyList<SqliteStateStore.DeferredSettle> outcome,
-        Func<string, bool> evaluated, SortedSet<string> unsettled)
-    {
-        var refused = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var resolved = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var entry in outcome)
-            if (entry.Refused) refused.Add(entry.Path);
-            else resolved.Add(entry.Path);
-        resolved.ExceptWith(refused);
-        try
-        {
-            foreach (var path in refused)
-                FailureRetryOwner.ReportDeferredRefusal(_store, pairId, path, DeferredRefusalCause(path, evaluated, unsettled));
-            foreach (var path in resolved) FailureRetryOwner.ClearDeferredRefusal(_store, pairId, path);
-        }
-        catch (Exception error) { RunLog.Trace("Deferred refusal notice unavailable: " + error); }
-    }
-
-    private static string DeferredRefusalCause(string path, Func<string, bool> evaluated, SortedSet<string> unsettled)
-    {
-        if (unsettled.Contains(string.Empty)) return "a pair-wide hold is preventing verification";
-        foreach (var blocker in unsettled)
-            if (blocker.Length > 0 && (PairPath.IsSelfOrUnder(path, blocker) || PairPath.IsSelfOrUnder(blocker, path)))
-                return PairPath.Same(path, blocker) ? "the item still has unresolved work" : "waiting for " + blocker;
-        return evaluated(path) ? "the item is still being verified" : "waiting for a completed scan of this path";
     }
 
     // The paths this run joined and planned for: current and baseline paths on both sides.

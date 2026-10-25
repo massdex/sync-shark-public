@@ -91,31 +91,9 @@ public static class FailureRetryOwner
             (explanation ?? $"This item is not synced yet: {cause}. Fix the reported cause and Retry.") +
             " Ignore silences this notice while retries continue." +
             (attempts > 0 ? $" Attempts: {attempts}." : ""), "sync-retry",
-            RetryNoticeId(pairId, path), FolderInspection: folderInspection, CauseKey: cause);
+            FolderInspection: folderInspection, CauseKey: cause);
 
     public static string RunNoticeId(string pairId) => ShortId.Make("n", pairId, "40", "", "run-unavailable");
-
-    /// <summary>The one folded per-path retry notice identity, shared by publication and clearance.</summary>
-    public static string RetryNoticeId(string pairId, string path) =>
-        ShortId.Make("n", pairId, "40", PathKey.Of(path), "sync-retry");
-
-    /// <summary>One folded "not synced yet" line for a settle refusal. An item retry or the more specific
-    /// content-unconfirmed observation owns its own explanation.</summary>
-    public static void ReportDeferredRefusal(IStateStore store, string pairId, string path, string cause)
-    {
-        if (store.SyncRetryAt(pairId, path) is not null || store.HasUnresolvedNotice(pairId, "content-unconfirmed", path))
-            return;
-        store.AddNotices([RetryNotice(pairId, path, cause)]);
-    }
-
-    /// <summary>Closes the folded refusal line once the path settles; an item retry keeps its notice.</summary>
-    public static void ClearDeferredRefusal(IStateStore store, string pairId, string path)
-    {
-        var id = RetryNoticeId(pairId, path);
-        if (store.NoticeById(pairId, id) is not { Closed: false }) return;
-        if (store.SyncRetryAt(pairId, path) is not null) return;
-        store.CloseNotice(id, "resolved");
-    }
 
     /// <summary>Run debt belongs to a pair/run notice, never the root path's item or decision row.</summary>
     public static State RecordRunFailure(IStateStore store, string pairId, Exception error, DateTimeOffset now,

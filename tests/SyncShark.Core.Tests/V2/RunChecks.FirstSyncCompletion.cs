@@ -24,8 +24,6 @@ internal static partial class RunChecks
         await Completion_MovedRetryAsync();
         Completion_RetrySchema();
         Completion_SharedFailurePolicy();
-        DeferredRefusals_FoldedAndCleared();
-        DeferredRefusals_WiringDedupes();
         Completion_DeliveryPreservesPayload();
         await Completion_IgnoreColdReopenAsync();
         await Completion_UnknownDeleteReplansAsync();

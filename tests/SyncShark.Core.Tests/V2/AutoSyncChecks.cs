@@ -284,10 +284,10 @@ internal static partial class AutoSyncChecks
         rig.Run.Then(partial with { Deferred = 139 });
         await rig.StartAsync();
         await rig.ParkedAsync(AutoStatus.Waiting);
-        var floorDue = start + tuned.MinSafetyPoll;
-        Require(rig.State("p1").RetryAt == floorDue && FailureRetryOwner.DeferredRetryState(rig._store, "p1") is { Attempts: 1 },
+        Require(rig.State("p1").RetryAt - rig.Clock.GetUtcNow() == tuned.MinSafetyPoll &&
+            FailureRetryOwner.DeferredRetryState(rig._store, "p1") is { Attempts: 1 },
             "a due item retry is clamped to the safety floor while the non-shrinking backlog starts its counter");
-        rig.Clock.Advance(floorDue - rig.Clock.GetUtcNow());
+        rig.Clock.Advance(tuned.MinSafetyPoll);
         await Until(() => rig.Run.Runs("p1") == 2 && rig.State("p1").RetryAt > rig.Clock.GetUtcNow() &&
             rig.Clock.ActiveTimers == 1, "the non-shrinking backlog retries at its tier");
         var second = rig.State("p1").RetryAt - rig.Clock.GetUtcNow();

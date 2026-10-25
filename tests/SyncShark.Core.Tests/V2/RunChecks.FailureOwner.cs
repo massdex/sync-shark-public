@@ -122,68 +122,6 @@ internal static partial class RunChecks
         }
     }
 
-    // RQ-032: a path the settle step keeps refusing shows one folded "not synced yet" line, not one per run,
-    // and the line closes when the path settles. Item retries and specific observations keep their own notice.
-    private static void DeferredRefusals_FoldedAndCleared()
-    {
-        var folder = FixtureFolder("deferred-refusal");
-        try
-        {
-            using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
-            var fx = Build(suppliedStore: store);
-            var pairId = fx.Pair.PairId;
-            var id = FailureRetryOwner.RetryNoticeId(pairId, "waiting.txt");
-            FailureRetryOwner.ReportDeferredRefusal(store, pairId, "waiting.txt", "waiting for Folder");
-            FailureRetryOwner.ReportDeferredRefusal(store, pairId, "waiting.txt", "waiting for Folder");
-            var notices = store.OpenNotices(pairId).Where(notice => notice.Path == "waiting.txt").ToArray();
-            Require(notices.Length == 1 && notices[0].NoticeId == id && notices[0].ReasonKey == "sync-retry" &&
-                notices[0].Detail.Contains("not synced yet", StringComparison.Ordinal) &&
-                notices[0].Detail.Contains("waiting for Folder", StringComparison.Ordinal),
-                "a repeatedly refused settle path keeps one folded not-synced-yet notice across runs");
-            FailureRetryOwner.ClearDeferredRefusal(store, pairId, "waiting.txt");
-            Require(store.NoticeById(pairId, id) is { Closed: true },
-                "the folded refusal notice closes when the path settles");
-            store.SaveSyncRetry(pairId, new("retry.txt", "sync", 1, "permission denied", DateTimeOffset.UtcNow.AddMinutes(1)));
-            FailureRetryOwner.ReportDeferredRefusal(store, pairId, "retry.txt", "waiting for Other");
-            Require(store.NoticeById(pairId, FailureRetryOwner.RetryNoticeId(pairId, "retry.txt")) is null,
-                "an item retry owns its own explanation instead of a folded settle line");
-            store.AddNotices([new(pairId, 30, NoticeKind.Info, "unreadable.txt", "cannot read", "unreadable")]);
-            FailureRetryOwner.ReportDeferredRefusal(store, pairId, "unreadable.txt", "waiting for Other");
-            var folded = store.OpenNotices(pairId).Where(notice => notice.Path == "unreadable.txt").ToArray();
-            Require(folded.Length == 1 && folded[0].ReasonKey == "unreadable" &&
-                folded[0].Detail.Contains("waiting for Other", StringComparison.Ordinal),
-                "the generic settle line folds into the specific unreadable explanation");
-        }
-        finally { DeleteFixture(folder); }
-    }
-
-    // The acknowledgement wiring publishes one line per refused spelling across runs and clears it when the
-    // same spelling is later reported resolved.
-    private static void DeferredRefusals_WiringDedupes()
-    {
-        var folder = FixtureFolder("deferred-refusal-wiring");
-        try
-        {
-            using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
-            var fx = Build(suppliedStore: store);
-            var pairId = fx.Pair.PairId;
-            var wiring = typeof(SyncRun).GetMethod("ReportDeferredRefusals",
-                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
-            IReadOnlyList<SqliteStateStore.DeferredSettle> refused = [new("blocked.txt", Refused: true)];
-            Func<string, bool> evaluated = _ => true;
-            var unsettled = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
-            wiring.Invoke(fx.Run(), [pairId, refused, evaluated, unsettled]);
-            wiring.Invoke(fx.Run(), [pairId, refused, evaluated, unsettled]);
-            Require(store.OpenNotices(pairId).Count(notice => notice.Path == "blocked.txt") == 1,
-                "two settled acknowledgement runs keep one folded refusal line");
-            IReadOnlyList<SqliteStateStore.DeferredSettle> resolved = [new("blocked.txt", Refused: false)];
-            wiring.Invoke(fx.Run(), [pairId, resolved, evaluated, unsettled]);
-            Require(store.NoticeById(pairId, FailureRetryOwner.RetryNoticeId(pairId, "blocked.txt")) is { Closed: true },
-                "the refusal line closes when the acknowledgement reports the spelling resolved");
-        }
-        finally { DeleteFixture(folder); }
-    }
-
     private static void Completion_SharedFailurePolicy()
     {
         var now = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
