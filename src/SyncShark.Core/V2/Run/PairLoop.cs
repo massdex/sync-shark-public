@@ -96,6 +96,8 @@ internal sealed partial class PairLoop
                 catch (Exception error)
                 {
                     RecordFailure(error);
+                    try { ScheduleRetry(); }
+                    catch (Exception retryError) { RunOutput.Observe(retryError); }
                     // Never retire a worker because a watch, store read or callback failed.
                     DisposeWatches();
                     await Task.Delay(_in.Settings.MinSafetyPoll, _in.Time, stop).ConfigureAwait(false);

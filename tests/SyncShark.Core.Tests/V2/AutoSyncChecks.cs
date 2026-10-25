@@ -28,6 +28,7 @@ internal static partial class AutoSyncChecks
         await Deferred_BacklogWaitsForEarliestAsync();
         await Deferred_NoProgressBacksOffAsync();
         await Deferred_FreshSignalsInterruptBackoffAsync();
+        await Deferred_OuterFailureReplacesBackoffAsync();
         await RefusedOrAccess_HeldUntilKickAsync();
         await ClashingLayout_HeldAtStartupAsync();
         await SafetyPoll_RunsAndRebuildsAsync();
@@ -366,6 +367,38 @@ internal static partial class AutoSyncChecks
             Require(rig.Run.Runs("p1") == 2, "the consumed signal cannot recreate a ten-second retry spin");
         }
         Pass("Deferred_FreshSignalsInterruptBackoff");
+    }
+
+    private static async Task Deferred_OuterFailureReplacesBackoffAsync()
+    {
+        var tuned = Settings with { MinSafetyPoll = TimeSpan.FromSeconds(2) };
+        await using var rig = new Rig(["p1"], settings: tuned);
+        FailureRetryOwner.RecordDeferredRetry(rig._store, "p1", 1,
+            FailureRetryOwner.Failed(5, rig.Clock.GetUtcNow()));
+        rig.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Partial) with { Deferred = 1 });
+        await rig.StartAsync();
+        await Until(() => rig.Run.Runs("p1") == 1 && rig.State("p1").RetryAt is not null &&
+            rig.WatchA.Parked && rig.WatchB.Parked && rig.Clock.ActiveTimers == 1, "high-tier wait before outer failure");
+        var deferredDeadline = rig.State("p1").RetryAt!.Value;
+        var expected = FailureRetryOwner.Failed(0, rig.Clock.GetUtcNow());
+        rig.ThrowEligibility = true;
+        // A watch fault returns to the outer eligibility check without clearing the deferred deadline.
+        rig.WatchA.Fail(new IOException("one-shot watch fault"));
+        await Until(() => FailureRetryOwner.RunFailureState(rig._store, "p1") == expected &&
+            rig.WatchA.Disposed && rig.WatchB.Disposed && rig.Clock.ActiveTimers == 1,
+            "outer eligibility failure records a first-tier real failure and enters containment delay");
+        rig.Clock.Advance(tuned.MinSafetyPoll);
+        await Until(() => rig.State("p1").RetryAt == expected.RetryAfter && rig.Clock.ActiveTimers == 1,
+            "real failure replaces the deferred deadline");
+        Require(expected.RetryAfter < deferredDeadline, "the old high deferred tier is not inherited");
+        rig.WatchA.Signal();
+        rig.WatchB.Signal();
+        rig.Clock.Advance(expected.RetryAfter - rig.Clock.GetUtcNow() - TimeSpan.FromMilliseconds(1));
+        Require(rig.Run.Runs("p1") == 1 && rig.Watches.Created == 2,
+            "signals from retired watches cannot bypass the real-failure cooldown or re-arm early");
+        rig.Clock.Advance(TimeSpan.FromMilliseconds(1));
+        await Until(() => rig.Run.Runs("p1") >= 2, "real failure retries at its own deadline");
+        Pass("Deferred_OuterFailureReplacesBackoff");
     }
 
     private static async Task RefusedOrAccess_HeldUntilKickAsync()

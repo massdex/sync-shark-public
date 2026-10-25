@@ -185,6 +185,31 @@ internal static class PlanningDeferredChecks
                 "the re-spelled row settles instead of persisting forever");
         }
 
+        using (var store = SqliteStateStore.Open(Path.Combine(folder, "respell-shared-path"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
+        {
+            store.SavePair(pair);
+            var entity = local with { ObjectId = "alias-owner", Path = "Former/Name" };
+            Snapshot(store, pair.A, Side.A, [entity with { Path = "Current/Name" }, entity with { Path = "Other/Name" }]);
+            store.DeferPlanning(pair.PairId, [(pair.A.RootId, entity)]);
+            var current = store.ByObject(pair.A.RootId, entity.ObjectId)!.Path;
+            var other = current == "Current/Name" ? "Other/Name" : "Current/Name";
+            var neighbour = entity with { ObjectId = "different-owner", Path = current };
+            store.DeferPlanning(pair.PairId, [(pair.A.RootId, neighbour)]);
+            var page = store.AdmitDeferredPlanning(pair.PairId, DateTime.UtcNow.Ticks, rotate: false);
+            var row = page.Single(item => item.ObjectId == entity.ObjectId);
+            LocalChecks.Require(row.Paths.Contains(other), "admission includes the unresolved alias");
+            store.AcknowledgeDeferredPlanning(pair.PairId, [row], path => path == current, path => path == entity.Path);
+            var respelled = store.AdmitDeferredPlanning(pair.PairId, DateTime.UtcNow.Ticks, rotate: false);
+            LocalChecks.Require(respelled.Count == 2 && respelled.Any(item => item.ObjectId == entity.ObjectId && item.Path == current),
+                "another entity queued at the selected path cannot retire the re-spelled entity");
+            store.AcknowledgeDeferredPlanning(pair.PairId, [page.Single(item => item.ObjectId == neighbour.ObjectId)], _ => true);
+            var retained = store.AdmitDeferredPlanning(pair.PairId, DateTime.UtcNow.Ticks, rotate: false).Single();
+            LocalChecks.Require(retained.ObjectId == entity.ObjectId && retained.Paths.Contains(other),
+                "acknowledging the other entity preserves the original unresolved alias");
+            store.AcknowledgeDeferredPlanning(pair.PairId, [retained], path => path != other);
+            LocalChecks.Require(store.CountDeferredPlanning(pair.PairId) == 1, "the unresolved alias still prevents retirement");
+        }
+
         var migratedFolder = Path.Combine(folder, "migrated-v21");
         using (var old = SqliteStateStore.Open(migratedFolder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
