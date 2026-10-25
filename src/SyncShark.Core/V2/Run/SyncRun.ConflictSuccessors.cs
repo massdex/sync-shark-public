@@ -2,6 +2,10 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SyncRun
 {
+    private static SyncAction BindConflictCorrespondence(SyncAction action, string objectKey, bool winner) =>
+        winner ? action with { ObjectKey = objectKey, SuppressReconciledBaseline = false }
+            : action with { ObsoleteBaselineKey = objectKey };
+
     private async Task<ActionResult?> CheckConflictOriginalsAsync(PairDef pair, Notice notice,
         ConflictNoticeVersions versions, string noticeId, string choice, CancellationToken ct)
     {
