@@ -1,0 +1,572 @@
+name: Sync Shark CI
+
+on:
+  push:
+    branches:
+      - 'claude-code/v2-*'
+      - 'main'
+      - 'ci/**'
+  workflow_dispatch:
+
+# Every public snapshot completes independently; no superseded run cancellation.
+concurrency:
+  group: sync-shark-ci-${{ github.ref }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+env:
+  CONFIGURATION: Debug
+  DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false'
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+
+jobs:
+  spec-ratchet:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ratchet engineering-spec debt
+        shell: pwsh
+        run: |
+          python -I tools/ci/test-spec-ratchet.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -I tools/ci/check-spec-ratchet.py
+          exit $LASTEXITCODE
+
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Personal paths, account names and the owner's SID must never reach a
+      # tracked file again; docs/ and AGENTS.md are excluded.
+      - name: Reject personal literals
+        shell: pwsh
+        run: ./tools/ci/check-personal-literals.ps1
+
+      - name: Check short-id prefix contracts
+        shell: pwsh
+        run: ./tools/ci/check-short-id-prefixes.ps1
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/packages.lock.json', 'Directory.Build.props', 'global.json') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      # apps/SyncShark builds native Explorer and Discovery helpers through the
+      # pinned Zig 0.16.0 toolchain; the runner does not ship it.
+      - name: Install Zig 0.16.0
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zipPath = Join-Path $env:RUNNER_TEMP 'zig-0.16.0.zip'
+          Invoke-WebRequest -Uri 'https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip' -OutFile $zipPath
+          $expected = '68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e'
+          $actual = (Get-FileHash -Algorithm SHA256 -Path $zipPath).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "Zig archive checksum mismatch: $actual" }
+          $extractRoot = Join-Path $env:RUNNER_TEMP 'zig'
+          Expand-Archive -Path $zipPath -DestinationPath $extractRoot -Force
+          $zig = Get-ChildItem -Path $extractRoot -Filter 'zig.exe' -Recurse -File | Select-Object -First 1
+          if ($null -eq $zig) { throw 'zig.exe was not found in the extracted toolchain.' }
+          "ZIG_EXE=$($zig.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          & $zig.FullName version
+
+      - name: Build Core
+        shell: pwsh
+        run: |
+          dotnet build 'src/SyncShark.Core/SyncShark.Core.csproj' -c $env:CONFIGURATION --nologo
+          exit $LASTEXITCODE
+
+      # The test project targets net8.0 (not net8.0-windows) but naturally uses
+      # Windows identity APIs on the Windows-only host checks. Keep the one
+      # platform-compatibility rule quiet so the runner's full analyzer set does
+      # not turn its Windows-only calls into errors.
+      - name: Build tests
+        shell: pwsh
+        run: |
+          dotnet build 'tests/SyncShark.Core.Tests/SyncShark.Core.Tests.csproj' -c $env:CONFIGURATION --nologo -p:NoWarn=CA1416
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "tests/SyncShark.Core.Tests/bin/$env:CONFIGURATION/net8.0/SyncShark.Core.Tests.exe" --engine-layout-checks
+          exit $LASTEXITCODE
+
+      # The standalone Files On-Demand project is the native acceptance runner and
+      # compiles a different subset of files than the main test project. Build it
+      # (compile only, its tests never run in CI) without NoWarn=CA1416 so drift the
+      # main project hides fails here instead of on native-acceptance day.
+      - name: Build Files On-Demand tests
+        shell: pwsh
+        run: |
+          dotnet build 'tests/SyncShark.FilesOnDemand.Tests/SyncShark.FilesOnDemand.Tests.csproj' -c $env:CONFIGURATION --nologo
+          exit $LASTEXITCODE
+
+      # The product build owns its output allocation through SyncSharkBuildRoot;
+      # the native setup script refuses an output outside it.
+      - name: Build app
+        shell: pwsh
+        run: |
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE 'build\ci'
+          dotnet build 'apps/SyncShark/SyncShark.csproj' -c $env:CONFIGURATION --nologo `
+            -p:SyncSharkBuildRoot=$buildRoot `
+            -p:SyncSharkZigPath=$env:ZIG_EXE
+          exit $LASTEXITCODE
+
+      - name: Upload test binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-shark-tests
+          path: tests/SyncShark.Core.Tests/bin/${{ env.CONFIGURATION }}/net8.0
+          if-no-files-found: error
+          retention-days: 7
+
+  # Suites are grouped into shards so one CI run uses more runner slots instead of
+  # one per suite. Shards are balanced by measured duration; `dropbox` (6.8 min)
+  # runs alone, and the other shards hold about 7 minutes of suites each. Shards
+  # 7-9 close the suite/CI flag-coverage gap and are balanced by estimate until
+  # they have measured durations. Every shard runs all of its suites even when one
+  # fails, then fails the job if any suite failed.
+  tests:
+    name: tests (${{ matrix.label }})
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: 'shard-1: dropbox'
+            suites:
+              - suite: dropbox
+                flag: --v2-dropbox-checks
+                takes-root: true
+                drive: c
+          - label: 'shard-2: conflict-choices, nested-pair, reincluded-evidence'
+            suites:
+              - suite: conflict-choices
+                flag: --v2-conflict-choice-checks
+                takes-root: false
+                drive: c
+              - suite: nested-pair
+                flag: --excluded-nested-pair-partition-checks
+                takes-root: true
+                drive: c
+              - suite: reincluded-evidence
+                flag: --reincluded-evidence-checks
+                takes-root: false
+                drive: c
+          - label: 'shard-3: local-journal, blockers, cli, composition'
+            suites:
+              # Real NTFS USN journal checks. runner.temp is on the runner's D:
+              # volume, which has no usable journal; keep these roots on C:.
+              - suite: local-journal
+                flag: --v2-local-journal-checks
+                takes-root: true
+                drive: c
+              - suite: blockers
+                flag: --blocker-checks
+                takes-root: false
+                drive: c
+              - suite: cli
+                flag: --cli-checks
+                takes-root: true
+                drive: c
+              - suite: composition
+                flag: --v2-composition-checks
+                takes-root: false
+                drive: c
+          - label: 'shard-4: store-gate, outcome-ownership, root-relist-scoped, name-mapping, name-mapping-review, corresponding-overlap, quarantine, retry-protection, first-sync-completion'
+            suites:
+              - suite: store-gate
+                flag: --v2-store-gate-checks
+                takes-root: true
+                drive: c
+              - suite: outcome-ownership
+                flag: --v2-outcome-ownership-checks
+                takes-root: false
+                drive: c
+              - suite: root-relist-scoped
+                flag: --v2-root-relist-scoped-checks
+                takes-root: true
+                drive: c
+              - suite: name-mapping
+                flag: --v2-name-mapping-checks
+                takes-root: false
+                drive: c
+              - suite: name-mapping-review
+                flag: --v2-name-mapping-review-checks
+                takes-root: false
+                drive: c
+              - suite: corresponding-overlap
+                flag: --corresponding-included-overlap-checks
+                takes-root: true
+                drive: c
+              - suite: quarantine
+                flag: --quarantine-checks
+                takes-root: true
+                drive: c
+              - suite: retry-protection
+                flag: --retry-protection-checks
+                takes-root: false
+                drive: c
+              - suite: first-sync-completion
+                flag: --first-sync-completion-checks
+                takes-root: false
+                drive: c
+          - label: 'shard-5: removal-review, resumable-listing, planning-protection, interrupted-delete, gap-verification, snapshot-memory, prepare-memory, storage, files-on-demand-storage, recovery-restore, recovery-reader, recovery-query, runcli, run, executor'
+            suites:
+              - suite: removal-review
+                flag: --v2-removal-review-checks
+                takes-root: false
+                drive: c
+              - suite: resumable-listing
+                flag: --v2-resumelist-checks
+                takes-root: true
+                drive: c
+              - suite: planning-protection
+                flag: --v2-planning-protection-checks
+                takes-root: true
+                drive: c
+              - suite: interrupted-delete
+                flag: --v2-interrupted-delete-checks
+                takes-root: true
+                drive: c
+              - suite: gap-verification
+                flag: --v2-gap-checks
+                takes-root: true
+                drive: c
+              - suite: snapshot-memory
+                flag: --v2-snapshot-million-memory-checks
+                takes-root: true
+                drive: c
+              - suite: prepare-memory
+                flag: --v2-million-memory-checks
+                takes-root: false
+                drive: c
+              - suite: storage
+                flag: --v2-storage-checks
+                takes-root: true
+                drive: c
+              - suite: files-on-demand-storage
+                flag: --fod-storage-checks
+                takes-root: true
+                drive: c
+              - suite: recovery-restore
+                flag: --v2-recovery-restore-checks
+                takes-root: false
+                drive: c
+              - suite: recovery-reader
+                flag: --v2-recovery-reader-checks
+                takes-root: false
+                drive: c
+              - suite: recovery-query
+                flag: --v2-recovery-query-checks
+                takes-root: true
+                drive: c
+              - suite: runcli
+                flag: --v2-runcli-checks
+                takes-root: false
+                drive: c
+              - suite: run
+                flag: --v2-run-checks
+                takes-root: false
+                drive: c # Includes the production rehearsal fixture, which needs native journal evidence.
+              - suite: executor
+                flag: --v2-executor-checks
+                takes-root: false
+                drive: c
+          - label: 'shard-6: conflict-transition, conflict-retirement, collision-baseline, recovery-first-restart, planner, held, notices, dates, local-offline, autosync, run-history, autosync-phase3, autosync-process, sync-host, review-deletes'
+            suites:
+              - suite: conflict-transition
+                flag: --v2-conflict-transition-checks
+                takes-root: false
+                drive: c
+              - suite: conflict-retirement
+                flag: --v2-conflict-retirement-checks
+                takes-root: false
+                drive: c
+              - suite: collision-baseline
+                flag: --v2-collision-baseline-checks
+                takes-root: false
+                drive: c
+              - suite: recovery-first-restart
+                flag: --v2-recovery-first-restart-checks
+                takes-root: true
+                drive: c
+              - suite: planner
+                flag: --v2-planner-checks
+                takes-root: false
+                drive: c
+              - suite: held
+                flag: --v2-held-recovery
+                takes-root: false
+                drive: c
+              - suite: notices
+                flag: --v2-notice-restore-checks
+                takes-root: false
+                drive: c
+              - suite: dates
+                flag: --v2-dates-checks
+                takes-root: true
+                drive: c
+              - suite: local-offline
+                flag: --v2-local-offline-checks
+                takes-root: true
+                drive: c
+              - suite: autosync
+                flag: --v2-autosync-checks
+                takes-root: false
+                drive: c
+              - suite: run-history
+                flag: --v2-run-history-checks
+                takes-root: true
+                drive: c
+              - suite: autosync-phase3
+                flag: --v2-autosync-phase3-checks
+                takes-root: false
+                drive: c
+              - suite: autosync-process
+                flag: --v2-autosync-process-checks
+                takes-root: false
+                drive: c
+              - suite: sync-host
+                flag: --v2-host-checks
+                takes-root: false
+                drive: c
+              - suite: review-deletes
+                flag: --v2-review-deletes-checks
+                takes-root: false
+                drive: c
+          # Shards 7-9 run the 29 correctness suites that previously had no CI entry.
+          # Child processes (*-child), benchmarks/million-scale runs and suites that
+          # need an F: drive or a manual selector stay out; the suites that already
+          # run inside a covered suite are not repeated here.
+          - label: 'shard-7: local, hotfix-gap, ignored-child, localwatch, download-kill, recovery-kill'
+            suites:
+              # These use real NTFS journal evidence, so their roots stay on C:
+              # (runner.temp is on the runner's D: volume, which has no journal).
+              - suite: local
+                flag: --v2-local-checks
+                takes-root: true
+                drive: c
+              - suite: hotfix-gap
+                flag: --v2-hotfix-gap-checks
+                takes-root: true
+                drive: c
+              - suite: cached-identity-exclusions
+                flag: --v2-cached-identity-exclusion-checks
+                takes-root: true
+                drive: c
+              - suite: journal-windows
+                flag: --v2-journal-window-checks
+                takes-root: true
+                drive: c
+              - suite: settle-planning
+                flag: --v2-settle-planning-checks
+                takes-root: false
+                drive: c
+              - suite: settle-window-million
+                flag: --v2-settle-window-million-checks
+                takes-root: false
+                drive: c
+              - suite: ignored-child
+                flag: --v2-ignored-child-checks
+                takes-root: false
+                drive: c
+              - suite: localwatch
+                flag: --v2-localwatch-checks
+                takes-root: true
+                drive: c
+              # Both parents launch *-child helper processes from the test exe;
+              # the child flags themselves are never shard entries.
+              - suite: download-kill
+                flag: --v2-download-kill-checks
+                takes-root: true
+                drive: c
+              - suite: recovery-kill
+                flag: --v2-recovery-kill-checks
+                takes-root: true
+                drive: c
+          - label: 'shard-8: recovery-audit, slowdelete, heldperf, monitor, dropboxwatch'
+            suites:
+              - suite: recovery-audit
+                flag: --v2-recovery-audit
+                takes-root: true
+                drive: c
+              # A case argument is required; "all" runs every delete-recovery case.
+              - suite: slowdelete
+                flag: --v2-slowdelete-checks
+                takes-root: true
+                extra-args: [all]
+                drive: c
+              - suite: heldperf
+                flag: --v2-heldperf-checks
+                takes-root: true
+                drive: c
+              - suite: monitor
+                flag: --v2-monitor-checks
+                takes-root: true
+                drive: c
+              - suite: dropboxwatch
+                flag: --v2-dropboxwatch-checks
+                takes-root: false
+                drive: c
+          - label: 'shard-9: coverage, coverage-fix, mkdir-gate, provider-followups, dropbox-ignore, delete-review-notice, narrowing, contract, core-switch, instrumentation, memory, indexing-signal, storage-unicode, prepared-match-exclusion, linked-exclusion-triple, deferred-intake-bound, gap-promotion-handoff, gap-promotion-bound'
+            suites:
+              - suite: coverage
+                flag: --v2-coverage-checks
+                takes-root: true
+                drive: c
+              - suite: coverage-fix
+                flag: --v2-coverage-fix-checks
+                takes-root: true
+                drive: c
+              - suite: mkdir-gate
+                flag: --v2-mkdir-gate-checks
+                takes-root: true
+                drive: c
+              - suite: provider-followups
+                flag: --v2-provider-followups-checks
+                takes-root: true
+                drive: c
+              - suite: dropbox-ignore
+                flag: --v2-dropbox-ignore-checks
+                takes-root: true
+                drive: c
+              - suite: delete-review-notice
+                flag: --v2-delete-review-notice-checks
+                takes-root: true
+                drive: c
+              - suite: narrowing
+                flag: --v2-narrowing-checks
+                takes-root: false
+                drive: c
+              - suite: contract
+                flag: --v2-contract-checks
+                takes-root: false
+                drive: c
+              - suite: core-switch
+                flag: --v2-core-switch-checks
+                takes-root: false
+                drive: c
+              - suite: instrumentation
+                flag: --v2-instrumentation-checks
+                takes-root: false
+                drive: c
+              - suite: memory
+                flag: --v2-memory-checks
+                takes-root: false
+                drive: c
+              - suite: indexing-signal
+                flag: --v2-indexing-signal-checks
+                takes-root: true
+                drive: c
+              - suite: storage-unicode
+                flag: --v2-storage-unicode-checks
+                takes-root: false
+                drive: c
+              - suite: prepared-match-exclusion
+                flag: --v2-prepared-match-exclusion-checks
+                takes-root: false
+                drive: c
+              - suite: linked-exclusion-triple
+                flag: --v2-linked-exclusion-triple-checks
+                takes-root: false
+                drive: c
+              - suite: deferred-intake-bound
+                flag: --v2-deferred-intake-bound-checks
+                takes-root: false
+                drive: c
+              - suite: gap-promotion-handoff
+                flag: --v2-gap-promotion-handoff-checks
+                takes-root: false
+                drive: c
+              - suite: gap-promotion-bound
+                flag: --v2-gap-promotion-bound-checks
+                takes-root: true
+                drive: c
+    steps:
+      - name: Download test binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: sync-shark-tests
+          path: tests/SyncShark.Core.Tests/bin/${{ env.CONFIGURATION }}/net8.0
+
+      - name: Run shard suites
+        shell: pwsh
+        env:
+          SHARD_SUITES: '${{ toJSON(matrix.suites) }}'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $suites = $env:SHARD_SUITES | ConvertFrom-Json
+          $exe = Join-Path $env:GITHUB_WORKSPACE "tests\SyncShark.Core.Tests\bin\$env:CONFIGURATION\net8.0\SyncShark.Core.Tests.exe"
+          $results = @()
+
+          foreach ($s in $suites) {
+            $suite = $s.suite
+            Write-Host "::group::SUITE $suite"
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $code = 1
+            try {
+              # Suites using real journal evidence need both explicit and temporary roots on C:.
+              $base = if ($s.drive -eq 'c') { $env:LOCALAPPDATA } else { $env:RUNNER_TEMP }
+              $scratch = Join-Path $base "syncshark-ci\$suite-scratch"
+              New-Item -ItemType Directory -Force -Path $scratch | Out-Null
+              $env:TEMP = $scratch
+              $env:TMP = $scratch
+              $env:SYNCSHARK_TEST_ROOT = $scratch
+              # The suite's own root must not pre-exist: some suites refuse a
+              # directory that already exists.
+              $root = Join-Path $base "syncshark-ci\$suite-root"
+              if (-not (Test-Path $exe)) { throw "Test executable not found: $exe" }
+              $testArgs = @($s.flag)
+              if ($s.'takes-root') { $testArgs += $root }
+              # A few suites take a case selector after the root (e.g. slowdelete).
+              if ($s.'extra-args') { $testArgs += $s.'extra-args' }
+              Write-Host "Running: $exe $($testArgs -join ' ')"
+              & $exe @testArgs
+              $code = $LASTEXITCODE
+              Write-Host "Exit code: $code"
+            } catch {
+              Write-Host "ERROR: $($_.Exception.Message)"
+              $code = 1
+            } finally {
+              $sw.Stop()
+            }
+            $seconds = [int][Math]::Round($sw.Elapsed.TotalSeconds)
+            $result = if ($code -eq 0) { 'PASS' } else { 'FAIL' }
+            Write-Host "SUITE-RESULT $suite $result exit=$code seconds=$seconds"
+            Write-Host "::endgroup::"
+            $results += [pscustomobject]@{ Suite = $suite; Result = $result; Exit = $code; Seconds = $seconds }
+          }
+
+          Write-Host ""
+          Write-Host "SUMMARY"
+          Write-Host ("{0,-30} {1,-6} {2,-6} {3,7}" -f 'SUITE', 'RESULT', 'EXIT', 'SECONDS')
+          foreach ($r in $results) {
+            Write-Host ("{0,-30} {1,-6} {2,-6} {3,7}" -f $r.Suite, $r.Result, $r.Exit, $r.Seconds)
+          }
+          $failed = @($results | Where-Object { $_.Result -ne 'PASS' })
+          Write-Host "TOTAL suites=$($results.Count) failed=$($failed.Count)"
+
+          if ($env:GITHUB_STEP_SUMMARY) {
+            $md = @('## Sync Shark CI shard results', '', '| Suite | Result | Exit | Seconds |', '| --- | --- | --- | --- |')
+            foreach ($r in $results) {
+              $md += "| $($r.Suite) | $($r.Result) | $($r.Exit) | $($r.Seconds) |"
+            }
+            $md += ''
+            $md | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          }
+
+          if ($failed.Count -gt 0) { exit 1 }
+          exit 0
