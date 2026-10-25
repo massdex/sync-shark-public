@@ -1,3 +1,4 @@
+--v2-storage-checks
 --v2-run-checks
 --v2-runcli-checks
 --v2-local-journal-checks

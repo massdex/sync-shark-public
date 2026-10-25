@@ -370,7 +370,7 @@ internal sealed class FileStateReader
         return rows;
     }
 
-    private static Entry Decode(SqliteDataReader reader) => Entry.Of(
+    internal static Entry Decode(SqliteDataReader reader) => Entry.Of(
         reader.GetString(1), reader.GetString(2), DecodeItem(reader), reader.GetInt64(0)) with { NameKey = reader.GetString(11) };
 
     private static ItemState DecodeItem(SqliteDataReader reader) => new(
