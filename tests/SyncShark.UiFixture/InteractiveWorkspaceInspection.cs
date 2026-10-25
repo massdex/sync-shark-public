@@ -666,16 +666,19 @@ internal static partial class Program
             // seeds the same object-scoped cut the production planner binds, on the pair's true roots.
             var planningAuthority = await FixturePlanningAuthority.CurrentAsync(database, pair.Id,
                 pair.Id + "-local", pair.Id + "-remote", id);
-            await database.CreateOperationAsync(new SyncAuthorityOperationPlan(id, id + "-key",
+            // An absent-destination action also needs its own fresh registration ticket; a bare
+            // retained operation id is not an insertion grant.
+            var registration = await database.ReserveActionAsync(id + "-key", fixtureAdmission);
+            await database.CreateOperationAsync(new SyncAuthorityOperationPlan(registration.OperationId, id + "-key",
                 index == 0 ? SyncAuthorityOperationKind.CreateRemote : SyncAuthorityOperationKind.CreateLocal,
                 pair.Id, id, planningAuthority.ConfigurationRevision, "inspection-profile", "{}", pair.Priority,
                 [new(id + "-source", pair.Id, id, "source", sourceRoot, id + "-membership", id + "-version", 1, path, "{\"kind\":\"file\"}"),
                  new(id + "-destination", pair.Id, id, "destination", destinationRoot, null, null, null, path, "{\"kind\":\"file\",\"absent\":true}")], [], [],
-                PlanningAuthorities: [planningAuthority]), fixtureAdmission);
+                PlanningAuthorities: [planningAuthority]), fixtureAdmission, reservation: registration.Reservation);
             if (index == 0)
             {
-                var lease = await database.AcquireOperationLeaseAsync(id, "inspection-seed", TimeSpan.FromMinutes(1));
-                var attempt = await database.StartDispatchedAttemptAsync(id, lease, hash, "inspection-no-provider-effect");
+                var lease = await database.AcquireOperationLeaseAsync(registration.OperationId, "inspection-seed", TimeSpan.FromMinutes(1));
+                var attempt = await database.StartDispatchedAttemptAsync(registration.OperationId, lease, hash, "inspection-no-provider-effect");
                 await database.RecordReceiptAsync(attempt.AttemptId, lease, SyncAuthorityReceiptCertainty.Unknown,
                     "{}", "{}", "{\"example\":true}", hash);
                 await database.ReleaseLeaseAsync(lease);
