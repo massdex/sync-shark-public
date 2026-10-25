@@ -60,8 +60,7 @@ internal sealed class TrayClient : IDisposable
     private Task _initialPoll = Task.CompletedTask;
     private Task _conflictsLoad = Task.CompletedTask;
     // The last logged failure kind per read, so a diagnostic is written on a transition only, never per poll.
-    private string? _statusFailure;
-    private string? _conflictFailure;
+    private readonly Dictionary<string, string?> _readFailures = new(StringComparer.Ordinal);
 
     private sealed record TrayConflictList(int Total, IReadOnlyList<string> Rows);
 
@@ -128,6 +127,10 @@ internal sealed class TrayClient : IDisposable
 
     /// <summary>The conflicts menu line, so the capped "99+" wording is observable.</summary>
     internal string ConflictStatusText => _conflictsItem.Text ?? string.Empty;
+
+    /// <summary>The rendered conflict rows, so the menu text loaded at open time is observable.</summary>
+    internal IReadOnlyList<string> ConflictRowsForTest =>
+        _conflictRows.Select(item => item.Text ?? string.Empty).ToArray();
 
     /// <summary>The task of the first poll Start began, so a caller can await observable completion.</summary>
     internal Task InitialPoll => _initialPoll;
@@ -225,7 +228,7 @@ internal sealed class TrayClient : IDisposable
                 failure = FailureKind(error);
                 detail = error.GetType().Name + ": " + error.Message;
             }
-            NoteStatusRead(failure, detail);
+            NoteRead("status read", failure, detail);
             if (_disposed) return;
             if (snapshot is not null) _lastSnapshot = snapshot;
             Apply(TrayStatusView.Derive(_lastSnapshot, _lastSnapshot is not null && snapshot is null, poll % 2 == 1));
@@ -389,8 +392,11 @@ internal sealed class TrayClient : IDisposable
             else if (Int(element, "exitCode") is not 0)
             {
                 failure = "rejected";
-                detail = "conflicts list exited with code " +
-                    Int(element, "exitCode").ToString(CultureInfo.InvariantCulture);
+                // The forwarded command's own stderr explains the refusal; the exit code alone does not.
+                var stderr = Text(element, "stderr");
+                detail = !string.IsNullOrWhiteSpace(stderr) ? stderr.Trim()
+                    : "conflicts list exited with code " +
+                      Int(element, "exitCode").ToString(CultureInfo.InvariantCulture);
             }
             else if (Text(element, "stdout") is not { Length: > 0 } output)
             {
@@ -417,7 +423,7 @@ internal sealed class TrayClient : IDisposable
             detail = error.GetType().Name + ": " + error.Message;
         }
         finally { _conflictsLoading = false; }
-        if (!_disposed) NoteConflictRead(failure, detail);
+        if (!_disposed) NoteRead("conflict list read", failure, detail);
     }
 
     // The distinct failure kinds the tray reports: uncertain (sent, no reply), timed out, rejected (the host
@@ -430,20 +436,13 @@ internal sealed class TrayClient : IDisposable
     };
 
     // One diagnostic per transition, never one per failed poll, so a healthy or sustained failure is quiet.
-    private void NoteStatusRead(string? failure, string detail)
+    private void NoteRead(string read, string? failure, string detail)
     {
-        if (string.Equals(failure, _statusFailure, StringComparison.Ordinal)) return;
-        if (failure is null) _diagnostic("tray status read recovered after " + _statusFailure + ".");
-        else _diagnostic("tray status read failed (" + failure + "): " + detail);
-        _statusFailure = failure;
-    }
-
-    private void NoteConflictRead(string? failure, string detail)
-    {
-        if (string.Equals(failure, _conflictFailure, StringComparison.Ordinal)) return;
-        if (failure is null) _diagnostic("tray conflict list read recovered after " + _conflictFailure + ".");
-        else _diagnostic("tray conflict list read failed (" + failure + "): " + detail);
-        _conflictFailure = failure;
+        _readFailures.TryGetValue(read, out var last);
+        if (string.Equals(failure, last, StringComparison.Ordinal)) return;
+        if (failure is null) _diagnostic("tray " + read + " recovered after " + last + ".");
+        else _diagnostic("tray " + read + " failed (" + failure + "): " + detail);
+        _readFailures[read] = failure;
     }
 
     private static bool TryParseConflicts(string stdout, out TrayConflictList list)
@@ -509,28 +508,40 @@ internal sealed class TrayClient : IDisposable
             {
                 var reply = await _send(request, TimeSpan.FromMilliseconds(300), deadline.Token);
                 if (reply is null)
+                {
+                    _diagnostic("tray action '" + label + "' not sent: background sync is not reachable");
                     Notify(label + " was not sent", "Background sync is not reachable. Nothing was replayed.", true);
+                }
                 else if (!reply.Ok)
-                    Notify(label + " was rejected", reply.Error?.Message ??
-                        "The host refused the command; nothing was replayed.", true);
+                {
+                    var message = reply.Error?.Message ?? "The host refused the command; nothing was replayed.";
+                    _diagnostic("tray action '" + label + "' rejected: " + message);
+                    Notify(label + " was rejected", message, true);
+                }
                 else if (RejectedForwardedCli(request, reply, out var diagnostic))
+                {
+                    _diagnostic("tray action '" + label + "' rejected: " + diagnostic);
                     Notify(label + " was rejected", diagnostic, true);
+                }
+                else _diagnostic("tray action '" + label + "' accepted");
             }
             catch (AutoSyncHostUncertainException)
             {
                 // Sent, but the reply did not arrive: a distinct outcome from a rejection, never replayed.
+                _diagnostic("tray action '" + label + "' uncertain: the reply did not arrive; nothing was replayed");
                 Notify(label + " is uncertain", "The host may have accepted the command, but the reply did not " +
                     "arrive. The host keeps admitted work; this tray never replays it.", true);
             }
             catch (OperationCanceledException)
             {
                 // The deadline expired before the host accepted the command.
+                _diagnostic("tray action '" + label + "' cancelled before the deadline; nothing was replayed");
                 Notify(label + " timed out", "The host did not accept the command before the deadline. " +
                     "Nothing was replayed.", true);
             }
             catch (Exception error)
             {
-                _diagnostic("tray action '" + label + "' failed: " + error.GetType().Name + ": " + error.Message);
+                _diagnostic("tray action '" + label + "' not sent: " + error.GetType().Name + ": " + error.Message);
                 Notify(label + " was not sent", error.Message + " Nothing was replayed.", true);
             }
         }
