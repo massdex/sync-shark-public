@@ -219,6 +219,7 @@ internal static partial class AutoSyncChecks
                 // A proxied call must surface the store's own exception, not reflection's wrapper;
                 // the production path has no reflection layer.
                 System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw();
+                throw;
             }
         }
     }
