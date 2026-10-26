@@ -9,7 +9,7 @@ internal static partial class RunChecks
             var folder = FixtureFolder("split-retry-" + mode);
             using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
-            const string path = "Parent/capsules/work/item.json";
+            const string path = "Parent/child/work/item.json";
             fx.A.Seed(path, "original");
             var run = fx.Run();
             await FirstSyncAsync(run, fx);
