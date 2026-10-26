@@ -319,7 +319,7 @@ public sealed partial class LocalInventory : IInventorySource
 
     /// <summary>Runs the refresh and delta construction for explicit paths; exposed for checks without a live journal.</summary>
     internal async Task<Delta> ChangesForPathsAsync(IReadOnlyList<string> paths, string cursor, long gen,
-        Func<string, bool> include, CancellationToken ct)
+        Func<string, bool> include, CancellationToken ct, bool exact = false)
     {
         PilotDirectoryLease lease;
         try
@@ -340,7 +340,8 @@ public sealed partial class LocalInventory : IInventorySource
                 "The folder could not be opened for a targeted re-read (" + cause + ").");
         }
         using (lease)
-            return await RefreshAsync(lease, gen, cursor, cursor, include, paths, ct).ConfigureAwait(false);
+            return await RefreshAsync(lease, gen, cursor, cursor, include, paths, ct,
+                exactPaths: exact ? paths.ToHashSet(StringComparer.OrdinalIgnoreCase) : null).ConfigureAwait(false);
     }
 
     /// <summary>Check seam: runs in <see cref="ChangesForPathsAsync"/> immediately before the root lease is

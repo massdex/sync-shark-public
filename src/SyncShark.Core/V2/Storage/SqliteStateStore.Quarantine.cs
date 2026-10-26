@@ -318,6 +318,8 @@ public sealed partial class SqliteStateStore
                 recorded.VersionId == item.VersionId && recorded.Size == item.Size && recorded.Mtime == item.Mtime)
                 return item with { Hash = recorded.Hash };
             if (ct.IsCancellationRequested) return item;
+            if (ReconcileBatch.Current.Value is { } batch &&
+                (!batch.OwnsDecisionPath(item.Path) || !batch.AdmitDecisionHash(item))) return item;
             if (DefenderCaptureForTest is { } capture) return capture(item);
             return _captureOptionalHash(root, item, ct);
         }
@@ -413,6 +415,10 @@ public sealed partial class SqliteStateStore
         var root = first.Side == Side.A ? first.Pair.A : first.Pair.B;
         if (root.Provider != ProviderIds.Local) return [];
         var prefix = RowCodec.Key(Path.GetFullPath(root.RootPath).TrimEnd('\\', '/') + Path.DirectorySeparatorChar);
+        var exactKeys = publish && ReconcileBatch.Current.Value is { } batch
+            ? System.Text.Json.JsonSerializer.Serialize(batch.Paths.Concat(batch.AliasPaths).Distinct(StringComparer.OrdinalIgnoreCase)
+                .Select(path => RowCodec.Key(Path.GetFullPath(Path.Combine(root.RootPath, path.Replace('/', Path.DirectorySeparatorChar))))))
+            : null;
         var after = prefix;
         var afterId = "";
         while (true)
@@ -422,16 +428,7 @@ public sealed partial class SqliteStateStore
             var prepared = new List<CapturedDefenderNotice>();
             InStore(() =>
             {
-                using (var cmd = StoreSchema.Command(_connection, null,
-                    "SELECT grant_id,owner_object,source_object,local_object,path,stage_path,verified FROM defender_grant " +
-                    "WHERE path_key >= $prefix AND path_key < $end AND (path_key > $after OR (path_key=$after AND grant_id>$id)) " +
-                    "AND verified<>2 ORDER BY path_key,grant_id LIMIT 512;"))
-                {
-                    cmd.Parameters.AddWithValue("$prefix", prefix); cmd.Parameters.AddWithValue("$end", prefix + char.MaxValue);
-                    cmd.Parameters.AddWithValue("$after", after); cmd.Parameters.AddWithValue("$id", afterId);
-                    using var reader = cmd.ExecuteReader();
-                    while (reader.Read()) page.Add(ReadGrant(reader));
-                }
+                page.AddRange(ReadDefenderGrantPage(prefix, after, afterId, exactKeys));
                 foreach (var grant in page)
                 {
                     var relative = Path.GetRelativePath(root.RootPath, grant.Path).Replace('\\', '/');

@@ -35,6 +35,7 @@ public sealed partial class SyncRun
         ProgressThrottle throttle, IReadOnlySet<string> reviewedDeletes, CancellationToken ct)
     {
         using var timing = new RunBoundaryTiming("apply", _settings.EnableRunInstrumentation);
+        using var effectBytes = ReconcileBatch.MeasureEffects();
         return await ExecuteWithEvidenceAsync(plan, pair, throttle, reviewedDeletes, ct, allowUnreviewedEvidence: true);
     }
 

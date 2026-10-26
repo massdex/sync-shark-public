@@ -1034,7 +1034,7 @@ public sealed partial class DropboxPilotClient(
     internal async Task<IReadOnlyDictionary<string, PilotRemoteEntry?>> ReadMetadataPageAsync(
         IReadOnlyList<string> paths, CancellationToken cancellationToken, Action<string, Exception>? onFailure = null)
     {
-        if (paths.Count > 128) throw new ArgumentOutOfRangeException(nameof(paths));
+        if (paths.Count > MetadataPageLimit) throw new ArgumentOutOfRangeException(nameof(paths));
         await using var verification = SyncProviderAccountVerificationScope.Begin(cancellationToken);
         await VerifyRootIdentityAsync(cancellationToken);
         var result = new System.Collections.Concurrent.ConcurrentDictionary<string, PilotRemoteEntry?>();

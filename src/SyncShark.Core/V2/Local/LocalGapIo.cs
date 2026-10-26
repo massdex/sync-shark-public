@@ -198,7 +198,8 @@ internal sealed partial class LocalGapIo(IStateStore known, V2Settings settings,
         lease.Dispose();
         setStage(stage = ProofStage.Read);
         using var stream = new FileStream(handle, FileAccess.Read, ContentBufferBytes, isAsync: false);
-        var content = await ReadHashAsync(stream, urgent, ct).ConfigureAwait(false);
+        var content = await ReadHashAsync(stream, urgent, ct,
+            ReconcileBatch.Current.Value is null ? null : item.Size).ConfigureAwait(false);
         if (content is null) return new(LocalGapHashOutcome.Paused);
         setStage(stage = ProofStage.AfterRead);
         var after = FileProof(handle, out var afterFailure);
@@ -229,7 +230,8 @@ internal sealed partial class LocalGapIo(IStateStore known, V2Settings settings,
         new(eligibility.NotPairWork ? LocalGapHashOutcome.NotPairWork : LocalGapHashOutcome.Held,
             Reason: eligibility.Reason);
 
-    private async Task<(string Hash, long Bytes)?> ReadHashAsync(FileStream stream, bool urgent, CancellationToken ct)
+    private async Task<(string Hash, long Bytes)?> ReadHashAsync(FileStream stream, bool urgent, CancellationToken ct,
+        long? maximumBytes = null)
     {
         var buffer = ArrayPool<byte>.Shared.Rent(ContentBufferBytes);
         var hasher = new ContentBlockHasher();
@@ -237,8 +239,12 @@ internal sealed partial class LocalGapIo(IStateStore known, V2Settings settings,
         {
             while (true)
             {
-                if (!await Budget(buffer.Length, ct, urgent).ConfigureAwait(false)) return null;
-                var count = await stream.ReadAsync(buffer.AsMemory(0, ContentBufferBytes), ct).ConfigureAwait(false);
+                var requested = maximumBytes is { } limit
+                    ? (int)Math.Min(ContentBufferBytes, Math.Max(default(long), limit - hasher.TotalBytes))
+                    : ContentBufferBytes;
+                if (requested == 0) break; // The post-read identity/size proof rejects concurrent growth.
+                if (!await Budget(requested, ct, urgent).ConfigureAwait(false)) return null;
+                var count = await stream.ReadAsync(buffer.AsMemory(0, requested), ct).ConfigureAwait(false);
                 if (!urgent && Paused) return null;
                 if (count == 0) break;
                 hasher.Append(buffer.AsSpan(0, count));

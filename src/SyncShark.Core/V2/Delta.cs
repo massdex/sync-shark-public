@@ -9,6 +9,8 @@ public sealed record Delta(string RootId, Side Side, long Gen, string CursorBefo
     // Local partial refreshes use the same evidence for displaced objects as for missing rows.
     internal Snapshot? DisplacementEvidence { get; init; }
     internal Action<string>? ChangedObject { get; init; }
+    // Exact reconciliation observations never infer or enumerate descendants of a missing folder.
+    internal IReadOnlySet<string>? ExactPaths { get; init; }
 
     /// <summary>Held paths whose retry bound expired; these no longer retain the side's cursor.</summary>
     public IReadOnlySet<string> ReleasedDeletionEvidence { get; init; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

@@ -61,6 +61,7 @@ public sealed class PilotLocalScanner
     // Two-phase inventory: the held, identity-verified metadata pass reads no file bytes. The caller
     // hashes only the paths whose content can change a decision (refreshPaths on a hashing scanner).
     internal bool MetadataOnly { get; init; }
+    internal long? MaximumContentBytes { get; init; }
     // The hash read chunk; the v2 local inventory passes its setting, other callers keep the default.
     internal int HashBufferBytes { get; init; } = SyncContentIdentity.DefaultReadBufferBytes;
     // Core v2 another provider's Windows cloud-files placeholder is classified from its
@@ -176,6 +177,8 @@ public sealed class PilotLocalScanner
                 await using var stream = OpenExclusiveVerified(exactPath, rootLease, out var ownedCloud,
                     expectedPairId, contentProvider);
                 length = stream.Length;
+                if (!MetadataOnly && MaximumContentBytes is { } limit && length > limit)
+                    throw new IOException(V2.MessageCatalog.Default.Message("proof-selection-deferred"));
                 var lastWrite = File.GetLastWriteTimeUtc(exactPath);
                 if (!PilotDirectoryLease.GetFileInformationByHandle(stream.SafeFileHandle, out var identity))
                     throw new IOException("Local file identity became unreadable during inventory.");

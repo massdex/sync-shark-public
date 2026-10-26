@@ -7,6 +7,7 @@ namespace Massdex.SyncShark;
 // verification and metadata parsing; no existing line changes. All Dropbox HTTP stays inside this adapter.
 public sealed partial class DropboxPilotClient
 {
+    internal const int MetadataPageLimit = 128;
     /// <summary>
     /// The stable folder id of this client's root, read once when a pair is created. The account root is its
     /// namespace identity; any other root must be a folder still at exactly this path.

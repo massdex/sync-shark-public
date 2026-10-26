@@ -47,8 +47,11 @@ public sealed partial class SyncRun
             var inventory = _endpoints.Inventory(root);
             var predicates = Predicates(pair, LinkExclusions.None);
             var include = side == Side.A ? predicates.A : predicates.B;
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            RunTrace.Emit($"reconciliation scoped refresh start: side={side} paths={paths.Count}");
             var read = await ReadScopesAsync(pair, root, side, inventory, paths, cursor, gen,
-                include, id => ids.Add(id), throttle, ct);
+                include, id => ids.Add(id), throttle, ct, exact: true);
+            RunTrace.Emit($"reconciliation scoped refresh end: side={side} paths={paths.Count} observed={read.Observed.Count} ms={System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0}");
             await ProveReconciliationBatchAsync(root, inventory, batch, read, ct);
             return new(gen, cursor, !read.Incomplete.Contains(string.Empty), false,
                 read.Touched, ids.ToArray(), NoDeletions, [])

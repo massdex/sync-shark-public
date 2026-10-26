@@ -3,7 +3,7 @@ using System.Net;
 namespace Massdex.SyncShark.V2;
 
 /// <summary>Reads one Dropbox root's complete or incremental inventory through the provider client.</summary>
-public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEvidence
+public sealed partial class DropboxInventory : IInventorySource, IDeferredDeletionEvidence
 {
     private static readonly IReadOnlyDictionary<string, SyncRemoteDeletionEvidence> NoEvidence =
         new Dictionary<string, SyncRemoteDeletionEvidence>(StringComparer.OrdinalIgnoreCase);

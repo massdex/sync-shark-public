@@ -31,6 +31,9 @@ internal sealed partial class LocalGapWorker(ILocalGapStore store, ILocalGapIo i
 
     private async Task RunRoot(RootDef root, CancellationTokenSource stop)
     {
+        // Independent indexing owns its own budget, even when endpoint preparation launched it in a batch.
+        ReconcileBatch.Current.Value = null;
+        ReconcileBatch.EffectCurrent.Value = null;
         await Task.WhenAll(Task.Run(() => Loop(root, true, stop)), Task.Run(() => Loop(root, false, stop))).ConfigureAwait(false);
     }
 

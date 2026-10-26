@@ -23,10 +23,12 @@ internal static partial class RunChecks
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var nextBatch = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var reads = 0;
+        var admitted = new List<ReconcileBatch>();
         var autoFinished = false;
         fx.Provider.AddInventory(fx.Pair.A, new ReconciliationBarrierInventory(fx.A, async () =>
         {
             var read = ++reads;
+            if (ReconcileBatch.Current.Value is { } batch) admitted.Add(batch);
             if (read == 2)
             {
                 entered.TrySetResult();
@@ -50,7 +52,7 @@ internal static partial class RunChecks
                 await MakePriorityChangesAsync(fx);
                 var fullA = fx.A.FullCalls;
                 var fullB = fx.B.FullCalls;
-                var report = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+                var report = await ((ISyncRun)run).AutoSyncAsync(fx.Pair.PairId, new RecordingProgress(), default);
                 Require(fx.A.FullCalls == fullA && fx.B.FullCalls == fullB,
                     "fresh priority changes use provider deltas rather than another bulk inventory");
                 await AssertPriorityAppliedAsync(fx, report);
@@ -67,6 +69,8 @@ internal static partial class RunChecks
             await auto.WaitAsync(TimeSpan.FromSeconds(20));
             await nextBatch.Task.WaitAsync(TimeSpan.FromSeconds(20));
             await FinishedAsync();
+            Require(admitted.Count > 0 && admitted.All(batch => batch.DecisionBytes <= batch.DecisionByteLimit),
+                "AutoSync passes between bounded repair batches; every batch stays within its decision byte allowance");
             await MirrorAsync(fx);
         }
         finally

@@ -227,9 +227,12 @@ public sealed partial class SyncRun
         }
     }
 
-    private Task<ReconcileResult> ReconcileAsync(PairDef pair, ProgressThrottle throttle, CancellationToken ct,
-        IReadOnlyList<string>? narrowedIgnoreRules = null, Func<SyncAction, bool>? intentFilter = null) =>
-        new IntentRecovery(this, pair, throttle, ct, narrowedIgnoreRules, intentFilter).RunAsync();
+    private async Task<ReconcileResult> ReconcileAsync(PairDef pair, ProgressThrottle throttle, CancellationToken ct,
+        IReadOnlyList<string>? narrowedIgnoreRules = null, Func<SyncAction, bool>? intentFilter = null)
+    {
+        using var effectBytes = ReconcileBatch.MeasureEffects();
+        return await new IntentRecovery(this, pair, throttle, ct, narrowedIgnoreRules, intentFilter).RunAsync();
+    }
 
     // Why a guard-rejected intent is held. Only Verification is background verification debt that the combined
     // summary counts; Link/Stub retire under their standing notice; Pending keeps its own notice and stays unsynced.
@@ -769,6 +772,8 @@ public sealed partial class SyncRun
     {
         await Task.WhenAll(PatchSideAsync(pair, pair.A, Side.A, scan.A, requests.PathsA, ct),
             PatchSideAsync(pair, pair.B, Side.B, scan.B, requests.PathsB, ct));
+        if (ReconcileBatch.Current.Value is { } batch)
+            RunTrace.Emit($"reconciliation planner hash bytes: used={batch.DecisionBytes} budget={batch.DecisionByteLimit}");
     }
 
     private async Task PatchSideAsync(PairDef pair, RootDef root, Side side, SideScan scan, IReadOnlyList<string> paths,
@@ -788,7 +793,7 @@ public sealed partial class SyncRun
             using (string.Equals(root.Provider, SyncProviders.Local, StringComparison.OrdinalIgnoreCase)
                        ? RunInstrumentation.Current?.Measure(RunTimingStage.LocalHash) : null)
             {
-                try { hashes = await _endpoints.Inventory(root).HashAsync(chunk, ct); }
+                try { hashes = await HashDecisionAsync(root, _endpoints.Inventory(root), chunk, ct); }
                 catch (Exception error) when (ScopeFailure(error, ct))
                 {
                     // A bulk provider API need not identify the failed member. Isolate that
@@ -809,7 +814,7 @@ public sealed partial class SyncRun
                         }
                         try
                         {
-                            foreach (var entry in await _endpoints.Inventory(root).HashAsync([path], ct))
+                            foreach (var entry in await HashDecisionAsync(root, _endpoints.Inventory(root), [path], ct))
                                 recovered[entry.Key] = entry.Value;
                             consecutiveTransportFailures = 0;
                         }

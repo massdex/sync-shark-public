@@ -158,7 +158,19 @@ public sealed partial class SyncRun
         return await _admission.WithAsync(pair.PairId, async () =>
         {
             batch.AdmissionWait = _time.GetUtcNow() - queuedAt;
-            return await ReconcileTracedBatchAsync((SqliteStateStore)_store, pair, active.Decision, batch, progress, ct);
+            var previous = ReconcileBatch.Current.Value;
+            batch.DecisionByteLimit = _settings.ReconciliationBatch.MaxBytes;
+            ReconcileBatch.Current.Value = batch;
+            try
+            {
+                return await ReconcileTracedBatchAsync((SqliteStateStore)_store, pair, active.Decision, batch, progress, ct);
+            }
+            finally
+            {
+                RunTrace.Emit($"reconciliation decision hash bytes: used={batch.DecisionBytes} budget={batch.DecisionByteLimit}");
+                RunTrace.Emit($"reconciliation effect progress-stream bytes: read={batch.EffectReadBytes} written={batch.EffectWrittenBytes}; execution limits unchanged");
+                ReconcileBatch.Current.Value = previous;
+            }
         }, ct);
     }
 

@@ -4,6 +4,7 @@ namespace Massdex.SyncShark.V2;
 public sealed record RunOptions
 {
     internal ReconcileBatch? Batch { get; init; }
+    internal bool AutoSyncFreshDelta { get; init; }
     public string? EffectsExportPath { get; init; }
     public long? MaxPlannedActions { get; init; }
 }

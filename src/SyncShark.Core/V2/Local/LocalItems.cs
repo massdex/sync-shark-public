@@ -31,7 +31,11 @@ internal static partial class LocalItems
         {
             var (volume, fileId) = ParseObjectId(root.RootObjectId);
             using var lease = PilotDirectoryLease.Open(root.RootPath, new PilotDirectoryIdentity(volume, fileId));
-            var scan = new PilotLocalScanner { CloudFilesAware = true }.ScanAsync(lease, new HashSet<string>(),
+            var scan = new PilotLocalScanner
+            {
+                CloudFilesAware = true,
+                MaximumContentBytes = ReconcileBatch.Current.Value is null ? null : Math.Max(default(long), item.Size)
+            }.ScanAsync(lease, new HashSet<string>(),
                 ct, refreshPaths: [item.Path], traverseDirectory: _ => false).GetAwaiter().GetResult();
             if (scan.Entries.TryGetValue(item.Path, out var entry) && entry.ContentHash is not null)
             {

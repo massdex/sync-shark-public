@@ -47,6 +47,8 @@ internal static partial class RunChecks
         fx.A.HashedPaths.Clear();
         var batch = BatchFor(item);
         batch.ProofBytes = 2; // Earlier proof on the other root consumed part of this batch.
+        batch.DecisionByteLimit = 4;
+        Require(batch.AdmitDecisionHash(item with { Size = 2 }), "the earlier root reserves its decision bytes");
         var run = new SyncRun(store, fx.Executor, fx.Provider,
             Settings with { ReconciliationBatch = new(10, 4) }, TimeProvider.System);
         var report = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default,

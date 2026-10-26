@@ -808,6 +808,7 @@ public sealed partial class SyncRun : ISyncRun
         using var gapCoverage = options?.Batch is not null && _store is SqliteStateStore sql
             ? sql.BeginReconciliationGapCoverage(pairId) : null;
         if (options?.Batch is { } batch) batch.GapCoverage = gapCoverage;
+        using var decisionBudget = options?.Batch?.MeasureDecisions(_settings.ReconciliationBatch.MaxBytes);
         var prepared = await PrepareIncrementalAsync(pairId, decisions, resolvingNoticeId, progress, ct, options);
         if (prepared.Completed is { Failed: 0 } && prepared.Plan is not null) ClosePlanBoundNotice(pairId);
         return prepared.Completed ?? await prepared.Execute!();
@@ -903,7 +904,8 @@ public sealed partial class SyncRun : ISyncRun
         var retries = batch is null ? _store.DueSyncRetries(pairId, _time.GetUtcNow(), 256, CachedIdentityRefresh.PendingReason)
             .Where(retry => retry.Path.Length != 0 || retry.Kind != "run").ToArray() : [];
         ct.ThrowIfCancellationRequested();
-        var deferredPlanning = batch is null ? AdmitPlanningPage(pairId, pair) : ReconciliationPlanningPage(pair, batch);
+        var deferredPlanning = batch is not null ? ReconciliationPlanningPage(pair, batch) :
+            options?.AutoSyncFreshDelta == true ? [] : AdmitPlanningPage(pairId, pair);
         var current = LeftAlone(pair); // Admission may retire non-work; summaries must observe that transition.
         using var planningTiming = new RunBoundaryTiming("planning", _settings.EnableRunInstrumentation);
         var activeRetries = CachedIdentityRefresh.ActiveRetryPaths(retries);
@@ -940,6 +942,8 @@ public sealed partial class SyncRun : ISyncRun
         var recoveryPaths = batch is null ? reconcile.Touched : reconcile.Touched.Where(batch.Contains);
         var touched = new List<string>(scan.Touched(recoveryPaths.Concat(retryPaths)
             .Concat(decisions?.Keys ?? Enumerable.Empty<string>())));
+        if (options?.AutoSyncFreshDelta == true)
+            RunTrace.Emit($"autosync: fresh delta {scan.Touched([]).Distinct(StringComparer.OrdinalIgnoreCase).Count()} paths; retry follow-ups {recoveryPaths.Concat(retryPaths).Distinct(StringComparer.OrdinalIgnoreCase).Count()} paths; backlog left to reconciliation: {_store.CountDeferredPlanning(pairId)}");
         // Finding 3: a whole-root read retry expands planning to the whole pair only in the run where
         // that debt actually settles. While another root is unreadable its empty-path failure keeps
         // every row protected, and no retry can retire, so an earlier sleeping retry on the healthy

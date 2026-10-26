@@ -316,10 +316,10 @@ internal sealed partial class FileStateTable
     // object is upserted later in the delta is a move written as Delete(old) + Upsert(new) and is left for that
     // Upsert, which removes it in the same step as the insertion. One step per removed row.
     private void Delete(Change change, long rootNo, HashSet<string> suppressed, StoreBatch batch,
-        Func<string, bool>? include, Action<string>? changedObject, HashSet<string> retainedAliases)
+        Func<string, bool>? include, Action<string>? changedObject, HashSet<string> retainedAliases, bool exact = false)
     {
         var deletedAt = change.DeletedUtc ?? _clock.GetUtcNow();
-        foreach (var row in ExactRows(rootNo, change, batch.Transaction))
+        foreach (var row in ExactRows(rootNo, change, batch.Transaction, exact))
         {
             var path = RowCodec.Join(row.Path, row.Name);
             // Retire only the explicitly observed missing spelling. Another live local
@@ -342,7 +342,7 @@ internal sealed partial class FileStateTable
         }
     }
 
-    private List<RowRef> ExactRows(long rootNo, Change change, SqliteTransaction transaction)
+    private List<RowRef> ExactRows(long rootNo, Change change, SqliteTransaction transaction, bool exact = false)
     {
         var at = _reader.AtKey(rootNo, change.Path, transaction).Where(entry =>
             string.Equals(entry.Item.Path, change.Path, StringComparison.Ordinal) &&
@@ -351,7 +351,7 @@ internal sealed partial class FileStateTable
         // A Delete naming its object reaches under its path only when that object is the folder there. Descendants
         // come first and the folder row last (B-127): batches commit between rows, and a crash after a boundary
         // must leave the folder live so the replayed Delete still finds it and removes the rest.
-        var rows = change.ObjectId.Length == 0 || at.Any(entry => entry.Item.Kind == ItemKind.Folder)
+        var rows = !exact && (change.ObjectId.Length == 0 || at.Any(entry => entry.Item.Kind == ItemKind.Folder))
             ? Subtree(rootNo, change.Path, transaction).Where(row => IsExactUnder(row.Path, row.Name, change.Path)).ToList()
             : new List<RowRef>();
         rows.AddRange(at.Select(entry => new RowRef(entry.DirNo, entry.Parent, entry.Name, entry.Item.ObjectId)));

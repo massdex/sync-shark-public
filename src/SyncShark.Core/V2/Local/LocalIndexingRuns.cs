@@ -128,6 +128,8 @@ internal sealed class LocalIndexingRuns : IAsyncDisposable
 
     private async Task<string> RunRootAsync(RootDef root, CancellationToken ct, bool continuous)
     {
+        ReconcileBatch.Current.Value = null;
+        ReconcileBatch.EffectCurrent.Value = null;
         using var admission = StoreAdmission.WithCancellation(ct);
         try
         {

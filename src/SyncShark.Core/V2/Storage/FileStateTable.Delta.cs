@@ -16,7 +16,8 @@ internal sealed partial class FileStateTable
         using var batch = new StoreBatch(_connection, _settings.StoreBatchRows);
         var retainedAliases = new HashSet<string>(StringComparer.Ordinal);
         foreach (var change in delta.Changes)
-            if (change.Kind == ChangeKind.Delete) Delete(change, rootNo, suppressed, batch, delta.IncludesPath, delta.ChangedObject, retainedAliases);
+            if (change.Kind == ChangeKind.Delete) Delete(change, rootNo, suppressed, batch, delta.IncludesPath, delta.ChangedObject, retainedAliases,
+                exact: delta.ExactPaths?.Contains(change.Path) == true);
         var now = _clock.GetUtcNow();
         foreach (var change in delta.Changes)
             if (change.Kind == ChangeKind.Upsert && (delta.IncludesPath?.Invoke(change.Path) ?? true))
