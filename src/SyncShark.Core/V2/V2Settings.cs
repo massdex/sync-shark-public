@@ -41,6 +41,11 @@ public sealed record V2Settings(
     internal const int SettleCandidateCap = 8192;
     internal const int SettleExaminationCap = 16384;
 
+    /// <summary>Saturation value of the one open-conflict count behind the tray icon: at or past this many
+    /// visible notices the icon says 99+ and never claims an exact total. Only the reported result is capped;
+    /// the indexed traversal itself is unbounded and tracked by deferral #25.</summary>
+    internal const int AttentionCountCap = 100;
+
     // Journal metadata admission bounds; no file-content reads occur under these leases.
     internal const int JournalRecordsPerPage = 256;
     internal static readonly TimeSpan JournalStoreSlice = TimeSpan.FromMilliseconds(200);

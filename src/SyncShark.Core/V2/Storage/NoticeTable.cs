@@ -15,9 +15,10 @@ internal sealed partial class NoticeTable
     /// notices the icon says 99+ and never claims an exact total. Only the result is capped. The traversal is
     /// not row-bounded: the same indexed pass also visits open notices whose choice is ignore/quarantine-ignore
     /// before the NOT filter removes them. That residual cost is deferral #25, the designed paging lane, and is
-    /// not changed here (no index or schema change).
+    /// not changed here (no index or schema change). The default lives with every other v2 tunable in
+    /// <see cref="V2Settings"/>.
     /// </summary>
-    internal const int AttentionCountCap = 100;
+    internal const int AttentionCountCap = V2Settings.AttentionCountCap;
 
     internal static readonly string VisibleCountSql =
         "SELECT COUNT(*) FROM (SELECT 1 FROM notice n INDEXED BY nt_open JOIN pair p ON p.pair_no=n.pair_no WHERE " +
