@@ -11,9 +11,9 @@ namespace Massdex.SyncShark.V2;
 public static class AutoSyncLog
 {
     internal const string FileName = "autosync.log";
-    // A failing host can write stderr continuously; reuse the run-log byte bound and move the previous
-    // generation aside rather than growing forever.
-    internal const long FileBound = RunLog.MaximumRunBytes;
+    // RunLog retention selects dated run names, not this lifecycle log. Its separate budget
+    // is one current and one previous generation, each at most ten MiB.
+    internal const long FileBound = 10 * 1024 * 1024;
     internal const int LongestLine = 2048;
 
     /// <summary>The log file in the product logs directory that RunLog already owns.</summary>
@@ -27,10 +27,15 @@ public static class AutoSyncLog
         {
             var path = FilePath(productRoot);
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            RotateIfFull(path);
             var stamp = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
             var bytes = new UTF8Encoding(false).GetBytes(stamp + " " + OneLine(message) + Environment.NewLine);
-            using var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+            // Deny other writers for the entire size-check/rotation/append transaction. Contention
+            // drops a diagnostic rather than blocking shutdown. No separate lock file is needed.
+            using var stream = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite,
+                FileShare.Read | FileShare.Delete);
+            if (bytes.Length > FileBound) return;
+            if (stream.Length > FileBound - bytes.Length) Rotate(stream, path);
+            stream.Position = stream.Length;
             stream.Write(bytes, 0, bytes.Length);
             stream.Flush();
         }
@@ -44,25 +49,21 @@ public static class AutoSyncLog
     public static TextWriter CreateStderrWriter(string productRoot) =>
         TextWriter.Synchronized(new LineWriter(productRoot));
 
-    private static void RotateIfFull(string path)
+    private static void Rotate(FileStream current, string path)
     {
-        try
-        {
-            var file = new FileInfo(path);
-            if (!file.Exists || file.Length <= FileBound) return;
-            // One previous generation is enough to explain the latest termination. A concurrent writer
-            // can hold the file briefly; a failed move only delays bounding until the next event.
-            File.Move(path, path + ".previous", overwrite: true);
-        }
-        catch (Exception)
-        {
-            // Bounding is best effort; the event being appended is more valuable than the cap.
-        }
+        // Keep the current handle throughout rotation so another process cannot append between
+        // the budget check and write. Failure propagates to Append's catch: never grow a full file.
+        using var previous = new FileStream(path + ".previous", FileMode.Create, FileAccess.Write,
+            FileShare.Read | FileShare.Delete);
+        current.Position = Math.Max(0, current.Length - FileBound);
+        current.CopyTo(previous);
+        previous.Flush();
+        current.SetLength(0);
     }
 
     private static string OneLine(string message)
     {
-        var text = message.ReplaceLineEndings(" ");
+        var text = SyncActivityText.Safe(message, omitPrivateDetails: true);
         return text.Length <= LongestLine ? text : text[..LongestLine] + "...";
     }
 

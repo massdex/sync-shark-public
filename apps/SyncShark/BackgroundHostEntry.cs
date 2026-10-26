@@ -11,14 +11,15 @@ internal static class BackgroundHostEntry
 
     internal static async Task<int> RunAsync()
     {
+        var logRoot = ProductRootOrNull();
         var client = Client();
         if (await client.TrySendAsync(AutoSyncHostClient.Request("status"), TimeSpan.FromMilliseconds(300)) is { } existing)
         {
             Console.WriteLine($"AutoSync already running (PID {existing.Host.Pid}). Attached; no second engine created.");
+            if (logRoot is { } root) AutoSyncLog.Append(root, "host shutdown: attached to existing owner");
             return 0;
         }
         // The owner is silent on stdout; stderr is durable so an externally ended host leaves evidence.
-        var logRoot = ProductRootOrNull();
         Console.SetOut(TextWriter.Null);
         Console.SetError(logRoot is { } logTarget ? AutoSyncLog.CreateStderrWriter(logTarget) : TextWriter.Null);
         try
@@ -34,23 +35,22 @@ internal static class BackgroundHostEntry
                     catch (Exception noticeError) { Console.Error.WriteLine("Could not clear the startup notice: " + noticeError.Message); }
                     return authority;
                 },
-                () => new ProductionAutoSyncEngine(authority!, SyncDataLocation.ProductRoot, wake));
+                () => new ProductionAutoSyncEngine(authority!, SyncDataLocation.ProductRoot, wake),
+                stopSupervisor: ProcessEntry.StopSupervisor);
             await host.Completion.ConfigureAwait(false);
             if (logRoot is { } root)
-                AutoSyncLog.Append(root, host.StopRequested
-                    ? "host shutdown: stop requested"
-                    : "host shutdown: listener ended without a stop request");
+                AutoSyncLog.Append(root, "host shutdown: " + host.ShutdownReason);
             return 0;
         }
         catch (AutoSyncHostReservationException)
         {
             // FirstPipeInstance can lose after the initial status probe. Never acquire a
             // second store/engine; attach to the winning starter as it becomes ready.
-            return await AttachToOwnerAsync(client);
+            return await AttachToOwnerAsync(client, logRoot);
         }
         catch (IOException error) when (error.InnerException is System.ComponentModel.Win32Exception { NativeErrorCode: 32 or 33 })
         {
-            return await AttachToOwnerAsync(client);
+            return await AttachToOwnerAsync(client, logRoot);
         }
         catch (Exception error)
         {
@@ -66,11 +66,19 @@ internal static class BackgroundHostEntry
         catch (Exception) { return null; } // the engine factory reports the same invalid location
     }
 
-    private static async Task<int> AttachToOwnerAsync(AutoSyncHostClient client)
+    private static async Task<int> AttachToOwnerAsync(AutoSyncHostClient client, string? logRoot)
     {
-        var attached = await client.TrySendAsync(AutoSyncHostClient.Request("status"), TimeSpan.FromSeconds(5));
-        if (attached is not null) return 0;
-        return (int)SyncCliExitCode.Busy;
+        var reason = "owner attach failed";
+        try
+        {
+            var attached = await client.TrySendAsync(AutoSyncHostClient.Request("status"), TimeSpan.FromSeconds(5));
+            reason = attached is not null ? "attached to existing owner" : "existing owner unavailable";
+            return attached is not null ? 0 : (int)SyncCliExitCode.Busy;
+        }
+        finally
+        {
+            if (logRoot is { } root) AutoSyncLog.Append(root, "host shutdown: " + reason);
+        }
     }
 
     internal static async Task<AutoSyncHostReply> StartAsync(CancellationToken ct)

@@ -16,6 +16,7 @@ public sealed class AutoSyncBackgroundHost : IAsyncDisposable
     private readonly IDisposable _authority;
     private readonly IAutoSyncHostEngine _engine;
     private readonly Func<PipeStream, bool> _trustedPeer;
+    private readonly Action? _stopSupervisor;
     private readonly CancellationTokenSource _acceptStop = new();
     private readonly CancellationTokenSource _workStop = new();
     private readonly ConcurrentDictionary<long, Task> _connections = new();
@@ -30,12 +31,13 @@ public sealed class AutoSyncBackgroundHost : IAsyncDisposable
     private readonly Task _listener;
 
     private AutoSyncBackgroundHost(string pipeName, NamedPipeServerStream first, IDisposable authority,
-        IAutoSyncHostEngine engine, Func<PipeStream, bool> trustedPeer)
+        IAutoSyncHostEngine engine, Func<PipeStream, bool> trustedPeer, Action? stopSupervisor)
     {
         _pipeName = pipeName;
         _authority = authority;
         _engine = engine;
         _trustedPeer = trustedPeer;
+        _stopSupervisor = stopSupervisor;
         Identity = new AutoSyncHostIdentity(Guid.NewGuid().ToString("N"), Environment.ProcessId, DateTimeOffset.UtcNow);
         _listener = Task.Run(() => ListenAsync(first));
     }
@@ -44,6 +46,7 @@ public sealed class AutoSyncBackgroundHost : IAsyncDisposable
 
     /// <summary>True when a stop request ended this host; the durable shutdown line uses it.</summary>
     public bool StopRequested => Volatile.Read(ref _stopRequested) != 0;
+    public string ShutdownReason => StopRequested ? "stop requested" : "listener ended without a stop request";
     public Task Completion => _listener;
 
     /// <summary>
@@ -52,11 +55,11 @@ public sealed class AutoSyncBackgroundHost : IAsyncDisposable
     /// bypass the lock: attach with AutoSyncHostClient, or report the existing GUI/maintenance owner.
     /// </summary>
     public static AutoSyncBackgroundHost Start(string pipeName, Func<IDisposable> acquireAuthority,
-        Func<IAutoSyncHostEngine> createEngine) => Start(pipeName, acquireAuthority, createEngine,
-            pipe => AutoSyncHostProtocol.TrustedPeer(pipe, server: true));
+        Func<IAutoSyncHostEngine> createEngine, Action? stopSupervisor = null) => Start(pipeName, acquireAuthority, createEngine,
+            pipe => AutoSyncHostProtocol.TrustedPeer(pipe, server: true), stopSupervisor);
 
     internal static AutoSyncBackgroundHost Start(string pipeName, Func<IDisposable> acquireAuthority,
-        Func<IAutoSyncHostEngine> createEngine, Func<PipeStream, bool> trustedPeer)
+        Func<IAutoSyncHostEngine> createEngine, Func<PipeStream, bool> trustedPeer, Action? stopSupervisor = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(pipeName);
         ArgumentNullException.ThrowIfNull(acquireAuthority);
@@ -73,7 +76,7 @@ public sealed class AutoSyncBackgroundHost : IAsyncDisposable
         {
             authority = acquireAuthority();
             var engine = createEngine();
-            return new AutoSyncBackgroundHost(pipeName, first, authority, engine, trustedPeer);
+            return new AutoSyncBackgroundHost(pipeName, first, authority, engine, trustedPeer, stopSupervisor);
         }
         catch
         {
@@ -202,6 +205,9 @@ public sealed class AutoSyncBackgroundHost : IAsyncDisposable
     /// </summary>
     private bool RecordStopRequest()
     {
+        // Only a trusted, validated stop reaches here. Signal before drain; a failed signal
+        // rejects the stop rather than exiting into a supervisor relaunch.
+        _stopSupervisor?.Invoke();
         Volatile.Write(ref _stopRequested, 1);
         return true;
     }

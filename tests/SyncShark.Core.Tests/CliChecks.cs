@@ -473,6 +473,19 @@ internal static partial class CliChecks
                 SyncCliRegistry.Rows.Single(row => row.Command == "index run").RequiresRoot &&
                 SyncCliRegistry.Rows.Single(row => row.Command == "index run").Mutating,
             "the registry keeps index status read-only and index run exact, mutating and confirmed");
+        foreach (var command in new[] { "start", "stop" })
+        {
+            var invocation = SyncCliRegistry.Parse(["--cli", "autosync", command]);
+            var row = SyncCliRegistry.Rows.Single(row => row.Command == invocation.Command);
+            Require(invocation.Command == "autosync " + command && row.Mutating,
+                "explicit lifecycle commands retain their shared host routing and mutation classification");
+            Expect("invalid lifecycle arguments stay state-free",
+                await RunCliAsync(["--cli", "autosync", command, "--pair", "fixture"], NeverOpensState), 2);
+        }
+        Require(SyncCliRegistry.Rows.Single(row => row.Command == "autosync start").Effect.Contains("unexpected exits relaunch", StringComparison.Ordinal) &&
+            SyncCliRegistry.Rows.Single(row => row.Command == "autosync stop").Effect.Contains("cancel supervision before draining", StringComparison.Ordinal) &&
+            SyncCliRegistry.Rows.Single(row => row.Command == "autosync stop").Effect.Contains("without a host", StringComparison.Ordinal),
+            "help and capabilities describe supervised start and deliberate stop including backoff");
         foreach (var command in new[] { "install-startup", "uninstall-startup" })
         {
             var invocation = SyncCliRegistry.Parse(["--cli", "autosync", command]);

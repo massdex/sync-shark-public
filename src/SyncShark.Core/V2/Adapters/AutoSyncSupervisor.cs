@@ -62,8 +62,8 @@ public sealed class AutoSyncSupervisor
             {
                 Trace("child cycle failed: " + SyncCli.DescribeException(error));
             }
-            if (Stopped(delay)) return 0;
             Trace("relaunch delay=" + (long)delay.TotalSeconds + "s");
+            if (Stopped(delay)) return 0;
             delay = NextDelay(delay);
         }
     }

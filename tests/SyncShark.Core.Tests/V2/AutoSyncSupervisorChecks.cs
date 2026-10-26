@@ -9,9 +9,12 @@ internal static class AutoSyncSupervisorChecks
     public static void Run()
     {
         ZeroExitWithoutStopRelaunches();
-        ZeroExitWithStopDoesNotRelaunch();
+        BackoffResetsAfterStableUptime();
         EventsAreLogged();
         BackoffIsUnchanged();
+        FailedRotationDoesNotGrow();
+        ConcurrentWritersStayBounded();
+        PrivateDetailsAreOmitted();
         Console.WriteLine("AutoSync supervisor checks passed.");
     }
 
@@ -30,17 +33,28 @@ internal static class AutoSyncSupervisorChecks
         finally { Remove(root); }
     }
 
-    private static void ZeroExitWithStopDoesNotRelaunch()
+    private static void BackoffResetsAfterStableUptime()
     {
         var root = NewRoot();
         try
         {
             var starts = 0;
+            var clock = new FakeClock();
+            var delays = new List<int>();
             var supervisor = NewSupervisor(root,
-                () => new FakeChild(200 + Interlocked.Increment(ref starts), exitCode: 0),
-                wait => wait > TimeSpan.Zero);
-            Require(supervisor.Run() == 0, "an explicit stop ends supervision cleanly");
-            Require(starts == 1, "a zero child exit with the stop event does not relaunch");
+                () => new FakeChild(++starts, 0, () => clock.Advance(
+                    starts == 3 ? TimeSpan.FromMinutes(10) : TimeSpan.FromSeconds(1))),
+                wait =>
+                {
+                    if (wait == TimeSpan.Zero) return false;
+                    Require(File.ReadAllLines(AutoSyncLog.FilePath(root)).Last().Contains(
+                        "relaunch delay=" + (int)wait.TotalSeconds + "s", StringComparison.Ordinal),
+                        "relaunch delay is durable before waiting");
+                    delays.Add((int)wait.TotalSeconds);
+                    return delays.Count == 4;
+                }, () => clock.Now);
+            supervisor.Run();
+            Require(delays.SequenceEqual(new[] { 5, 10, 5, 10 }), "stable uptime resets backoff before the next wait");
         }
         finally { Remove(root); }
     }
@@ -91,6 +105,78 @@ internal static class AutoSyncSupervisorChecks
             supervisor.Run();
             Require(delays.Select(delay => (int)delay.TotalSeconds).SequenceEqual(new[] { 5, 10, 20, 40, 80, 160, 300 }),
                 "backoff doubles from five seconds and caps at five minutes");
+        }
+        finally { Remove(root); }
+    }
+
+    private static void PrivateDetailsAreOmitted()
+    {
+        var root = NewRoot();
+        try
+        {
+            foreach (var text in new[] { @"failure at X:\Parent\Child Name.txt", "failure at /Parent/Child",
+                "Bearer synthetic-secret", "password=synthetic-secret", "access_token=synthetic-secret",
+                "accountId=synthetic-account", "person@example.invalid", "https://example.invalid/Parent?code=synthetic-secret" })
+                AutoSyncLog.Append(root, text);
+            using (var stderr = AutoSyncLog.CreateStderrWriter(root))
+            {
+                stderr.Write("stderr password=");
+                stderr.WriteLine("synthetic-secret");
+                stderr.Write("partial stderr at /Parent/Child");
+                stderr.Flush();
+            }
+            var log = File.ReadAllText(AutoSyncLog.FilePath(root));
+            Require(!log.Contains("Parent") && !log.Contains("Child") && !log.Contains("synthetic-secret") &&
+                !log.Contains("synthetic-account") && !log.Contains("example.invalid"),
+                "shared sink omits paths, identifiers, URLs and credentials, including fragmented stderr");
+            Require(log.Contains("stderr") && log.Contains("[redacted]") && log.Contains("[path omitted]"),
+                "stderr remains durable with safe diagnostic markers");
+        }
+        finally { Remove(root); }
+    }
+
+    private static void FailedRotationDoesNotGrow()
+    {
+        var root = NewRoot();
+        try
+        {
+            AutoSyncLog.Append(root, "initial");
+            var path = AutoSyncLog.FilePath(root);
+            using (var full = File.OpenWrite(path)) full.SetLength(AutoSyncLog.FileBound);
+            using (var blocked = new FileStream(path + ".previous", FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                AutoSyncLog.Append(root, "must not grow");
+                Require(new FileInfo(path).Length == AutoSyncLog.FileBound, "failed rotation skips the append");
+            }
+            AutoSyncLog.Append(root, "rotation recovered");
+            Require(new FileInfo(path).Length < AutoSyncLog.FileBound &&
+                new FileInfo(path + ".previous").Length == AutoSyncLog.FileBound,
+                "rotation recovers with one bounded previous generation");
+        }
+        finally { Remove(root); }
+    }
+
+    private static void ConcurrentWritersStayBounded()
+    {
+        var root = NewRoot();
+        try
+        {
+            AutoSyncLog.Append(root, "initial");
+            var path = AutoSyncLog.FilePath(root);
+            using (var full = File.OpenWrite(path)) full.SetLength(AutoSyncLog.FileBound);
+            using var start = new Barrier(2);
+            Task Writer(string label) => Task.Run(() =>
+            {
+                start.SignalAndWait(TimeSpan.FromSeconds(5));
+                for (var n = 0; n < 100; n++) AutoSyncLog.Append(root, label);
+            });
+            Task.WhenAll(Writer("writer-a"), Writer("writer-b")).GetAwaiter().GetResult();
+            Require(new FileInfo(path).Length <= AutoSyncLog.FileBound &&
+                new FileInfo(path + ".previous").Length <= AutoSyncLog.FileBound,
+                "concurrent writers keep both generations within budget");
+            var lines = File.ReadAllLines(path);
+            Require(lines.Length > 0 && lines.All(line => line.EndsWith("writer-a", StringComparison.Ordinal) ||
+                line.EndsWith("writer-b", StringComparison.Ordinal)), "concurrent appends retain complete lines");
         }
         finally { Remove(root); }
     }
