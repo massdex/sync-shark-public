@@ -32,7 +32,6 @@ public sealed partial class SyncRun
                 : SelectionChanged(item, previous, false);
             counts = await _admission.WithAsync(pair.PairId, () =>
             {
-                if (untrusted) InvalidateLegacyGapItems(pair, root, side, page, eligibility, sql);
                 var result = SelectPage(pair, side, page, session, sql, eligibility, accounted, counts, false, changed);
                 _store.RequireRehashBatch(root.RootId, invalidated,
                     MessageCatalog.Default.Template("reconcile-journal-proof"));

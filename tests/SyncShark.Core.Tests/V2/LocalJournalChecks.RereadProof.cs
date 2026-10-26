@@ -31,6 +31,7 @@ internal static partial class LocalJournalChecks
             store.RehashPendingCount(root.RootId) == 0,
             "acknowledgement empties the queue and settled rereads do not recreate debt");
         await VerifyScopedProofWatermarkAsync(store, root, inventory);
+        await VerifyConcurrentRereadAsync(store, root, inventory);
         await VerifyChangedAndFailedRereadAsync(store, root, inventory);
     }
 
@@ -52,6 +53,37 @@ internal static partial class LocalJournalChecks
             "scoped inline watermark acknowledges its proof but not another row invalidated after capture");
         await inventory.HashAsync([other.Path], default);
         store.AcknowledgeRehash(root.RootId, store.RehashWatermark(root.RootId), _ => true);
+    }
+
+    private static async Task VerifyConcurrentRereadAsync(SqliteStateStore store, RootDef root, LocalInventory inventory)
+    {
+        var item = store.Live(root.RootId).Single(row => row.Path == "file.txt");
+        var path = Path.Combine(root.RootPath, item.Path);
+        var native = inventory.GapIo!;
+        LocalChecks.Seed(root.RootPath, item.Path, "first-ed");
+        File.SetLastWriteTimeUtc(path, item.Mtime.UtcDateTime);
+        long newer = 0;
+        inventory.GapIo = new VerificationTestIo(async (r, row, ct) =>
+        {
+            var proof = await native.HashAsync(r, row, ct);
+            LocalChecks.Seed(root.RootPath, item.Path, "nextedit");
+            File.SetLastWriteTimeUtc(path, item.Mtime.UtcDateTime);
+            store.RequireRehash(root.RootId, item, "second metadata-preserving journal edit");
+            newer = store.RehashRevision(root.RootId, item.ObjectId);
+            return proof;
+        });
+        try
+        {
+            var hashes = await inventory.HashAsync([item.Path], default);
+            LocalChecks.Require(!hashes.ContainsKey(item.Path) && newer > 0 &&
+                store.RehashRevision(root.RootId, item.ObjectId) == newer &&
+                store.ByObject(root.RootId, item.ObjectId) is { Hash: null } pending && pending.Flags.HasFlag(ItemFlags.NeedsRehash),
+                "two quick metadata-identical edits retain the newer evidence instead of publishing the first edit's stale proof");
+        }
+        finally { inventory.GapIo = native; }
+        var fresh = await inventory.HashAsync([item.Path], default);
+        LocalChecks.Require(fresh[item.Path] == DropboxContentHash.Compute(System.Text.Encoding.UTF8.GetBytes("nextedit")),
+            "the subsequent proof reads the second edit");
     }
 
     private static async Task VerifyChangedAndFailedRereadAsync(SqliteStateStore store, RootDef root, LocalInventory inventory)

@@ -210,6 +210,9 @@ public partial interface IStateStore : IDisposable
     /// <summary>Persist a hash retry and its diagnostic before the journal cursor can advance.</summary>
     void RequireRehash(string rootId, ItemState item, string reason);
 
+    /// <summary>Atomically reflag a reread only while its pre-read evidence revision still owns the row.</summary>
+    long? RequireRehashAtRevision(string rootId, ItemState item, string reason, long revision);
+
     /// <summary>Persist debt in bounded transactions before advancing a covered journal interval.</summary>
     void RequireRehashBatch(string rootId, IEnumerable<ItemState> items, string reason)
     {

@@ -1104,7 +1104,9 @@ internal static partial class ExecutorChecks
         public void SaveSyncRetry(string pairId, SyncRetry retry) => _inner.SaveSyncRetry(pairId, retry);
         public void ClearSyncRetry(string pairId, string path) => _inner.ClearSyncRetry(pairId, path);
     public void SuspendHeldRetry(string pairId, SyncRetry retry) => _inner.SuspendHeldRetry(pairId, retry);
-        public void RequireRehash(string rootId, ItemState item, string reason) => _inner.RequireRehash(rootId, item, reason);
+        public long? RequireRehashAtRevision(string rootId, ItemState item, string reason, long revision) =>
+        _inner.RequireRehashAtRevision(rootId, item, reason, revision);
+    public void RequireRehash(string rootId, ItemState item, string reason) => _inner.RequireRehash(rootId, item, reason);
         public bool CompleteRehash(string rootId, ItemState item, string hash) => _inner.CompleteRehash(rootId, item, hash);
         public long RehashRevision(string rootId, string objectId) => _inner.RehashRevision(rootId, objectId);
         public bool CompleteIndexingRehash(string rootId, ItemState expected, string hash, long revision) => _inner.CompleteIndexingRehash(rootId, expected, hash, revision);

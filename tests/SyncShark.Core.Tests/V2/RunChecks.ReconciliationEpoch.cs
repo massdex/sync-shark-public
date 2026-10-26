@@ -42,8 +42,15 @@ internal static partial class RunChecks
                 return Task.CompletedTask;
             }));
             var progress = new RecordingProgress();
-            var report = await fx.Run().ReconcileScopeAsync(fx.Pair.PairId,
+            RunLog? log = null;
+            var run = new SyncRun(store, fx.Executor, fx.Provider, Settings, TimeProvider.System,
+                beginRunLog: (pairId, command) => log = RunLog.Open(folder, pairId, command, false));
+            var report = await run.ReconcileScopeAsync(fx.Pair.PairId,
                 new(null, ReconciliationScope.Root, ReconciliationTrigger.JournalReplaced), progress, default);
+            await log!.Completion;
+            var trace = File.ReadAllText(log.Path!);
+            Require(trace.Contains("second gap epoch replacement", StringComparison.Ordinal) == (replacements == 2),
+                "the second replacement truthfully logs ending Partial rather than a restart");
             Require(progress.Reports.Any(row => row.Phase == RunPhases.Invalidating) == (replacements > 0),
                 "untrusted proof invalidation reaches the live progress sink");
             Require(progress.Reports.Any(row => row.Phase == RunPhases.RestartingSelection) == (replacements > 0),

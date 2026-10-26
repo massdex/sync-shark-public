@@ -2,6 +2,8 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SqliteStateStore
 {
+    // Existing reason column records epoch provenance; carried legacy items do not select proof scope.
+    private const string ReconciliationEpochPrefix = "reconciliation-inventory: ";
     private void PublishGapInventory(Microsoft.Data.Sqlite.SqliteTransaction transaction, long root,
         string journalCursor, bool protect)
     {

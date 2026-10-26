@@ -133,6 +133,16 @@ internal sealed partial class InMemoryStateStore : IStateStore
     private long _rehashAttempt;
     private readonly Dictionary<(string Root, string Object), long> _rehashEvidence = new();
 
+    public long? RequireRehashAtRevision(string rootId, ItemState item, string reason, long revision)
+    {
+        lock (_gate)
+        {
+            if (RehashRevision(rootId, item.ObjectId) != revision) return null;
+            RequireRehash(rootId, item, reason);
+            return RehashRevision(rootId, item.ObjectId);
+        }
+    }
+
     public void RequireRehash(string rootId, ItemState item, string reason)
     {
         lock (_gate)

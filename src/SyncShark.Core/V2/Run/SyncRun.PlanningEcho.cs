@@ -2,8 +2,8 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SyncRun
 {
+    // Single assertion reader: RunChecks.PlanningEcho injects a later foreign observation.
     internal Action? PlanningAcknowledgementForTest { get; set; }
-    internal Action<SqliteStateStore.DeferredPlanning, long?, bool, string>? PlanningEchoForTest { get; set; }
 
     private void WriteHashObservation(PairDef pair, SideScan scan, Delta observation)
     {
@@ -32,11 +32,7 @@ public sealed partial class SyncRun
                     path => !echoPaths.Contains(path) && emptySettled(path),
                     row => { if (echoes.Contains(row)) echoesRetired++; acknowledged?.Invoke(row); },
                     count => { if (count > 0) RunTrace.Emit($"Deferred planning re-spell decisions: count={count}"); },
-                    (row, reason) =>
-                    {
-                        PlanningEchoForTest?.Invoke(row, PlanningObservationVersion(pair, scan, row), row.Paths.All(settled), reason);
-                        blocked?.Invoke(row, reason);
-                    });
+                    blocked);
             }
         RunTrace.Emit(string.Format(System.Globalization.CultureInfo.InvariantCulture,
             MessageCatalog.Default.Template("deferred-echoes-retired"), echoesRetired));

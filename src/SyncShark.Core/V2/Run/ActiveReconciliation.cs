@@ -6,6 +6,7 @@ internal sealed class ActiveReconciliation(StateMonitorDecision decision, string
     internal StateMonitorDecision Decision { get; } = decision;
     internal string Session { get; } = session;
     internal Dictionary<string, string> GapEpochs { get; } = new(StringComparer.Ordinal);
+    internal Dictionary<string, long> InitialGapItems { get; } = new(StringComparer.Ordinal);
     internal Dictionary<string, string> ListingBases { get; } = new(StringComparer.Ordinal);
     internal HashSet<string> CompletedSelectionRoots { get; } = new(StringComparer.Ordinal);
     internal TaskCompletionSource Drained { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);

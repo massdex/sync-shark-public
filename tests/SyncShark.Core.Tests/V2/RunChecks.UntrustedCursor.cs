@@ -25,7 +25,8 @@ internal static partial class RunChecks
         Require(epoch is { TrustFileUsn: false } && store.Cursor(root.RootId) == through.Cursor &&
             store.RehashPendingCount(root.RootId) == 0,
             "missing saved cursor requests untrusted reconciliation without pre-seeded content debt");
-        await SavedCursorReconciliationAsync(store, root, inventory, rows, epoch, through, folder, untrusted: true);    }
+        await SavedCursorReconciliationAsync(store, root, inventory, rows, epoch, through, folder, untrusted: true);
+    }
 
     private static void CheckUntrustedPending(SqliteStateStore store, RootDef root, ItemState[] rows,
         BoundaryPlanCapture executor, CountingWriter writer)

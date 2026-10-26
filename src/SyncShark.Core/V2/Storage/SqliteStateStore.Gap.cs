@@ -177,12 +177,15 @@ public sealed partial class SqliteStateStore : ILocalGapStore
             "SELECT 1 FROM local_gap g JOIN root r ON r.root_no=g.root_no WHERE r.root_id=$id AND g.inventory_pending=1;",
             ("$id", rootId)) is not null);
 
-    internal void CompleteGapInventory(string rootId, string epoch) => InIndexingStore(() =>
+    internal int CompleteGapInventory(string rootId, string epoch) => InIndexingStore(() =>
+    {
         StoreSchema.Execute(_connection, null,
             "UPDATE local_gap SET inventory_pending=0,discovery_done=1,worker_done=1,after_object=char(65535),worker_after=char(65535) " +
             "WHERE root_no=(SELECT root_no FROM root WHERE root_id=$r) AND epoch=$e AND NOT EXISTS(" +
             "SELECT 1 FROM local_gap_item i WHERE i.root_no=local_gap.root_no);",
-            ("$r", rootId), ("$e", epoch)));
+            ("$r", rootId), ("$e", epoch));
+        return Convert.ToInt32(StoreSchema.Scalar(_connection, null, "SELECT changes();"));
+    });
 
     internal void SettleGapInventory(long completedGeneration, bool cursorHeldForEvidence = false) => InIndexingStore(() =>
         SettleGapInventory(null, completedGeneration, cursorHeldForEvidence));
@@ -210,7 +213,7 @@ public sealed partial class SqliteStateStore : ILocalGapStore
             if (trustFileUsn) boundary = Math.Min(boundary, prior.Boundary);
         }
         if (prior is not null && prior.JournalCursor == journalCursor && prior.Boundary == boundary &&
-            prior.TrustFileUsn == trustFileUsn) return;
+            prior.TrustFileUsn == trustFileUsn && prior.Reason.StartsWith(ReconciliationEpochPrefix, StringComparison.Ordinal)) return;
         // A later gap requires a new pass even if an earlier epoch is still unfinished.
         // Old entity obligations survive replacement; their staged hashes become ineligible.
         using var tx = _connection.BeginTransaction();
@@ -220,7 +223,7 @@ public sealed partial class SqliteStateStore : ILocalGapStore
             "ON CONFLICT(root_no) DO UPDATE SET epoch=excluded.epoch,journal_cursor=excluded.journal_cursor," +
             "boundary=excluded.boundary,trust_usn=excluded.trust_usn,reason=excluded.reason,after_object='',discovery_done=0,worker_after='',worker_done=0;",
             ("$r", root.Value), ("$e", epoch), ("$c", journalCursor),
-            ("$b", boundary), ("$t", trustFileUsn ? 1 : 0), ("$why", reason));
+            ("$b", boundary), ("$t", trustFileUsn ? 1 : 0), ("$why", ReconciliationEpochPrefix + reason));
         StoreSchema.Execute(_connection, tx,
             "UPDATE local_gap_item SET epoch=$e,metadata_ready=0,metadata_stamp=NULL,hash=NULL,proof_json=NULL,result_seq=0 " +
             "WHERE root_no=$r;", ("$e", epoch), ("$r", root.Value));

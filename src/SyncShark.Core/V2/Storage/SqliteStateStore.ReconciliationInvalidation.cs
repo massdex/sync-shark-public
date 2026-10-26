@@ -16,16 +16,18 @@ public sealed partial class SqliteStateStore
         var root = RootNo(rootId);
         if (root is null) return false;
         using var tx = _connection.BeginTransaction();
+        PrepareLegacyInvalidation(root.Value, epoch, tx);
         string after;
         bool legacy;
         using (var command = StoreSchema.Command(_connection, tx,
-            "SELECT after_object,EXISTS(SELECT 1 FROM local_gap_item WHERE root_no=$r) FROM local_gap " +
+            "SELECT after_object,reason FROM local_gap " +
             "WHERE root_no=$r AND epoch=$e AND trust_usn=0 AND discovery_done=0;"))
         {
             command.Parameters.AddWithValue("$r", root.Value); command.Parameters.AddWithValue("$e", epoch);
             using var reader = command.ExecuteReader();
             if (!reader.Read()) return false;
-            after = reader.GetString(0); legacy = reader.GetInt64(1) != 0;
+            after = reader.GetString(0);
+            legacy = reader.GetString(1).StartsWith(LegacyItemsEpochPrefix, StringComparison.Ordinal);
         }
         var ids = ReconciliationInvalidationIds(root.Value, after, legacy, tx);
         var invalidated = default(int);
@@ -43,6 +45,19 @@ public sealed partial class SqliteStateStore
         progress?.Invoke(ids.Count, invalidated);
         return !done;
     });
+
+    private const string LegacyItemsEpochPrefix = "reconciliation-legacy-items: ";
+
+    private void PrepareLegacyInvalidation(long root, string epoch, Microsoft.Data.Sqlite.SqliteTransaction tx)
+    {
+        // Old GapDiscoveryDone set worker_done only after worker_after covered every retained entity.
+        // Preserve that provenance before reusing the planner discovery frontier for invalidation.
+        StoreSchema.Execute(_connection, tx,
+            "UPDATE local_gap SET reason=CASE WHEN worker_done=1 THEN $items ELSE $full END || reason," +
+            "after_object='',discovery_done=0 WHERE root_no=$r AND epoch=$e AND trust_usn=0 " +
+            "AND substr(reason,1,length($items))<>$items AND substr(reason,1,length($full))<>$full;",
+            ("$items", LegacyItemsEpochPrefix), ("$full", ReconciliationEpochPrefix), ("$r", root), ("$e", epoch));
+    }
 
     private List<string> ReconciliationInvalidationIds(long root, string after, bool legacy,
         Microsoft.Data.Sqlite.SqliteTransaction tx)

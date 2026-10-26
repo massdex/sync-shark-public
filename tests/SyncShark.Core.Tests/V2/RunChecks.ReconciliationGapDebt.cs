@@ -4,6 +4,12 @@ internal static partial class RunChecks
 {
     private static async Task ReconciliationUnreadableFolder()
     {
+        await ReconciliationUnreadableFolder(false);
+        await ReconciliationUnreadableFolder(true);
+    }
+
+    private static async Task ReconciliationUnreadableFolder(bool legacyItems)
+    {
         var clock = new LocalChecks.FixedClock(DateTimeOffset.UtcNow);
         using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "reconcile-unreadable-" + Guid.NewGuid().ToString("N")),
             StorageChecks.Fast, clock, LocalItems.CaptureOptionalHash);
@@ -20,11 +26,25 @@ internal static partial class RunChecks
         fx.Provider.AddInventory(fx.Pair.A, inventory);
         var gaps = (ILocalGapStore)store;
         gaps.BeginGap(fx.Pair.A.RootId, new NtfsUsnCheckpoint(2, 0, 200, 0).Cursor, 100, false, protect: false);
-        var run = new SyncRun(store, fx.Executor, fx.Provider, Settings, clock);
+        var held = store.Live(fx.Pair.A.RootId, ["Denied/held.txt"]).Single();
+        if (legacyItems) gaps.GapDiscoveredBatch(fx.Pair.A.RootId, gaps.GapEpoch(fx.Pair.A.RootId)!, [(held, true)]);
+        var logFolder = FixtureFolder("gap-transfer-log");
+        RunLog? log = null;
+        var run = new SyncRun(store, fx.Executor, fx.Provider, Settings, clock,
+            beginRunLog: (pairId, command) => log = RunLog.Open(logFolder, pairId, command, false));
         var writes = fx.WriterB.Puts;
         var report = await run.ReconcileScopeAsync(fx.Pair.PairId,
             StateMonitor.FromGap(gaps.GapEpoch(fx.Pair.A.RootId)!) with { RootId = fx.Pair.A.RootId },
             new RecordingProgress(), default);
+        await log!.Completion;
+        var completionLog = File.ReadAllText(log.Path!);
+        Require(completionLog.Contains($"{(legacyItems ? 1 : 0)} transferred to unreadable-folder retries", StringComparison.Ordinal) &&
+            completionLog.Contains("epoch rows updated=1, remaining items=0", StringComparison.Ordinal),
+            "completion reports actual transfer and epoch update counts");
+        Require(gaps.GapObligations(fx.Pair.A.RootId, [held.ObjectId]).Count == 0,
+            "unreadable legacy item transfers out of epoch debt while its rehash and scan owners remain");
+        Require(store.CompleteGapInventory(fx.Pair.A.RootId, "not-current-epoch") == 0,
+            "a stale completion reports zero updated rows");
         var retry = store.SyncRetryAt(fx.Pair.PairId, "Denied");
         Require(!report.CompletionFailed && fx.WriterB.Puts == writes + 1,
             "one unreadable folder does not prevent the same run repairing the readable change");
@@ -77,11 +97,6 @@ internal static partial class RunChecks
         fx.A.HashedPaths.Clear(); fx.B.HashedPaths.Clear();
         var run = new SyncRun(store, fx.Executor, fx.Provider,
             Settings with { ReconciliationBatch = new(5, 64) }, TimeProvider.System);
-        run.RehashAcknowledgementForTest = (a, b) => proofTrace.Enqueue($"ack scan.A.RehashThrough={a} scan.B.RehashThrough={b}");
-        var planningTrace = new System.Collections.Concurrent.ConcurrentQueue<string>();
-        run.PlanningEchoForTest = (row, receipt, settled, reason) => planningTrace.Enqueue(
-            $"planning side={(row.RootId == root ? "A" : "B")} object={row.ObjectId} attemptedVersion={row.Version} " +
-            $"receipt={(receipt is { } version ? version.ToString() : "none")} settled={settled} blocker={reason}");
         var report = await run.ReconcileScopeAsync(fx.Pair.PairId,
             StateMonitor.FromGap(epoch) with { RootId = root }, new RecordingProgress(), default);
         Require(!report.CompletionFailed && report.Failed == 0 && fx.WriterB.Calls - writes == 3,
@@ -98,7 +113,7 @@ internal static partial class RunChecks
         Require(gaps.GapObligations(root, items.Select(item => item.ObjectId).ToArray()).Count == 0,
             "reconciliation clears concrete gap items: " + remaining);
         Require(store.PlanningBacklogPage(fx.Pair.PairId).Count == 0,
-            "reconciliation clears observation planning debt: " + remaining + " | " + string.Join(" | ", planningTrace));
+            "reconciliation clears observation planning debt: " + remaining);
         await MirrorAsync(fx);
     }
 }

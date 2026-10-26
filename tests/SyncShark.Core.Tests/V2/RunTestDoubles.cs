@@ -406,6 +406,8 @@ internal sealed class RecordingStore : IStateStore
     }
     public void ClearSyncRetry(string pairId, string path) => _inner.ClearSyncRetry(pairId, path);
     public void SuspendHeldRetry(string pairId, SyncRetry retry) => _inner.SuspendHeldRetry(pairId, retry);
+    public long? RequireRehashAtRevision(string rootId, ItemState item, string reason, long revision) =>
+        _inner.RequireRehashAtRevision(rootId, item, reason, revision);
     public void RequireRehash(string rootId, ItemState item, string reason) => _inner.RequireRehash(rootId, item, reason);
     public void RequireRehashBatch(string rootId, IEnumerable<ItemState> items, string reason) => _inner.RequireRehashBatch(rootId, items, reason);
     public bool CompleteRehash(string rootId, ItemState item, string hash) => _inner.CompleteRehash(rootId, item, hash);

@@ -6,12 +6,14 @@ public sealed partial class SqliteStateStore
 {
     internal const string RehashAcknowledgementAliasesSql = AcknowledgeRehashIdentitySql;
 
-    private string[] ReadRehashAcknowledgementPage(string rootId, long through, string after,
+    internal string[] ReadRehashAcknowledgementPage(string rootId, long through, string after,
         IReadOnlyCollection<string>? objectIds) => InStore(() =>
     {
         if (RootNo(rootId) is not { } root) return [];
         using var command = StoreSchema.Command(_connection, null, objectIds is null
-            ? "SELECT object_id FROM local_rehash WHERE root_no=$r AND object_id>$after AND last_attempt<=$through ORDER BY object_id LIMIT $limit;"
+            ? "SELECT q.object_id FROM local_rehash q WHERE q.root_no=$r AND q.object_id>$after AND q.last_attempt<=$through " +
+                "AND EXISTS(SELECT 1 FROM file_state f INDEXED BY fs_obj WHERE f.root_no=q.root_no AND f.object_id=q.object_id " +
+                "AND f.hash IS NOT NULL AND (f.flags & 256)=0) ORDER BY q.object_id LIMIT $limit;"
             : "SELECT q.object_id FROM json_each($ids) j CROSS JOIN local_rehash q " +
                 "WHERE q.root_no=$r AND q.object_id=j.value AND q.object_id>$after AND q.last_attempt<=$through ORDER BY q.object_id LIMIT $limit;");
         command.Parameters.AddWithValue("$r", root);

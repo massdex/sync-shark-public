@@ -393,12 +393,20 @@ public sealed partial class LocalInventory : IInventorySource
             try { proof = await io.HashAsync(_root, item, budget.AdmitUrgent(_known.IsUserChange(_root.RootId, item.ObjectId)), ct).ConfigureAwait(false); }
             catch (Exception error) when (IsRootUnavailable(error))
             {
-                if (proven) revision = ReflagReread(item);
+                if (proven)
+                {
+                    if (ReflagReread(item, revision) is not { } reflagged) continue;
+                    revision = reflagged;
+                }
                 _known.FailIndexingRehash(_root.RootId, item, revision, error.Message);
                 continue;
             }
             ct.ThrowIfCancellationRequested();
-            if (proven && !SameContentProof(item, proof)) revision = ReflagReread(item);
+            if (proven && !SameContentProof(item, proof))
+            {
+                if (ReflagReread(item, revision) is not { } reflagged) continue;
+                revision = reflagged;
+            }
             if (CompleteContentProof(item, revision, proof)) hashes[item.Path] = proof.Hash!;
         }
     }

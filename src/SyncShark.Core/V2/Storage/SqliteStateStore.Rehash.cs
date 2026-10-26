@@ -20,7 +20,6 @@ public sealed partial class SqliteStateStore
     public long RehashWatermark(string rootId) => InStore(() =>
     {
         var root = RootNo(rootId);
-        if (root is not null) ReportRehashOrderForTest("capture", root.Value, null);
         return root is null ? 0L : Convert.ToInt64(StoreSchema.Scalar(_connection, null,
             "SELECT COALESCE(MAX(last_attempt),0) FROM local_rehash WHERE root_no=$r;", ("$r", root.Value)));
     });
@@ -57,6 +56,13 @@ public sealed partial class SqliteStateStore
 
     public void RequireRehash(string rootId, ItemState item, string reason) => RequireRehashBatch(rootId, [item], reason);
 
+    public long? RequireRehashAtRevision(string rootId, ItemState item, string reason, long revision) => InIndexingStore<long?>(() =>
+    {
+        if (RehashRevision(rootId, item.ObjectId) != revision) return null;
+        RequireRehash(rootId, item, reason);
+        return RehashRevision(rootId, item.ObjectId);
+    });
+
     public void RequireRehashBatch(string rootId, IEnumerable<ItemState> items, string reason)
     {
         foreach (var batch in items.DistinctBy(item => item.ObjectId).Chunk(128))
@@ -83,7 +89,6 @@ public sealed partial class SqliteStateStore
         StoreSchema.Execute(_connection, tx,
             "UPDATE file_state INDEXED BY fs_obj SET flags=flags | 256,hash=NULL WHERE root_no=$r AND object_id=$o;",
             ("$r", root), ("$o", item.ObjectId));
-        ReportRehashOrderForTest("reflag", root, tx, item.ObjectId);
     }
 
     internal string RehashRootSql => _storageEnabled
@@ -229,7 +234,6 @@ public sealed partial class SqliteStateStore
             row.Item.Path == expected.Path && row.Item.ObjectId == expected.ObjectId &&
             row.Item.Size == expected.Size && row.Item.Mtime == expected.Mtime);
         if (!exact) return false;
-        ReportRehashOrderForTest(sameProof ? "identical-proof" : "before-proof", root.Value, tx, expected.ObjectId);
         if (sameProof) return true; // Identical accepted proof is a read-only success for every caller.
         // A validated handle proves one physical entity. Do not unhold aliases with different metadata.
         if (StoreSchema.Scalar(_connection, tx,
@@ -246,7 +250,6 @@ public sealed partial class SqliteStateStore
         StoreSchema.Execute(_connection, tx,
             "UPDATE local_rehash SET failure_count=0,retry_after=0,last_attempt=$order WHERE root_no=$r AND object_id=$o;",
             ("$r", root.Value), ("$o", expected.ObjectId), ("$order", NextRehashOrder(root.Value, tx)));
-        ReportRehashOrderForTest("after-proof", root.Value, tx, expected.ObjectId);
         // The queue is also the durable planning obligation. Only settled execution acknowledges it.
         CloseIndexItemFailure(tx, rootId, expected.Path);
         tx.Commit();

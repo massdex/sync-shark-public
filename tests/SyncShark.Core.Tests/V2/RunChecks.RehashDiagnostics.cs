@@ -5,10 +5,6 @@ internal static partial class RunChecks
     private static System.Collections.Concurrent.ConcurrentQueue<string> TraceRehashProofs(string folder, SqliteStateStore store, Fixture fx, IReadOnlySet<string>? ids = null)
     {
         var trace = new System.Collections.Concurrent.ConcurrentQueue<string>();
-        store.RehashOrderForTest = (phase, root, id, order) =>
-        {
-            if (ids is null || ids.Contains(id)) trace.Enqueue($"phase={phase} root={root} object={id} order={order}");
-        };
         fx.A.ContentProofCompletedForTest = (path, hash) =>
         {
             var item = store.Live(fx.Pair.A.RootId, [path]).Single();

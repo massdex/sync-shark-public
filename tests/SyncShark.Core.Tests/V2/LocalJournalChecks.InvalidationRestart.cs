@@ -10,12 +10,17 @@ internal static partial class LocalJournalChecks
         gaps.BeginGap(root.RootId, new NtfsUsnCheckpoint(1, 0, 200, 0).Cursor, 0, false);
         var epoch = gaps.GapEpoch(root.RootId)!;
         gaps.GapDiscoveredBatch(root.RootId, epoch, [(rows[0], true)]);
+        LegacyGapFixture.SetDiscovery(product, complete: true);
         store.InvalidateReconciliationPage(root.RootId, epoch.Epoch, _ => true);
         LocalChecks.Require(store.RehashPendingCount(root.RootId) == 1 &&
             store.ByObject(root.RootId, rows[0].ObjectId)!.Flags.HasFlag(ItemFlags.NeedsRehash) &&
             store.ByObject(root.RootId, rows[1].ObjectId)!.Hash == rows[1].Hash &&
             !store.ByObject(root.RootId, rows[1].ObjectId)!.Flags.HasFlag(ItemFlags.NeedsRehash),
-            "protected legacy invalidation touches only entities with open gap items");
+            "completed legacy discovery invalidates only entities with open gap items");
+        gaps.BeginGap(root.RootId, new NtfsUsnCheckpoint(2, 0, 300, 0).Cursor, 0, false);
+        store.InvalidateReconciliationPage(root.RootId, gaps.GapEpoch(root.RootId)!.Epoch, _ => true);
+        LocalChecks.Require(store.ByObject(root.RootId, rows[1].ObjectId)!.Flags.HasFlag(ItemFlags.NeedsRehash),
+            "a newly begun untrusted epoch invalidates non-item files despite carried legacy items");
     }
 
     private static void InvalidationRestartChecks(string folder)
@@ -51,9 +56,14 @@ internal static partial class LocalJournalChecks
         LocalChecks.Require(!reopened.InvalidateReconciliationPage(root.RootId, epoch, _ => true) &&
             reopened.RehashPendingCount(root.RootId) == rows.Length,
             "restart resumes after the committed frontier and adds only the remaining debt");
+        LocalChecks.Require(reopened.ReadRehashAcknowledgementPage(root.RootId, reopened.RehashWatermark(root.RootId), "", null).Length == 0,
+            "ordinary acknowledgement SQL does not page the unproven invalidation queue");
         var proven = reopened.ByObject(root.RootId, rows[0].ObjectId)!;
         LocalChecks.Require(reopened.CompleteRehash(root.RootId, proven, rows[0].Hash!), "fixture publishes real rehash completion");
         var afterProof = reopened.RehashWatermark(root.RootId);
+        LocalChecks.Require(reopened.ReadRehashAcknowledgementPage(root.RootId, afterProof, "", null)
+            .SequenceEqual(new[] { rows[0].ObjectId }),
+            "ordinary acknowledgement SQL returns only the proven unflagged candidate");
         LocalChecks.Require(!reopened.InvalidateReconciliationPage(root.RootId, epoch, _ => true) &&
             reopened.RehashWatermark(root.RootId) == afterProof && afterProof > firstWatermark &&
             reopened.ByObject(root.RootId, rows[0].ObjectId) is { Hash: not null } stable &&

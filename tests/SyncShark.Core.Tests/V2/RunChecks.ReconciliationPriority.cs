@@ -40,7 +40,6 @@ internal static partial class RunChecks
         }));
         var run = new SyncRun(store, fx.Executor, fx.Provider,
             Settings with { ReconciliationBatch = new(1, 1024) }, TimeProvider.System);
-        run.RehashAcknowledgementForTest = (a, b) => proofTrace.Enqueue($"ack scan.A.RehashThrough={a} scan.B.RehashThrough={b}");
         try
         {
             Require(await run.MonitorAsync(fx.Pair.PairId, new RecordingProgress(), default),

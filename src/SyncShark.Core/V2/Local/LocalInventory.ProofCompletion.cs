@@ -2,11 +2,9 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class LocalInventory
 {
-    private long ReflagReread(ItemState item)
-    {
-        _known.RequireRehash(_root.RootId, item, MessageCatalog.Default.Message("proof-unavailable-changed"));
-        return _known.RehashRevision(_root.RootId, item.ObjectId);
-    }
+    private long? ReflagReread(ItemState item, long revision) =>
+        _known.RequireRehashAtRevision(_root.RootId, item,
+            MessageCatalog.Default.Message("proof-unavailable-changed"), revision);
 
     private static bool SameContentProof(ItemState item, LocalGapHashResult result) =>
         result is { Outcome: LocalGapHashOutcome.Verified, Hash: { } hash, Proof: { } proof } &&
