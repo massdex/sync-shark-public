@@ -57,7 +57,7 @@ public sealed class PilotLocalScanner
     // for every tiny file. The held handle, exclusive sharing and fresh byte digest are unchanged.
     private const int ReadBufferSize = 64 * 1024;
     // One owner for the refresh-spelling trace text. The relative path format matches the scan's paths.
-    private const string RefreshCaseResolvedTrace = "refresh path case resolved: ";
+    internal const string RefreshCaseResolvedTrace = "refresh path case resolved: ";
     internal SyncTransferSchedulingScope? InventoryScheduling { get; init; }
     internal Action<string>? SharingRetryForTest { get; init; }
     // Two-phase inventory: the held, identity-verified metadata pass reads no file bytes. The caller
@@ -210,136 +210,16 @@ public sealed class PilotLocalScanner
             pendingDirectories.Push((path, identity));
             pageDirectories?.Add((path, identity));
         }
-        // A refresh request carries the spelling the store or the journal resolved the path to, and a
-        // case-only rename can leave that spelling behind the directory. Resolve every component against
-        // the parent listings before the explicit children and traversal prefixes are built, so a stale
-        // requested spelling and the enumerated on-disk name describe one entry instead of colliding.
-        // An absent component, or more than one case-insensitive match in a case-sensitive directory,
-        // keeps the requested spelling: absence and genuine collisions are never silently re-spelled.
-        var requestedRelatives = refreshPaths?.Select(PilotPath.NormalizeRelative).ToArray();
-        // One canonical key can only be reached twice when the request carries several paths, because a
-        // single path is enumerated once and a folder's own children never repeat its key. A lone scoped
-        // metadata read (content classification) therefore keeps its one parent listing, while a per-subtree
-        // retry or journal refresh resolves every component. A bounded preview keeps its lazy single-parent
-        // read too, so neither hot path gains a whole-tree ancestor walk.
-        var resolveOnDisk = MetadataOnly && maxEntries is null && requestedRelatives is { Length: > 1 };
-        var wantedByParent = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
-        void WantParent(string parent, string name)
-        {
-            if (!wantedByParent.TryGetValue(parent, out var wanted))
-                wantedByParent[parent] = wanted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            wanted.Add(name);
-        }
-        if (requestedRelatives is not null)
-            foreach (var relative in requestedRelatives)
-            {
-                // Resolution needs every component's parent retained; the ordinary refresh needs only
-                // each exact requested path's own parent and leaf, exactly as before.
-                if (!resolveOnDisk)
-                {
-                    var exact = Path.Combine(rootLease.Path, relative.Replace('/', Path.DirectorySeparatorChar));
-                    WantParent(Path.GetDirectoryName(exact) ?? rootLease.Path, Path.GetFileName(exact));
-                    continue;
-                }
-                var prefix = string.Empty;
-                foreach (var component in relative.Split('/', StringSplitOptions.RemoveEmptyEntries))
-                {
-                    WantParent(prefix.Length == 0 ? rootLease.Path
-                        : Path.Combine(rootLease.Path, prefix.Replace('/', Path.DirectorySeparatorChar)), component);
-                    prefix = prefix.Length == 0 ? component : prefix + "/" + component;
-                }
-            }
-        // A journal-bound refresh resolves each exact path from its own containing directory listing,
-        // cached per parent, and admits a vanished entry as absent (never opening the entry itself).
-        Dictionary<string, DirectoryEntryInfo[]>? parentListings = null;
-        // One owner for a refresh parent listing: the bounded set retained for a requested parent, or a
-        // direct read for a bounded preview or an unrequested ancestor. A vanished parent lists nothing.
-        IEnumerable<DirectoryEntryInfo> ListParent(string parent)
-        {
-            if (maxEntries is null && wantedByParent.TryGetValue(parent, out var wanted))
-            {
-                parentListings ??= new(StringComparer.OrdinalIgnoreCase);
-                if (parentListings.TryGetValue(parent, out var cached)) return cached;
-                DirectoryEntryInfo[] listing;
-                try
-                {
-                    // Stream the directory once, retaining only the bounded refresh set, not every sibling.
-                    listing = WindowsDirectoryListing.List(parent).Where(entry =>
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        return wanted.Contains(entry.Name);
-                    }).ToArray();
-                }
-                catch (Win32Exception error) when (error.NativeErrorCode is 2 or 3) { return []; }
-                parentListings[parent] = listing;
-                ParentListingRetainedForTest?.Invoke(listing.Length);
-                return listing;
-            }
-            try
-            {
-                if (!string.Equals(parent, rootLease.Path, StringComparison.OrdinalIgnoreCase))
-                    ReadDirectoryIdentity(parent, rootLease);
-            }
-            catch (Win32Exception error) when (error.NativeErrorCode is 2 or 3) { return []; }
-            return WindowsDirectoryListing.List(parent);
-        }
-        // The on-disk spelling of every requested component, or the requested path when a component is
-        // absent or ambiguous. The cache is keyed case-insensitively, so a descendant resolves through
-        // the same listing its already-resolved ancestor produced.
-        string ResolveOnDiskSpelling(string relative)
-        {
-            var resolved = new List<string>();
-            foreach (var component in relative.Split('/', StringSplitOptions.RemoveEmptyEntries))
-            {
-                var parent = resolved.Count == 0 ? rootLease.Path
-                    : Path.Combine(rootLease.Path, string.Join('/', resolved).Replace('/', Path.DirectorySeparatorChar));
-                DirectoryEntryInfo? match = null;
-                try
-                {
-                    foreach (var entry in ListParent(parent))
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        if (!string.Equals(entry.Name, component, StringComparison.OrdinalIgnoreCase)) continue;
-                        // Two ordinal names in one case-sensitive directory: never silently choose one.
-                        if (match is not null) return relative;
-                        match = entry;
-                    }
-                }
-                catch (Win32Exception error) when (error.NativeErrorCode is 2 or 3) { return relative; }
-                if (match is null) return relative;
-                resolved.Add(match.Name);
-            }
-            return string.Join('/', resolved);
-        }
-        string[]? explicitChildren = null;
-        if (requestedRelatives is not null)
-        {
-            explicitChildren = new string[requestedRelatives.Length];
-            for (var index = 0; index < requestedRelatives.Length; index++)
-            {
-                var requested = requestedRelatives[index];
-                var onDisk = resolveOnDisk ? ResolveOnDiskSpelling(requested) : requested;
-                if (!string.Equals(onDisk, requested, StringComparison.Ordinal))
-                    V2.RunTrace.Emit(RefreshCaseResolvedTrace + requested + " -> " + onDisk);
-                explicitChildren[index] = Path.Combine(rootLease.Path,
-                    onDisk.Replace('/', Path.DirectorySeparatorChar));
-            }
-        }
+        // A refresh request can carry a spelling from before a case-only rename. The resolver maps each
+        // requested component to the on-disk name, keeps absence and genuine ambiguity, and owns both the
+        // explicit children and the bounded parent listings shared with metadata lookup.
+        var refreshResolution = new RefreshPathResolution(rootLease.Path, refreshPaths, MetadataOnly,
+            maxEntries is not null, cancellationToken, parent => ReadDirectoryIdentity(parent, rootLease),
+            ParentListingRetainedForTest);
+        var explicitChildren = refreshResolution.ExplicitChildren;
         if (refreshPaths is null) pendingDirectories.Push((rootLease.Path, rootLease.Identity));
-        DirectoryEntryInfo? ResolveFromParent(string exactPath)
-        {
-            if (ListedMetadata is not null) return ListedMetadata.GetValueOrDefault(exactPath);
-            var parent = Path.GetDirectoryName(exactPath) ?? rootLease.Path;
-            try
-            {
-                return ListParent(parent).FirstOrDefault(entry =>
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    return string.Equals(entry.Name, Path.GetFileName(exactPath), StringComparison.OrdinalIgnoreCase);
-                });
-            }
-            catch (Win32Exception error) when (error.NativeErrorCode is 2 or 3) { return null; }
-        }
+        DirectoryEntryInfo? ResolveFromParent(string exactPath) =>
+            refreshResolution.ResolveFromParent(exactPath, ListedMetadata);
         try
         {
         while (pendingDirectories.Count > 0 || explicitChildren is not null)
