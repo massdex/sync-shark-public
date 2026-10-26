@@ -10,6 +10,27 @@ internal static partial class RunChecks
     public static async Task RunAsync()
     {
         var failures = new List<string>();
+        await Group(nameof(MonitorDerivesScopeAfterRestart), MonitorDerivesScopeAfterRestart, failures);
+        await Group(nameof(ReconciliationCompletesCapturedEpochOnly), ReconciliationCompletesCapturedEpochOnly, failures);
+        await Group(nameof(ReconciliationBacklogKeepsGapMarker), ReconciliationBacklogKeepsGapMarker, failures);
+        await Group(nameof(PruneAtReconciliationEnd), PruneAtReconciliationEnd, failures);
+        await Group(nameof(ReconciliationClearsSettleEquivalent), ReconciliationClearsSettleEquivalent, failures);
+        await Group(nameof(ReconciliationClearsNonUrgentIntake), ReconciliationClearsNonUrgentIntake, failures);
+        await Group(nameof(ReconcileSubtreeScopeOnly), ReconcileSubtreeScopeOnly, failures);
+        await Group(nameof(ReconciliationEveryItemAccountable), ReconciliationEveryItemAccountable, failures);
+        await Group(nameof(ReconciliationRetainedNoticeResolves), ReconciliationRetainedNoticeResolves, failures);
+        await Group(nameof(ReconciliationAdmitsAutoSyncBetweenBatches), ReconciliationAdmitsAutoSyncBetweenBatches, failures);
+        await Group(nameof(ReconciliationStaleAdoptBetweenBatches), ReconciliationStaleAdoptBetweenBatches, failures);
+        await Group(nameof(ReconcileBatchPlansCurrentState), ReconcileBatchPlansCurrentState, failures);
+        await Group(nameof(ReconcileBatchForgetsAfterRecovery), ReconcileBatchForgetsAfterRecovery, failures);
+        await Group(nameof(ReconcileBatchRecoversWholeGroupPlansSelected), ReconcileBatchRecoversWholeGroupPlansSelected, failures);
+        await Group(nameof(ReconcileBatchKeepsOtherScanRetries), ReconcileBatchKeepsOtherScanRetries, failures);
+        await Group(nameof(ReconciliationBatchBoundValidated), ReconciliationBatchBoundValidated, failures);
+        await Group(nameof(ReadScopesRereadsExactPaths), ReadScopesRereadsExactPaths, failures);
+        await Group(nameof(ReconciliationSelectionRows), ReconciliationSelectionRows, failures);
+        await Group(nameof(ReconciliationDropboxSelectionRows), ReconciliationDropboxSelectionRows, failures);
+        await Group(nameof(ReconciliationSelectsByUsn), ReconciliationSelectsByUsn, failures);
+        await Group(nameof(ReconciliationAdmissionUsesCurrentBaselineAsync), ReconciliationAdmissionUsesCurrentBaselineAsync, failures);
         await Group(nameof(EligibilityRegressionAsync), EligibilityRegressionAsync, failures);
         await Group(nameof(CaseLocationAsync), CaseLocationAsync, failures);
         await Group(nameof(CaseSensitiveRenameAndCreateAsync), CaseSensitiveRenameAndCreateAsync, failures);

@@ -14,6 +14,8 @@ internal static partial class StorageChecks
     {
         if (Directory.Exists(root)) Directory.Delete(root, true);
         Directory.CreateDirectory(root);
+        ReconcileStagingPages(root);
+        ScopedRehashAcknowledgement(root);
         PruneCadenceChecks(root);
         ResultMaintenanceChecks(Path.Combine(root, "result-maintenance"));
         IntegratedSchemaChecks(root);

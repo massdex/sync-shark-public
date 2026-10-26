@@ -14,6 +14,7 @@ internal static partial class AutoSyncChecks
     public static async Task RunAsync()
     {
         var clock = Stopwatch.StartNew();
+        StateMonitorSignals();
         Require(Settings.ChangeMaxDelay == TimeSpan.FromSeconds(5), "continuous changes run within the five-second maximum delay");
         await RunTimingLogAsync();
         await JournalBacklog_ImmediateRunsAsync();

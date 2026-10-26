@@ -183,7 +183,7 @@ public sealed partial class SqliteStateStore
 
     internal void AcknowledgeDeferredPlanning(string pairId, IReadOnlyList<DeferredPlanning> page,
         Func<string, bool> settled, Func<string, bool>? emptyPath = null,
-        Action<DeferredPlanning>? acknowledged = null) => InStore(() =>
+        Action<DeferredPlanning>? acknowledged = null, Action<DeferredPlanning, string>? blocked = null) => InStore(() =>
     {
         var pair = PairNo(pairId);
         if (pair is null) return;
@@ -195,28 +195,38 @@ public sealed partial class SqliteStateStore
             (emptyPath is not null && row.Paths.All(emptyPath) && _reads.ByObject(row.Root, row.ObjectId) is null) }).ToArray();
         using var tx = _connection.BeginTransaction();
         var retired = new List<DeferredPlanning>();
+        var blockers = new List<(DeferredPlanning Row, string Reason)>();
         foreach (var entry in rows)
         {
             var row = entry.Row;
             if (row.AllAliases && entry.Settled && !row.AliasUnsettled)
             {
                 if (AcknowledgePlanningVersion(tx, pair.Value, row)) retired.Add(row);
+                else blockers.Add((row, "newer planning version"));
             }
             else
-                // Finish every bounded alias slice even if one alias is held. Keep a cycle's
-                // unresolved bit; only a complete successful cycle may retire the entity.
-                // An interrupted run never calls this acknowledgement, so its slice replays.
-                StoreSchema.Execute(_connection, tx, """
-                    UPDATE planning_deferred SET alias_dir=$dir,alias_key=$key,alias_name=$name,alias_unsettled=$held
-                    WHERE pair_no=$p AND root_no=$r AND object_id=$o AND version=$v;
-                    """, ("$p", pair.Value), ("$r", row.Root), ("$o", row.ObjectId), ("$v", row.Version),
-                    ("$dir", row.AllAliases ? -1 : row.NextAliasDir), ("$key", row.AllAliases ? "" : row.NextAliasKey),
-                    ("$name", row.AllAliases ? "" : row.NextAliasName),
-                    ("$held", !row.AllAliases && (row.AliasUnsettled || !entry.Settled) ? 1 : 0));
+            {
+                blockers.Add((row, !row.AllAliases ? "alias slice incomplete" :
+                    row.AliasUnsettled ? "prior alias slice unsettled" : "path not settled by this plan"));
+                AdvancePlanningAliasSlice(tx, pair.Value, row, entry.Settled);
+            }
         }
         tx.Commit();
         foreach (var row in retired) acknowledged?.Invoke(row);
+        foreach (var blocker in blockers) blocked?.Invoke(blocker.Row, blocker.Reason);
     });
+
+    // Interrupted runs replay their slice; only a complete successful alias cycle retires the entity.
+    private void AdvancePlanningAliasSlice(SqliteTransaction tx, long pair, DeferredPlanning row, bool settled)
+    {
+        StoreSchema.Execute(_connection, tx, """
+            UPDATE planning_deferred SET alias_dir=$dir,alias_key=$key,alias_name=$name,alias_unsettled=$held
+            WHERE pair_no=$p AND root_no=$r AND object_id=$o AND version=$v;
+            """, ("$p", pair), ("$r", row.Root), ("$o", row.ObjectId), ("$v", row.Version),
+            ("$dir", row.AllAliases ? -1 : row.NextAliasDir), ("$key", row.AllAliases ? "" : row.NextAliasKey),
+            ("$name", row.AllAliases ? "" : row.NextAliasName),
+            ("$held", !row.AllAliases && (row.AliasUnsettled || !settled) ? 1 : 0));
+    }
 
     private bool AcknowledgePlanningVersion(SqliteTransaction tx, long pair, DeferredPlanning row)
     {

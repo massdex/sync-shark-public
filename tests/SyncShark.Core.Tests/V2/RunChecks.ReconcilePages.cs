@@ -41,6 +41,8 @@ internal static partial class RunChecks
         foreach (var anchorFirst in new[] { true, false })
         foreach (var completed in new[] { true, false })
             await ReconcileFolderPagesAsync(anchorFirst, completed);
+        foreach (var completed in new[] { true, false })
+            await ReconcileFolderPagesAsync(false, completed, selectedMemberOnly: true);
     }
 
     private static async Task ReconcilePendingPagesAsync()
@@ -77,7 +79,8 @@ internal static partial class RunChecks
         finally { if (Directory.Exists(folder)) Directory.Delete(folder, true); }
     }
 
-    private static async Task ReconcileFolderPagesAsync(bool anchorFirst, bool completed)
+    private static async Task ReconcileFolderPagesAsync(bool anchorFirst, bool completed, bool selectedMemberOnly = false,
+        bool throughBatch = false)
     {
         var folder = Path.Combine(Path.GetTempPath(), "folder-pages-" + Guid.NewGuid().ToString("N"));
         try
@@ -87,9 +90,10 @@ internal static partial class RunChecks
             store.MarkFirstSyncDone(fx.Pair.PairId);
             var writer = new ExcludedDeleteJobWriter(fx.WriterB) { Completed = completed };
             fx.Provider.AddWriter(fx.Pair.B, writer);
-            var actions = Enumerable.Range(0, 301).Select(i => new SyncAction("tree-" + i, 6, ActionKind.Delete,
-                Side.B, i == 300 ? "tree" : "tree/file-" + i, null, null,
-                new ItemState(i == 300 ? "tree" : "tree/file-" + i, i == 300 ? ItemKind.Folder : ItemKind.File,
+            var count = selectedMemberOnly ? 3 : 301;
+            var actions = Enumerable.Range(0, count).Select(i => new SyncAction("tree-" + i, 6, ActionKind.Delete,
+                Side.B, i == count - 1 ? "tree" : "tree/file-" + i, null, null,
+                new ItemState(i == count - 1 ? "tree" : "tree/file-" + i, i == count - 1 ? ItemKind.Folder : ItemKind.File,
                     "tree-object-" + i, "v1", new string('a', 64), 1, DateTimeOffset.UnixEpoch, ItemFlags.None),
                 false, null)).ToArray();
             var anchor = actions[^1];
@@ -104,6 +108,29 @@ internal static partial class RunChecks
                     new("whole-folder-member", anchor.ActionId)
             });
             foreach (var action in anchorFirst ? pending.Reverse() : pending) store.RecordIntent(fx.Pair.PairId, action);
+            if (selectedMemberOnly)
+            {
+                var selected = pending.First();
+                using var log = RunLog.Open(folder, "pair", "recovery", false);
+                if (throughBatch)
+                {
+                    fx.A.Seed("unrelated.txt", "not selected");
+                    await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default,
+                        new RunOptions { Batch = BatchFor(selected.ExpectedTarget!) });
+                    Require(await fx.B.ObserveAsync("unrelated.txt", default) is null,
+                        "whole-group recovery does not broaden the batch planning scope");
+                }
+                else await fx.Executor.ReconcileAsync([selected], 1, fx.WriterA, writer, default);
+                log.Dispose();
+                await log.Completion;
+                Require(writer.TreeChecks == 1 && store.UnresolvedIntents(fx.Pair.PairId).Count == (completed ? 0 : count),
+                    "one selected member checks the indivisible group, retaining every intent if recovery is uncertain");
+                Require(File.ReadAllText(log.Path!).Contains("recovery group expanded: 2 extra paths", StringComparison.Ordinal),
+                    "recovery expansion is logged separately with the extra path count");
+                Require(fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0,
+                    "group recovery does not replay ordinary effects");
+                return;
+            }
             var progress = new RecordingProgress();
             var report = await fx.Run().IncrementalAsync(fx.Pair.PairId, progress, default);
             Require(writer.TreeChecks == 1 && store.UnresolvedIntents(fx.Pair.PairId).Count == (completed ? 0 : 301) &&

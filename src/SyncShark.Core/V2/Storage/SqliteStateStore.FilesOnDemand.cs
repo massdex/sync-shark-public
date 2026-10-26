@@ -123,7 +123,7 @@ public sealed partial class SqliteStateStore
                 CASE WHEN p.object_id=$root THEN '' ELSE
                   CASE WHEN d.path_key='' THEN f.name_key ELSE d.path_key||'/'||f.name_key END END AS path_key
               FROM storage_policy p LEFT JOIN root r ON r.root_id=p.root_id
-              LEFT JOIN file_state f INDEXED BY fs_obj ON f.root_no=r.root_no AND f.object_id=p.object_id
+              LEFT JOIN file_state f ON f.root_no=r.root_no AND f.object_id=p.object_id
               LEFT JOIN dir d ON d.dir_no=f.dir_no
               WHERE p.root_id=$r AND p.mode='online-only' AND (f.kind=1 OR p.object_id=$root)
               ORDER BY p.object_id LIMIT $limit OFFSET $offset
@@ -260,7 +260,7 @@ public sealed partial class SqliteStateStore
         // as its receipt and queue acknowledgement, before a subsequent scan/planner can see it.
         // Preserve independent holds; a replaced path has a different object id and is never marked.
         StoreSchema.Execute(_connection, tx,
-            "UPDATE file_state INDEXED BY fs_obj SET flags=flags | $owned WHERE root_no=$r AND object_id=$o;",
+            "UPDATE file_state SET flags=flags | $owned WHERE root_no=$r AND object_id=$o;",
             ("$owned", (int)ItemFlags.OwnedPointer), ("$r", RootNo(job.RootId) ?? -1), ("$o", job.ObjectId));
         StoreSchema.Execute(_connection, tx, "DELETE FROM storage_settlement WHERE job_id=$id;", ("$id", job.JobId));
         tx.Commit();

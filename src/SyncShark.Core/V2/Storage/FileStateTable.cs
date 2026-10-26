@@ -152,7 +152,7 @@ internal sealed partial class FileStateTable
         // Preserve cross-row effects of the old writer without retaining the old live root in memory.
         // End the read snapshot before opening the write transaction (no deferred upgrade/BUSY_SNAPSHOT).
         const string orphan = "FROM local_rehash WHERE root_no=$r AND NOT EXISTS " +
-            "(SELECT 1 FROM file_state f INDEXED BY fs_obj WHERE f.root_no=local_rehash.root_no AND f.object_id=local_rehash.object_id)";
+            "(SELECT 1 FROM file_state f WHERE f.root_no=local_rehash.root_no AND f.object_id=local_rehash.object_id)";
         bool hasOrphans(SqliteTransaction? tx) => snapshot.IncompleteSubtrees.Count == 0 &&
             (long)StoreSchema.Scalar(_connection, tx, "SELECT EXISTS(SELECT 1 " + orphan + ");", ("$r", rootNo))! != 0;
         if (initialLoad || changes.HasChanges || heldMoves.HasChanges || hasOrphans(lockedBatch?.Transaction))
@@ -235,7 +235,7 @@ internal sealed partial class FileStateTable
     private bool HasOrphanDebt(long rootNo, SqliteTransaction reading) =>
         StoreSchema.Scalar(_connection, reading,
             "SELECT 1 FROM local_rehash WHERE root_no=$r AND NOT EXISTS " +
-            "(SELECT 1 FROM file_state f INDEXED BY fs_obj WHERE f.root_no=local_rehash.root_no AND f.object_id=local_rehash.object_id) LIMIT 1;",
+            "(SELECT 1 FROM file_state f WHERE f.root_no=local_rehash.root_no AND f.object_id=local_rehash.object_id) LIMIT 1;",
             ("$r", rootNo)) is not null;
 
     internal void HoldQuarantine(SqliteTransaction transaction, long rootNo, ItemState item)
@@ -516,7 +516,7 @@ internal sealed partial class FileStateTable
             item = item with { Hash = null };
         }
         if (debt && (StoreSchema.Scalar(_connection, tx,
-            "SELECT 1 FROM file_state INDEXED BY fs_obj WHERE root_no=$r AND object_id=$o LIMIT 1;",
+            "SELECT 1 FROM file_state WHERE root_no=$r AND object_id=$o LIMIT 1;",
             ("$r", rootNo), ("$o", item.ObjectId)) is null || StoreSchema.Scalar(_connection, tx,
             RehashDebtProbeSql,
             ("$r", rootNo), ("$o", item.ObjectId)) is not null))

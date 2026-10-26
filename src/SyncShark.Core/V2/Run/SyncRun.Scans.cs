@@ -67,6 +67,7 @@ public sealed partial class SyncRun
 
     internal sealed record BothScan(SideScan A, SideScan B)
     {
+        internal Func<Side, string, bool>? Unknown { get; init; }
         internal void PendingChanges(RunScope scope, IEnumerable<string> a, IEnumerable<string> b)
         {
             if (A.UserChanges is { } userA && B.UserChanges is { } userB)

@@ -410,6 +410,7 @@ public sealed partial class LocalInventory : IInventorySource
     internal JournalRead? JournalReadForTest { get; set; }
     internal Func<(NtfsUsnCheckpoint? Checkpoint, bool Deleted)>? WalkCheckpointForTest { get; set; }
     internal Action<string>? DirectoryCompletedForTest { get; set; }
+    internal NtfsUsnCheckpoint? JournalCheckpoint() => ReadWalkCheckpointState().Checkpoint;
     private NtfsUsnCheckpoint? ReadWalkCheckpoint() => ReadWalkCheckpointState().Checkpoint;
     private (NtfsUsnCheckpoint? Checkpoint, bool Deleted) ReadWalkCheckpointState()
     {

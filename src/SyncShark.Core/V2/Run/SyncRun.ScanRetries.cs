@@ -72,86 +72,21 @@ public sealed partial class SyncRun
                 (authoritativeReplay || rootRetry.RetryAfter <= _time.GetUtcNow() && scopes.Contains(string.Empty));
             if (rootSettles) rootDebtSettles = true;
             if (scopes.Length == 0) continue;
-            if (RehearsalEndpoints.Unwrap(inventory) is LocalInventory local)
+            var read = await ReadScopesAsync(pair, root, side, inventory, scopes, cursor, gen,
+                include, changed, throttle, ct);
+            touched.AddRange(read.Touched);
+            incomplete.AddRange(read.Incomplete);
+            foreach (var reason in read.Reasons) reasons[reason.Key] = reason.Value;
+            if (read.Incomplete.Contains(string.Empty)) rootSettles = rootDebtSettles = false;
+            if (scopes.Contains(string.Empty))
             {
-                // Exact-path read: at most the 256 admitted scopes, never their descendants.
-                var before = _store.Live(root.RootId, scopes);
-                var reread = RehearsalEndpoints.Apply(inventory, await local.ChangesForPathsAsync(scopes, cursor, gen, include, ct), include);
-                if (reread.CursorInvalid)
-                {
-                    var reason = reread.IncompleteReasons.GetValueOrDefault(string.Empty) ?? local.LastFallbackReason;
-                    RecordIncomplete(pair.PairId, scopes, scopes.ToDictionary(path => path, _ => reason!), incomplete, reasons);
-                    // A root-open failure means the scope was not observed, so the root debt is not settled.
-                    if (scopes.Contains(string.Empty)) { rootSettles = false; rootDebtSettles = false; }
-                    continue;
-                }
-                _store.WriteDelta(reread with { ChangedObject = changed });
-                // WriteDelta's callback covers deletions; re-read identities widen the dirty set too, exactly
-                // as the main scan's delta does, so a hidden change is never merely touched.
-                foreach (var change in reread.Changes)
-                    if (change.ObjectId.Length > 0) changed(change.ObjectId);
-                RecordIncomplete(pair.PairId, reread.IncompleteSubtrees, reread.IncompleteReasons, incomplete, reasons);
-                touched.AddRange(reread.Changes.Select(change => change.Path));
-                CachedIdentityRefresh.SettleObserved(_store, pair.PairId, scopes, reread.IncompleteSubtrees, root.RootId, before, incomplete, reasons);
-                if (reread.IncompleteSubtrees.Contains(string.Empty)) { rootSettles = false; rootDebtSettles = false; }
+                if (!read.RootSettles) { rootSettles = false; rootDebtSettles = false; }
+                else if (RehearsalEndpoints.Unwrap(inventory) is DropboxInventory && _store is SqliteStateStore)
+                    rootSettles = rootDebtSettles = true;
             }
-            else if (RehearsalEndpoints.Unwrap(inventory) is DropboxInventory dropbox && _store is SqliteStateStore sql)
-            {
-                // Prefix hydration has its own disk staging and never replaces the root's
-                // complete tombstone-classification header with a partial inventory.
-                try
-                {
-                    sql.BeginPrefixHydration(root.RootId, ct);
-                    var failures = await RehearsalEndpoints.HydrateAsync(inventory, dropbox, scopes, rows =>
-                    {
-                        sql.StagePrefixHydration(root.RootId, rows.Where(row => include(row.Path))
-                        .Select(row => (row.Path, row.Entry is null ? null : DropboxItems.ToItem(row.Entry))).ToArray());
-                        return Task.CompletedTask;
-                    }, ct);
-                    bool observed(string path) => include(path) && !DropboxPathIdentity.InScope(failures, path);
-                    sql.InstallPrefixHydration(root, side, gen, scopes, observed, cursor, ct, changed);
-                    foreach (var failure in failures)
-                    {
-                        incomplete.Add(failure.Key);
-                        reasons[failure.Key] = failure.Value;
-                    }
-                    if (scopes.Contains(string.Empty))
-                    {
-                        rootSettles = !failures.ContainsKey(string.Empty);
-                        rootDebtSettles = rootSettles;
-                    }
-                }
-                catch (Exception error) when (ScopeFailure(error, ct))
-                {
-                    incomplete.AddRange(scopes);
-                    if (scopes.Contains(string.Empty)) { rootSettles = false; rootDebtSettles = false; }
-                    RunLog.Trace("Targeted inventory remains incomplete: " + error.Message);
-                }
-            }
-            else
-            {
-                // Generic inventories may not expose targeted reads. Narrow both enumeration and
-                // snapshot authority; ancestors are traversed, never granted absence authority.
-                bool within(string path) => scopes.Any(scope => scope.Length == 0 || PairPath.IsSelfOrUnder(path, scope));
-                bool traverse(string path) => include(path) && (within(path) || scopes.Any(scope => PairPath.IsSelfOrUnder(scope, path)));
-                var reread = await ReadFullAsync(inventory, gen, traverse, root, throttle, ct);
-                _store.WriteSnapshot(reread with
-                {
-                    IncludesPath = path => include(path) && within(path) && (reread.IncludesPath?.Invoke(path) ?? true),
-                    ChangedObject = changed
-                });
-                foreach (var path in reread.IncompleteSubtrees)
-                {
-                    incomplete.Add(path);
-                    if (reread.IncompleteReasons.GetValueOrDefault(path) is { Length: > 0 } detail) reasons[path] = detail;
-                }
-                if (reread.IncompleteSubtrees.Contains(string.Empty)) { rootSettles = false; rootDebtSettles = false; }
-                touched.AddRange(reread.Items.Select(item => item.Path));
-            }
-            // Finding 2 (review-rc3-2): a due root retry whose re-read failed observed nothing, so it
-            // must not touch "" and plan the whole pair without settling. Ordinary scopes stay touched.
-            touched.AddRange(rootSettles ? scopes : scopes.Where(scope => scope.Length > 0));
-            exactObserved.UnionWith(SuccessfullyObservedScopes(scopes, include, incomplete));
+            // Whole-root planning is admitted only after this root's debt settles.
+            if (rootSettles && scopes.Contains(string.Empty)) touched.Add(string.Empty);
+            exactObserved.UnionWith(SuccessfullyObservedScopes(read.Observed, include, incomplete));
         }
         return (touched, incomplete, reasons, rootDebtSettles, exactObserved.ToArray());
     }
@@ -161,10 +96,12 @@ public sealed partial class SyncRun
         scope.Length > 0 && include(scope) && !incomplete.Any(failed => failed.Length == 0 ||
             PairPath.IsSelfOrUnder(scope, failed) || PairPath.IsUnder(failed, scope)));
 
-    private void RetireScanRetries(PairDef pair, IReadOnlyCollection<string> failed, Func<string, bool> notSynced)
+    private void RetireScanRetries(PairDef pair, IReadOnlyCollection<string> failed, Func<string, bool> notSynced,
+        IReadOnlyList<string>? observed = null)
     {
         foreach (var retry in _store.ReadSyncRetries(pair.PairId))
-            if ((Retirable(retry, failed) || retry.Kind == "scan" && notSynced(retry.Path)) &&
+            if ((observed is null || observed.Any(path => PairPath.IsSelfOrUnder(retry.Path, path))) &&
+                (Retirable(retry, failed) || retry.Kind == "scan" && notSynced(retry.Path)) &&
                 // RQ-052: scan bookkeeping cannot discard held or reviewed deletion evidence.
                 (retry.Kind != "scan" || retry.Held is null && retry.ReviewedActions is not { Count: > 0 }))
             {
@@ -183,11 +120,11 @@ public sealed partial class SyncRun
             }
     }
 
-    private void RecordScanRetries(PairDef pair, BothScan scan)
+    private void RecordScanRetries(PairDef pair, BothScan scan, IReadOnlyList<string>? observed = null)
     {
         var notSynced = ScanPathsNotSynced(pair);
         var failed = ScanFailures(scan).ToArray();
-        RetireScanRetries(pair, failed, notSynced);
+        RetireScanRetries(pair, failed, notSynced, observed);
         // Do not recreate retired scan debt from a filtered targeted reread. Other retry
         // kinds retain their existing read-debt and reviewed-authority bookkeeping.
         failed = failed.Where(path => _store.SyncRetryAt(pair.PairId, path) is { Kind: not "scan" } ||
@@ -204,54 +141,63 @@ public sealed partial class SyncRun
         // remain: deaggregating below the limit would hide unresolved failures until the next scan.
         var keepTransientSummary = summaryState is ObservationSummaryState.Open or ObservationSummaryState.Ignored;
         foreach (var path in failed)
-        {
-            var previous = _store.SyncRetryAt(pair.PairId, path);
-            var floor = ScanRetryFloor(scan, path);
-            // Preserve existing reviewed authority; the scan must not replace it.
-            var diagnostic = scan.A.IncompleteReasons.GetValueOrDefault(path) ?? scan.B.IncompleteReasons.GetValueOrDefault(path);
-            // A bounded pass can leave queued rediscovery unvisited; that is protected work.
-            if (CachedIdentityRefresh.QuietUnvisited(previous, diagnostic)) continue;
-            // Finding 4: the durable retry keeps the raw internal cause for support and the next run;
-            // the notice says the same thing in plain language with a concrete fix. Both stay one row
-            // (and one notice) per path, so repeated runs never duplicate them.
-            var technical = diagnostic ?? (previous is { LastError.Length: > 0 } ? previous.LastError : null);
-            var reason = ScanFailureText.Describe(technical);
-            // Name only the side(s) that actually failed to read. The healthy side's planning
-            // coverage comes from the empty touched path (see RetryScanScopesAsync), not from
-            // pretending it is unread: naming it here would keep whole-root debt alive on a side
-            // whose replay already succeeded.
-            var roots = new[] { (pair.A.RootId, scan.A), (pair.B.RootId, scan.B) }
-                .Where(entry => entry.Item2.IncompleteSubtrees.Contains(path, StringComparer.OrdinalIgnoreCase))
-                .Select(entry => entry.RootId).ToArray();
-            if (previous is { Kind: not "scan" })
-            {
-                _store.SaveSyncRetry(pair.PairId, WithScanFloor(previous with { ReadRoots = roots }, floor));
-                continue; // Keep bespoke notice, authority and reason; only extend its provider cooldown floor.
-            }
-            if (previous?.RetryAfter > _time.GetUtcNow())
-            {
-                // A sleeping retry is unchanged unless a new provider floor pushes its deadline later.
-                // Rewriting it every run would be up to one upsert per escalated row per run.
-                if (floor is not null && floor > previous.RetryAfter)
-                    _store.SaveSyncRetry(pair.PairId, WithScanFloor(previous, floor));
-                continue;
-            }
-            var failureState = FailureRetryOwner.Failed(previous?.Attempts ?? 0, _time.GetUtcNow());
-            var updated = WithScanFloor((previous ?? new SyncRetry(path, "scan", 0, "", DateTimeOffset.MinValue)) with
-            {
-                Attempts = failureState.Attempts, LastError = technical ?? reason, ReadRoots = roots,
-                DeleteBlockedDetail = null, DeleteBlockedDeferred = false, FailureKind = null,
-                RetryAfter = failureState.RetryAfter
-            }, floor);
-            var suppressed = (aggregateTransient || keepTransientSummary) && path.Length > 0 &&
-                IsTransientObservation(scan, path);
-            // The one pair notice represents these paths; never leave a queued per-file notice behind.
-            _store.SaveSyncRetry(pair.PairId, suppressed ? updated with { PendingNotice = null } : updated);
-            if (suppressed) continue;
-            WriteNotices([FailureRetryOwner.RetryNotice(pair.PairId, path, updated.LastError, updated.Attempts,
-                explanation: reason + " Nothing in this subtree was synced or deleted.")]);
-        }
+            RecordScanFailure(pair, scan, path, aggregateTransient || keepTransientSummary);
         if (storage is not null) UpdateScanSummary(pair, storage, transientCount, summaryState, aggregateTransient);
+    }
+
+    private void RecordScanFailure(PairDef pair, BothScan scan, string path, bool suppressTransient)
+    {
+        var previous = _store.SyncRetryAt(pair.PairId, path);
+        var floor = ScanRetryFloor(scan, path);
+        // Preserve existing reviewed authority; the scan must not replace it.
+        var diagnostic = scan.A.IncompleteReasons.GetValueOrDefault(path) ?? scan.B.IncompleteReasons.GetValueOrDefault(path);
+        // A bounded pass can leave queued rediscovery unvisited; that is protected work.
+        if (CachedIdentityRefresh.QuietUnvisited(previous, diagnostic)) return;
+        // Finding 4: the durable retry keeps the raw internal cause for support and the next run;
+        // the notice says the same thing in plain language with a concrete fix. Both stay one row
+        // (and one notice) per path, so repeated runs never duplicate them.
+        var technical = diagnostic ?? (previous is { LastError.Length: > 0 } ? previous.LastError : null);
+        var reason = ScanFailureText.Describe(technical);
+        // Name only the side(s) that actually failed to read. The healthy side's planning
+        // coverage comes from the empty touched path (see RetryScanScopesAsync), not from
+        // pretending it is unread: naming it here would keep whole-root debt alive on a side
+        // whose replay already succeeded.
+        var roots = new[] { (pair.A.RootId, scan.A), (pair.B.RootId, scan.B) }
+            .Where(entry => entry.Item2.IncompleteSubtrees.Contains(path, StringComparer.OrdinalIgnoreCase))
+            .Select(entry => entry.RootId).ToArray();
+        if (previous is { Kind: not "scan" })
+        {
+            _store.SaveSyncRetry(pair.PairId, WithScanFloor(previous with { ReadRoots = roots }, floor));
+            return; // Keep bespoke notice, authority and reason; only extend its provider cooldown floor.
+        }
+        if (previous?.RetryAfter > _time.GetUtcNow())
+        {
+            // A sleeping retry is unchanged unless a new provider floor pushes its deadline later.
+            // Rewriting it every run would be up to one upsert per escalated row per run.
+            if (floor is not null && floor > previous.RetryAfter)
+                _store.SaveSyncRetry(pair.PairId, WithScanFloor(previous, floor));
+            return;
+        }
+        SaveScanFailure(pair, scan, path, previous, floor, technical, reason, roots, suppressTransient);
+    }
+
+    private void SaveScanFailure(PairDef pair, BothScan scan, string path, SyncRetry? previous,
+        DateTimeOffset? floor, string? technical, string reason, string[] roots, bool suppressTransient)
+    {
+        var failureState = FailureRetryOwner.Failed(previous?.Attempts ?? 0, _time.GetUtcNow());
+        var updated = WithScanFloor((previous ?? new SyncRetry(path, "scan", 0, "", DateTimeOffset.MinValue)) with
+        {
+            Attempts = failureState.Attempts, LastError = technical ?? reason, ReadRoots = roots,
+            DeleteBlockedDetail = null, DeleteBlockedDeferred = false, FailureKind = null,
+            RetryAfter = failureState.RetryAfter
+        }, floor);
+        var suppressed = suppressTransient && path.Length > 0 &&
+            IsTransientObservation(scan, path);
+        // The one pair notice represents these paths; never leave a queued per-file notice behind.
+        _store.SaveSyncRetry(pair.PairId, suppressed ? updated with { PendingNotice = null } : updated);
+        if (suppressed) return;
+        WriteNotices([FailureRetryOwner.RetryNotice(pair.PairId, path, updated.LastError, updated.Attempts,
+            explanation: reason + " Nothing in this subtree was synced or deleted.")]);
     }
 
     private void UpdateScanSummary(PairDef pair, SqliteStateStore storage, int transientCount,

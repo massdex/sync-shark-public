@@ -1,2 +1,4 @@
+--v2-autosync-checks
 --v2-run-checks
+--v2-local-journal-checks
 --v2-storage-checks

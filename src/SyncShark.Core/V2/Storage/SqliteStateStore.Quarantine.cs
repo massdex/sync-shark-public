@@ -507,7 +507,7 @@ public sealed partial class SqliteStateStore
         if (RootNo(rootId) is not { } rootNo) return false;
         using var transaction = _connection.BeginTransaction();
         using var command = StoreSchema.Command(_connection, transaction,
-            "UPDATE file_state INDEXED BY fs_obj SET flags=flags & ~$f WHERE root_no=$r AND object_id=$o AND (flags & $f)!=0;");
+            "UPDATE file_state SET flags=flags & ~$f WHERE root_no=$r AND object_id=$o AND (flags & $f)!=0;");
         command.Parameters.AddWithValue("$f", (long)ItemFlags.Quarantined);
         command.Parameters.AddWithValue("$r", rootNo);
         command.Parameters.AddWithValue("$o", item.ObjectId);
