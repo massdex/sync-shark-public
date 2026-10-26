@@ -442,6 +442,11 @@ internal static partial class Program
             using (var raw = new SqliteConnection("Data Source=" + database.DatabasePath))
             {
                 raw.Open();
+                // The command_request delete guard calls this function, which the product registers on
+                // its own connection. Answer it on this isolated raw connection for exactly the three
+                // fixture rows being removed, as the existing history fixtures do.
+                raw.CreateFunction<string, long>("syncshark_run_retirement_allowed",
+                    id => id is "run-scope-local-newest" or "run-scope-primary-older" or "run-scope-secondary-newer" ? 1L : 0L);
                 using var delete = raw.CreateCommand();
                 // Remove only this fixture's three unreferenced successful history rows. Keep the failed
                 // and recovery rows, and every command that still owns pending operations.

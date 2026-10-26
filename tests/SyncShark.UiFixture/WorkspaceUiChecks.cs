@@ -500,7 +500,12 @@ internal static class WorkspaceUiChecks
             MainWindow.ActivityProjectionLoaderForTest = (_, _, _, _, _, _, _, _) =>
                 Task.FromException<IReadOnlyList<SyncAuthorityActivityProjection>>(new IOException("fixture activity load refused"));
             refreshButton.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
-            for (var guard = 0; guard < 500 && !refreshButton.IsEnabled; guard++) Drain();
+            // The handler disables the control, awaits a real SQLite-backed page, then re-enables it.
+            // Wait by wall clock, not a fixed number of dispatcher drains: on a loaded runner the page
+            // read outlives a tight drain loop and the assertion would read the still-busy control.
+            var refreshDeadline = Environment.TickCount64 + 15000;
+            while (!refreshButton.IsEnabled && Environment.TickCount64 < refreshDeadline)
+            { Drain(); Thread.Sleep(1); }
             Require(refreshButton.IsEnabled && refreshNote.Text.Length > 0 &&
                     !Field<TextBlock>(window, "PhaseText").Text.Contains("Refreshing", StringComparison.Ordinal) &&
                     !Field<TextBlock>(window, "PhaseText").Text.Contains("activity list", StringComparison.Ordinal),
