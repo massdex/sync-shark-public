@@ -10,6 +10,14 @@ public sealed partial class SyncRun
     // the counts it produced, through the same RunLog trace the run already writes.
     private static long PlanningStepStarted() => Stopwatch.GetTimestamp();
 
+    // A stage names itself before it starts, so a stall points at the stage in progress rather than
+    // at the previous stage's completion line. Its input counts stay on the same trace line.
+    private static long PlanningStepStarted(string step, int actions)
+    {
+        RunLog.Trace(string.Create(CultureInfo.InvariantCulture, $"planning {step}: start; actions={actions}"));
+        return Stopwatch.GetTimestamp();
+    }
+
     private static void RunTracePlanningStep(string step, long started, string counts) =>
         RunLog.Trace(string.Create(CultureInfo.InvariantCulture, $"planning {step}: elapsed-ms={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0}; {counts}"));
 
@@ -17,7 +25,7 @@ public sealed partial class SyncRun
     // callers (apply, deferred evidence) keep their untraced shape.
     private Plan FilteredPlan(PairDef pair, string step, ActionGuard? guard, Plan plan)
     {
-        var started = PlanningStepStarted();
+        var started = PlanningStepStarted("filter " + step, plan.Actions.Count);
         var filtered = ApplySafetyFilter(pair, guard, plan);
         RunTracePlanningStep("filter " + step, started, $"actions={plan.Actions.Count}->{filtered.Actions.Count}; blocked={filtered.SkippedActions.Count - plan.SkippedActions.Count}");
         return filtered;
