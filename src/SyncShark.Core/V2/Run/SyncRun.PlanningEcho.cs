@@ -31,7 +31,7 @@ public sealed partial class SyncRun
                     path => settled(path) && (!echoPaths.Contains(path) || PlanningEchoVerified(pair, path)),
                     path => !echoPaths.Contains(path) && emptySettled(path),
                     row => { if (echoes.Contains(row)) echoesRetired++; acknowledged?.Invoke(row); },
-                    count => { if (count > 0) Trace($"Deferred planning re-spell decisions: count={count}"); },
+                    count => { if (count > 0) RunTrace.Emit($"Deferred planning re-spell decisions: count={count}"); },
                     (row, reason) =>
                     {
                         PlanningEchoForTest?.Invoke(row, PlanningObservationVersion(pair, scan, row), row.Paths.All(settled), reason);
