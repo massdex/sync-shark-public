@@ -28,17 +28,25 @@ public sealed partial class SyncRun
 
         async Task<RunReport> RunScope()
         {
+            var previousTrace = RunTrace.Slot.Value;
+            var previousRunId = _reconciliationRunId.Value;
             _reconciliationRunId.Value = id;
             using var log = _beginRunLog?.Invoke(pairId, ReconcileLogCommand);
             try
             {
                 LogScope(decision);
-                return await RunExclusiveAsync(progress, (sink, token) => ReconcileScopeBodyAsync(pairId, active, sink, token),
+                var run = RunExclusiveAsync(progress, (sink, token) => ReconcileScopeBodyAsync(pairId, active, sink, token),
                     ct, historyPairId: pairId, admissionPairId: pairId, admitBody: false);
+                // The run captured this scope's context at its first yield; restoring the monitor caller's
+                // ambient trace and run id keeps the ordinary run that follows on its own log and history entry.
+                RunTrace.Slot.Value = previousTrace;
+                _reconciliationRunId.Value = previousRunId;
+                return await run;
             }
             finally
             {
-                _reconciliationRunId.Value = null;
+                _reconciliationRunId.Value = previousRunId;
+                RunTrace.Slot.Value = previousTrace;
                 FinishReconciliationScope(pairId, active);
             }
         }
