@@ -1,0 +1,4 @@
+--v2-run-checks
+--v2-autosync-checks
+--v2-planning-protection-checks
+--v2-planner-checks
