@@ -1,0 +1,84 @@
+namespace Massdex.SyncShark;
+
+public sealed record DropboxRevisionEntry(string RelativePath, string FileId, string Revision, long Size,
+    string? ContentHash, DateTimeOffset? ModifiedUtc);
+
+public sealed record DropboxDeletedEntry(string RelativePath, string Name);
+
+public sealed record DropboxDeletedPage(
+    IReadOnlyList<DropboxDeletedEntry> Entries,
+    string? ContinueCursor);
+
+
+public enum PilotDecisionKind
+{
+    Uploaded,
+    Identical,
+    Conflict,
+    Blocked,
+    Stopped,
+    OnlineOnly
+}
+
+public sealed record PilotLocalEntry(
+    string RelativePath,
+    PilotEntryKind Kind,
+    string FullPath,
+    long Size,
+    DateTime LastWriteUtc,
+    string? ContentHash,
+    uint? VolumeSerialNumber = null,
+    ulong? FileId = null,
+    SyncCloudFileAvailability? CloudAvailability = null,
+    string? CloudRevision = null,
+    string? CloudFileId = null,
+    bool ContentUnreadable = false,
+    bool Link = false,
+    bool NeedsRehash = false);
+
+
+/// <summary>
+/// One provider folder identity read back from an exact access route. The optional aliases are the extra
+/// provider-issued keys for that same folder (a Dropbox shared-folder mount), kept as evidence only.
+/// </summary>
+public sealed record PilotRemoteRootBinding(string Path, string FolderId,
+    IReadOnlyList<SyncCloudObjectKey>? ObjectAliases = null);
+
+public sealed record PilotUploadResult(string FileId, string Revision, long Size, string ContentHash)
+{
+    public DateTimeOffset? ClientModifiedUtc { get; init; }
+}
+
+public sealed record PilotDecision(string RelativePath, PilotDecisionKind Kind, string Reason)
+{
+    internal static PilotDecision MetadataFailure(string path, Exception error) =>
+        new(path, PilotDecisionKind.Blocked, V2.MessageCatalog.Default.Message("proof-metadata-unavailable") + error.Message)
+        {
+            QuarantineCode = V2.QuarantineFailure.NativeCode(error),
+            NativeError = V2.ContentProofFailure.FromException(V2.ContentProofFailure.StageKind.Classification, error).NativeError
+        };
+    public int? NativeError { get; init; }
+    public int? QuarantineCode { get; init; }
+    public bool DefenderHistoryMatch { get; init; }
+    public bool DefenderHistoryUnknown { get; init; }
+    public bool IsQuarantine => QuarantineCode is not null || DefenderHistoryMatch;
+    public bool QuarantineFile { get; init; }
+}
+
+public sealed record PilotRunResult(IReadOnlyList<PilotDecision> Decisions)
+{
+    public int Uploaded => Decisions.Count(item => item.Kind == PilotDecisionKind.Uploaded);
+    public int Identical => Decisions.Count(item => item.Kind == PilotDecisionKind.Identical);
+    public int Conflicts => Decisions.Count(item => item.Kind == PilotDecisionKind.Conflict);
+    public int Blocked => Decisions.Count(item => item.Kind == PilotDecisionKind.Blocked);
+    public bool Stopped => Decisions.Any(item => item.Kind == PilotDecisionKind.Stopped);
+}
+
+public interface IPilotRemoteStore
+{
+    Task VerifyRootIdentityAsync(CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<PilotRemoteEntry>> ListEntriesAsync(CancellationToken cancellationToken = default);
+    Task<PilotUploadResult> UploadCreateOnlyAsync(string relativePath, Stream source, string expectedContentHash, CancellationToken cancellationToken = default);
+}
+
+public sealed class PilotLimitException(string message) : IOException(message);
