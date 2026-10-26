@@ -8,6 +8,7 @@ internal static partial class AutoSyncChecks
         await Deferred_WatchFaultRebuildsImmediatelyAsync();
         await Deferred_SecondWatchFaultDegradesAsync();
         await Evidence_NoProgressBacksOffAsync();
+        await Evidence_JournalRunsImmediatelyAsync();
     }
 
     private static async Task Deferred_WatchFaultRebuildsImmediatelyAsync()
@@ -51,6 +52,23 @@ internal static partial class AutoSyncChecks
             "second death before catch-up degrades to timed polling");
         Require(rig.Watches.Created == 4, "repeated dead watches cannot rebuild in a tight loop");
         Pass("Deferred_RepeatFault");
+    }
+
+    private static async Task Evidence_JournalRunsImmediatelyAsync()
+    {
+        await using var rig = new Rig(["p1"]);
+        var pending = FakeSyncRun.Report("p1", RunOutcomes.Partial) with
+        { DeletionEvidencePending = new[] { "pending.txt" } };
+        rig.Run.Then(pending with { JournalBacklog = true });
+        rig.Run.Then(pending);
+        await rig.StartAsync();
+        var now = rig.Clock.GetUtcNow();
+        await Until(() => rig.Run.Runs("p1") == 2 && rig.State("p1").RetryAt > now &&
+            rig.Clock.ActiveTimers == 1, "journal backlog drains before evidence backoff without advancing time");
+        Require(rig.Clock.GetUtcNow() == now &&
+            FailureRetryOwner.DeferredRetryState(rig._store, "p1")?.Attempts == 1,
+            "current journal work runs immediately; unchanged evidence then opens its shared tier");
+        Pass("Evidence_JournalPriority");
     }
 
     private static async Task Evidence_NoProgressBacksOffAsync()
