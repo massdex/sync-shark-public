@@ -104,10 +104,14 @@ internal static partial class RunChecks
         await worker.HashPage(fx.Pair.A, epoch, default);
         Require(io.Attempts.Count == count, "failed urgent hash obeys backoff and does not loop");
         store.RequestIndexRetry(fx.Pair.A.RootId);
-        await using var indexing = new LocalIndexingRuns(store, (_, _) => Task.FromResult(0), worker, io, _ => PriorityCheckpoint);
-        await indexing.RunAsync(fx.Pair.A, default);
+        // Retained legacy-proof compatibility check, not a production indexing entry point.
+        // ReconciliationOwnership checks separately that LocalIndexingRuns cannot invoke these helpers.
+        await worker.HashPage(fx.Pair.A, epoch, default);
+        LocalGapWorker.PromoteDiscovery(gaps, fx.Pair.A, default, StorageFailureClassifier.IsStateDamage);
+        LocalGapWorker.Promote(gaps, store, io, fx.Pair.A, gaps.GapResultWatermark(fx.Pair.A.RootId),
+            PriorityCheckpoint, _ => true, _ => { }, default, StorageFailureClassifier.IsStateDamage);
         Require(expected.All(path => !store.ProtectionBatch(fx.Pair.A.RootId, ItemFlags.NeedsRehash, [path])[0].Covered),
-            "real indexing run publishes verified proofs and hands them to planning");
+            "retained legacy proof helpers publish verified proofs and hand them to planning");
         var budget = new LocalGapIo(store, Settings, new HashSet<string>(), () => true);
         Require(!await budget.Budget(1, default) && await budget.Budget(1, default, urgent: true),
             "production byte budget retains the bulk activity gate but bypasses it for urgent work");
