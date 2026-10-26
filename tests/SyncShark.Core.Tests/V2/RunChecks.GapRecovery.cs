@@ -677,12 +677,13 @@ internal static partial class RunChecks
                 row.RunId.StartsWith("reconcile-", StringComparison.Ordinal) && row.Outcome == RunOutcomes.Partial),
                 "the gap run with an unreadable synced folder is Partial, never a failure (failed=" + gapRun.Failed +
                 (gapRun.Failures.Count > 0 ? ": " + gapRun.Failures[0].Reason : "") + ")");
-            Require(store.GapInventoryPending(root.RootId),
-                "the reconciliation obligation remains until the unreadable folder is observed");
+            Require(!store.GapInventoryPending(root.RootId),
+                "the whole-root gap obligation clears once the fresh walk covers every readable path");
             var gaps = (ILocalGapStore)store;
             var epoch = gaps.GapEpoch(root.RootId);
-            Require(epoch is not null && StateMonitor.FromGap(epoch).UnknownScope is not null,
-                "the unreadable, previously synced folder keeps durable unknown-scope protection");
+            Require(store.ByObject(root.RootId, held.ObjectId) is { Hash: null } unreadable &&
+                unreadable.Flags.HasFlag(ItemFlags.NeedsRehash),
+                "the unreadable subtree retains invalidated content proof after the readable remainder completes");
             Require(store.SyncRetryAt(pair.PairId, "locked") is { Kind: "scan" },
                 "the unreadable folder keeps its durable retry");
             Require(store.OpenNotices(pair.PairId).Count(n => n.ReasonKey == "sync-retry" && n.Path == "locked") == 1,

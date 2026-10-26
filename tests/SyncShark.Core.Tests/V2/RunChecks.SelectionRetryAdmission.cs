@@ -14,8 +14,10 @@ internal static partial class RunChecks
         await using var owner = new GapRecoveryRun(fx.Run());
         var run = owner.Run;
         await FirstSyncAsync(run, fx);
+        CheckScopedRetryGate(store, fx, run);
         var failed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        inventory.FullError = new TimeoutException("selection failed while AutoSync held admission");
+        var before = store.Live(fx.Pair.A.RootId).Single(item => item.Path == "file.txt");
+        inventory.FullError = new System.ComponentModel.Win32Exception("selection failed while AutoSync held admission");
         inventory.OnFull = () => failed.TrySetResult();
         var auto = run.WithPairAdmissionAsync(fx.Pair.PairId, async () =>
         {
@@ -35,5 +37,8 @@ internal static partial class RunChecks
             store.ReadRunHistory(fx.Pair.PairId, 10).Any(row => row.RunId.StartsWith("reconcile-", StringComparison.Ordinal) &&
                 row.Outcome == RunOutcomes.Partial),
             "selection publishes under admission after AutoSync: retry and notice survive and reconciliation is Partial");
+        Require(store.ByObject(fx.Pair.A.RootId, before.ObjectId)!.Hash == before.Hash &&
+            store.RehashPendingCount(fx.Pair.A.RootId) == 0,
+            "an unlocalized enumeration exception retains unrelated cached proof rather than invalidating the whole root");
     }
 }

@@ -1,5 +1,7 @@
 {
   "templates": {
+    "untrusted-journal-invalidation": "untrusted journal: invalidation page {0}, more={1}",
+    "trusted-journal-reproof": "trusted journal: {0} rows selected for re-proof",
     "reconcile-journal-proof": "The change journal identifies unprocessed changes. Verify this file's content before planning.",
     "effect-result-trace": "effect outcome={0} kind={1} side={2} path={3} category={4} reason={5}",
     "reconciliation-deferred-dependencies": "reconciliation coverage: deferred dependencies=",

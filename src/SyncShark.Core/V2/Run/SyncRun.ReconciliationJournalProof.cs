@@ -9,12 +9,6 @@ public sealed partial class SyncRun
         ((ILocalGapStore)store).GapEpoch(root.RootId) is { TrustFileUsn: false } &&
             (store.GapInventoryPending(root.RootId) || ((ILocalGapStore)store).HasGapProtection(root.RootId));
 
-    private static bool InvalidateUntrustedFile(ItemState previous, List<ItemState> invalidated)
-    {
-        if (!previous.Flags.HasFlag(ItemFlags.NeedsRehash)) invalidated.Add(previous);
-        return true;
-    }
-
     private async Task<RunReport> ReconcileTracedBatchAsync(SqliteStateStore store, PairDef pair,
         StateMonitorDecision decision, ReconcileBatch batch, IProgress<RunProgress> progress, CancellationToken ct)
     {

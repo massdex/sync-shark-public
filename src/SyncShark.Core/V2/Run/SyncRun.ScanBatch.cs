@@ -19,6 +19,8 @@ public sealed partial class SyncRun
                 if (_store.ByObject(pair.B.RootId, basis.B.ObjectId) is { } b) paths.Add(b.Path);
             }
         }
+        var predicates = Predicates(pair, LinkExclusions.None);
+        paths.RemoveWhere(path => !predicates.A(path) || !predicates.B(path));
         batch.AliasPaths.UnionWith(paths.Except(batch.Paths, StringComparer.OrdinalIgnoreCase));
         RunTrace.Emit($"reconciliation alias paths read: selected={batch.Paths.Count} aliases={batch.AliasPaths.Count}");
         return paths.ToArray();

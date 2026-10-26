@@ -7,7 +7,7 @@ public sealed partial class SqliteStateStore
     {
         if (!protect)
             StoreSchema.Execute(_connection, transaction,
-                "UPDATE local_gap SET discovery_done=1,worker_done=1,after_object=char(65535) WHERE root_no=$r;",
+                "UPDATE local_gap SET discovery_done=trust_usn,worker_done=1,after_object=CASE WHEN trust_usn=1 THEN char(65535) ELSE '' END WHERE root_no=$r;",
                 ("$r", root));
         // Publish the pre-walk checkpoint with the obligation in the epoch's transaction;
         // later journal changes must remain available for ordinary replay.

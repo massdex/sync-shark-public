@@ -83,6 +83,12 @@ internal static partial class RunChecks
         Require(store.ByObject(root.RootId, orphan.ObjectId) is null &&
             gaps.GapObligations(root.RootId, [orphan.ObjectId]).Count == 1,
             "discovery retains an orphan obligation without a file-state row");
+        var editedOrphan = held with { Path = "Parent/edited.txt", ObjectId = "edited-orphan-object" };
+        gaps.GapDiscoveredBatch(root.RootId, currentEpoch, [(editedOrphan, true)]);
+        var editedRemote = fx.B.Seed(editedOrphan.Path, "edited remotely");
+        var deletesBefore = fx.WriterB.Deletes;
+        store.SaveSyncRetry(pair.PairId, new("remote-unreadable", "scan", 1, "remote scope unavailable",
+            DateTimeOffset.MaxValue, ReadRoots: [pair.B.RootId]));
         fx.Provider.AddInventory(pair.B, fx.B);
         var report = await run.ReconcileScopeAsync(pair.PairId,
             StateMonitor.FromGap(currentEpoch) with { RootId = root.RootId }, new RecordingProgress(), default);
@@ -90,6 +96,11 @@ internal static partial class RunChecks
             gaps.GapObligations(root.RootId, [held.ObjectId, orphan.ObjectId]).Count == 0 &&
             !store.PendingGapInventory(root.RootId) && !gaps.HasGapProtection(root.RootId),
             "fresh reconciliation discharges replacement-epoch and orphan obligations and clears the gap");
+        Require(store.SyncRetryAt(pair.PairId, "remote-unreadable") is { Kind: "scan" },
+            "Dropbox-side sleeping retry survives while the readable local gap epoch completes");
+        Require(fx.WriterB.Deletes == deletesBefore &&
+            (await fx.B.ObserveAsync(editedOrphan.Path, default))?.Hash == editedRemote.Hash,
+            "an orphan local obligation never deletes content present and edited on the counterpart");
         await MirrorAsync(fx);
     }
 }

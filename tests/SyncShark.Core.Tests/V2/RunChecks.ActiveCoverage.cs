@@ -60,6 +60,7 @@ internal static partial class RunChecks
 
     private static async Task ReconciliationFileMoveAliasesAcrossBatches()
     {
+        await ReconciliationExcludedAliasAsync();
         foreach (var side in new[] { Side.A, Side.B })
         {
             using var store = SqliteStateStore.Open(FixtureFolder("reconcile-move-alias-" + side),

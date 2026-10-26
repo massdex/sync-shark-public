@@ -28,8 +28,7 @@ public sealed partial class SyncRun
                 else _pendingResets[(pairId, rootId)] = decision;
             }
             if (_reconciling.ContainsKey(pairId)) return false;
-            if (_store.Pair(pairId) is { } pair && new[] { pair.A, pair.B }
-                .Any(root => ScanRetriesForRoot(pair, root).Any(retry => retry.RetryAfter > _time.GetUtcNow())))
+            if (_store.Pair(pairId) is { } pair && ReconciliationRetriesSleeping(pair, decision))
             {
                 RunTrace.Emit("reconciliation monitor waiting for existing scan retry due time");
                 return false;
@@ -40,6 +39,18 @@ public sealed partial class SyncRun
                 () => ReconcileScopeAsync(pairId, decision, progress, ct)));
         }
         return true;
+    }
+
+    internal bool ReconciliationRetriesSleeping(PairDef pair, StateMonitorDecision decision)
+    {
+        if (decision.Trigger == ReconciliationTrigger.PlanningBacklog) return false;
+        var scope = decision.UnknownScope ?? ReconciliationScope.Root;
+        var retries = ReconciliationSides(pair, decision.Trigger)
+            .Select(side => side == Side.A ? pair.A : pair.B)
+            .Where(root => decision.RootId is null || root.RootId == decision.RootId)
+            .SelectMany(root => ScanRetriesForRoot(pair, root))
+            .Where(retry => scope.Contains(retry.Path) || scope.ReadScopes.Any(path => PairPath.IsSelfOrUnder(path, retry.Path))).ToArray();
+        return retries.Length != 0 && retries.All(retry => retry.RetryAfter > _time.GetUtcNow());
     }
 
     private StateMonitorDecision? SampleReconciliation(PairDef pair, SqliteStateStore sql)

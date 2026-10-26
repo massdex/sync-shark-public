@@ -22,16 +22,17 @@ public sealed partial class SyncRun
             var usns = selected.ToDictionary(row => row.Item.Path, row => row.Usn, StringComparer.Ordinal);
             sql.StageReconcile(session + ":seen", side, page);
             var invalidated = new List<ItemState>();
-            bool changed(ItemState item, ItemState previous) => untrusted && previous.Kind == ItemKind.File
-                ? InvalidateUntrustedFile(previous, invalidated)
-                : sameJournal
-                    ? JournalSelectionChanged(item, previous, usns[item.Path], probes, journal, savedNext, invalidated)
-                    : SelectionChanged(item, previous, false);
+            bool changed(ItemState item, ItemState previous) => sameJournal
+                ? JournalSelectionChanged(item, previous, usns[item.Path], probes, journal, savedNext, invalidated)
+                : SelectionChanged(item, previous, false);
             counts = await _admission.WithAsync(pair.PairId, () =>
             {
+                if (untrusted) InvalidateLegacyGapItems(pair, root, side, page, eligibility, sql);
                 var result = SelectPage(pair, side, page, session, sql, eligibility, accounted, counts, false, changed);
                 _store.RequireRehashBatch(root.RootId, invalidated,
                     MessageCatalog.Default.Template("reconcile-journal-proof"));
+                if (sameJournal) RunTrace.Emit(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                    MessageCatalog.Default.Template("trusted-journal-reproof"), invalidated.Count));
                 return Task.FromResult(result);
             }, ct);
         }, ct, incomplete);

@@ -23,10 +23,10 @@ public sealed partial class SyncRun
     private Task RecordSelectionFailureAsync(PairDef pair, RootDef root, Side side,
         ReconciliationScope scope, Exception error, CancellationToken ct)
     {
-        // A failed enumeration makes its entire requested scope unknown, including earlier partial pages.
+        // An exception identifies no failing subtree. Retry the scope without destroying unrelated proof.
         var paths = scope.ReadScopes.ToArray();
         var reasons = paths.ToDictionary(path => path, _ => error.GetType().Name + ": " + error.Message);
-        return InvalidateUnreadableSelectionAsync(pair, root, side, paths, reasons, ct);
+        return PublishSelectionIncompleteAsync(pair, side, paths, reasons, ct);
     }
 
     private Task PublishSelectionIncompleteAsync(PairDef pair, Side side, IReadOnlyList<string> paths,

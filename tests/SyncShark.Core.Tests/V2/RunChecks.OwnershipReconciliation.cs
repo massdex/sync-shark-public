@@ -5,7 +5,7 @@ namespace Massdex.SyncShark.V2;
 internal static partial class RunChecks
 {
     internal static async Task CompleteOwnershipReconciliationAsync(SqliteStateStore store, RootDef root,
-        LocalInventory inventory, ItemState item, LocalGapEpoch epoch, string folder)
+        LocalInventory inventory, ItemState item, LocalGapEpoch epoch, string folder, string? alreadyProven = null)
     {
         var fx = Build(suppliedStore: store, pairId: "ownership-pair");
         var pair = fx.Pair with { A = root };
@@ -29,6 +29,8 @@ internal static partial class RunChecks
         await using var owner = new GapRecoveryRun(fx.Run());
         var report = await owner.Run.ReconcileScopeAsync(pair.PairId, StateMonitor.FromGap(epoch),
             new RecordingProgress(), default);
+        if (alreadyProven is not null) Require(!proof.Reads.Contains(alreadyProven),
+            "restarted untrusted epoch never rereads content already proven before restart");
         var gaps = (ILocalGapStore)store;
         Require(report.Failed == 0 && report.Uncertain == 0 && proof.Reads.Contains(item.Path) &&
             store.ByObject(root.RootId, item.ObjectId) is { Hash: not null } verified && verified.Hash == expectedHash &&

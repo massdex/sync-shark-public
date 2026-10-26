@@ -6,6 +6,8 @@ internal static partial class LocalJournalChecks
     {
         GapSchemaUpgradeChecks(folder);
         GapCursorChecks(folder);
+        InvalidationRestartChecks(folder);
+        await NativeProofRestartAsync(Path.Combine(folder, "native-proof-restart"));
         await RunChecks.GapRecoveryChecksAsync(Path.Combine(folder, "run-recovery"));
         await SavedCursorWrapAsync(folder);
         await IndexingRunsAsync(folder);

@@ -34,7 +34,7 @@ public sealed partial class SyncRun
             RunTrace.Emit($"reconciliation selection: enumerated={counts.Enumerated} changed={counts.Changed} new={counts.New} missing={counts.Missing} unaffected={counts.Unaffected} S-orphan={counts.Orphan} S-moved={counts.Moved} S-case={counts.Case}");
             return counts;
         }
-        catch (Exception error) when (ScopeFailure(error, ct) && (error is IOException or UnauthorizedAccessException or TimeoutException))
+        catch (Exception error) when (ScopeFailure(error, ct))
         {
             await RecordSelectionFailureAsync(pair, root, side, scope, error, ct);
             return counts;
@@ -50,10 +50,10 @@ public sealed partial class SyncRun
         var empty = new SideScan(0, string.Empty, true, false, [], [], new Dictionary<string, DateTimeOffset?>(), []);
         var failed = empty with { IncompleteSubtrees = paths, IncompleteReasons = reasons };
         var scan = side == Side.A ? new BothScan(failed, empty) : new BothScan(empty, failed);
+        RunTrace.Emit($"selection scan incomplete: {paths.Count} paths, retry recorded under admission");
         foreach (var path in paths)
         {
             RecordScanFailure(pair, scan, path, suppressTransient: false);
-            RunTrace.Emit($"selection scan incomplete: {paths.Count} paths, retry recorded under admission");
             RunTrace.Emit($"reconciliation selection unreadable: root={side} scope={path} reason={reasons.GetValueOrDefault(path)}");
         }
     }
