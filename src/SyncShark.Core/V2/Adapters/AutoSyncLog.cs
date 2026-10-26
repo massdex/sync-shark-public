@@ -51,13 +51,14 @@ public static class AutoSyncLog
 
     /// <summary>Records numeric assembly version, never a free-form informational version.</summary>
     public static void HostStarted(string productRoot, Version? version) =>
-        Append(productRoot, "host start version=" + version);
+        Append(productRoot, string.Format(CultureInfo.InvariantCulture,
+            MessageCatalog.Default.Message("autosync-host-start"), version));
 
     /// <summary>Records exception identity only, without message, data, inner exceptions or source paths.</summary>
     public static void Failure(string productRoot, Exception error) =>
-        Append(productRoot, "lifecycle failure type=" + error.GetType().FullName +
-            " hresult=" + error.HResult.ToString("X8", CultureInfo.InvariantCulture) +
-            " method=" + error.TargetSite?.Name);
+        Append(productRoot, string.Format(CultureInfo.InvariantCulture,
+            MessageCatalog.Default.Message("autosync-lifecycle-failure"),
+            error.GetType().FullName, error.HResult, error.TargetSite?.Name));
 
     private static void Rotate(FileStream current, string path)
     {

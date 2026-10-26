@@ -83,6 +83,7 @@ internal static partial class RunCliChecks
         {
             using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(store: store);
+            fx.A.DropboxHashes = fx.B.DropboxHashes = true;
             var a = fx.A.Seed("choice.txt", "synthetic-content-a");
             var b = fx.B.Seed("choice.txt", "synthetic-content-b");
             store.AddNotices([new(fx.Pair.PairId, 27, NoticeKind.KeepBoth, a.Path,
