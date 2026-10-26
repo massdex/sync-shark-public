@@ -35,11 +35,17 @@ internal static partial class RunChecks
         await run.IncrementalAsync(pair.PairId, new RecordingProgress(), default);
         Require(fx.WriterA.Calls + fx.WriterB.Calls == before,
             "ordinary AutoSync cannot borrow the reconciliation exemption");
+        var puts = fx.WriterA.Puts + fx.WriterB.Puts;
+        var preserves = fx.WriterA.Preserves + fx.WriterB.Preserves;
         await run.IncrementalAsync(pair.PairId, new RecordingProgress(), default,
             new RunOptions { Batch = Selected(items.Single(item => item.Path == "Parent/observed.txt")) });
-        Require(fx.WriterA.Calls + fx.WriterB.Calls == before + 1 &&
-            gaps.GapObligations(root.RootId, [items.Single(item => item.Path == "Parent/observed.txt").ObjectId]).Count == 0,
-            "fresh two-root observation executes and acknowledges only its settled item");
+        Require(fx.WriterA.Puts + fx.WriterB.Puts == puts + 1 &&
+            fx.WriterA.Calls + fx.WriterB.Calls - before ==
+                1 + fx.WriterA.Preserves + fx.WriterB.Preserves - preserves,
+            "fresh two-root observation performs one copy plus its recovery preservation only");
+        Require(gaps.GapObligations(root.RootId,
+            [items.Single(item => item.Path == "Parent/observed.txt").ObjectId]).Count == 0,
+            "fresh two-root observation acknowledges its settled gap item");
         store.CompleteGapInventory(root.RootId, epoch.Epoch);
         Require(store.PendingGapInventory(root.RootId) &&
             store.ProtectionBatch(root.RootId, ItemFlags.NeedsRehash, ["Parent/held.txt"])[0].Covered,
