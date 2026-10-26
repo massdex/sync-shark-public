@@ -38,8 +38,7 @@ public sealed partial class SyncRun
         }
         PublishScopeDelta(reread with
         {
-            ChangedObject = changed,
-            ExactPaths = exact ? scopes.ToHashSet(StringComparer.OrdinalIgnoreCase) : null
+            ChangedObject = changed
         });
         foreach (var change in reread.Changes)
             if (change.ObjectId.Length > 0) changed(change.ObjectId);

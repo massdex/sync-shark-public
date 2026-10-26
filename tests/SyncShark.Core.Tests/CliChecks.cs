@@ -433,7 +433,9 @@ internal static partial class CliChecks
     internal static async Task RunAsync(string root, string? capabilitiesPath = null)
     {
         Require(SyncCliRegistry.Rows.Single(row => row.Command == "autosync now").Effect.Contains(
-            "deferred backlog belongs to reconciliation", StringComparison.Ordinal),
+            "bulk deferred backlog belongs to reconciliation", StringComparison.Ordinal) &&
+            SyncCliRegistry.Rows.Single(row => row.Command == "autosync now").Effect.Contains(
+                "urgent user-change handoffs", StringComparison.Ordinal),
             "AutoSync CLI documents shared fresh-delta and reconciliation backlog ownership");
         var proofList = SyncCliRegistry.Parse(["--cli", "conflicts", "list", "--pair", "fixture", "--limit", "10", "--json"]);
         Require(!SyncCliRegistry.MutatesProductState(proofList) &&

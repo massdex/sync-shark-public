@@ -36,12 +36,12 @@ internal static partial class DropboxChecks
             (Func<string, bool>)(_ => true), (Action<string>)(_ => { }), CancellationToken.None])!;
         Require(pages == 0 && h.Wire.ListRequests.Count == 0 && h.Wire.MetadataPaths.Distinct().Count() == paths.Length + 1,
             "a 128-path reconciliation batch uses exact metadata and never pages the 5000-row root inventory");
-        Require(store.Live(RootId, ["Missing"]).Count == 0 && store.Live(RootId, ["unknown.txt"]).Count == 1 &&
+        Require(store.Live(RootId, ["Missing"]).Count == 1 && store.Live(RootId, ["unknown.txt"]).Count == 1 &&
             store.Live(RootId, ["Missing/child.txt"]).Count == 1,
-            "proven not_found removes only its exact folder row; a network error and unselected descendants remain live");
+            "a missing folder waits for recursive observation; network errors and unselected descendants remain live");
         var delta = await cloud.ReadExactAsync(["Missing", "unknown.txt"], "cursor", observedGen, _ => true, default);
-        Require(delta.IncompleteSubtrees.SequenceEqual(["unknown.txt"]) &&
-            delta.Changes.All(change => change.Path != "unknown.txt"),
+        Require(delta.IncompleteSubtrees.ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(["Missing", "unknown.txt"]) &&
+            delta.Changes.All(change => change.Path != "unknown.txt" && change.Path != "Missing"),
             "failed metadata is explicitly incomplete, never a deletion candidate or observed receipt");
     }
 }

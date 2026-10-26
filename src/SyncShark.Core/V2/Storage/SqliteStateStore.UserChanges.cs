@@ -71,11 +71,11 @@ public sealed partial class SqliteStateStore
         ORDER BY d.version,d.root_no,d.object_id LIMIT $limit;
         """;
 
-    private List<DeferredPlanning> ReadPlanningIntake(SqliteTransaction tx, long pair, long before)
+    private List<DeferredPlanning> ReadPlanningIntake(SqliteTransaction tx, long pair, long before, bool userOnly)
     {
         var admitted = new List<DeferredPlanning>();
         AddPage(UrgentPlanningIntakeSql, DeferredIntakeEntityCap / 2, DeferredIntakePathCap / 2);
-        AddPage(BulkPlanningIntakeSql, DeferredIntakeEntityCap - admitted.Count,
+        if (!userOnly) AddPage(BulkPlanningIntakeSql, DeferredIntakeEntityCap - admitted.Count,
             DeferredIntakePathCap - admitted.Sum(row => row.Paths.Count));
         return admitted;
 

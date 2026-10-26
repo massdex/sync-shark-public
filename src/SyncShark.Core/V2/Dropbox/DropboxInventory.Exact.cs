@@ -17,7 +17,8 @@ public sealed partial class DropboxInventory
             var before = _known.Live(_root.RootId, page);
             foreach (var path in page)
             {
-                if (!metadata.TryGetValue(path, out var entry)) continue;
+                if (!metadata.TryGetValue(path, out var entry))
+                { failures.TryAdd(path, MessageCatalog.Default.Message("guardedInventoryIncomplete")); continue; }
                 if (entry is not null)
                 {
                     var item = DropboxItems.ToItem(entry);
@@ -25,7 +26,9 @@ public sealed partial class DropboxInventory
                 }
                 else
                     foreach (var item in before.Where(item => PairPath.Same(item.Path, path)))
-                        changes.Add(new(ChangeKind.Delete, item.ObjectId, item.Path, null, null));
+                        if (item.Kind == ItemKind.Folder)
+                            failures.TryAdd(path, MessageCatalog.Default.Message("guardedInventoryIncomplete"));
+                        else changes.Add(new(ChangeKind.Delete, item.ObjectId, item.Path, null, null));
             }
         }
         return new(_root.RootId, _side, gen, cursor, cursor, changes, false, failures.Keys.ToArray())
