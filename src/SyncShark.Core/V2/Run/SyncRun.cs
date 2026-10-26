@@ -1121,20 +1121,25 @@ public sealed partial class SyncRun : ISyncRun
                 with { MappingContextA = scope.ContextA, MappingContextB = scope.ContextB, ProtectedDescendants = links.Contains });
 
     // Decision 64: the paths of open user-decision notices, except the ones being decided in this run.
-    private IEnumerable<string> PendingDecisions(string pairId, IReadOnlyDictionary<string, Side>? deciding) =>
-        _store.UnresolvedNotices(pairId).SelectMany(notice =>
-            notice.ConflictOperation is { Finished: false } operation &&
-            operation.Actions.Any(action => action.ObsoleteBaselineKey is not null)
-                ? operation.Actions.SelectMany(action => new[] { action.Path, action.FromPath,
-                    action.Source?.Path, action.ExpectedTarget?.Path }).OfType<string>().Append(notice.Path)
-                : (notice.Kind == NoticeKind.UserDecision ||
-                                                   notice.ReasonKey == "deletion-history-unavailable" || notice.Quarantine is not null) &&
-                                                   notice.ReasonKey != "name-mapping-collision" &&
-                                                   PlanNotices.HasPathScope(notice) &&
-                                                   // A finished replace no longer holds its path: the incoming item must arrive.
-                                                   (!NoticeChoices.AwaitsArrival(notice) || notice.ConflictOperation is { Restoring: true, RestorePath: null }) &&
-                                                   (deciding is null || !deciding.ContainsKey(notice.Path))
-                    ? new[] { notice.Path } : Array.Empty<string>()).ToArray();
+    private IEnumerable<string> PendingDecisions(string pairId, IReadOnlyDictionary<string, Side>? deciding)
+    {
+        bool HoldsNoticePath(Notice notice) =>
+            (notice.Kind == NoticeKind.UserDecision || notice.ReasonKey == "deletion-history-unavailable" || notice.Quarantine is not null) &&
+            notice.ReasonKey != "name-mapping-collision" && PlanNotices.HasPathScope(notice) &&
+            // A finished replace no longer holds its path: the incoming item must arrive.
+            (!NoticeChoices.AwaitsArrival(notice) || notice.ConflictOperation is { Restoring: true, RestorePath: null }) &&
+            (deciding is null || !deciding.ContainsKey(notice.Path));
+
+        IEnumerable<string> HeldPaths(Notice notice)
+        {
+            if (notice.ConflictOperation is { Finished: false, SettlementAction: not null } operation)
+                return operation.Actions.SelectMany(action => new[] { action.Path, action.FromPath,
+                    action.Source?.Path, action.ExpectedTarget?.Path }).OfType<string>().Append(notice.Path);
+            return HoldsNoticePath(notice) ? new[] { notice.Path } : Array.Empty<string>();
+        }
+
+        return _store.UnresolvedNotices(pairId).SelectMany(HeldPaths).ToArray();
+    }
 
     // Decision 64: a decided notice closes with the chosen side only on evidence (Astra): the winner's effect
     // completed Done, or after the run both sides hold equal content at the path. Anything else — the chosen side

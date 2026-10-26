@@ -14,6 +14,12 @@ public sealed partial class SyncRun
         if (notice.Rule == 27 && (choice == NoticeChoices.KeepB && observed[0] is null ||
             choice == NoticeChoices.KeepA && observed[1] is null))
             return await RestoreConflictSuccessorAsync(pair, notice, versions, noticeId, choice, ct).ConfigureAwait(false);
+        for (var index = 0; index < observed.Length; index++)
+        {
+            if (observed[index] is not { Kind: ItemKind.File, Hash: null } current) continue;
+            observed[index] = await ProveConflictContentAsync(index == 0 ? pair.A : pair.B, current, ct).ConfigureAwait(false);
+            if (observed[index] is null) return RefuseConflictSuccessor(pair, notice, noticeId, "proof");
+        }
         if (observed[0] is not null && observed[1] is not null &&
             SameConflictItem(observed[0]!, versions.A, pair.A) && SameConflictItem(observed[1]!, versions.B, pair.B)) return null;
         return RefuseConflictSuccessor(pair, notice, noticeId,
@@ -65,12 +71,12 @@ public sealed partial class SyncRun
             var key = PlanIds.Split(versions.Base!.ObjectKey, originalSide);
             var baseline = _store.Baselines(pair.PairId, [key]).SingleOrDefault();
             if (baseline is null || original.Kind != ItemKind.File) return (null, "provenance");
-            if (original.Hash is null || baseline.A.Hash is null || baseline.B.Hash is null) return (null, "proof");
+            if (original.Hash is null || baseline.A.Hash is null || baseline.B.Hash is null) return (null, "provenance");
             if (Content.SameContent(baseline.A, original) != true || Content.SameContent(baseline.B, original) != true)
                 return (null, "changed");
             var originalRoot = originalSide == Side.A ? pair.A : pair.B;
             var savedOriginal = originalSide == Side.A ? baseline.A : baseline.B;
-            if (savedOriginal.ObjectId != original.ObjectId) return (null, "foreign");
+            if (savedOriginal.ObjectId != original.ObjectId) return (null, "provenance");
             if (!SameConflictItem(savedOriginal, original with { Path = savedOriginal.Path }, originalRoot)) return (null, "changed");
             foreach (var side in new[] { Side.A, Side.B })
             {

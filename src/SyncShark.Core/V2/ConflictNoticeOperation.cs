@@ -6,11 +6,17 @@ public sealed record ConflictNoticeOperation(string Choice, string? Destination,
 {
     /// <summary>Every saved step finished; a completed replace may still await the incoming item's arrival.</summary>
     public bool Finished => Actions.All(action => Completed.Contains(action.ActionId));
+    /// <summary>A keep-version operation has at most one canonical write preceding its copy removals.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public SyncAction? SettlementAction => Choice is NoticeChoices.KeepA or NoticeChoices.KeepB
+        ? Actions.SingleOrDefault(action => action.Rule == 27 && action.Kind is ActionKind.CopyNew or ActionKind.Update)
+        : null;
+
     /// <summary>Admit canonical settlement alone until its verified completion is durable.</summary>
     public SyncAction[] ReadyActions()
     {
         var completed = Completed.ToHashSet(StringComparer.Ordinal);
-        var predecessor = Actions.SingleOrDefault(action => action.ObsoleteBaselineKey is not null);
+        var predecessor = SettlementAction;
         if (predecessor is not null && !completed.Contains(predecessor.ActionId)) return [predecessor];
         return Actions.Where(action => !completed.Contains(action.ActionId)).ToArray();
     }
