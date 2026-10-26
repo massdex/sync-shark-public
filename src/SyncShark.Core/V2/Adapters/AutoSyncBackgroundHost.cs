@@ -134,6 +134,7 @@ public sealed class AutoSyncBackgroundHost : IAsyncDisposable
     {
         using (pipe)
         {
+            var stopAfterReply = false;
             AutoSyncHostRequest? request = null;
             try
             {
@@ -144,7 +145,7 @@ public sealed class AutoSyncBackgroundHost : IAsyncDisposable
                 AutoSyncHostReply reply;
                 if (request.Command == "stop")
                 {
-                    Volatile.Write(ref _stopRequested, 1);
+                    stopAfterReply = RecordStopRequest();
                     await BeginStop().ConfigureAwait(false);
                     reply = Reply(request, "stopped", new { safePointReached = true });
                 }
@@ -189,9 +190,20 @@ public sealed class AutoSyncBackgroundHost : IAsyncDisposable
             finally
             {
                 // A failed stop reply must not leave an already drained process owning the store indefinitely.
-                if (StopRequested) _acceptStop.Cancel();
+                if (stopAfterReply) _acceptStop.Cancel();
             }
         }
+    }
+
+    /// <summary>
+    /// Records the stop request for the durable shutdown line and answers whether this connection ends
+    /// the listener. Only this connection may cancel it: another connection in flight during drain must
+    /// not tear the listener down before its reply and the stop's safe point are observed.
+    /// </summary>
+    private bool RecordStopRequest()
+    {
+        Volatile.Write(ref _stopRequested, 1);
+        return true;
     }
 
     private static bool IsReadOnly(AutoSyncHostRequest request) =>
