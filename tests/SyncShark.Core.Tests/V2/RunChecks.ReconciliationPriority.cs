@@ -15,7 +15,7 @@ internal static partial class RunChecks
         ((ILocalGapStore)store).BeginGap(fx.Pair.A.RootId, PriorityCheckpoint.Cursor, 100, false, protect: false);
         // The missing interval is reconciliation work, not part of the retained provider delta.
         var generation = store.BeginGeneration(fx.Pair.A.RootId, "fixture-retained-replay");
-        store.CompleteGeneration(generation, cursor, true, settleInventory: false);
+        store.CompleteGeneration(generation, cursor, true, settleInventory: false, cursorHeldForEvidence: false);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var nextBatch = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
