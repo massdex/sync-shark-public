@@ -1,0 +1,48 @@
+﻿Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SyncShark.Core", "src\SyncShark.Core\SyncShark.Core.csproj", "{E31E4F78-6519-48AE-92B5-9FB8A3E11E14}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SyncShark.Core.Tests", "tests\SyncShark.Core.Tests\SyncShark.Core.Tests.csproj", "{CC5A840A-BBA5-4A21-B9C9-2DD5D8E2C18D}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SyncShark", "apps\SyncShark\SyncShark.csproj", "{44A7C2C6-C81A-4AC5-A4F0-A3B265AE1A65}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{496951D6-F36D-4487-85D2-D4D46D213574}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SyncShark.UiFixture", "tests\SyncShark.UiFixture\SyncShark.UiFixture.csproj", "{52C90086-F4B2-498A-A3B1-0A00E1EEABAE}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SyncShark.LiveBrowserProbe", "tests\SyncShark.LiveBrowserProbe\SyncShark.LiveBrowserProbe.csproj", "{6314EB49-D633-405C-9AE8-B5D77E8F9BF4}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{E31E4F78-6519-48AE-92B5-9FB8A3E11E14}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E31E4F78-6519-48AE-92B5-9FB8A3E11E14}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E31E4F78-6519-48AE-92B5-9FB8A3E11E14}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E31E4F78-6519-48AE-92B5-9FB8A3E11E14}.Release|Any CPU.Build.0 = Release|Any CPU
+		{CC5A840A-BBA5-4A21-B9C9-2DD5D8E2C18D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CC5A840A-BBA5-4A21-B9C9-2DD5D8E2C18D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CC5A840A-BBA5-4A21-B9C9-2DD5D8E2C18D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CC5A840A-BBA5-4A21-B9C9-2DD5D8E2C18D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{44A7C2C6-C81A-4AC5-A4F0-A3B265AE1A65}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{44A7C2C6-C81A-4AC5-A4F0-A3B265AE1A65}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{44A7C2C6-C81A-4AC5-A4F0-A3B265AE1A65}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{44A7C2C6-C81A-4AC5-A4F0-A3B265AE1A65}.Release|Any CPU.Build.0 = Release|Any CPU
+		{52C90086-F4B2-498A-A3B1-0A00E1EEABAE}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{52C90086-F4B2-498A-A3B1-0A00E1EEABAE}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{52C90086-F4B2-498A-A3B1-0A00E1EEABAE}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{52C90086-F4B2-498A-A3B1-0A00E1EEABAE}.Release|Any CPU.Build.0 = Release|Any CPU
+		{6314EB49-D633-405C-9AE8-B5D77E8F9BF4}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6314EB49-D633-405C-9AE8-B5D77E8F9BF4}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6314EB49-D633-405C-9AE8-B5D77E8F9BF4}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6314EB49-D633-405C-9AE8-B5D77E8F9BF4}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{52C90086-F4B2-498A-A3B1-0A00E1EEABAE} = {496951D6-F36D-4487-85D2-D4D46D213574}
+		{6314EB49-D633-405C-9AE8-B5D77E8F9BF4} = {496951D6-F36D-4487-85D2-D4D46D213574}
+	EndGlobalSection
+EndGlobal
