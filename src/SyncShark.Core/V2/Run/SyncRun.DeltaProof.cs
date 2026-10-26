@@ -16,7 +16,9 @@ public sealed partial class SyncRun
         {
             if (root.Provider != SyncProviders.Local || side.WalkObserved || side.InventoryFailure is not null) continue;
             var changes = side.UserChanges ?? [];
-            var rows = _store.Live(root.RootId, changes.Select(change => change.Path))
+            var touched = (scan.A.UserChanges ?? []).Concat(scan.B.UserChanges ?? []).Select(change => change.Path)
+                .Concat(scan.A.PreviousPaths).Concat(scan.B.PreviousPaths).Distinct(StringComparer.OrdinalIgnoreCase);
+            var rows = _store.Live(root.RootId, touched)
                 .Concat(changes.Select(change => _store.ByObject(root.RootId, change.ObjectId)).OfType<ItemState>())
                 .DistinctBy(item => item.ObjectId);
             foreach (var item in rows)
@@ -27,8 +29,13 @@ public sealed partial class SyncRun
                 if (size > _settings.ReconciliationBatch.MaxBytes - bytes) continue;
                 bytes += size;
                 var hashes = await _endpoints.Inventory(root).HashAsync([item.Path], ct);
-                if (hashes.ContainsKey(item.Path) && _store.ByObject(root.RootId, item.ObjectId) is { } current &&
-                    !current.Flags.HasFlag(ItemFlags.NeedsRehash)) proven++;
+                if (hashes.TryGetValue(item.Path, out var hash) && _store.ByObject(root.RootId, item.ObjectId) is { } current &&
+                    !current.Flags.HasFlag(ItemFlags.NeedsRehash))
+                {
+                    proven++;
+                    if (_store is SqliteStateStore sql)
+                        side.RehashThrough = Math.Max(side.RehashThrough, sql.RehashProofOrder(root.RootId, item.ObjectId, hash));
+                }
             }
         }
         RunTrace.Emit(string.Format(System.Globalization.CultureInfo.InvariantCulture,

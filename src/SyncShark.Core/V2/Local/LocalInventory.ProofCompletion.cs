@@ -2,6 +2,16 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class LocalInventory
 {
+    private long ReflagReread(ItemState item)
+    {
+        _known.RequireRehash(_root.RootId, item, MessageCatalog.Default.Message("proof-unavailable-changed"));
+        return _known.RehashRevision(_root.RootId, item.ObjectId);
+    }
+
+    private static bool SameContentProof(ItemState item, LocalGapHashResult result) =>
+        result is { Outcome: LocalGapHashOutcome.Verified, Hash: { } hash, Proof: { } proof } &&
+        item.Hash == hash && LocalGapWorker.Matches(item, proof.File);
+
     private bool RetireExcludedProof(ILocalGapIo io, ItemState item, long revision)
     {
         if (!io.Excluded(_root, item)) return false;

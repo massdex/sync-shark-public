@@ -232,11 +232,12 @@ internal static partial class RunChecks
             cause + ": run catch-up replays advanced checkpoint, not newer walk start");
         Require(store.IndexRetryDue(root.RootId) && store.NextIndexRetry(root.RootId) is null,
             cause + ": recovered journal fallback leaves independent indexing immediately eligible");
-        // D90: catch-up persists protected proof debt; the separate index run proves content.
+        // Fresh delta-touched content is proved inline; interrupted inventory remains separate debt.
         // Measured pre-index state in all nine crash modes: hash=NULL, NeedsRehash, one entity debt row.
-        Require(store.ByObject(root.RootId, original.ObjectId) is { Hash: null } pending &&
-            (pending.Flags & ItemFlags.NeedsRehash) != 0 && store.RehashPendingCount(root.RootId) > 0,
-            cause + ": sync retains crash-window write as protected indexing debt");
+        Require(store.ByObject(root.RootId, original.ObjectId) is { } pending &&
+            pending.Hash == DropboxContentHash.Compute(System.Text.Encoding.UTF8.GetBytes("new")) &&
+            !pending.Flags.HasFlag(ItemFlags.NeedsRehash),
+            cause + ": AutoSync proves the delta-touched crash-window write inline before planning");
         await IndexRecoveredGapAsync(store, root, inventory, () => checkpoint);
         Require(store.ByObject(root.RootId, original.ObjectId)?.Hash == DropboxContentHash.Compute(System.Text.Encoding.UTF8.GetBytes("new")),
             cause + ": same-size same-mtime crash-window write is rehashed by the independent index path");
@@ -591,9 +592,10 @@ internal static partial class RunChecks
                 "the following run is Partial while the unreadable folder is still debt");
             Require(reads.Count == 1,
                 "the following run replays from the committed delta cursor instead of repeating the full walk");
-            Require(store.ByObject(root.RootId, sibling.ObjectId) is { Hash: null } pendingSibling &&
-                (pendingSibling.Flags & ItemFlags.NeedsRehash) != 0,
-                "the catch-up sync protects the readable sibling until independent indexing verifies the write");
+            Require(store.ByObject(root.RootId, sibling.ObjectId) is { } pendingSibling &&
+                pendingSibling.Hash == DropboxContentHash.Compute(System.Text.Encoding.UTF8.GetBytes("bravo")) &&
+                !pendingSibling.Flags.HasFlag(ItemFlags.NeedsRehash),
+                "the catch-up sync proves the delta-touched readable sibling inline while unreadable work remains protected");
             await IndexRecoveredGapAsync(store, root, inventory, () => checkpoint);
             await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
             Require(await fx.B.ObserveAsync("a.txt", default) is { } synced &&
@@ -686,6 +688,8 @@ internal static partial class RunChecks
                 row.RunId.StartsWith("reconcile-", StringComparison.Ordinal) && row.Outcome == RunOutcomes.Partial),
                 "the gap run with an unreadable synced folder is Partial, never a failure (failed=" + gapRun.Failed +
                 (gapRun.Failures.Count > 0 ? ": " + gapRun.Failures[0].Reason : "") + ")");
+            Require(store.SyncRetryAt(pair.PairId, "") is null,
+                "replay-pending uses the durable gap obligation, never a synthetic root read retry");
             Require(!store.GapInventoryPending(root.RootId),
                 "the whole-root gap obligation clears once the fresh walk covers every readable path");
             var gaps = (ILocalGapStore)store;

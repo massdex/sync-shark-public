@@ -166,6 +166,17 @@ public sealed partial class SqliteStateStore
         }
     }
 
+    internal long RehashProofOrder(string rootId, string objectId, string hash) => InStore(() =>
+        Convert.ToInt64(StoreSchema.Scalar(_connection, null,
+            """
+            SELECT COALESCE((SELECT q.last_attempt FROM local_rehash q JOIN root r ON r.root_no=q.root_no
+            WHERE r.root_id=$r AND q.object_id=$o AND EXISTS
+            (SELECT 1 FROM file_state f WHERE f.root_no=q.root_no AND f.object_id=q.object_id) AND NOT EXISTS
+            (SELECT 1 FROM file_state f WHERE f.root_no=q.root_no AND f.object_id=q.object_id
+            AND ((f.flags & 256)!=0 OR f.hash IS NOT $h))),0);
+            """,
+            ("$r", rootId), ("$o", objectId), ("$h", RowCodec.HashBlob(hash)))));
+
     public long RehashRevision(string rootId, string objectId) => InStore(() =>
         Convert.ToInt64(StoreSchema.Scalar(_connection, null,
             "SELECT COALESCE((SELECT evidence_revision FROM local_rehash WHERE root_no=(SELECT root_no FROM root WHERE root_id=$r) AND object_id=$o),0);",
@@ -173,8 +184,7 @@ public sealed partial class SqliteStateStore
 
     public bool CompleteIndexingRehash(string rootId, ItemState expected, string hash, long revision) => InStore(() =>
     {
-        if (revision == 0) return false;
-        if (RehashRevision(rootId, expected.ObjectId) == revision) return CompleteRehash(rootId, expected, hash);
+        if (revision != 0 && RehashRevision(rootId, expected.ObjectId) == revision) return CompleteRehash(rootId, expected, hash);
         var root = RootNo(rootId);
         if (root is null) return false;
         // CAS mismatch never writes. A retired/rotated queue may already have published the same proof.
@@ -203,6 +213,13 @@ public sealed partial class SqliteStateStore
         var root = RootNo(rootId);
         if (root is null) return false;
         using var tx = _connection.BeginTransaction();
+        var sameProof = StoreSchema.Scalar(_connection, tx,
+            """
+            SELECT 1 FROM file_state INDEXED BY fs_obj WHERE root_no=$r AND object_id=$o AND
+            ((flags & 256)!=0 OR hash IS NOT $h OR size!=$s OR mtime!=$m OR version_id IS NOT $v) LIMIT 1;
+            """,
+            ("$r", root.Value), ("$o", expected.ObjectId), ("$h", RowCodec.HashBlob(hash)),
+            ("$s", expected.Size), ("$m", expected.Mtime.UtcTicks), ("$v", expected.VersionId)) is null;
         var exact = _reads.AtKey(root.Value, expected.Path, tx).Any(row =>
             row.Item.Path == expected.Path && row.Item.ObjectId == expected.ObjectId &&
             row.Item.Size == expected.Size && row.Item.Mtime == expected.Mtime);
@@ -221,7 +238,10 @@ public sealed partial class SqliteStateStore
         // Accepted proof ends this failure episode; the planning obligation still survives.
         StoreSchema.Execute(_connection, tx,
             "UPDATE local_rehash SET failure_count=0,retry_after=0,last_attempt=$order WHERE root_no=$r AND object_id=$o;",
-            ("$r", root.Value), ("$o", expected.ObjectId), ("$order", NextRehashOrder(root.Value, tx)));
+            ("$r", root.Value), ("$o", expected.ObjectId), ("$order", sameProof
+                ? StoreSchema.Scalar(_connection, tx, "SELECT last_attempt FROM local_rehash WHERE root_no=$r AND object_id=$o;",
+                    ("$r", root.Value), ("$o", expected.ObjectId)) ?? 0L
+                : NextRehashOrder(root.Value, tx)));
         // The queue is also the durable planning obligation. Only settled execution acknowledges it.
         CloseIndexItemFailure(tx, rootId, expected.Path);
         tx.Commit();

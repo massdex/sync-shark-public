@@ -52,6 +52,9 @@ internal static partial class RunChecks
                 Require(fx.A.FullCalls == fullA && fx.B.FullCalls == fullB,
                     "fresh priority changes use provider deltas rather than another bulk inventory");
                 await AssertPriorityAppliedAsync(fx, report);
+                var inline = store.Live(fx.Pair.A.RootId, ["Edit"]).Single();
+                Require(inline.Hash is { } hash && store.RehashProofOrder(fx.Pair.A.RootId, inline.ObjectId, hash) == 0,
+                    "AutoSync acknowledges its inline-proven changed row within the same run");
                 Require(store.PendingGapInventory(fx.Pair.A.RootId) &&
                     (await fx.B.ObserveAsync("bulk-b", default))?.Hash != (await fx.A.ObserveAsync("bulk-b", default))?.Hash,
                     "fresh user changes settle while later gap work remains pending");

@@ -149,6 +149,8 @@ public sealed partial class SyncRun
 
     private void RecordScanFailure(PairDef pair, BothScan scan, string path, bool suppressTransient)
     {
+        scan = ScanRetryFailures(pair, scan, path);
+        if (!ScanFailures(scan).Contains(path, StringComparer.OrdinalIgnoreCase)) return;
         var previous = _store.SyncRetryAt(pair.PairId, path);
         var floor = ScanRetryFloor(scan, path);
         // Preserve existing reviewed authority; the scan must not replace it.

@@ -55,7 +55,7 @@ public sealed partial class SyncRun
         internal Exception? InventoryFailure { get; init; }
         public IReadOnlyDictionary<string, string> IncompleteReasons { get; init; } = new Dictionary<string, string>();
         public InventoryCoverage? ObservedCoverage { get; init; }
-        public long RehashThrough { get; init; }
+        public long RehashThrough { get; set; }
         public IReadOnlySet<string> ReleasedDeletionEvidence { get; init; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         public IReadOnlyDictionary<string, string> PendingDeletionEvidence { get; init; } =
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);

@@ -54,7 +54,8 @@ internal static partial class RunChecks
 
     private static async Task ReconcileGapDebt(bool legacy)
     {
-        using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "reconcile-gap-debt-" + Guid.NewGuid().ToString("N")),
+        var folder = FixtureFolder("reconcile-gap-debt");
+        using var store = SqliteStateStore.Open(folder,
             StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.ContentProofStore = store;
@@ -83,7 +84,7 @@ internal static partial class RunChecks
         Require(items.All(item => fx.A.HashedPaths.Contains(item.Path)),
             "every retained file was hashed: missing=" + string.Join(",", items.Where(item => !fx.A.HashedPaths.Contains(item.Path)).Select(item => item.Path)));
         Require(fx.B.HashedPaths.Count == 0, "trusted counterpart has zero hash requests: actual=" + fx.B.HashedPaths.Count);
-        Require(store.RehashPendingCount(root) == 0, "all 50 files have zero remaining proof debt");
+        Require(store.RehashPendingCount(root) == 0, "all 50 files have zero remaining proof debt: " + RehashDiagnostics(folder, fx.Pair));
         Require(report.Deferred == 0, "all 50 files settle within one run with zero deferred work");
         Require(!store.PendingGapInventory(root) && !gaps.HasGapProtection(root) &&
             gaps.GapObligations(root, items.Select(item => item.ObjectId).ToArray()).Count == 0 &&

@@ -32,6 +32,7 @@ internal static partial class LocalJournalChecks
         await RunChecks.CompleteOwnershipReconciliationAsync(reopened, root, RestartInventory(reopened, root, checkpoint),
             pending, epoch, folder, alreadyProven: "proven.txt");
         await VerifyPostProofJournalEditAsync(reopened, root, checkpoint);
+        await NativeRereadProofAsync(folder);
     }
 
     private static LocalInventory RestartInventory(SqliteStateStore store, RootDef root, NtfsUsnCheckpoint checkpoint) =>

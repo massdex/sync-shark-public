@@ -383,19 +383,22 @@ public sealed partial class LocalInventory : IInventorySource
             if (item.Kind != ItemKind.File) continue;
             if (RetireExcludedProof(io, item, _known.RehashRevision(_root.RootId, item.ObjectId))) continue;
             if ((item.Flags & VerificationBudget.BlockedFlags) != 0) continue;
-            // Persist before reading. Missing/paused/over-budget proof is durable indexing work;
-            // the caller owns its per-effect failure notice and may proceed with unrelated effects.
-            _known.RequireRehash(_root.RootId, item, "content proof pending");
+            // Unproven content keeps write-ahead debt. A proven reread preserves its order
+            // unless changed or failed; revision checking still rejects concurrent invalidation.
+            var proven = item.Hash is not null && !item.Flags.HasFlag(ItemFlags.NeedsRehash);
+            if (!proven) _known.RequireRehash(_root.RootId, item, "content proof pending");
             if (!budget.Admit(item.Size)) continue;
             var revision = _known.RehashRevision(_root.RootId, item.ObjectId);
             LocalGapHashResult proof;
             try { proof = await io.HashAsync(_root, item, budget.AdmitUrgent(_known.IsUserChange(_root.RootId, item.ObjectId)), ct).ConfigureAwait(false); }
             catch (Exception error) when (IsRootUnavailable(error))
             {
+                if (proven) revision = ReflagReread(item);
                 _known.FailIndexingRehash(_root.RootId, item, revision, error.Message);
                 continue;
             }
             ct.ThrowIfCancellationRequested();
+            if (proven && !SameContentProof(item, proof)) revision = ReflagReread(item);
             if (CompleteContentProof(item, revision, proof)) hashes[item.Path] = proof.Hash!;
         }
     }
