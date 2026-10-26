@@ -108,7 +108,7 @@ internal static partial class AutoSyncChecks
             Require(first.GetProperty("pairs").GetArrayLength() == 1,
                 "the first contended read still names the pair read at startup");
             var pair = first.GetProperty("pairs")[0];
-            Require(pair.GetProperty("pairId").GetString() == "p1" && pair.GetProperty("name").GetString() == "p1",
+            Require(pair.GetProperty("PairId").GetString() == "p1" && pair.GetProperty("Name").GetString() == "p1",
                 "the seeded identity keeps the name and exact id read at startup");
             Require(pair.GetProperty("storeStale").GetBoolean() &&
                 pair.GetProperty("urgentPending").ValueKind == JsonValueKind.Null &&
@@ -173,9 +173,9 @@ internal static partial class AutoSyncChecks
         Require(pairs.EnumerateArray().All(pair => pair.GetProperty("storeStale").GetBoolean() &&
             pair.GetProperty("urgentPending").ValueKind == JsonValueKind.Null),
             "memory-only pairs mark unavailable store fields stale");
-        Require(pairs[0].GetProperty("pairId").GetString() == "p9" &&
+        Require(pairs[0].GetProperty("PairId").GetString() == "p9" &&
             pairs[0].GetProperty("progress").ValueKind == JsonValueKind.Null &&
-            pairs[1].GetProperty("pairId").GetString() == "p8" &&
+            pairs[1].GetProperty("PairId").GetString() == "p8" &&
             pairs[1].GetProperty("progress").GetProperty("done").GetInt64() == 1,
             "the pair's live state and progress still come from memory");
         Pass("StatusKeepsMemoryPairsWhenStale");
