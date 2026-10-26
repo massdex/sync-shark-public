@@ -14,7 +14,7 @@ public sealed partial class SyncRun
     // Folder decisions remain refused without subtree evidence (B-172), except an identity-bound
     // case-only spelling choice: it moves one folder and never authorizes descendant effects.
     private const string DecisionFolderNotResolvable =
-        "folder decisions can't be resolved yet â€” decide the files inside, or use a per-path choice";
+        "folder decisions can't be resolved yet - decide the files inside, or use a per-path choice";
 
     /// <summary>The reason a resolved decision could not be applied; the CLI surfaces it with the run result.</summary>
     internal const string DecisionNotApplied = "decision could not be applied";

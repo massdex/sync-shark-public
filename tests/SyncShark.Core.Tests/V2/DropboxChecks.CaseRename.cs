@@ -89,9 +89,9 @@ internal static partial class DropboxChecks
         await CaseSensitiveFolderOccupancyAsync(local, writer);
         var conflict = Planner.Decide(pair.PairId, 4,
             [new PlanRow(conflictBase, changedLocal, newerRemote, new Evidence(false, false, false, false))], options);
-        Require(conflict.Actions.Single().Kind == ActionKind.Hold &&
-            conflict.Notices.Single().Kind == NoticeKind.UserDecision,
-            "both baseline-relative renames require a choice even with different metadata times");
+        Require(conflict.Actions.Single().Kind == ActionKind.Move && conflict.Actions.Single().Target == Side.A &&
+            conflict.Notices.Single().Kind == NoticeKind.AutoConflict,
+            "RQ-035 uses known newer metadata for competing file renames");
         var chosen = Planner.Decide(pair.PairId, 5,
             [new PlanRow(conflictBase, changedLocal, newerRemote, new Evidence(false, false, false, false))],
             options with { Winners = new Dictionary<string, Side?> { [changedLocal.Path] = Side.B } });
@@ -107,6 +107,7 @@ internal static partial class DropboxChecks
             !DropboxPilotClient.SameMoveSpelling("Parent/doc.txt", "Parent/Doc.txt"),
             "Dropbox guarantees exact leaf case, not exact ancestor case");
         await CaseRenameLocalSqliteAsync();
+        await NestedFolderCaseLocalAsync();
         await CaseOutageColdReopenAsync();
         await CaseConflictColdReopenAsync();
         foreach (var scenario in new[] { "normal", "moved", "deleted", "edited", "occupied" })

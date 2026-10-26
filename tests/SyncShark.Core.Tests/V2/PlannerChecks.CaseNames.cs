@@ -91,8 +91,26 @@ internal static partial class PlannerChecks
         AssertEmpty(Decide(Row(Base("mapped", local, cloud), local, cloud)));
     }
 
+    private static void CompetingFileCaseRenames()
+    {
+        foreach (var winner in new[] { Side.A, Side.B })
+        foreach (var tied in new[] { false, true })
+        {
+            var a = F("Parent/REPORT.txt", "a", "same", mtime: !tied && winner == Side.A ? T0.AddMinutes(1) : T0);
+            var b = F("parent/report.txt", "b", "same", mtime: !tied && winner == Side.B ? T0.AddMinutes(1) : T0);
+            var basis = Base("competing-case", a with { Path = "Parent/Report.txt" }, b with { Path = "parent/Report.txt" });
+            var plan = Decide(Row(basis, a, b));
+            Require(tied
+                ? plan.Actions.Single().Kind == ActionKind.Hold && plan.Notices.Single().Kind == NoticeKind.UserDecision
+                : plan.Actions.Single() is { Kind: ActionKind.Move } move && move.Target == Opposite(winner) &&
+                    plan.Notices.Single().Kind == NoticeKind.AutoConflict,
+                "RQ-035 chooses known newer file rename metadata in either direction; ties need a choice");
+        }
+    }
+
     private static void LeafCaseDecisionAndMappingConverge()
     {
+        CompetingFileCaseRenames();
         var folderA = D("Parent/Photos", "folder-a");
         var folderB = D("Parent/photos", "folder-b", DateTimeOffset.UnixEpoch);
         var folderChoice = Decide(Row(Base("folder-case", folderA, folderB), folderA, folderB));
@@ -117,7 +135,7 @@ internal static partial class PlannerChecks
                     plan.Notices.Any(n => n.Kind == NoticeKind.UserDecision), "tied spelling offers a decision");
                 plan = Planner.Decide(PairId, Gen, [row], Opt(winners: new Dictionary<string, Side?> { [a.Path] = winner }));
             }
-            var destination = winner == Side.B ? "parent/report_.txt" : mapped ? "parent/Report:.txt" : a.Path;
+            var destination = winner == Side.B ? "Parent/report_.txt" : mapped ? "parent/Report:.txt" : "parent/Report_.txt";
             Require(plan.Actions.Count == 1 && plan.Actions.Single() is { Kind: ActionKind.Move, Rule: 20 } move &&
                 move.Target == Opposite(winner) && move.Path == destination &&
                 move.FromPath == (winner == Side.A ? b.Path : a.Path) &&
