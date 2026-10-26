@@ -136,14 +136,15 @@ internal static partial class RunChecks
             {
                 if (!bestEffort) WaitForAdmissionDeadline(deadline);
             };
-            var failed = false;
+            RunReport report;
             try
             {
-                await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+                report = await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
             }
-            catch (TimeoutException) { failed = true; }
             finally { FairStoreGate.CleanupBodySettledForTest = null; }
-            Require(failed, "an effectful cleanup that completes after the admission deadline still fails the run");
+            // The shared failure owner turns the timeout into retained retry debt, so the run must not complete.
+            Require(report.Outcome != RunOutcomes.Complete,
+                $"an effectful cleanup that completes after the admission deadline still fails the run (outcome {report.Outcome})");
         }
     }
 
