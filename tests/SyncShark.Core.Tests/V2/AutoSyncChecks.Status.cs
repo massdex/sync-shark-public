@@ -131,8 +131,8 @@ internal static partial class AutoSyncChecks
         using var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
         foreach (var id in new[] { "p1", "p2", "p3" }) store.SavePair(StatusPair(id));
         var seeded = ProductionAutoSyncEngine.StatusCache.Seeded(store.Pairs(), DateTimeOffset.UnixEpoch);
-        var slow = SlowStatusStore.Wrap(store);
-        slow.HistoryDelay = TimeSpan.FromMilliseconds(80);
+        var slow = SlowStatusStore.Wrap(store, out var control);
+        control.HistoryDelay = TimeSpan.FromMilliseconds(80);
         var settings = V2Settings.Default with { StatusStoreTimeout = TimeSpan.FromMilliseconds(120) };
         var watch = Stopwatch.StartNew();
         var (status, cache) = ProductionAutoSyncEngine.ReadStatus([], new Dictionary<string, LiveProgress>(), true, 5,
@@ -142,8 +142,8 @@ internal static partial class AutoSyncChecks
         Require(element.GetProperty("storeStale").GetBoolean(),
             "a read that runs past its deadline answers stale instead of publishing fresh values");
         Require(watch.Elapsed < TimeSpan.FromSeconds(1), "the bounded read returns promptly");
-        Require(slow.HistoryReads < 3,
-            "the projection stops at the deadline instead of reading every pair: " + slow.HistoryReads);
+        Require(control.HistoryReads < 3,
+            "the projection stops at the deadline instead of reading every pair: " + control.HistoryReads);
         Require(cache.AsOf == seeded.AsOf, "an expired projection is never published as the fresh cache");
         Require(element.GetProperty("pairs").GetArrayLength() == 3,
             "the cached projection still names every pair while the read is stale");
@@ -155,8 +155,8 @@ internal static partial class AutoSyncChecks
     {
         var root = Path.Combine(Path.GetTempPath(), "autosync-status-memory-" + Guid.NewGuid().ToString("N"));
         using var store = SqliteStateStore.Open(root, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
-        var slow = SlowStatusStore.Wrap(store);
-        slow.PairsDelay = TimeSpan.FromMilliseconds(200);
+        var slow = SlowStatusStore.Wrap(store, out var control);
+        control.PairsDelay = TimeSpan.FromMilliseconds(200);
         var settings = V2Settings.Default with { StatusStoreTimeout = TimeSpan.FromMilliseconds(50) };
         var states = new[] { new PairAutoState("p9", AutoStatus.Running, null, null, null) };
         var progress = new Dictionary<string, LiveProgress>
@@ -193,12 +193,12 @@ internal static partial class AutoSyncChecks
         internal TimeSpan HistoryDelay { get; set; }
         internal int HistoryReads { get; private set; }
 
-        internal static SlowStatusStore Wrap(IStateStore inner)
+        internal static IStateStore Wrap(IStateStore inner, out SlowStatusStore control)
         {
             var proxy = DispatchProxy.Create<IStateStore, SlowStatusStore>();
-            var typed = (SlowStatusStore)(object)proxy;
-            typed._inner = inner;
-            return typed;
+            control = (SlowStatusStore)(object)proxy;
+            control._inner = inner;
+            return proxy;
         }
 
         protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
