@@ -34,7 +34,7 @@ internal static partial class LocalItems
             var scan = new PilotLocalScanner
             {
                 CloudFilesAware = true,
-                MaximumContentBytes = ReconcileBatch.Current.Value is null ? null : Math.Max(default(long), item.Size)
+                MaximumContentBytes = ReconciliationBudgetContext.Current.Value is null ? null : Math.Max(default(long), item.Size)
             }.ScanAsync(lease, new HashSet<string>(),
                 ct, refreshPaths: [item.Path], traverseDirectory: _ => false).GetAwaiter().GetResult();
             if (scan.Entries.TryGetValue(item.Path, out var entry) && entry.ContentHash is not null)
