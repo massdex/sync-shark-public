@@ -31,6 +31,8 @@ internal static partial class RunChecks
             var run = interrupt
                 ? new SyncRun(store, new FailAfterApply(NewExecutor(store)), fx.Provider, Settings, TimeProvider.System)
                 : fx.Run();
+            // Explicit rescan retains full-inventory completion; journal gaps now belong to reconciliation.
+            await run.RequestRescanAsync(fx.Pair.PairId, [root.RootId], default);
             var report = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
             Require(report.Done == 1 && report.Downloaded == 1 && report.CompletionFailed == interrupt &&
                 store.GapInventoryPending(root.RootId) == interrupt &&
@@ -44,6 +46,7 @@ internal static partial class RunChecks
             fx.Provider.AddWriter(root, await LocalWriter.OpenAsync(root, Side.A, fx.Pair.PairId,
                 LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default, isStateDamage: StorageFailureClassifier.IsStateDamage));
             var run = new SyncRun(reopened, NewExecutor(reopened), fx.Provider, Settings, TimeProvider.System);
+            if (interrupt) await run.RequestRescanAsync(fx.Pair.PairId, [root.RootId], default);
             var report = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
             Require(report.Downloaded == 0 && report.Uploaded == 0 && !report.CompletionFailed && walks <= (interrupt ? 1 : 0) &&
                 !reopened.GapInventoryPending(root.RootId),

@@ -294,6 +294,9 @@ internal static partial class AutoSyncChecks
         await rig.ParkedAsync(AutoStatus.Idle);
         Require(rig.Run.Runs("p1") == 2, "the safety poll runs with no signals");
         Require(old.Disposed && rig.Watches.Created == 4, "the safety poll rebuilds the watches");
+        Require(rig.Run.MonitorOrder.SequenceEqual(new[]
+            { "monitor:p1", "incremental:p1", "monitor:p1", "incremental:p1" }),
+            "startup and signal-free safety poll sample reconciliation before incremental preparation");
         Pass("SafetyPoll_RunsAndRebuilds");
     }
 

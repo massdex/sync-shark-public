@@ -156,7 +156,7 @@ internal static partial class RunChecks
         foreach (var (key, value) in new (string, object)[] { ("$p", 1), ("$a", 1), ("$b", 2),
             ("$before", long.MaxValue), ("$scan", SqliteStateStore.SettleExaminationCap), ("$v", 0), ("$r", -1), ("$o", ""),
             ("$observation", SqliteStateStore.ObservationPlanningReason),
-            ("$flags", (long)ItemFlags.NeedsRehash), ("$gap", 1), ("$done", 1), ("$after", "") })
+            ("$flags", (long)ItemFlags.NeedsRehash), ("$gap", 1), ("$done", 1), ("$after", ""), ("$observed", "[]") })
             command.Parameters.AddWithValue(key, value);
         using var reader = command.ExecuteReader();
         var steps = new List<string>();

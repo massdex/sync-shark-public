@@ -60,6 +60,11 @@ public sealed partial class SqliteStateStore
         return result;
     }
 
+    internal bool HasPlanningBacklog(string pairId) => InStore(() =>
+        StoreSchema.Scalar(_connection, null,
+            "SELECT 1 FROM planning_deferred INDEXED BY planning_deferred_pair WHERE pair_no=$p AND reason<>$user LIMIT 1;",
+            ("$p", PairNo(pairId)), ("$user", UserChangeReason)) is not null);
+
     internal IReadOnlyList<DeferredPlanning> PlanningBacklogPage(string pairId, long afterRoot = -1,
         string afterId = "") => InStore(() =>
     {

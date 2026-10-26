@@ -1,5 +1,9 @@
 {
   "templates": {
+    "reconciliation-deferred-dependencies": "reconciliation coverage: deferred dependencies=",
+    "reconciliation-replay-pending": "Journal replay remains unavailable; reconciliation retains the unknown scope.",
+    "local-watch-replay": "Local watcher overflow: replay requested; journal continuity determines whether reconciliation is needed.",
+    "monitor-scope-decision": "monitor signal -> scope decision: scope=root trigger=",
     "reconciliation-active": "Reconciliation is already active for this pair.",
     "reconciliation-staging-required": "Reconciliation requires persistent staging.",
     "reconciliation-excluded": "excluded: existing sync boundary",

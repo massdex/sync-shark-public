@@ -8,6 +8,7 @@ public sealed partial class SyncRun
         foreach (var side in ReconciliationSides(pair, active.Decision.Trigger))
         {
             var root = side == Side.A ? pair.A : pair.B;
+            if (active.Decision.RootId is { } rootId && root.RootId != rootId) continue;
             if ((active.Decision.Trigger is ReconciliationTrigger.GapSameJournal or
                 ReconciliationTrigger.JournalReplaced or ReconciliationTrigger.JournalPositionInvalid) &&
                 _store is ILocalGapStore gaps && gaps.GapEpoch(root.RootId) is { } epoch)
@@ -30,8 +31,11 @@ public sealed partial class SyncRun
                 completion.Step(() => sql.CompleteGapInventory(rootId, epoch));
             if (active.Decision.Trigger == ReconciliationTrigger.DropboxReset)
                 foreach (var (rootId, basis) in active.ListingBases)
-                    completion.Step(() => _store.CompleteGeneration(
-                        _store.BeginGeneration(rootId, "delta"), basis, true));
+                    completion.Step(() =>
+                    {
+                        _store.CompleteGeneration(_store.BeginGeneration(rootId, "delta"), basis, true);
+                        lock (_stopGate) _pendingResets.Remove((pair.PairId, rootId));
+                    });
         }
         completion.Step(_store.Prune);
         completion.Step(() => sql.ClearRemovalObservation(active.Session + ":work"));

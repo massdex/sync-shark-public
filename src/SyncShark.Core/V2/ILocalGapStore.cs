@@ -4,7 +4,8 @@ namespace Massdex.SyncShark.V2;
 internal interface ILocalGapStore
 {
     LocalGapEpoch? GapEpoch(string rootId);
-    void BeginGap(string rootId, string journalCursor, long boundary, bool trustFileUsn, string reason = "journal history discontinuity");
+    void BeginGap(string rootId, string journalCursor, long boundary, bool trustFileUsn,
+        string reason = "journal history discontinuity", bool protect = true);
     IReadOnlyList<ItemState> GapDiscoveryPage(string rootId, LocalGapEpoch epoch, int limit);
     void GapDiscovered(string rootId, LocalGapEpoch epoch, ItemState item, bool requiresHash);
     void GapDiscoveredBatch(string rootId, LocalGapEpoch epoch, IReadOnlyList<(ItemState Item, bool RequiresHash)> items);

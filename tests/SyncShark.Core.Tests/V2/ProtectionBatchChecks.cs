@@ -182,6 +182,7 @@ internal static class ProtectionBatchChecks
             command.Parameters.AddWithValue("$gap", 1);
             command.Parameters.AddWithValue("$done", 0);
             command.Parameters.AddWithValue("$after", items[6].ObjectId);
+            command.Parameters.AddWithValue("$observed", "[]");
             command.Parameters.AddWithValue("$a", "[{\"n\":0,\"dir\":\"PARENT\",\"name\":\"CLEAR\",\"self\":1}]");
             command.Parameters.AddWithValue("$ranges", "[\"PARENT\",\"MISSING\"]");
             var details = new List<string>();

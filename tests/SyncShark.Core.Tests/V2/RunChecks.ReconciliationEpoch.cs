@@ -19,7 +19,7 @@ internal static partial class RunChecks
             await FirstSyncAsync(fx.Run(), fx);
             var gaps = (ILocalGapStore)store;
             var root = fx.Pair.A.RootId;
-            gaps.BeginGap(root, new NtfsUsnCheckpoint(1, 0, 200, 0).Cursor, 100, true);
+            gaps.BeginGap(root, new NtfsUsnCheckpoint(1, 0, 200, 0).Cursor, 100, true, protect: false);
             var captured = gaps.GapEpoch(root);
             Require(captured is not null && store.GapInventoryPending(root), "fixture starts with a pending gap epoch");
             var selections = 0;
@@ -27,7 +27,7 @@ internal static partial class RunChecks
             {
                 selections++;
                 if (replaceDuringSelection)
-                    gaps.BeginGap(root, new NtfsUsnCheckpoint(2, 0, 300, 0).Cursor, 200, false);
+                    gaps.BeginGap(root, new NtfsUsnCheckpoint(2, 0, 300, 0).Cursor, 200, false, protect: false);
                 return Task.CompletedTask;
             }));
             var writes = fx.B.WriteCalls;

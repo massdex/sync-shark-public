@@ -216,14 +216,14 @@ internal static partial class LocalJournalChecks
             "completion preflight reports real exclusions without querying temporary hash-debt protection");
         queries = store.ProtectionBatchQueries;
         var reconcile = (Task)typeof(SyncRun).GetMethod("ReconcileAsync", hidden)!.Invoke(run,
-            [pair, new ProgressThrottle(null, TimeProvider.System, TimeSpan.Zero), CancellationToken.None, null])!;
+            [pair, new ProgressThrottle(null, TimeProvider.System, TimeSpan.Zero), CancellationToken.None, null, null])!;
         await reconcile;
         LocalChecks.Require(store.ProtectionBatchQueries == queries + 5 && endpointA.WriteCalls == 0 && endpointB.WriteCalls == 0 &&
             store.UnresolvedIntents(pair.PairId).Count == 1025,
             "reconciliation classifies five bounded batches and retains every hash-debt-held intent without effects");
         queries = store.ProtectionBatchQueries;
         await (Task)typeof(SyncRun).GetMethod("ReconcileAsync", hidden)!.Invoke(run,
-            [pair, new ProgressThrottle(null, TimeProvider.System, TimeSpan.Zero), CancellationToken.None, null])!;
+            [pair, new ProgressThrottle(null, TimeProvider.System, TimeSpan.Zero), CancellationToken.None, null, null])!;
         LocalChecks.Require(store.ProtectionBatchQueries == queries + 5 && endpointA.WriteCalls == 0 && endpointB.WriteCalls == 0 &&
             store.UnresolvedIntents(pair.PairId).Count == 1025,
             "next run keeps unresolved hash debt held rather than retiring it as an exclusion");

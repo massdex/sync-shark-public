@@ -40,6 +40,15 @@ internal static partial class AutoSyncChecks
             "exact paths and subtree boundaries have distinct coverage");
         Require(exact.Touches("Parent", folder: true) && !exact.Touches("Parent", folder: false) &&
             exact.Touches("", folder: true), "folder actions include scoped descendant dependencies");
+        var durable = new LocalGapEpoch("epoch", Cursor(7, 120), 90, true, "", false);
+        var restarted = StateMonitor.FromGap(durable);
+        Require(restarted.Trigger == ReconciliationTrigger.GapSameJournal && restarted.SavedCursor == Cursor(7, 90) &&
+            restarted.UnknownScope?.Contains("Parent/Child") == true,
+            "restart reconstructs the lost boundary rather than the advanced replay position");
+        Require(StateMonitor.FromGap(durable with { TrustFileUsn = false }).Trigger == ReconciliationTrigger.JournalReplaced &&
+            StateMonitor.FromGap(durable with { JournalCursor = "invalid" }).Trigger == ReconciliationTrigger.JournalPositionInvalid &&
+            StateMonitor.PlanningBacklog().Trigger == ReconciliationTrigger.PlanningBacklog,
+            "untrusted legacy gaps and planning backlog retain their selection policies");
         Pass("StateMonitorSignals");
     }
 }

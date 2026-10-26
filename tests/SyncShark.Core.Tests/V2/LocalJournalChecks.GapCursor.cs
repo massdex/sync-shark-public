@@ -6,6 +6,7 @@ internal static partial class LocalJournalChecks
 {
     internal static void GapCursorChecks(string folder)
     {
+        BeginGapUnprotected(folder);
         var product = Path.Combine(folder, "gap-cursor-" + Guid.NewGuid().ToString("N"));
         var root = new RootDef("cursor-root", SyncProviders.Local, null, folder, SyncLocalEndpointStore.ObjectId(1, 1));
         var row = new ItemState("file", ItemKind.File, SyncLocalEndpointStore.ObjectId(1, 11), null,

@@ -121,7 +121,7 @@ internal static partial class RunChecks
             const System.Reflection.BindingFlags hidden =
                 System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
             var reconcile = (Task)typeof(SyncRun).GetMethod("ReconcileAsync", hidden)!.Invoke(run,
-                [fx.Pair, new ProgressThrottle(null, TimeProvider.System, TimeSpan.Zero), CancellationToken.None, null])!;
+                [fx.Pair, new ProgressThrottle(null, TimeProvider.System, TimeSpan.Zero), CancellationToken.None, null, null])!;
             await reconcile;
             var result = reconcile.GetType().GetProperty("Result")!.GetValue(reconcile)!;
             var touched = (IReadOnlyList<string>)result.GetType().GetProperty("Touched")!.GetValue(result)!;

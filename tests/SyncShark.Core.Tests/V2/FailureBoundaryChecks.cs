@@ -131,7 +131,8 @@ internal static class FailureBoundaryChecks
         public int Done;
         public int FailureStatuses;
         public LocalGapEpoch? GapEpoch(string rootId) => Epoch;
-        public void BeginGap(string rootId, string journalCursor, long boundary, bool trustFileUsn, string reason = "journal history discontinuity") { }
+        public void BeginGap(string rootId, string journalCursor, long boundary, bool trustFileUsn,
+            string reason = "journal history discontinuity", bool protect = true) { }
         public IReadOnlyList<ItemState> GapDiscoveryPage(string rootId, LocalGapEpoch epoch, int limit) =>
             [new("folder", ItemKind.Folder, "id", null, null, 0, DateTimeOffset.UnixEpoch, ItemFlags.None)];
         public void GapDiscovered(string rootId, LocalGapEpoch epoch, ItemState item, bool requiresHash) { }

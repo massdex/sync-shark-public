@@ -197,17 +197,12 @@ public sealed partial class LocalInventory : IInventorySource
         var rootId = _root.RootId;
         if (_pairId is not null && (WalkCheckpointForTest is null || CapacityQueryForTest is not null)) ObserveCapacity(null);
         PairPause.Check();
-        var (checkpoint, journalDeleted) = ReadWalkCheckpointState();
+        var (checkpoint, _) = ReadWalkCheckpointState();
         var sql = _known as ILocalWalkStore;
-        if (checkpoint is not null && sql?.GapInventoryPending(rootId) == true &&
-            NtfsUsnCheckpoint.TryParseCursor(_known.Cursor(rootId), out var savedJournal, out var savedNext) &&
-            checkpoint.RequiresFullReconciliation(_known.Cursor(rootId)))
-            BeginJournalGap(rootId, savedJournal, savedNext, checkpoint);
         if (checkpoint is null) { sql?.ForgetLocalWalk(rootId); sql = null; }
         var options = JsonSerializer.Serialize(new { _settings.ReplaceOnlineOnlyStubs,
             ProductOwned = _productOwnedPaths.OrderBy(path => path, StringComparer.Ordinal).ToArray() });
         var cursor = sql?.BeginLocalWalk(_root, options, checkpoint) ?? checkpoint?.Cursor ?? _known.Cursor(rootId) ?? string.Empty;
-        BeginFullGap(rootId, cursor, journalDeleted);
         PilotDirectoryLease lease;
         try
         {
@@ -410,6 +405,7 @@ public sealed partial class LocalInventory : IInventorySource
     internal JournalRead? JournalReadForTest { get; set; }
     internal Func<(NtfsUsnCheckpoint? Checkpoint, bool Deleted)>? WalkCheckpointForTest { get; set; }
     internal Action<string>? DirectoryCompletedForTest { get; set; }
+    internal NtfsUsnCheckpoint? JournalCheckpoint() => ReadWalkCheckpointState().Checkpoint;
     private NtfsUsnCheckpoint? ReadWalkCheckpoint() => ReadWalkCheckpointState().Checkpoint;
     private (NtfsUsnCheckpoint? Checkpoint, bool Deleted) ReadWalkCheckpointState()
     {
@@ -570,7 +566,7 @@ public sealed partial class LocalInventory : IInventorySource
             ObserveCapacity(through.Cursor, overflow: true);
         (_known as ILocalGapStore)?.BeginGap(rootId, through.Cursor, next,
             journalId == through.JournalId && next <= through.NextUsn,
-            journalId != through.JournalId ? "journal replaced" : next > through.NextUsn ? "cursor ahead of journal" : "journal wrapped past saved cursor");
+            journalId != through.JournalId ? "journal replaced" : next > through.NextUsn ? "cursor ahead of journal" : "journal wrapped past saved cursor", protect: false);
     }
 
     internal void BeginFullGap(string rootId, string cursor, bool journalDeleted)
@@ -599,7 +595,7 @@ public sealed partial class LocalInventory : IInventorySource
             // would prevent its verification debt from draining. The existing verification
             // summary displays this persisted gap reason without changing retry eligibility.
             var detail = "journal range over limit: metadata rescan and trusted per-file verification; " + reason;
-            (_known as ILocalGapStore)?.BeginGap(rootId, through.Cursor, next, trustFileUsn: true, detail);
+            (_known as ILocalGapStore)?.BeginGap(rootId, through.Cursor, next, trustFileUsn: true, detail, protect: false);
             return Invalid(gen, rootId, cursor, detail);
         }
         return RetryJournal(gen, rootId, cursor, reason);
