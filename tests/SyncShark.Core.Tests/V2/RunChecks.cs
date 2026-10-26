@@ -17,7 +17,13 @@ internal static partial class RunChecks
         await Group(nameof(GapRoutesToReconciliation), GapRoutesToReconciliation, failures);
         await Group(nameof(AutoSyncInScopeFreshChange), AutoSyncInScopeFreshChange, failures);
         await Group(nameof(AutoSyncInScopeDependencies), AutoSyncInScopeDependencies, failures);
+        await Group(nameof(ReconciliationFolderMoveAcrossBatches), ReconciliationFolderMoveAcrossBatches, failures);
+        await Group(nameof(ReconciliationFileMoveAliasesAcrossBatches), ReconciliationFileMoveAliasesAcrossBatches, failures);
+        await Group(nameof(ReconciliationDependencyReason), ReconciliationDependencyReason, failures);
+        await Group(nameof(ReconciliationProofBudgetDefers), ReconciliationProofBudgetDefers, failures);
+        await Group(nameof(SelectionRetryPublishesAfterAutoSync), SelectionRetryPublishesAfterAutoSync, failures);
         await Group(nameof(AutoSyncInScopeIntentHorizon), AutoSyncInScopeIntentHorizon, failures);
+        await Group(nameof(ReconciliationUnreadableFolder), ReconciliationUnreadableFolder, failures);
         await Group(nameof(ReconciliationClearsGapDebt), ReconciliationClearsGapDebt, failures);
         await Group(nameof(ReconciliationClearsLegacyEpoch), ReconciliationClearsLegacyEpoch, failures);
         await Group(nameof(ReconciliationLegacyPartialCoverage), ReconciliationLegacyPartialCoverage, failures);
@@ -27,6 +33,7 @@ internal static partial class RunChecks
         await Group(nameof(ReconciliationClearsSettleEquivalent), ReconciliationClearsSettleEquivalent, failures);
         await Group(nameof(ReconciliationClearsNonUrgentIntake), ReconciliationClearsNonUrgentIntake, failures);
         await Group(nameof(ReconcileSubtreeScopeOnly), ReconcileSubtreeScopeOnly, failures);
+        await Group(nameof(ReconciliationAccountedBacklogDoesNotRestart), ReconciliationAccountedBacklogDoesNotRestart, failures);
         await Group(nameof(ReconciliationEveryItemAccountable), ReconciliationEveryItemAccountable, failures);
         await Group(nameof(ReconciliationRetainedNoticeResolves), ReconciliationRetainedNoticeResolves, failures);
         await Group(nameof(ReconciliationAdmitsAutoSyncBetweenBatches), ReconciliationAdmitsAutoSyncBetweenBatches, failures);

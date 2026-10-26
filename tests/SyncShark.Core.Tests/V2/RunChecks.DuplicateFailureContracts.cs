@@ -39,6 +39,7 @@ internal static partial class RunChecks
         }
         Require(MessageCatalog.Default.Message("firstSyncIncomplete").Length > 0,
             "catalog loader decodes every message, including non-ASCII text");
+        EffectTraceCatalogCoverage();
     }
 
     private static async Task DuplicateFirstFailureAsync()

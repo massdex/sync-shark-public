@@ -192,15 +192,28 @@ internal static partial class LocalJournalChecks
 
     private static async Task SavedCursorWrapAsync(string folder)
     {
+        await SavedCursorBoundaryAsync(Path.Combine(folder, "probe"), discovery: false);
+        await SavedCursorBoundaryAsync(Path.Combine(folder, "discovery"), discovery: true);
+    }
+
+    private static async Task SavedCursorBoundaryAsync(string folder, bool discovery)
+    {
         var product = Path.Combine(folder, "gap-" + Guid.NewGuid().ToString("N"));
-        var root = new RootDef("gap-root", SyncProviders.Local, null, folder, SyncLocalEndpointStore.ObjectId(1, 1));
-        var stamp = DateTimeOffset.UtcNow;
+        var directory = Path.Combine(folder, "saved-cursor-root");
+        LocalChecks.Seed(directory, "1", "old");
+        LocalChecks.Seed(directory, "2", "old");
+        var root = LocalChecks.RootOf(directory, "gap-root");
         const string cursor = "0000000000000001:100";
-        var rows = Enumerable.Range(1, 2).Select(n => new ItemState("folder/" + n, ItemKind.File,
-            SyncLocalEndpointStore.ObjectId(1, (ulong)n + 10), null, new string('a', 64), 3, stamp, ItemFlags.None)).ToArray();
+        ItemState[] rows;
         using (var store = SqliteStateStore.Open(product, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
+            var initial = new LocalInventory(root, Side.A, store, new HashSet<string>(), StorageChecks.Fast,
+                TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage)
+                { WalkCheckpointForTest = () => (new NtfsUsnCheckpoint(1, 0, 100, 0), false) };
             var gen = store.BeginGeneration(root.RootId, "full");
+            var snapshot = await initial.FullAsync(gen, _ => true, null!, default);
+            rows = snapshot.Items.OrderBy(item => item.Path).Select(item => item with
+                { Hash = DropboxContentHash.Compute(System.Text.Encoding.UTF8.GetBytes("old")) }).ToArray();
             store.WriteSnapshot(new(root.RootId, Side.A, gen, cursor, rows, []));
             store.CompleteGeneration(gen, cursor, true);
         }
@@ -221,18 +234,7 @@ internal static partial class LocalJournalChecks
         var epoch = gaps.GapEpoch(root.RootId)!;
         LocalChecks.Require(epoch is { TrustFileUsn: true, Boundary: 100 },
             "same-ID wrap and full fallback preserve the trusted saved boundary");
-        var io = new GapCheckIo(stamp, through.Cursor);
-        await using (var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage))
-            worker.Discover(root, epoch, default);
-        LocalChecks.Require(reopened.ProtectionBatch(root.RootId, ItemFlags.NeedsRehash, [rows[0].Path])[0].Covered,
-            "same-run unchanged USN proof remains held");
-        gaps.PromoteGapDiscovery(root.RootId);
-        var held = reopened.ProtectionBatch(root.RootId, ItemFlags.NeedsRehash, [rows[0].Path, rows[1].Path]);
-        LocalChecks.Require(io.Probes == 2 && io.Reads == 0 && reopened.RehashWatermark(root.RootId) == 0 &&
-            !held[0].Covered && held[1].Covered && gaps.GapHashPage(root.RootId, epoch, 128).Count == 1,
-            "saved-cursor wrap retires USN below boundary without content/debt/hold; equality alone remains a candidate");
-        LocalChecks.Require(reopened.ByObject(root.RootId, rows[0].ObjectId)!.Hash == rows[0].Hash,
-            "trusted unchanged entity retains its reusable content hash");
+        await RunChecks.SavedCursorReconciliationAsync(reopened, root, inventory, rows, epoch, through, folder, discovery);
     }
 
     private static void GapSchemaUpgradeChecks(string folder)
@@ -485,12 +487,8 @@ internal static partial class LocalJournalChecks
             gaps.GapEpoch(root.RootId)!.JournalCursor == through.Cursor,
             "over-limit journal read requests metadata full rescan and trusted per-file gap at saved boundary");
 
-        root = original with { RootId = "missing-saved-cursor" };
-        store.WriteSnapshot(new Snapshot(root.RootId, Side.A, store.BeginGeneration(root.RootId, "full"), "", rows, []));
-        inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), StorageChecks.Fast, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage);
-        await inventory.FullAsync(1, _ => true, null!, default);
-        LocalChecks.Require(gaps.GapEpoch(root.RootId) is { TrustFileUsn: false } && gaps.HasGapProtection(root.RootId),
-            "full scan with retained rows but no readable saved cursor starts untrusted gap verification");
+        // Full walks no longer own gap creation. Preserve the missing-cursor guarantee through reconciliation.
+        await RunChecks.MissingCursorReconciliationAsync(Path.Combine(product, "missing-cursor-proof"));
 
         root = original with { RootId = "initial-resume" };
         store.WriteSnapshot(new Snapshot(root.RootId, Side.A, store.BeginGeneration(root.RootId, "full"), "", rows.Select(r => r with { Hash = null }).ToArray(), []));

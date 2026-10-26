@@ -119,6 +119,8 @@ internal sealed class CountingWriter : IEndpointWriter, IRecoveryAvailability, I
     public int Calls => Puts + Moves + Deletes + MkDirs + Preserves;
     public Action<string>? OnRead { get; set; }
     public Action<string>? OnContentRead { get; set; }
+    public Action<string, string>? OnEffect { get; set; }
+    public Action<SyncAction, ItemState?>? OnPut { get; set; }
 
     /// <summary>
     /// When set, every effect after the first waits here until the run is cancelled, and the first such wait completes
@@ -150,14 +152,19 @@ internal sealed class CountingWriter : IEndpointWriter, IRecoveryAvailability, I
     {
         await ParkUnlessFirstAsync(ct).ConfigureAwait(false);
         Interlocked.Increment(ref _puts);
+        OnEffect?.Invoke(a.Kind.ToString(), a.Path);
+        OnPut?.Invoke(a, null);
         if ((PutFailure?.Invoke(a) ?? PutError) is { } error) throw error;
-        return await _inner.PutAsync(a, content, ct).ConfigureAwait(false);
+        var result = await _inner.PutAsync(a, content, ct).ConfigureAwait(false);
+        OnPut?.Invoke(a, result);
+        return result;
     }
 
     public async Task<ItemState> MoveAsync(SyncAction a, CancellationToken ct)
     {
         await ParkUnlessFirstAsync(ct).ConfigureAwait(false);
         Interlocked.Increment(ref _moves);
+        OnEffect?.Invoke(a.Kind.ToString(), a.Path);
         return await _inner.MoveAsync(a, ct).ConfigureAwait(false);
     }
 
@@ -165,6 +172,7 @@ internal sealed class CountingWriter : IEndpointWriter, IRecoveryAvailability, I
     {
         await ParkUnlessFirstAsync(ct).ConfigureAwait(false);
         Interlocked.Increment(ref _deletes);
+        OnEffect?.Invoke(a.Kind.ToString(), a.Path);
         await _inner.DeleteAsync(a, ct).ConfigureAwait(false);
     }
 
@@ -172,12 +180,14 @@ internal sealed class CountingWriter : IEndpointWriter, IRecoveryAvailability, I
     {
         await ParkUnlessFirstAsync(ct).ConfigureAwait(false);
         Interlocked.Increment(ref _mkDirs);
+        OnEffect?.Invoke(nameof(ActionKind.MkDir), path);
         return await _inner.MkDirAsync(path, ct).ConfigureAwait(false);
     }
 
     public Task<RecoveryRef> PreserveAsync(ItemState victim, string actionId, CancellationToken ct)
     {
         Interlocked.Increment(ref _preserves);
+        OnEffect?.Invoke("Preserve", victim.Path);
         return _inner.PreserveAsync(victim, actionId, ct);
     }
 
@@ -260,6 +270,7 @@ internal sealed class ScriptedInventory : IInventorySource
     /// <summary>Full listings and deltas report the whole root as one incomplete subtree.</summary>
     public bool Incomplete { get; init; }
     public IReadOnlyList<string> Unreadable { get; set; } = [];
+    public IReadOnlyDictionary<string, string> UnreadableReasons { get; set; } = new Dictionary<string, string>();
     public string? LinkPath { get; init; }
 
     /// <summary>While set, HashAsync answers nothing, as when hashing fails.</summary>
@@ -283,33 +294,39 @@ internal sealed class ScriptedInventory : IInventorySource
     public string? ThrowHashPath { get; set; }
     public Exception? HashError { get; set; }
     public Exception? FullError { get; set; }
+    public Action? OnFull { get; set; }
     private sealed class UnknownHashFailure : Exception { }
     public Action? OnHash { get; set; }
 
     public async Task<Snapshot> FullAsync(long gen, Func<string, bool> include, IProgress<string> p,
         CancellationToken ct)
     {
+        OnFull?.Invoke();
         if (FullError is { } error) throw error;
         var snapshot = await _inner.FullAsync(gen, include, p, ct);
         return snapshot with
         {
             Items = snapshot.Items.Where(item => !Unreadable.Any(path => PairPath.IsSelfOrUnder(item.Path, path)))
                 .Select(item => item.Path == LinkPath ? item with { Flags = ItemFlags.Link } : Hashless ? item with { Hash = null } : item).ToArray(),
-            IncompleteSubtrees = Incomplete ? [string.Empty] : Unreadable.Concat(snapshot.IncompleteSubtrees).ToArray()
+            IncompleteSubtrees = Incomplete ? [string.Empty] : Unreadable.Concat(snapshot.IncompleteSubtrees).ToArray(),
+            IncompleteReasons = snapshot.IncompleteReasons.Concat(UnreadableReasons).ToDictionary(entry => entry.Key, entry => entry.Value)
         };
     }
 
     /// <summary>When set, ChangesSinceAsync throws this (an account that lost access before the scan).</summary>
     public Exception? ChangesError { get; set; }
+    public Action? OnChanges { get; set; }
 
     public async Task<Delta> ChangesSinceAsync(string cursor, long gen, Func<string, bool> include, CancellationToken ct)
     {
+        OnChanges?.Invoke();
         if (ChangesError is { } error) throw error;
         var delta = await _inner.ChangesSinceAsync(cursor, gen, include, ct);
         return delta with
         {
             Changes = delta.Changes.Where(item => !Unreadable.Any(path => PairPath.IsSelfOrUnder(item.Path, path))).ToArray(),
-            IncompleteSubtrees = Incomplete ? [string.Empty] : Unreadable.Concat(delta.IncompleteSubtrees).ToArray()
+            IncompleteSubtrees = Incomplete ? [string.Empty] : Unreadable.Concat(delta.IncompleteSubtrees).ToArray(),
+            IncompleteReasons = delta.IncompleteReasons.Concat(UnreadableReasons).ToDictionary(entry => entry.Key, entry => entry.Value)
         };
     }
 

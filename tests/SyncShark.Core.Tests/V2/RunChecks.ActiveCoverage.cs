@@ -35,6 +35,54 @@ internal static partial class RunChecks
         finally { release.TrySetResult(); await run.StopAsync(); }
     }
 
+    private static async Task ReconciliationFolderMoveAcrossBatches()
+    {
+        using var store = SqliteStateStore.Open(FixtureFolder("reconcile-folder-batches"),
+            StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
+        var fx = Build(suppliedStore: store);
+        fx.A.Seed("Parent", "", ItemKind.Folder);
+        fx.A.Seed("Parent/first.txt", "first");
+        fx.A.Seed("Parent/last.txt", "last");
+        await FirstSyncAsync(fx.Run(), fx);
+        await fx.A.MoveAsync(new SyncAction("seed-move", 25, ActionKind.Move, Side.A,
+            "Moved", "Parent", null, null, false, null), default);
+        var run = new SyncRun(store, fx.Executor, fx.Provider,
+            Settings with { ReconciliationBatch = new(1, 1024) }, TimeProvider.System);
+        var report = await run.ReconcileScopeAsync(fx.Pair.PairId,
+            new(null, ReconciliationScope.Root, ReconciliationTrigger.JournalReplaced), new RecordingProgress(), default);
+        Require(!report.CompletionFailed && report.Failed == 0 && report.Moved > 0 &&
+            report.Uploaded == 0 && report.Downloaded == 0 && report.Deleted == 0,
+            "folder split from later child batches remains a move, not copy/delete");
+        await MirrorAsync(fx);
+        Require(!store.UnresolvedNotices(fx.Pair.PairId).Any(notice => notice.Path == "Moved" || notice.Path == "Parent"),
+            "successful deferred folder pass leaves no unresolved dependency notice");
+    }
+
+    private static async Task ReconciliationFileMoveAliasesAcrossBatches()
+    {
+        foreach (var side in new[] { Side.A, Side.B })
+        {
+            using var store = SqliteStateStore.Open(FixtureFolder("reconcile-move-alias-" + side),
+                StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
+            var fx = Build(suppliedStore: store);
+            fx.A.Seed("z-original.txt", "unchanged content");
+            await FirstSyncAsync(fx.Run(), fx);
+            var endpoint = side == Side.A ? fx.A : fx.B;
+            await endpoint.MoveAsync(new SyncAction("seed-file-move", 9, ActionKind.Move, side,
+                "a-renamed.txt", "z-original.txt", null, null, false, null), default);
+            var run = new SyncRun(store, fx.Executor, fx.Provider,
+                Settings with { ReconciliationBatch = new(1, 1024) }, TimeProvider.System);
+            var report = await run.ReconcileScopeAsync(fx.Pair.PairId,
+                new(null, ReconciliationScope.Root, ReconciliationTrigger.ScheduledConsistency), new RecordingProgress(), default);
+            Require(!report.CompletionFailed && report.Failed == 0 && report.Moved == 1 &&
+                report.Uploaded == 0 && report.Downloaded == 0 && report.Deleted == 0,
+                "fresh old/current aliases preserve a file move across one-path batches on " + side);
+            Require(!store.UnresolvedNotices(fx.Pair.PairId).Any(notice => notice.ReasonKey == "edit-beats-delete"),
+                "a move is not misclassified as an edit versus stale deletion on " + side);
+            await MirrorAsync(fx);
+        }
+    }
+
     private static Task AutoSyncInScopeDependencies()
     {
         using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "coverage-dependency-" + Guid.NewGuid().ToString("N")),
@@ -65,6 +113,16 @@ internal static partial class RunChecks
             "deferred folder staging remains unknown between repair passes");
         b.ExactCreationObserved.Add(item.Path);
         Require(!repairing.Unknown(Side.A, item.Path), "later exact-path observation overrides staged uncertainty");
+        var batch = BatchFor(folder);
+        batch.AliasPaths.Add(item.Path);
+        var aliasCoverage = new ReconciliationCoverage(decision, false, "alias-session", store,
+            new HashSet<Side> { Side.A, Side.B }, new(a, b), batch.UnobservedAlias);
+        Require(aliasCoverage.Unknown(Side.A, item.Path) &&
+            aliasCoverage.DeferDependencies(new(fx.Pair.PairId, 0, [update], [])).Actions.Count == 0,
+            "one-sided freshness never authorizes an alias-only effect");
+        batch.ObservedAliases.Add(item.Path);
+        Require(aliasCoverage.DeferDependencies(new(fx.Pair.PairId, 0, [update], [])).Actions.Count == 1,
+            "both-side batch observation releases the exact alias effect");
         return Task.CompletedTask;
     }
 }

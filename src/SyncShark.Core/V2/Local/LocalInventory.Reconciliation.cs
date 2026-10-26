@@ -5,7 +5,8 @@ public sealed partial class LocalInventory
     internal Func<IReadOnlyList<SyncDiscoveryRoot>, CancellationToken, Task<SyncDiscoveryResult?>>? DiscoveryReadForTest { get; set; }
 
     internal async Task<bool> EnumerateMetadataAsync(
-        Func<IReadOnlyList<(ItemState Item, long? Usn)>, Task> accept, CancellationToken ct)
+        Func<IReadOnlyList<(ItemState Item, long? Usn)>, Task> accept, CancellationToken ct,
+        Action<IReadOnlyList<string>, IReadOnlyDictionary<string, string>>? incomplete = null)
     {
         using var lease = PilotDirectoryLease.Open(_root.RootPath, _rootIdentity);
         var root = new SyncDiscoveryRoot(lease.Path, _volume, _rootFileId);
@@ -25,8 +26,9 @@ public sealed partial class LocalInventory
         }
         RunTrace.Emit("reconciliation selection source: metadata walk with file USN fallback");
         var scan = await ScanAsync(lease, ct, _ => true, null, null);
-        if (!scan.Complete || DecisionPaths(scan, _ => true).Count > 0)
-            throw new IOException(string.Join("; ", DecisionReasons(scan, _ => true).Values));
+        var failed = DecisionPaths(scan, _ => true);
+        if (!scan.Complete && failed.Count == 0) failed = [string.Empty];
+        incomplete?.Invoke(failed, DecisionReasons(scan, _ => true));
         foreach (var page in scan.Entries.Values.Chunk(V2Settings.PlanningObservationBatchRows))
             await accept(page.Select(item => (LocalItems.FromScan(item), (long?)null)).ToArray());
         return false;

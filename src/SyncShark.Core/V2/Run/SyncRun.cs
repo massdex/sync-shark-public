@@ -874,7 +874,7 @@ public sealed partial class SyncRun : ISyncRun
             return new(null, FailedRun(pairId, [new ActionResult(string.Empty, Outcome.Failed, null, null, null, error.Message)]), null);
         }
 
-        IReadOnlyList<ReconciliationCoverage> coverages = batch is null ? ActiveCoverages(pair, ref scan) : [];
+        var coverages = ActiveCoverages(pair, ref scan, batch);
         RecordScanRetries(pair, scan, batch?.Paths);
         var rootsComplete = !scan.A.IncompleteSubtrees.Contains(string.Empty) &&
             !scan.B.IncompleteSubtrees.Contains(string.Empty);
@@ -1029,7 +1029,7 @@ public sealed partial class SyncRun : ISyncRun
         plan = ApplySafetyFilter(pair, ActionPredicates(retryPair, links, retrySelection), plan);
         RaiseLinksSummary(pair, current);
         var openNotices = _store.UnresolvedNotices(pair.PairId);
-        RetainPlanningFailures(pair, plan);
+        RetainPlanningFailures(pair, plan, batch is not null);
         WriteNotices(plan.Notices);
         RefreshRetryProtection();
         plan = ApplySafetyFilter(pair, ActionPredicates(retryPair, links.WithPending(
@@ -1078,7 +1078,7 @@ public sealed partial class SyncRun : ISyncRun
                 // If that write failed, retain the previous cursor for safe replay.
                 var retrySaved = completion.Step(() => UpdateRetryWork(pair, plan, tally, CompletionRetries(pairId, batch, plan, retries),
                     execution.Pending, evaluated, scan.A.Complete && scan.B.Complete));
-                retrySaved &= completion.Step(() => RetainPlanningFailures(pair, plan));
+                retrySaved &= completion.Step(() => RetainPlanningFailures(pair, plan, batch is not null));
                 completion.Step(() => CloseResolvedNotices(openNotices, plan, tally, path => evaluated(path) &&
                     _store.SyncRetryAt(pairId, path) is not { Held: not null, Kind: not "decision" }));
                 await completion.StepAsync(() => CloseArrivedReplacementsAsync(pair, openNotices, plan.Gen, ct));

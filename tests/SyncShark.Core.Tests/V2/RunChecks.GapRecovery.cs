@@ -24,6 +24,7 @@ internal static partial class RunChecks
             ("catch-up-unreadable-subtree", CatchUpUnreadableSubtreeAsync),
             ("catch-up-fresh-fallback", CatchUpFreshFallbackUnreadableSubtreeAsync),
             ("catch-up-synced-folder-in-gap", GapRetainsEarlierSyncedUnreadableFolderAsync),
+            ("reconcile-large-proof", ReconciliationLargeProofConverges),
             ("catch-up-second-run", CatchUpRetrySurvivesSecondCatchUpAsync),
             ("replaced-directory-incomplete", ReplacedDirectoryIncompleteNotDeletedAsync),
             ("sleeping-root-retry-replay", SleepingLocalRootRetryClearsAfterReplayAsync),
@@ -51,6 +52,9 @@ internal static partial class RunChecks
         LocalChecks.Seed(directory, "file.txt", "old");
         using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
+        var diagnostics = cause == "cloud-outage" ? new GapRecoveryDiagnostics() : null;
+        diagnostics?.Attach(fx.WriterA, Side.A);
+        diagnostics?.Attach(fx.WriterB, Side.B);
         var root = LocalChecks.RootOf(directory, "ra");
         var pair = fx.Pair with { A = root };
         store.SavePair(pair);
@@ -93,13 +97,36 @@ internal static partial class RunChecks
             }
             return true;
         }
-        inventory.DirectoryCompletedForTest = _ =>
+        inventory.BeforeTargetedRefreshLeaseForTest = () => diagnostics?.Add("targeted-read A begins");
+        inventory.AfterRefreshScan = () => diagnostics?.Add("targeted-read A completed");
+        inventory.DirectoryCompletedForTest = path =>
         {
+            diagnostics?.Add("metadata-walk A interrupted after directory " + path);
             if (cause == "read-timeout") throw new TimeoutException("synthetic mid-walk read timeout");
             if (cause == "read-outage") throw new IOException("synthetic mid-walk outage");
             throw new GapWalkInterrupted();
         };
         fx.Provider.AddInventory(root, inventory);
+        ScriptedInventory? cloud = null;
+        if (cause == "cloud-outage")
+        {
+            fx.A.DropboxHashes = fx.B.DropboxHashes = true;
+            // A is fresh after the gap. B's earlier listing is safe for CopyNew because
+            // DropboxWriter.PutAsync passes a null revision to CommitInfo: add mode,
+            // no autorename, strict_conflict. An occupied target becomes an
+            // ExpectedTargetMismatchException (DropboxItems.MapWriteError), never overwrite.
+            fx.Provider.AddWriter(root, await LocalWriter.OpenAsync(root, Side.A, pair.PairId,
+                LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default, isStateDamage: StorageFailureClassifier.IsStateDamage));
+            cloud = new ScriptedInventory(fx.B)
+            {
+                OnFull = () => diagnostics?.Add("full-read B begins"),
+                OnChanges = () => diagnostics?.Add("delta-read B begins")
+            };
+            fx.Provider.AddInventory(pair.B, cloud);
+        }
+        inventory.DiscoveryReadForTest = (_, _) => Task.FromResult<SyncDiscoveryResult?>(null);
+        await using var owner = new GapRecoveryRun(fx.Run());
+        var run = owner.Run;
         if (cause == "preview")
         {
             inventory.DirectoryCompletedForTest = null;
@@ -109,7 +136,7 @@ internal static partial class RunChecks
             inventory.CapacityQueryForTest = _ => { queries++; return [1, 0, 200, 0, JournalSizing.Minimum,
                 SyncSharkJournalNative.Delta, 1000 * JournalSizing.Minimum, serial]; };
             inventory.CapacityQueueForTest = (_, _, _) => grows++;
-            var plan = await fx.Run().PreviewIncrementalAsync(pair.PairId, new RecordingProgress(), default);
+            var plan = await run.PreviewIncrementalAsync(pair.PairId, new RecordingProgress(), default);
             Require(plan.Plan.RunUnavailable is null && queries > 0 && grows == 0 && inventory.ObserveOnly,
                 "real preview pipeline observes overflow without ever scheduling journal growth");
             Require(store.PendingJournal(serial)?.State.Requested > JournalSizing.Minimum &&
@@ -119,9 +146,14 @@ internal static partial class RunChecks
         }
         try
         {
-            var report = await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+            var report = await run.IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+            diagnostics?.Report(report);
+            diagnostics?.Check(report.Failed == 0 && report.Uncertain == 0,
+                "cloud fixture seed CopyNew completes with matching provider content evidence");
+            await owner.DrainAsync(pair.PairId, monitor: true);
             if (cause is "read-outage" or "read-timeout")
-                Require(report.Outcome == RunOutcomes.Partial && store.SyncRetryAt(pair.PairId, "") is { Kind: "scan" } &&
+                Require(store.ReadRunHistory(pair.PairId, 10).Any(row => row.RunId.StartsWith("reconcile-", StringComparison.Ordinal) &&
+                    row.Outcome == RunOutcomes.Partial) && store.SyncRetryAt(pair.PairId, "") is { Kind: "scan" } &&
                     store.OpenNotices(pair.PairId).Any(n => n.ReasonKey == "sync-retry"),
                     "read outage finishes Partial with durable root retry and notice");
         }
@@ -145,9 +177,9 @@ internal static partial class RunChecks
         // fixtures below deliberately finish and promote discovery before introducing a
         // later write; its ordinary rehash summary need not repeat a discharged gap reason.
         if (cause is "overflow" or "untrusted" or "read-outage" or "read-timeout" or "cloud-outage")
-            Require(gaps.HasGapProtection(root.RootId) &&
-                new RehashProtection(store, pair).Summary(pair.PairId).Detail.Contains("synthetic overflow", StringComparison.Ordinal),
-                cause + ": active verification summary exposes the floor fallback reason");
+            Require(store.GapInventoryPending(root.RootId) &&
+                StateMonitor.FromGap(epoch).UnknownScope is not null,
+                cause + ": the durable gap retains unknown-path coverage until reconciliation observes it");
         // Publish independently completed verification BEFORE the outage run. Otherwise
         // the unrelated background gap hold would correctly prevent the later upload,
         // or promoting it on the recovery run would itself supply a dirty-path handoff.
@@ -168,24 +200,22 @@ internal static partial class RunChecks
         inventory.DirectoryCompletedForTest = null;
         emitWrite = true;
         reads.Clear();
-        ScriptedInventory? cloud = null;
+        var putsBeforeOutage = fx.WriterB.Puts;
+        var gapHash = DropboxContentHash.Compute(System.Text.Encoding.UTF8.GetBytes("new"));
         if (cause == "cloud-outage")
         {
-            fx.A.DropboxHashes = fx.B.DropboxHashes = true;
             // A newly discovered entity has no prior rehash handoff to mask lost root planning debt.
             LocalChecks.Seed(directory, "gap-added.txt", "gap-created");
-            fx.Provider.AddWriter(root, await LocalWriter.OpenAsync(root, Side.A, pair.PairId,
-                LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default, isStateDamage: StorageFailureClassifier.IsStateDamage));
-            cloud = new ScriptedInventory(fx.B) { FullError = new IOException("cloud root unavailable"),
-                ChangesError = new IOException("cloud root unavailable") };
-            fx.Provider.AddInventory(pair.B, cloud);
+            diagnostics?.Add($"outage begins puts={fx.WriterB.Puts}");
+            cloud!.FullError = new IOException("cloud root unavailable");
+            cloud.ChangesError = new IOException("cloud root unavailable");
         }
         if (cause == "overflow")
         {
             store.SavePair(pair with { IgnoreRules = ["FolderName:cache"] });
             store.SaveSyncRetry(pair.PairId, new("", "run", 1, "previous completion failed", DateTimeOffset.MinValue));
         }
-        var completed = await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+        var completed = await run.IncrementalAsync(pair.PairId, new RecordingProgress(), default);
         // This inventory fixture uses a fake local writer (except cloud-outage), so
         // a real-file copy may fail independently. Assert bookkeeping, not effect success.
         Require(!completed.CompletionFailed, cause + ": root retry does not fail completion bookkeeping");
@@ -202,20 +232,32 @@ internal static partial class RunChecks
         await IndexRecoveredGapAsync(store, root, inventory, () => checkpoint);
         Require(store.ByObject(root.RootId, original.ObjectId)?.Hash == DropboxContentHash.Compute(System.Text.Encoding.UTF8.GetBytes("new")),
             cause + ": same-size same-mtime crash-window write is rehashed by the independent index path");
-        Require(!store.GapInventoryPending(root.RootId) && store.Cursor(root.RootId) == checkpoint.Cursor,
-            cause + ": completed full side settles obligation and commits fresh cursor");
+        await owner.DrainAsync(pair.PairId, monitor: true);
+        Require(store.GapInventoryPending(root.RootId) == (cause == "cloud-outage") &&
+            store.Cursor(root.RootId) == checkpoint.Cursor,
+            cause + ": reconciliation retains unobserved cloud work and preserves the replay cursor");
         if (cause == "cloud-outage")
         {
-            Require(fx.WriterB.Puts == 0 && store.SyncRetryAt(pair.PairId, "") is { Kind: "scan" },
-                "cloud root outage blocks gap-time upload and retains root retry");
+            var gapPuts = diagnostics!.Puts(Side.B, "file.txt", gapHash, completed: false);
+            diagnostics.Add($"outage check before={putsBeforeOutage} after={fx.WriterB.Puts} gap-content puts={gapPuts} retry={store.SyncRetryAt(pair.PairId, "")?.Kind}");
+            diagnostics.Check(fx.WriterB.Puts == putsBeforeOutage && gapPuts == 0 &&
+                store.SyncRetryAt(pair.PairId, "") is { Kind: "scan" },
+                "cloud root outage blocks every upload including gap-time content and retains root retry");
             cloud!.FullError = cloud.ChangesError = null;
             var retry = store.SyncRetryAt(pair.PairId, "")!;
             store.SaveSyncRetry(pair.PairId, retry with { RetryAfter = DateTimeOffset.MinValue });
             emitWrite = false; // No delta carries the edit again: only durable root retry can recover it.
             // The targeted root retry uses the same directory scanner as a full walk.
             // Do not poison that required reread with the full-walk interruption hook.
-            await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
-            Require((await fx.B.ObserveAsync("file.txt", default))?.Hash == DropboxContentHash.Compute(System.Text.Encoding.UTF8.GetBytes("new")) &&
+            await run.IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+            await owner.DrainAsync(pair.PairId, monitor: true);
+            var recoveredPuts = diagnostics.Puts(Side.B, "file.txt", gapHash, completed: true);
+            diagnostics.Add($"recovery gap-content attempts={diagnostics.Puts(Side.B, "file.txt", gapHash, completed: false)} completed={recoveredPuts}");
+            diagnostics.Check(recoveredPuts == 1 && diagnostics.Puts(Side.B, "file.txt", gapHash, completed: false) == 1,
+                "cloud recovery uploads the gap-time content exactly once");
+            diagnostics.Check(!store.GapInventoryPending(root.RootId) && store.Cursor(root.RootId) == checkpoint.Cursor,
+                "cloud recovery completes the unknown scope without moving the replay cursor");
+            diagnostics.Check((await fx.B.ObserveAsync("file.txt", default))?.Hash == DropboxContentHash.Compute(System.Text.Encoding.UTF8.GetBytes("new")) &&
                 (await fx.B.ObserveAsync("gap-added.txt", default))?.Hash == DropboxContentHash.Compute(System.Text.Encoding.UTF8.GetBytes("gap-created")) &&
                 store.SyncRetryAt(pair.PairId, "") is null, "next run syncs gap-time edit and newly discovered file through root retry with an empty delta");
         }
@@ -575,8 +617,8 @@ internal static partial class RunChecks
 
     // F1 (review-gapscope-1): the core claim of the settle change is a folder that was SYNCED EARLIER
     // (stored rows and a baseline), then receives a same-size, same-mtime content edit and becomes
-    // unreadable (an ACL deny) during a journal gap. The whole-root gap obligation must still settle
-    // because the fresh walk covered every readable path, while the folder keeps gap protection, its
+    // unreadable (an ACL deny) during a journal gap. Reconciliation keeps the root obligation
+    // until the unreadable path is observed; the folder retains unknown-scope protection, its
     // durable retry and its notice and nothing inside it is deleted or uploaded. Once access returns,
     // the gap's per-file check must observe the new content - the same-size, same-mtime write a
     // metadata-only re-read cannot see - sync it and close the notice. Real ACLs, scanner, store and
@@ -606,12 +648,15 @@ internal static partial class RunChecks
             inventory.GapIo = new LocalGapIo(store, Settings, new HashSet<string>(), () => false);
             inventory.JournalReadForTest = NoJournalChanges;
             fx.Provider.AddInventory(root, inventory);
+            inventory.DiscoveryReadForTest = (_, _) => Task.FromResult<SyncDiscoveryResult?>(null);
+            await using var owner = new GapRecoveryRun(fx.Run());
+            var run = owner.Run;
             // The local inventory's content hash is the Dropbox content hash; make the fake endpoints
             // agree so a later upload can be compared with the local scan's hash.
             fx.A.DropboxHashes = fx.B.DropboxHashes = true;
             fx.Provider.AddWriter(root, await LocalWriter.OpenAsync(root, Side.A, pair.PairId,
                 LocalChecks.InstallationId, Path.Combine(folder, "recovery"), default, isStateDamage: StorageFailureClassifier.IsStateDamage));
-            var first = await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+            var first = await run.IncrementalAsync(pair.PairId, new RecordingProgress(), default);
             Require(first.Failed == 0, "the fixture syncs the folder before the gap (failed=" + first.Failed +
                 (first.Failures.Count > 0 ? ": " + first.Failures[0].Reason : "") + ")");
             var held = store.Live(root.RootId, ["locked/hidden.txt"]).Single();
@@ -624,18 +669,20 @@ internal static partial class RunChecks
             LocalChecks.Seed(directory, "locked/hidden.txt", "new");
             File.SetLastWriteTimeUtc(Path.Combine(locked, "hidden.txt"), held.Mtime.UtcDateTime);
             AddDirectoryRule(locked, deny);
-            // The catch-up replay overflows, which starts a journal gap followed by a fresh full walk.
+            // Replay overflows; the separate reconciliation owner inventories the unknown scope.
             inventory.JournalReadForTest = OverLimitJournal;
-            var gapRun = await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
-            Require(gapRun.Failed == 0 && gapRun.Outcome == RunOutcomes.Partial,
+            var gapRun = await run.IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+            await owner.DrainAsync(pair.PairId, monitor: true);
+            Require(gapRun.Failed == 0 && store.ReadRunHistory(pair.PairId, 10).Any(row =>
+                row.RunId.StartsWith("reconcile-", StringComparison.Ordinal) && row.Outcome == RunOutcomes.Partial),
                 "the gap run with an unreadable synced folder is Partial, never a failure (failed=" + gapRun.Failed +
                 (gapRun.Failures.Count > 0 ? ": " + gapRun.Failures[0].Reason : "") + ")");
-            Require(!store.GapInventoryPending(root.RootId),
-                "the whole-root gap obligation clears once the fresh walk covers every readable path");
+            Require(store.GapInventoryPending(root.RootId),
+                "the reconciliation obligation remains until the unreadable folder is observed");
             var gaps = (ILocalGapStore)store;
             var epoch = gaps.GapEpoch(root.RootId);
-            Require(epoch is not null && gaps.HasGapProtection(root.RootId),
-                "the unreadable, previously synced folder keeps gap protection");
+            Require(epoch is not null && StateMonitor.FromGap(epoch).UnknownScope is not null,
+                "the unreadable, previously synced folder keeps durable unknown-scope protection");
             Require(store.SyncRetryAt(pair.PairId, "locked") is { Kind: "scan" },
                 "the unreadable folder keeps its durable retry");
             Require(store.OpenNotices(pair.PairId).Count(n => n.ReasonKey == "sync-retry" && n.Path == "locked") == 1,
@@ -643,42 +690,21 @@ internal static partial class RunChecks
             Require(fx.WriterA.Deletes + fx.WriterB.Deletes == 0 &&
                 await fx.B.ObserveAsync("locked/hidden.txt", default) is { } blocked && blocked.Hash == oldHash,
                 "nothing inside the unreadable folder is deleted or uploaded while it is held");
-            // Drive the gap's metadata verification through the store seams. This stands in for the
-            // background worker (this fixture has no real journal to probe); the promotion is the real
-            // store path. The readable sibling is proved unchanged; the unreadable file still needs a hash.
-            var discovered = gaps.GapDiscoveryPage(root.RootId, epoch!, 128)
-                .Select(item => (item, requiresHash: item.Path == "locked/hidden.txt")).ToArray();
-            gaps.GapDiscoveredBatch(root.RootId, epoch!, discovered);
-            gaps.GapDiscoveryDone(root.RootId, epoch!);
-            gaps.PromoteGapDiscovery(root.RootId);
-            Require(gaps.HasGapProtection(root.RootId),
-                "after metadata discovery the unverified file still protects the folder while the readable sibling retires");
-            var pending = gaps.GapHashPage(root.RootId, epoch!, 16);
-            Require(pending.Count == 1 && pending[0].Path == "locked/hidden.txt",
-                "only the unreadable folder's file still needs the gap's per-file check");
-            // Access returns. The worker would now hash the file because metadata discovery could not
-            // prove it unchanged; stage that result through the same store seams.
+            // No synthetic legacy discovery/hash promotion: the new owner must detect this write.
             RemoveDirectoryRule(locked, deny);
-            var file = Path.Combine(locked, "hidden.txt");
-            var newHash = DropboxContentHash.Compute(File.ReadAllBytes(file));
-            var checkedItem = gaps.GapHashPage(root.RootId, epoch!, 16).Single();
-            gaps.StageGapHash(root.RootId, epoch!, checkedItem, newHash,
-                new LocalGapProof(epoch!.JournalCursor, new NtfsFileUsn(1,
-                    LocalItems.ParseObjectId(checkedItem.ObjectId).FileId, 150, checkedItem.Size,
-                    checkedItem.Mtime.UtcDateTime.ToFileTimeUtc())));
-            var verified = gaps.GapResults(root.RootId, gaps.GapResultWatermark(root.RootId), 128).Single();
-            Require(gaps.AcceptGapResult(root.RootId, verified) &&
-                store.Live(root.RootId, ["locked/hidden.txt"]).Single().Hash == newHash,
-                "the gap's per-file check publishes the new content hash for the same-size, same-mtime write");
+            var newHash = DropboxContentHash.Compute(File.ReadAllBytes(Path.Combine(locked, "hidden.txt")));
             store.SaveSyncRetry(pair.PairId,
                 store.SyncRetryAt(pair.PairId, "locked")! with { RetryAfter = DateTimeOffset.MinValue });
             inventory.JournalReadForTest = NoJournalChanges;
-            var recovered = await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+            var recovered = await run.IncrementalAsync(pair.PairId, new RecordingProgress(), default);
+            await owner.DrainAsync(pair.PairId, monitor: true);
+            Require(!store.GapInventoryPending(root.RootId) && gaps.GapEpoch(root.RootId)!.Epoch == epoch!.Epoch,
+                "observed recovery clears the same gap epoch through reconciliation");
             Require(recovered.Failed == 0 && store.SyncRetryAt(pair.PairId, "locked") is null &&
                 !store.OpenNotices(pair.PairId).Any(n => n.ReasonKey == "sync-retry" && n.Path == "locked"),
                 "restored access reads the folder, retires its retry and closes its notice");
             Require(await fx.B.ObserveAsync("locked/hidden.txt", default) is { } synced && synced.Hash == newHash,
-                "the new content is synced once the gap's per-file check has observed it");
+                "reconciliation observes and syncs the same-size same-mtime write after access returns");
             Require(fx.WriterA.Deletes + fx.WriterB.Deletes == 0,
                 "the recovery never deletes anything");
         }

@@ -26,6 +26,11 @@ public sealed partial class SyncRun
         }
     }
 
+    private IEnumerable<SyncRetry> ScanRetriesForRoot(PairDef pair, RootDef root) =>
+        _store.ReadSyncRetries(pair.PairId)
+            .Where(retry => (retry.Kind == "scan" || retry.ReadRoots is { Count: > 0 }) &&
+                (retry.ReadRoots is null ? root.Provider == SyncProviders.Local : retry.ReadRoots.Contains(root.RootId)));
+
     private async Task<(IReadOnlyList<string> Touched, IReadOnlyList<string> Incomplete,
         IReadOnlyDictionary<string, string> Reasons, bool RootSettles, IReadOnlyList<string> Observed)> RetryScanScopesAsync(
         PairDef pair, RootDef root, Side side, IInventorySource inventory, string cursor, long gen,
@@ -38,10 +43,7 @@ public sealed partial class SyncRun
         var remaining = V2Settings.ScanRetryScopeLimit;
         var notSynced = ScanPathsNotSynced(pair);
         var rootDebtSettles = false;
-        foreach (var batch in _store.ReadSyncRetries(pair.PairId)
-            .Where(retry => (retry.Kind == "scan" || retry.ReadRoots is { Count: > 0 }) &&
-                (retry.ReadRoots is null ? root.Provider == SyncProviders.Local : retry.ReadRoots.Contains(root.RootId)))
-            .Chunk(64))
+        foreach (var batch in ScanRetriesForRoot(pair, root).Chunk(64))
         {
             ct.ThrowIfCancellationRequested();
             var verified = CachedIdentityRefresh.Verified(_store, batch, root.RootId);

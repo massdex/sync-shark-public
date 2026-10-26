@@ -28,6 +28,12 @@ public sealed partial class SyncRun
                 else _pendingResets[(pairId, rootId)] = decision;
             }
             if (_reconciling.ContainsKey(pairId)) return false;
+            if (_store.Pair(pairId) is { } pair && new[] { pair.A, pair.B }
+                .Any(root => ScanRetriesForRoot(pair, root).Any(retry => retry.RetryAfter > _time.GetUtcNow())))
+            {
+                RunTrace.Emit("reconciliation monitor waiting for existing scan retry due time");
+                return false;
+            }
             RunTrace.Emit(MessageCatalog.Default.Template("monitor-scope-decision") + decision.Trigger);
             // ReconcileScopeAsync registers both scope and StopAsync work before its first yield.
             _ = ObserveMonitoredReconciliationAsync(pairId, _admission.WithoutBorrowedAdmissionAsync(

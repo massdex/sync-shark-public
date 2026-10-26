@@ -119,8 +119,11 @@ public sealed partial class SyncRun
         }
     }
 
-    private void RetainPlanningFailures(PairDef pair, Plan plan)
+    private void RetainPlanningFailures(PairDef pair, Plan plan, bool reconciliation = false)
     {
+        var reason = reconciliation && !plan.Notices.Any(notice => notice.ReasonKey == "planning-degraded")
+            ? MessageCatalog.Default.Template("reconcile-dependency-pending")
+            : "Planning post-pass failed; original actions require safe replanning.";
         foreach (var group in plan.DeferredPlanningActions.GroupBy(action => action.Path, StringComparer.OrdinalIgnoreCase))
         {
             var previous = _store.SyncRetryAt(pair.PairId, group.Key);
@@ -128,7 +131,7 @@ public sealed partial class SyncRun
             if (previous?.RetryAfter > _time.GetUtcNow()) continue;
             var failure = FailureRetryOwner.Failed(previous?.Attempts ?? 0, _time.GetUtcNow());
             _store.SaveSyncRetry(pair.PairId, new(group.Key, "planning", failure.Attempts,
-                "Planning post-pass failed; original actions require safe replanning.", failure.RetryAfter,
+                reason, failure.RetryAfter,
                 ProposedActions: group.ToArray()));
         }
         if (!plan.Notices.Any(notice => notice.ReasonKey == "planning-degraded") &&

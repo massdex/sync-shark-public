@@ -82,6 +82,22 @@ public sealed partial class SqliteStateStore
         tx.Commit();
     });
 
+    internal IReadOnlyList<ItemState> ReconciliationGapOrphans(string rootId, string afterObject) => InStore(() =>
+    {
+        var items = new List<ItemState>();
+        using var command = StoreSchema.Command(_connection, null,
+            "SELECT i.expected_json FROM local_gap_item i JOIN root r ON r.root_no=i.root_no " +
+            "WHERE r.root_id=$r AND i.object_id>$after AND NOT EXISTS(" +
+            "SELECT 1 FROM file_state f INDEXED BY fs_obj WHERE f.root_no=i.root_no AND f.object_id=i.object_id) " +
+            "ORDER BY i.object_id LIMIT $limit;");
+        command.Parameters.AddWithValue("$r", rootId);
+        command.Parameters.AddWithValue("$after", afterObject);
+        command.Parameters.AddWithValue("$limit", V2Settings.PlanningObservationBatchRows);
+        using var reader = command.ExecuteReader();
+        while (reader.Read()) items.Add(JsonSerializer.Deserialize<ItemState>(reader.GetString(0))!);
+        return items;
+    });
+
     private void AcknowledgeReconciliationGap(SqliteTransaction tx, DeferredPlanning row)
     {
         var scope = BatchGapCoverage.Value;

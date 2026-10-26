@@ -108,8 +108,13 @@ internal static partial class LocalJournalChecks
         LocalChecks.Require(store.GapInventoryPending(rootId),
             "completion for another root cannot settle the inventory obligation");
         store.CompleteGapInventory(rootId, current.Epoch);
-        LocalChecks.Require(!store.GapInventoryPending(rootId) && gaps.GapEpoch(rootId) == current &&
+        var completed = gaps.GapEpoch(rootId);
+        Console.WriteLine($"Reconciliation epoch completion: pending={store.GapInventoryPending(rootId)}; " +
+            $"same-epoch={completed?.Epoch == current.Epoch}; discovery-done={completed?.DiscoveryDone}; " +
+            $"frontier-retired={completed?.AfterObject == char.MaxValue.ToString()}; same-cursor={store.Cursor(rootId) == cursor}");
+        LocalChecks.Require(!store.GapInventoryPending(rootId) &&
+            completed == (current with { DiscoveryDone = true, AfterObject = char.MaxValue.ToString() }) &&
             store.Cursor(rootId) == cursor,
-            "exact reconciliation completion clears only its inventory marker, preserving epoch and cursor");
+            "exact reconciliation completion retires discovery coverage, preserving epoch identity, boundary and cursors");
     }
 }

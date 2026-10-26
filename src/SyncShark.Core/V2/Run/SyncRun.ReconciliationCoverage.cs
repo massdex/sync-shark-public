@@ -8,9 +8,17 @@ public sealed partial class SyncRun
         return scope;
     }
 
-    private IReadOnlyList<ReconciliationCoverage> ActiveCoverages(PairDef pair, ref BothScan scan)
+    private IReadOnlyList<ReconciliationCoverage> ActiveCoverages(PairDef pair, ref BothScan scan, ReconcileBatch? batch = null)
     {
         if (_store is not SqliteStateStore sql) return [];
+        if (batch is not null)
+        {
+            var coverage = new ReconciliationCoverage(StateMonitor.PlanningBacklog(), false, batch.Session, sql,
+                new HashSet<Side> { Side.A, Side.B }, scan, batch.UnobservedAlias);
+            scan = scan with { Unknown = (side, path) => batch.UnobservedAlias(path) ||
+                !batch.ObservedAliases.Contains(path) && batch.Remaining(side, path) || coverage.Unknown(side, path) };
+            return [coverage];
+        }
         var observed = scan;
         var result = new List<ReconciliationCoverage>();
         var covered = new HashSet<Side>();

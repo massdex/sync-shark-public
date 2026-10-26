@@ -9,6 +9,11 @@ internal sealed record ReconcileBatch(string Session, IReadOnlyList<string> Path
     internal IReadOnlyList<ItemState> RowsB { get; init; } = [];
     internal Dictionary<string, string> Dispositions { get; } = new(StringComparer.OrdinalIgnoreCase);
     internal HashSet<string> DeferredFolders { get; } = new(StringComparer.OrdinalIgnoreCase);
+    internal long ProofBytes { get; set; }
+    internal int ProofFiles { get; set; }
+    internal HashSet<string> AliasPaths { get; } = new(StringComparer.OrdinalIgnoreCase);
+    internal HashSet<string> ObservedAliases { get; } = new(StringComparer.OrdinalIgnoreCase);
+    internal bool UnobservedAlias(string path) => AliasPaths.Contains(path) && !ObservedAliases.Contains(path);
     internal bool Contains(string path) => Paths.Any(scope => PairPath.IsSelfOrUnder(path, scope));
 
     internal bool Contains(SyncAction action) => Contains(action.Path) ||

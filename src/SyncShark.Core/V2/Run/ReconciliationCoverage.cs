@@ -9,13 +9,15 @@ internal sealed class ReconciliationCoverage
     private readonly SqliteStateStore _store;
     private readonly IReadOnlySet<Side> _sides;
     private readonly SyncRun.BothScan _scan;
+    private readonly Func<string, bool>? _unobservedAlias;
     private readonly Dictionary<Side, HashSet<string>> _changed;
     private readonly Dictionary<(Side Side, string Path), bool> _loaded = new();
 
     internal ReconciliationCoverage(StateMonitorDecision decision, bool selecting, string session,
-        SqliteStateStore store, IReadOnlySet<Side> sides, SyncRun.BothScan scan)
+        SqliteStateStore store, IReadOnlySet<Side> sides, SyncRun.BothScan scan, Func<string, bool>? unobservedAlias = null)
     {
         _decision = decision; _selecting = selecting; _session = session; _store = store; _sides = sides; _scan = scan;
+        _unobservedAlias = unobservedAlias;
         _changed = new()
         {
             [Side.A] = scan.A.ChangePaths.ToHashSet(StringComparer.OrdinalIgnoreCase),
@@ -44,6 +46,7 @@ internal sealed class ReconciliationCoverage
 
     internal bool Unknown(Side side, string path)
     {
+        if (_unobservedAlias?.Invoke(path) == true) return true;
         if (!_sides.Contains(side) || Fresh(side, path)) return false;
         if (_selecting) return (_decision.UnknownScope ?? ReconciliationScope.Root).Contains(path);
         var key = (side, PathKey.Of(path));
@@ -72,6 +75,10 @@ internal sealed class ReconciliationCoverage
     internal Plan DeferDependencies(Plan plan)
     {
         var deferred = plan.Actions.Where(action =>
+            _unobservedAlias?.Invoke(action.Path) == true ||
+            action.FromPath is { } alias && _unobservedAlias?.Invoke(alias) == true ||
+            action.Source is { } source && _unobservedAlias?.Invoke(source.Path) == true ||
+            action.ExpectedTarget is { } target && _unobservedAlias?.Invoke(target.Path) == true ||
             action.FromPath is { } from && Unknown(action.Target, from) ||
             action.Kind is ActionKind.Move or ActionKind.Delete &&
             (action.Source?.Kind == ItemKind.Folder || action.ExpectedTarget?.Kind == ItemKind.Folder) &&

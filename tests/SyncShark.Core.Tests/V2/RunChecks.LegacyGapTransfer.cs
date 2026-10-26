@@ -76,5 +76,20 @@ internal static partial class RunChecks
             gaps.GapEpoch(root.RootId)!.Epoch != epoch!.Epoch && store.PendingGapInventory(root.RootId) &&
             gaps.GapObligations(root.RootId, [held.ObjectId]).Count == 1,
             "an epoch replaced during the read retains its obligation and cannot inherit the old exemption");
+        var currentEpoch = gaps.GapEpoch(root.RootId)!;
+        // Discovery may publish its captured item after a delta has already removed the live row.
+        var orphan = held with { Path = "Parent/removed.txt", ObjectId = "removed-object" };
+        gaps.GapDiscoveredBatch(root.RootId, currentEpoch, [(orphan, true)]);
+        Require(store.ByObject(root.RootId, orphan.ObjectId) is null &&
+            gaps.GapObligations(root.RootId, [orphan.ObjectId]).Count == 1,
+            "discovery retains an orphan obligation without a file-state row");
+        fx.Provider.AddInventory(pair.B, fx.B);
+        var report = await run.ReconcileScopeAsync(pair.PairId,
+            StateMonitor.FromGap(currentEpoch) with { RootId = root.RootId }, new RecordingProgress(), default);
+        Require(!report.CompletionFailed && report.Failed == 0 &&
+            gaps.GapObligations(root.RootId, [held.ObjectId, orphan.ObjectId]).Count == 0 &&
+            !store.PendingGapInventory(root.RootId) && !gaps.HasGapProtection(root.RootId),
+            "fresh reconciliation discharges replacement-epoch and orphan obligations and clears the gap");
+        await MirrorAsync(fx);
     }
 }

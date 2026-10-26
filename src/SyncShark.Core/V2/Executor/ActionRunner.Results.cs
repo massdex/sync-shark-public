@@ -11,6 +11,7 @@ internal sealed partial class ActionRunner
             result.Outcome is Outcome.Skipped or Outcome.Refused)
             result = result with { Outcome = Outcome.Failed };
         await _committer.CommitAsync(action, result).ConfigureAwait(false);
+        RunTrace.EffectResult(action, result);
         return result;
     }
 }

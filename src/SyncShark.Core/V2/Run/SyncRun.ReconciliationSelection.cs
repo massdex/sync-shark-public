@@ -12,32 +12,50 @@ public sealed partial class SyncRun
         var eligibility = new ItemEligibility(_store.Pairs(), _productOwned(pair));
         var accounted = SelectionAccounted(pair, side);
         var counts = new SelectionCounts(0, 0, 0, 0, 0);
-        Task accept(IReadOnlyList<ItemState> rows)
-        {
-            foreach (var page in rows.Where(item => scope.Contains(item.Path)).Chunk(V2Settings.PlanningObservationBatchRows))
-            {
-                ct.ThrowIfCancellationRequested();
-                sql.StageReconcile(session + ":seen", side, page);
-            }
-            return Task.CompletedTask;
-        }
+        var incompletePaths = new List<string>();
+        var incompleteReasons = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        void incomplete(IReadOnlyList<string> paths, IReadOnlyDictionary<string, string> causes)
+            => CollectSelectionIncomplete(paths, causes, incompletePaths, incompleteReasons);
+        Task accept(IReadOnlyList<ItemState> rows) => StageSelectionRows(sql, session, side, scope, rows, ct);
         try
         {
             if (decision.Trigger == ReconciliationTrigger.PlanningBacklog)
                 return SelectPlanningBacklog(pair, side, scope, session, sql, ct);
             if (RehearsalEndpoints.Unwrap(inventory) is LocalInventory local)
-                counts = await SelectLocalAsync(pair, side, local, decision, scope, session, sql, eligibility, accounted, ct);
+                counts = await SelectLocalAsync(pair, side, local, decision, scope, session, sql, eligibility, accounted, ct, incomplete);
             else
             {
-                await EnumerateSelectionAsync(root, inventory, scope, accept, throttle, ct, listingBasis);
+                await EnumerateSelectionAsync(root, inventory, scope, accept, throttle, ct, listingBasis, incomplete);
                 counts = SelectStaged(pair, side, session, sql, eligibility, accounted,
                     RehearsalEndpoints.Unwrap(inventory) is DropboxInventory, ct);
             }
-            counts = counts with { Missing = SelectMissing(pair, side, scope, session, sql, eligibility, ct) };
+            await InvalidateUnreadableSelectionAsync(pair, root, side, incompletePaths, incompleteReasons, ct);
+            counts = counts with { Missing = SelectMissing(pair, side, scope, session, sql, eligibility, incompletePaths, ct) };
             RunTrace.Emit($"reconciliation selection: enumerated={counts.Enumerated} changed={counts.Changed} new={counts.New} missing={counts.Missing} unaffected={counts.Unaffected} S-orphan={counts.Orphan} S-moved={counts.Moved} S-case={counts.Case}");
             return counts;
         }
+        catch (Exception error) when (ScopeFailure(error, ct) && (error is IOException or UnauthorizedAccessException or TimeoutException))
+        {
+            await RecordSelectionFailureAsync(pair, root, side, scope, error, ct);
+            return counts;
+        }
         finally { sql.ClearRemovalObservation(session + ":seen"); }
+    }
+
+    private void RecordSelectionIncomplete(PairDef pair, Side side, IReadOnlyList<string> paths,
+        IReadOnlyDictionary<string, string> causes)
+    {
+        var reasons = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        RecordIncomplete(pair.PairId, paths, causes, [], reasons);
+        var empty = new SideScan(0, string.Empty, true, false, [], [], new Dictionary<string, DateTimeOffset?>(), []);
+        var failed = empty with { IncompleteSubtrees = paths, IncompleteReasons = reasons };
+        var scan = side == Side.A ? new BothScan(failed, empty) : new BothScan(empty, failed);
+        foreach (var path in paths)
+        {
+            RecordScanFailure(pair, scan, path, suppressTransient: false);
+            RunTrace.Emit($"selection scan incomplete: {paths.Count} paths, retry recorded under admission");
+            RunTrace.Emit($"reconciliation selection unreadable: root={side} scope={path} reason={reasons.GetValueOrDefault(path)}");
+        }
     }
 
     private SelectionCounts SelectPlanningBacklog(PairDef pair, Side side, ReconciliationScope scope,
@@ -71,21 +89,20 @@ public sealed partial class SyncRun
 
     private async Task EnumerateSelectionAsync(RootDef root, IInventorySource inventory, ReconciliationScope scope,
         Func<IReadOnlyList<ItemState>, Task> accept, ProgressThrottle throttle, CancellationToken ct,
-        Action<string>? listingBasis)
+        Action<string>? listingBasis, Action<IReadOnlyList<string>, IReadOnlyDictionary<string, string>> incomplete)
     {
         if (RehearsalEndpoints.Unwrap(inventory) is DropboxInventory dropbox)
         {
             RunTrace.Emit("reconciliation selection source: Dropbox prefix hydration");
             var failures = await RehearsalEndpoints.HydrateAsync(inventory, dropbox, scope.ReadScopes.ToArray(), rows =>
                 accept(rows.Where(row => row.Entry is not null).Select(row => DropboxItems.ToItem(row.Entry!)).ToArray()), ct, listingBasis);
-            if (failures.Count > 0) throw new IOException(string.Join("; ", failures.Values));
+            incomplete(failures.Keys.ToArray(), failures);
             return;
         }
         RunTrace.Emit("reconciliation selection source: full metadata inventory");
         var snapshot = await inventory.FullAsync(0, path => scope.Touches(path, folder: true),
             new InventoryProgress(throttle, root), ct);
-        if (snapshot.IncompleteSubtrees.Count > 0)
-            throw new IOException(string.Join("; ", snapshot.IncompleteReasons.Values));
+        incomplete(snapshot.IncompleteSubtrees, snapshot.IncompleteReasons);
         listingBasis?.Invoke(snapshot.CursorAfter);
         foreach (var page in snapshot.Items.Chunk(V2Settings.PlanningObservationBatchRows)) await accept(page);
     }
@@ -127,8 +144,10 @@ public sealed partial class SyncRun
             var moved = eligible && baselines.Any(baseline => SelectionMoved(pair, side, item, baseline));
             var casing = eligible && baselines.Any(baseline => SelectionCase(pair, side, item, baseline));
             var added = eligible && previous is null && !atPath[PathKey.Of(item.Path)].Any() && baselines.Length == 0;
-            var changed = eligible && (legacy || previous is null ||
-                (changedLocal?.Invoke(item, previous) ?? SelectionChanged(item, previous, dropbox)));
+            // Local proof invalidation must run even when legacy protection already selects the row.
+            var observedChange = eligible && previous is not null &&
+                (changedLocal?.Invoke(item, previous) ?? SelectionChanged(item, previous, dropbox));
+            var changed = eligible && (legacy || previous is null || previous.Flags.HasFlag(ItemFlags.NeedsRehash) || observedChange);
             if (added || changed || orphan || moved || casing) work.Add(item);
             counts = counts with { New = counts.New + (added ? 1 : 0),
                 Changed = counts.Changed + (!added && (changed || orphan || moved || casing) ? 1 : 0),
@@ -168,9 +187,7 @@ public sealed partial class SyncRun
 
     private (HashSet<string> Paths, HashSet<string> Ids) SelectionAccounted(PairDef pair, Side side)
     {
-        var paths = _store.UnresolvedNotices(pair.PairId).Where(PlanNotices.HasPathScope)
-            .Where(notice => notice.Path.Length > 0 && !string.IsNullOrEmpty(notice.ReasonKey))
-            .Select(notice => notice.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var paths = PlanNotices.AccountedPaths(_store.UnresolvedNotices(pair.PairId));
         var ids = new HashSet<string>(StringComparer.Ordinal);
         foreach (var action in _store.StreamUnresolvedIntents(pair.PairId))
         {
@@ -182,9 +199,10 @@ public sealed partial class SyncRun
     }
 
     private long SelectMissing(PairDef pair, Side side, ReconciliationScope scope, string session,
-        SqliteStateStore sql, ItemEligibility eligibility, CancellationToken ct)
+        SqliteStateStore sql, ItemEligibility eligibility, IReadOnlyList<string> incomplete, CancellationToken ct)
     {
         var root = side == Side.A ? pair.A : pair.B;
+        bool readable(string path) => !incomplete.Any(failed => PairPath.IsSelfOrUnder(path, failed));
         long count = 0;
         var scopes = scope.ReadScopes.ToArray();
         foreach (var prefix in scopes.Where(path => !scopes.Any(parent => parent != path && PairPath.IsUnder(path, parent))))
@@ -196,7 +214,7 @@ public sealed partial class SyncRun
                 ct.ThrowIfCancellationRequested();
                 var page = sql.MissingPage(session + ":seen", side, root.RootId, prefix, dir, key, name);
                 if (page.Count == 0) break;
-                var missing = page.Where(row => !row.Seen && scope.Contains(row.Row.Item.Path) &&
+                var missing = page.Where(row => !row.Seen && readable(row.Row.Item.Path) && scope.Contains(row.Row.Item.Path) &&
                     eligibility.Evaluate(pair, side, row.Row.Item, ItemEligibility.Purpose.Plan).Eligible)
                     .Select(row => row.Row.Item).ToArray();
                 sql.StageReconcile(session + ":work", side, missing);
@@ -204,6 +222,16 @@ public sealed partial class SyncRun
                 var last = page[^1].Row;
                 dir = last.DirNo; key = last.NameKey; name = last.Name;
             }
+        }
+        var afterObject = string.Empty;
+        while (sql.ReconciliationGapOrphans(root.RootId, afterObject) is { Count: > 0 } orphans)
+        {
+            ct.ThrowIfCancellationRequested();
+            var missing = orphans.Where(item => readable(item.Path) && scope.Contains(item.Path) &&
+                eligibility.Evaluate(pair, side, item, ItemEligibility.Purpose.Plan).Eligible).ToArray();
+            sql.StageReconcile(session + ":work", side, missing);
+            count += missing.Length;
+            afterObject = orphans[^1].ObjectId;
         }
         return count;
     }

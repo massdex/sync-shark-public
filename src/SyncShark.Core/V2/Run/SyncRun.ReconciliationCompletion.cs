@@ -24,19 +24,25 @@ public sealed partial class SyncRun
         ct.ThrowIfCancellationRequested();
         var sql = (SqliteStateStore)_store;
         var completion = new CompletionSteps(this, pair.PairId, ct);
-        // A subtree inventory cannot discharge a root-wide restart obligation or replace its cursor.
-        if ((active.Decision.UnknownScope ?? ReconciliationScope.Root).ReadScopes.Contains(string.Empty))
+        var unreadable = new[] { pair.A, pair.B }.SelectMany(root => ScanRetriesForRoot(pair, root))
+            .Select(retry => retry.Path).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+        // Both counterparts must be observed before discharging the durable unknown scope.
+        if (unreadable == 0 && (active.Decision.UnknownScope ?? ReconciliationScope.Root).ReadScopes.Contains(string.Empty))
         {
             foreach (var (rootId, epoch) in active.GapEpochs)
-                completion.Step(() => sql.CompleteGapInventory(rootId, epoch));
+                if (!ScanRetriesForRoot(pair, rootId == pair.A.RootId ? pair.A : pair.B).Any())
+                    completion.Step(() => sql.CompleteGapInventory(rootId, epoch));
             if (active.Decision.Trigger == ReconciliationTrigger.DropboxReset)
                 foreach (var (rootId, basis) in active.ListingBases)
+                    if (!ScanRetriesForRoot(pair, rootId == pair.A.RootId ? pair.A : pair.B).Any())
                     completion.Step(() =>
                     {
                         _store.CompleteGeneration(_store.BeginGeneration(rootId, "delta"), basis, true);
                         lock (_stopGate) _pendingResets.Remove((pair.PairId, rootId));
                     });
         }
+        if (unreadable > 0) RunTrace.Emit($"reconciliation retains unknown scope: unreadable={unreadable}");
+        report = report with { Deferred = Math.Max(report.Deferred, unreadable) };
         completion.Step(_store.Prune);
         completion.Step(() => sql.ClearRemovalObservation(active.Session + ":work"));
         return Task.FromResult(completion.Finish(report));

@@ -75,7 +75,7 @@ public sealed partial class SyncRun
             {
                 ct.ThrowIfCancellationRequested();
                 var report = await _admission.WithAsync(pairId,
-                    () => ReconcileBatchAsync(pair, batch, progress, ct), ct);
+                    () => ReconcileTracedBatchAsync(sql, pair, active.Decision, batch, progress, ct), ct);
                 total = AddReconciliationReport(total, report);
                 lock (_stopGate) active.LiveProgress = new(RunPhases.Reconcile, null, total.Done, 0);
                 if (report.HaltedBy is not null || report.Cancelled || report.Paused || report.CompletionFailed) break;

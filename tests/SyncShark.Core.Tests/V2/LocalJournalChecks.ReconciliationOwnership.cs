@@ -7,29 +7,65 @@ internal static partial class LocalJournalChecks
         Directory.CreateDirectory(folder);
         using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast,
             TimeProvider.System, LocalItems.CaptureOptionalHash);
-        var (root, _) = SaveIndexRoot(store, folder, "ownership-root", "ownership-pair", ["Parent/file.txt"]);
+        var (root, inventory, items) = await SaveOwnershipRootAsync(store, folder);
+        var independent = items.Single(row => row.Path == "independent.txt");
+        var item = items.Single(row => row.Path == "gap.txt");
         var gaps = (ILocalGapStore)store;
         gaps.BeginGap(root.RootId, new NtfsUsnCheckpoint(1, 0, 300, 0).Cursor, 100, false);
         var epoch = gaps.GapEpoch(root.RootId)!;
-        var item = store.Live(root.RootId).Single();
         gaps.GapDiscoveredBatch(root.RootId, epoch, [(item, true)]);
         var before = gaps.GapEpoch(root.RootId);
         var io = new ForbiddenGapIo();
         await using var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage);
         var passes = 0;
-        await using var indexing = new LocalIndexingRuns(store, (r, _) =>
+        await using var indexing = new LocalIndexingRuns(store, (_, ct) =>
         {
             passes++;
-            return Task.FromResult(CompleteIndexWork(store, r.RootId));
+            return inventory.VerifyIndexingPassAsync(ct);
         }, worker, io, _ => throw new InvalidOperationException("rehash lane must not read a gap checkpoint"));
-        LocalChecks.Require(await indexing.RunAsync(root, default) == "complete" && passes == 1 &&
-            store.RehashPendingCount(root.RootId) == 0,
-            "independent indexing still verifies and publishes explicit rehash debt alongside a legacy gap");
+        var pendingBefore = store.RehashPendingCount(root.RootId);
+        LocalChecks.Require(await indexing.RunAsync(root, default) == "pending" && passes == 1 &&
+            pendingBefore == 2 && store.RehashPendingCount(root.RootId) == pendingBefore - 1 &&
+            store.ByObject(root.RootId, independent.ObjectId) is { Hash: not null } verified &&
+            verified.Hash == DropboxContentHash.Compute(System.Text.Encoding.UTF8.GetBytes("content")) &&
+            !verified.Flags.HasFlag(ItemFlags.NeedsRehash) && store.IndexPlanningWatermark(root.RootId) > 0,
+            "independent indexing verifies and publishes only its own item while gap-owned debt remains pending");
         LocalChecks.Require(gaps.GapEpoch(root.RootId) == before && gaps.HasGapProtection(root.RootId) &&
             gaps.GapObligations(root.RootId, [item.ObjectId]).Count == 1 && io.Calls == 0,
             "indexing does not discover, hash, promote or acknowledge reconciliation-owned gap work");
-        LocalChecks.Require(await indexing.RunAsync(root, default) == "complete" && passes == 1,
-            "gap-only debt cannot schedule another independent indexing pass");
+        LocalChecks.Require(await indexing.RunAsync(root, default) == "pending" &&
+            store.RehashPendingCount(root.RootId) == 1 &&
+            store.ByObject(root.RootId, item.ObjectId)!.Flags.HasFlag(ItemFlags.NeedsRehash) && io.Calls == 0,
+            "indexing never reports convergence or consumes the remaining gap-owned debt");
+        await RunChecks.CompleteOwnershipReconciliationAsync(store, root, inventory, item, epoch, folder);
+    }
+
+    private static async Task<(RootDef Root, LocalInventory Inventory, ItemState[] Items)> SaveOwnershipRootAsync(
+        SqliteStateStore store, string folder)
+    {
+        var directory = Path.Combine(folder, "root");
+        LocalChecks.Seed(directory, "independent.txt", "content");
+        LocalChecks.Seed(directory, "gap.txt", "content");
+        var root = LocalChecks.RootOf(directory, "ownership-root");
+        store.SavePair(new("ownership-pair", "Pair A", root,
+            new("ownership-remote", SyncProviders.Dropbox, "account", "/Other", "id:other"), [], [], true));
+        store.MarkFirstSyncDone("ownership-pair");
+        var checkpoint = new NtfsUsnCheckpoint(1, 0, 300, 0);
+        var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), StorageChecks.Fast,
+            TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage)
+        {
+            WalkCheckpointForTest = () => (checkpoint, false),
+            DiscoveryReadForTest = (_, _) => Task.FromResult<SyncDiscoveryResult?>(null),
+            GapIo = new LocalGapIo(store, StorageChecks.Fast, new HashSet<string>(), () => false)
+                { CheckpointForCheck = _ => checkpoint }
+        };
+        var gen = store.BeginGeneration(root.RootId, "full");
+        var snapshot = await inventory.FullAsync(gen, _ => true, null!, default);
+        store.WriteSnapshot(snapshot);
+        store.CompleteGeneration(gen, checkpoint.Cursor, true);
+        var items = store.Live(root.RootId).ToArray();
+        store.RequireRehashBatch(root.RootId, items, "content verification pending");
+        return (root, inventory, items);
     }
 
     private sealed class ForbiddenGapIo : ILocalGapIo

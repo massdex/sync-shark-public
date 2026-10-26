@@ -2,6 +2,43 @@ namespace Massdex.SyncShark.V2;
 
 internal static partial class RunChecks
 {
+    private static async Task ReconciliationUnreadableFolder()
+    {
+        var clock = new LocalChecks.FixedClock(DateTimeOffset.UtcNow);
+        using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "reconcile-unreadable-" + Guid.NewGuid().ToString("N")),
+            StorageChecks.Fast, clock, LocalItems.CaptureOptionalHash);
+        var fx = Build(suppliedStore: store);
+        fx.A.Seed("Denied/held.txt", "original");
+        fx.A.Seed("Readable/changed.txt", "original");
+        await FirstSyncAsync(fx.Run(), fx);
+        fx.A.Seed("Readable/changed.txt", "changed");
+        var inventory = new ScriptedInventory(fx.A)
+        {
+            Unreadable = ["Denied"],
+            UnreadableReasons = new Dictionary<string, string> { ["Denied"] = "Access denied while enumerating folder" }
+        };
+        fx.Provider.AddInventory(fx.Pair.A, inventory);
+        var gaps = (ILocalGapStore)store;
+        gaps.BeginGap(fx.Pair.A.RootId, new NtfsUsnCheckpoint(2, 0, 200, 0).Cursor, 100, false, protect: false);
+        var run = new SyncRun(store, fx.Executor, fx.Provider, Settings, clock);
+        var writes = fx.WriterB.Puts;
+        var report = await run.ReconcileScopeAsync(fx.Pair.PairId,
+            StateMonitor.FromGap(gaps.GapEpoch(fx.Pair.A.RootId)!) with { RootId = fx.Pair.A.RootId },
+            new RecordingProgress(), default);
+        var retry = store.SyncRetryAt(fx.Pair.PairId, "Denied");
+        Require(!report.CompletionFailed && fx.WriterB.Puts == writes + 1,
+            "one unreadable folder does not prevent the same run repairing the readable change");
+        Require(retry is { Kind: "scan" } && retry.RetryAfter > clock.GetUtcNow() &&
+            retry.LastError.Contains("Access denied", StringComparison.Ordinal) &&
+            store.UnresolvedNotices(fx.Pair.PairId).Any(notice => notice.Path == "Denied" &&
+                notice.Detail.Contains("Access denied", StringComparison.OrdinalIgnoreCase)),
+            "unreadable folder retains a specific visible reason and the scan owner's backoff");
+        var walks = fx.A.FullCalls;
+        Require(store.PendingGapInventory(fx.Pair.A.RootId) &&
+            !await run.MonitorAsync(fx.Pair.PairId, new RecordingProgress(), default) && fx.A.FullCalls == walks,
+            "monitor keeps the obligation without rewalking before its scan retry is due");
+    }
+
     private static Task ReconciliationClearsGapDebt() => ReconcileGapDebt(false);
     private static Task ReconciliationClearsLegacyEpoch() => ReconcileGapDebt(true);
 

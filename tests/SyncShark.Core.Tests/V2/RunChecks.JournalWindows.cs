@@ -12,7 +12,8 @@ internal static partial class RunChecks
 
     private static async Task JournalWindowRunCaseAsync(string folder, int windowBudget, bool pendingInventory = false)
     {
-        var settings = Settings with { LocalReplayWindowsPerRun = windowBudget };
+        var settings = Settings with { LocalReplayWindowsPerRun = windowBudget,
+            ReconciliationBatch = new(1, 1024 * 1024) };
         var directory = Path.Combine(folder, "root");
         for (var n = 0; n < 4; n++) LocalChecks.Seed(directory, $"edit-{n}.txt", "journal edit " + n);
         var clock = new CompletionClock();
@@ -65,7 +66,7 @@ internal static partial class RunChecks
         inventory.FullInventoryForTest = () =>
         {
             walks++;
-            if (!pendingInventory || walks > 1) throw new InvalidOperationException("unexpected repeated full walk");
+            throw new InvalidOperationException("AutoSync and exact-path repair must not perform a full inventory");
         };
         fx.Provider.AddInventory(root, inventory);
         fx.Provider.AddWriter(root, await LocalWriter.OpenAsync(root, Side.A, pair.PairId,
@@ -73,9 +74,9 @@ internal static partial class RunChecks
             isStateDamage: StorageFailureClassifier.IsStateDamage));
         var run = new SyncRun(store, fx.Executor, fx.Provider, settings, clock);
         var firstReport = await run.IncrementalAsync(pair.PairId, new RecordingProgress(), default);
-        if (pendingInventory) Require(walks == 1 && !store.GapInventoryPending(root.RootId) &&
+        if (pendingInventory) Require(walks == 0 && store.GapInventoryPending(root.RootId) &&
             ((ILocalGapStore)store).GapEpoch(root.RootId)!.Epoch == epoch,
-            "one pending-inventory walk settles without replacing its gap epoch");
+            "AutoSync replays without walking, clearing, or replacing the pending reconciliation epoch");
         Require(firstReport.JournalBacklog == (windowBudget == 2), "run report carries unread journal suffix");
         Require(reads.Count == Math.Min(4, windowBudget), "real run respects its replay-window budget");
         if (windowBudget == 2) Require(store.Cursor(root.RootId) != target.Cursor, "budget split retains the unread suffix");
@@ -87,8 +88,19 @@ internal static partial class RunChecks
             "late user edit is inventoried and handed to planning no later than the next run");
         if (pendingInventory)
         {
-            Require(walks == 1 && !store.GapInventoryPending(root.RootId), "second run uses pure delta after settling inventory pending");
-            Console.WriteLine("PASS existing inventory-pending epoch: one walk, catch-up, then delta");
+            Require(walks == 0 && store.GapInventoryPending(root.RootId),
+                "second AutoSync run remains delta-only and retains repair responsibility");
+            inventory.DiscoveryReadForTest = (_, _) => Task.FromResult<SyncDiscoveryResult?>(null);
+            var captured = ((ILocalGapStore)store).GapEpoch(root.RootId)!;
+            var cursor = store.Cursor(root.RootId);
+            var report = await run.ReconcileScopeAsync(pair.PairId,
+                StateMonitor.FromGap(captured) with { RootId = root.RootId }, new RecordingProgress(), default);
+            Console.WriteLine($"Real local reconciliation: failed={report.Failed}; completion-failed={report.CompletionFailed}; " +
+                $"pending={store.GapInventoryPending(root.RootId)}; full-walks={walks}; same-cursor={store.Cursor(root.RootId) == cursor}");
+            Require(!report.CompletionFailed && walks == 0 && !store.GapInventoryPending(root.RootId) &&
+                ((ILocalGapStore)store).GapEpoch(root.RootId)!.Epoch == epoch && store.Cursor(root.RootId) == cursor,
+                "one-path batches use the real local reader and clear the captured gap without replacing epoch or replay cursor");
+            Console.WriteLine("PASS existing inventory-pending epoch: delta replay, then one batched reconciliation");
             return; // Fake journal identity cannot supply real native gap hash proofs.
         }
         // Content verification remains its existing background owner, not gap hashing.

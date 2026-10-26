@@ -62,8 +62,11 @@ public sealed partial class SqliteStateStore
 
     internal bool HasPlanningBacklog(string pairId) => InStore(() =>
         StoreSchema.Scalar(_connection, null,
-            "SELECT 1 FROM planning_deferred INDEXED BY planning_deferred_pair WHERE pair_no=$p AND reason<>$user LIMIT 1;",
-            ("$p", PairNo(pairId)), ("$user", UserChangeReason)) is not null);
+            "SELECT 1 FROM planning_deferred d INDEXED BY planning_deferred_pair WHERE d.pair_no=$p AND d.reason<>$user " +
+            "AND choice_key(d.path) NOT IN (SELECT value FROM json_each($accounted)) " +
+            "AND NOT EXISTS(SELECT 1 FROM sync_retry r WHERE r.pair_no=d.pair_no AND r.path_key=choice_key(d.path) AND r.retry_after>$now) LIMIT 1;",
+            ("$p", PairNo(pairId)), ("$user", UserChangeReason), ("$now", NowMs()),
+            ("$accounted", JsonSerializer.Serialize(PlanNotices.AccountedPaths(UnresolvedNotices(pairId)).Select(PathKey.Of)))) is not null);
 
     internal IReadOnlyList<DeferredPlanning> PlanningBacklogPage(string pairId, long afterRoot = -1,
         string afterId = "") => InStore(() =>

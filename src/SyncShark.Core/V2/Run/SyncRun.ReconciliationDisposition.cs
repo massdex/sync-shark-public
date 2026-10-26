@@ -14,11 +14,11 @@ public sealed partial class SyncRun
         return RetireNonWorkPlanning(sql, pair, rows);
     }
 
-    // Completion retires only selected planning retries, never importing their saved actions.
+    // Completion evaluates selected ordinary retries, never importing their saved actions.
     private IReadOnlyList<SyncRetry> CompletionRetries(string pairId, ReconcileBatch? batch,
         Plan plan, IReadOnlyList<SyncRetry> retries) => batch is null ? retries : batch.Paths
         .Select(path => _store.SyncRetryAt(pairId, path)).OfType<SyncRetry>()
-        .Where(retry => retry.Kind == "planning" && !plan.DeferredPlanningActions.Any(
+        .Where(retry => (retry.Kind is "planning" or "sync") && !plan.DeferredPlanningActions.Any(
             action => PairPath.Same(action.Path, retry.Path))).ToArray();
 
     private void AccountReconciliationBatch(PairDef pair, ReconcileBatch batch, Plan plan, Tally tally,
@@ -65,7 +65,10 @@ public sealed partial class SyncRun
             var cause = scan.A.IncompleteReasons.GetValueOrDefault(path) ??
                 scan.B.IncompleteReasons.GetValueOrDefault(path) ?? notice?.Detail ??
                 (retry?.LastError is { Length: > 0 } error ? error : null) ??
-                plan.Notices.FirstOrDefault(item => item.ReasonKey == "planning-degraded")?.Detail ?? blocker;
+                plan.Notices.FirstOrDefault(item => item.ReasonKey == "planning-degraded")?.Detail ??
+                (plan.DeferredPlanningActions.Any(action => PairPath.Same(action.Path, path) ||
+                    action.FromPath is { } from && PairPath.Same(from, path))
+                    ? MessageCatalog.Default.Template("reconcile-dependency-pending") : blocker);
             batch.Dispositions[path] = "deferred: " + cause;
             if (notice is null || !PairPath.Same(notice.Path, path))
                 WriteNotices([FailureRetryOwner.RetryNotice(pair.PairId, path, cause, 1)]);
@@ -81,7 +84,8 @@ public sealed partial class SyncRun
             {
                 var retry = _store.SyncRetryAt(pair.PairId, path);
                 var reason = retry?.LastError is { Length: > 0 } detail ? detail :
-                    MessageCatalog.Default.Template("reconciliation-unsettled");
+                    MessageCatalog.Default.Template(batch.DeferredFolders.Contains(path)
+                        ? "reconcile-dependency-pending" : "reconciliation-unsettled");
                 // The existing failure owner supplies Retry/Ignore and durable retry input. Retiring TEMP
                 // selection is never a substitute for a real disposition or a saved unfinished item.
                 SaveFailedRetry(pair, path, reason, retry);

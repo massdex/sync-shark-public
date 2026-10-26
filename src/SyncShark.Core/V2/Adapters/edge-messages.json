@@ -1,5 +1,7 @@
 {
   "templates": {
+    "reconcile-journal-proof": "The change journal identifies unprocessed changes. Verify this file's content before planning.",
+    "effect-result-trace": "effect outcome={0} kind={1} side={2} path={3} category={4} reason={5}",
     "reconciliation-deferred-dependencies": "reconciliation coverage: deferred dependencies=",
     "reconciliation-replay-pending": "Journal replay remains unavailable; reconciliation retains the unknown scope.",
     "local-watch-replay": "Local watcher overflow: replay requested; journal continuity determines whether reconciliation is needed.",
@@ -8,6 +10,8 @@
     "reconciliation-staging-required": "Reconciliation requires persistent staging.",
     "reconciliation-excluded": "excluded: existing sync boundary",
     "reconciliation-settled": "settled: verified no-op",
+    "reconcile-unreadable-proof": "The path was unreadable during reconciliation. Its content must be verified after access returns.",
+    "reconcile-dependency-pending": "Selected work is waiting for selected descendants or its previous location to be freshly evaluated. Reconciliation retries it after the current batch pass.",
     "reconciliation-unsettled": "The selected path was not settled by the admitted plan. Its read or planning protection remains unresolved." ,
     "command": "{what} is not in core v2 yet. The legacy compatibility engine requires explicit --core v1 and uses separate legacy state.",
     "notice": "{what} is not in core v2 yet."
