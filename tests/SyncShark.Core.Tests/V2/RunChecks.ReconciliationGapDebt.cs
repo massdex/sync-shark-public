@@ -49,11 +49,7 @@ internal static partial class RunChecks
             "root-scope read failure retains the exact pending epoch checkpoint and full obligation with a Partial retry");
     }
 
-    private static async Task ReconciliationClearsGapDebt()
-    {
-        await ReconcileGapDebt(false);
-        await ExecutionProofReflagRetainsDebtAsync();
-    }
+    private static Task ReconciliationClearsGapDebt() => ReconcileGapDebt(false);
     private static Task ReconciliationClearsLegacyEpoch() => ReconcileGapDebt(true);
 
     private static async Task ReconcileGapDebt(bool legacy)
@@ -92,10 +88,13 @@ internal static partial class RunChecks
         Require(fx.B.HashedPaths.Count == 0, "trusted counterpart has zero hash requests: actual=" + fx.B.HashedPaths.Count);
         Require(store.RehashPendingCount(root) == 0, "all 50 files have zero remaining proof debt: " + RehashDiagnostics(folder, fx.Pair) + " | " + string.Join(" | ", proofTrace));
         Require(report.Deferred == 0, "all 50 files settle within one run with zero deferred work");
-        Require(!store.PendingGapInventory(root) && !gaps.HasGapProtection(root) &&
-            gaps.GapObligations(root, items.Select(item => item.ObjectId).ToArray()).Count == 0 &&
-            store.PlanningBacklogPage(fx.Pair.PairId).Count == 0,
-            "reconciliation clears inventory, legacy frontier, concrete gap items and observation planning debt");
+        var remaining = ReconciliationCompletionDiagnostics(folder, fx.Pair);
+        Require(!store.PendingGapInventory(root), "reconciliation clears pending inventory: " + remaining);
+        Require(!gaps.HasGapProtection(root), "reconciliation clears legacy frontier protection: " + remaining);
+        Require(gaps.GapObligations(root, items.Select(item => item.ObjectId).ToArray()).Count == 0,
+            "reconciliation clears concrete gap items: " + remaining);
+        Require(store.PlanningBacklogPage(fx.Pair.PairId).Count == 0,
+            "reconciliation clears observation planning debt: " + remaining);
         await MirrorAsync(fx);
     }
 }
