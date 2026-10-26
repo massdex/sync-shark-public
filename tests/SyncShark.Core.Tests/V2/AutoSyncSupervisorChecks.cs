@@ -116,7 +116,8 @@ internal static class AutoSyncSupervisorChecks
         {
             foreach (var text in new[] { @"failure at X:\Parent\Child Name.txt", "failure at /Parent/Child",
                 "Bearer synthetic-secret", "password=synthetic-secret", "access_token=synthetic-secret",
-                "accountId=synthetic-account", "person@example.invalid", "https://example.invalid/Parent?code=synthetic-secret" })
+                "accountId=synthetic-account", "person@example.invalid", "https://example.invalid/Parent?code=synthetic-secret",
+                "\"password\": \"synthetic-secret with spaces\"", "password=synthetic-secret with spaces", "token=synthetic-secret" })
                 AutoSyncLog.Append(root, text);
             using (var stderr = AutoSyncLog.CreateStderrWriter(root))
             {
@@ -127,9 +128,9 @@ internal static class AutoSyncSupervisorChecks
             }
             var log = File.ReadAllText(AutoSyncLog.FilePath(root));
             Require(!log.Contains("Parent") && !log.Contains("Child") && !log.Contains("synthetic-secret") &&
-                !log.Contains("synthetic-account") && !log.Contains("example.invalid"),
+                !log.Contains("synthetic-account") && !log.Contains("example.invalid") && !log.Contains("with spaces"),
                 "shared sink omits paths, identifiers, URLs and credentials, including fragmented stderr");
-            Require(log.Contains("stderr") && log.Contains("[redacted]") && log.Contains("[path omitted]"),
+            Require(log.Contains("stderr password=[redacted]") && log.Contains("partial stderr at [redacted]"),
                 "stderr remains durable with safe diagnostic markers");
         }
         finally { Remove(root); }

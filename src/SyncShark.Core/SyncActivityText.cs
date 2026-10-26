@@ -65,10 +65,11 @@ public static class SyncActivityText
         {
             // Lifecycle stderr is not structured activity: paths and identifiers add no useful
             // shutdown evidence. Drop the remainder of a path-bearing line (paths may contain spaces).
-            text = Regex.Replace(text, @"(?i)(?:[a-z]:[\\/]|\\\\|(?<!\w)/(?!/)).*", "[path omitted]");
-            text = Regex.Replace(text, @"(?i)https?://\S+", "[link omitted]");
-            text = Regex.Replace(text, @"[^\s<>]+@[^\s<>]+", "[identifier omitted]");
-            text = Regex.Replace(text, @"(?i)\b(?:pair|account|user|connection)[_-]?id\s*[=:]\s*\S+", "[identifier omitted]");
+            text = Regex.Replace(text, @"(?i)\b(access_token|refresh_token|id_token|client_secret|authorization|password|code|state|api[_-]?key|token)[""']?\s*[=:].*", "$1=[redacted]");
+            text = Regex.Replace(text, @"(?i)(?:[a-z]:[\\/]|\\\\|(?<!\w)/(?!/)).*", "[redacted]");
+            text = Regex.Replace(text, @"(?i)https?://\S+", "[redacted]");
+            text = Regex.Replace(text, @"[^\s<>]+@[^\s<>]+", "[redacted]");
+            text = Regex.Replace(text, @"(?i)\b(?:pair|account|user|connection)[_-]?id\s*[=:]\s*\S+", "[redacted]");
         }
         // Detailed retained records have their own bounded budget. The default 400-character
         // one-line CLI summary budget must not silently erase nested failure causes here.
