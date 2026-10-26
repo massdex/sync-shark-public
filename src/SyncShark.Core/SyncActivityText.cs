@@ -69,7 +69,7 @@ public static class SyncActivityText
             text = Regex.Replace(text, @"(?i)(?:[a-z]:[\\/]|\\\\|(?<!\w)/(?!/)).*", "[redacted]");
             text = Regex.Replace(text, @"(?i)https?://\S+", "[redacted]");
             text = Regex.Replace(text, @"[^\s<>]+@[^\s<>]+", "[redacted]");
-            text = Regex.Replace(text, @"(?i)\b(?:pair|account|user|connection)[_-]?id\s*[=:]\s*\S+", "[redacted]");
+            text = Regex.Replace(text, @"(?i)\b(?:pair|account|user|connection)[_-]?id[""']?\s*[=:].*", "[redacted]");
         }
         // Detailed retained records have their own bounded budget. The default 400-character
         // one-line CLI summary budget must not silently erase nested failure causes here.
