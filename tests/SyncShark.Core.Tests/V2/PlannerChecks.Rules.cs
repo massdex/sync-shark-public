@@ -61,6 +61,16 @@ internal static partial class PlannerChecks
         AssertActions(plan, new Exp(ActionKind.Hold, Side.B, "x", null, false, 29));
         AssertNotices(plan, new NExp(29, NoticeKind.UserDecision, "x"));
 
+        foreach (var path in new[] { "X/c", "x/deep/c", "xx/c", "x_suffix/c", "other/c" })
+        {
+            var candidate = Row(null, F(path, "candidate", "h1"), null);
+            var combined = Planner.Decide(PairId, Gen, [clash, candidate], Opt());
+            var expected = PairPath.IsUnder(path, "x") ? plan.Actions :
+                plan.Actions.Concat(Decide(candidate).Actions).ToArray();
+            Require(combined.Actions.ToHashSet().SetEquals(expected), "held-folder strict ancestor equivalence: " + path);
+            Require(combined.Notices.SequenceEqual(plan.Notices), "held-folder notices unchanged: " + path);
+        }
+
         var movedClash = Row(Base("m1", D("original", "folderA"), D("original", "folderB")),
             F("first", "replacement", "new"), D("second", "folderB"));
         var movedChild = Row(Base("m2", F("second/child", "childA", "h1"), F("second/child", "childB", "h1")),

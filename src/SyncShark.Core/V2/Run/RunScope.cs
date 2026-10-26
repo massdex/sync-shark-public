@@ -19,6 +19,7 @@ internal sealed partial class RunScope
     private bool _streamingProtection;
     private long _protectionBatches, _protectionTotal, _protectionStarted;
     private readonly IStateStore _store;
+    private readonly SqliteStateStore.PlanningProtectionRun? _protectionRun;
     private readonly IReadOnlyDictionary<string, Side>? _decisions;
     private HashSet<string> _downloadChoices = [];
     private readonly IReadOnlyList<SyncIgnoreRule> _rules;
@@ -38,8 +39,9 @@ internal sealed partial class RunScope
         LinkExclusions? links = null, RebuildableSelection? rebuildables = null, IReadOnlyList<SyncIgnoreRule>? rules = null, IReadOnlyDictionary<string, Side>? decisions = null,
         IReadOnlySet<string>? activeRetries = null, bool restoredRetriesOnly = false,
         RecoveryRestoreProtection? restoreProtection = null, bool persistDeferred = false,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, SqliteStateStore.PlanningProtectionRun? protectionRun = null)
     {
+        _protectionRun = protectionRun;
         _persistDeferred = persistDeferred;
         _cancellationToken = cancellationToken;
         _store = store;
@@ -240,6 +242,14 @@ internal sealed partial class RunScope
         return changed is null ? baselines : changed;
     }
 
+    private void BeginProtectionMeasurement(long started, int a, int b, int baselines, int contextA, int contextB)
+    {
+        _protectionStarted = started;
+        _protectionBatches = 0;
+        _protectionTotal = Batches(a, ItemBatchSize) + Batches(b, ItemBatchSize) +
+            Batches(baselines, BaselineBatchSize) + Batches(contextA, ItemBatchSize) + Batches(contextB, ItemBatchSize);
+    }
+
     private Scope Prepare(PairDef pair, IReadOnlyList<ItemState> a, IReadOnlyList<ItemState> b,
         IReadOnlyList<Baseline> baselines, IReadOnlyList<ItemState> contextA, IReadOnlyList<ItemState> contextB,
         string provenanceScope = "Touched", IReadOnlyCollection<string>? closureHolds = null)
@@ -247,12 +257,9 @@ internal sealed partial class RunScope
         BeginMeasuredScope(provenanceScope, (long)a.Count + b.Count + baselines.Count + contextA.Count + contextB.Count);
         _cancellationToken.ThrowIfCancellationRequested();
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        _protectionStarted = started;
-        _protectionBatches = 0;
-        _protectionTotal = Batches(a.Count, ItemBatchSize) + Batches(b.Count, ItemBatchSize) +
-            Batches(baselines.Count, BaselineBatchSize) + Batches(contextA.Count, ItemBatchSize) +
-            Batches(contextB.Count, ItemBatchSize);
-        using var snapshot = (_store as SqliteStateStore)?.OpenPlanningProtection(pair);
+        BeginProtectionMeasurement(started, a.Count, b.Count, baselines.Count, contextA.Count, contextB.Count);
+        using var ownedSnapshot = _protectionRun is null ? (_store as SqliteStateStore)?.OpenPlanningProtection(pair) : null;
+        var snapshot = _protectionRun?.Snapshot() ?? ownedSnapshot;
         _deferredPair = pair;
         Exception? primaryError = null;
         try
@@ -263,8 +270,10 @@ internal sealed partial class RunScope
             baselines = NormalizeBaselines(pair, baselines);
             contextA = Normalize(pair, Side.A, contextA);
             contextB = Normalize(pair, Side.B, contextB);
-            using var protection = snapshot is not null && _links.HasRehashProtection
+            using var ownedStream = snapshot is not null && _links.HasRehashProtection && _protectionRun is null
                 ? snapshot.Stream() : null;
+            var protection = snapshot is not null && _links.HasRehashProtection
+                ? _protectionRun?.Stream(snapshot) ?? ownedStream : null;
             _streamingProtection = protection is not null;
             _scopeLinks = snapshot is null ? _links : _links.Freeze(snapshot, protection is null ? null : protection.Read);
             if (closureHolds is not null) _scopeLinks = _scopeLinks.WithPending(closureHolds);

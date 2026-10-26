@@ -239,9 +239,14 @@ public static partial class Planner
     }
 
     /// <summary>Drops the actions of rows under a rule-29 held folder (step 8).</summary>
-    private static Draft DropHeld(Context ctx) => ctx.Held.Count == 0
-        ? ctx.Draft
-        : ctx.Draft.Where(d => !ctx.Held.Any(folder => TouchesUnder(d.Row, folder))).ToList();
+    private static Draft DropHeld(Context ctx)
+    {
+        if (ctx.Held.Count == 0) return ctx.Draft;
+        var held = ctx.Held.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        bool Under(string? path) => path is not null && PairPath.Ancestors(path).Any(held.Contains);
+        return ctx.Draft.Where(d => !Under(d.Row.Base?.A.Path) && !Under(d.Row.Base?.B.Path) &&
+            !Under(d.Row.A?.Path) && !Under(d.Row.B?.Path)).ToList();
+    }
 
     /// <summary>
     /// (third-review finding 1): a held/pending path is hidden from the planner's rows, but the
@@ -396,12 +401,6 @@ public static partial class Planner
                 map.TryAdd(pair.Key, pair.Value);
         return map;
     }
-
-    private static bool TouchesUnder(PlanRow row, string folder) =>
-        UnderPath(row.Base?.A.Path, folder) || UnderPath(row.Base?.B.Path, folder) ||
-        UnderPath(row.A?.Path, folder) || UnderPath(row.B?.Path, folder);
-
-    private static bool UnderPath(string? path, string folder) => path is not null && PairPath.IsUnder(path, folder);
 
     private static string PrimaryPath(PlanRow row) => row.A?.Path ?? row.B?.Path ?? row.Base?.A.Path ?? string.Empty;
 

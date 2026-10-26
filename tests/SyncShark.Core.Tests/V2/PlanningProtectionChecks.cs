@@ -13,6 +13,8 @@ internal static class PlanningProtectionChecks
         CheckRetryGate(Path.Combine(folder, "retry-gate"));
         CheckProtectionComposition(Path.Combine(folder, "composition"));
         CheckDamageBoundaries(Path.Combine(folder, "damage-boundaries"));
+        CheckRunSnapshotReuse(Path.Combine(folder, "run-snapshot"));
+        CheckTouchedOverlap();
         CheckIncompleteCoverage();
         CheckUnknownTargetCoverage();
         CheckLinkedClosure(Path.Combine(folder, "linked-closure"), 4);
@@ -24,6 +26,108 @@ internal static class PlanningProtectionChecks
         BlockedDeleteNoticeChecks.Run(Path.Combine(folder, "blocked-delete-notices"));
         DeleteReviewNoticeChecks.Run(Path.Combine(folder, "delete-review-notices"));
         Console.WriteLine("PASS immutable scope protection and real scan completeness: no false Delete/Forget");
+    }
+
+    private static void CheckRunSnapshotReuse(string folder)
+    {
+        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
+        var pair = new PairDef("pair", "Pair A", new("left", SyncProviders.Local, null, "/left", "left"),
+            new("right", SyncProviders.Local, null, "/right", "right"), [], [], true);
+        store.SavePair(pair);
+        var item = new ItemState("Parent/Child", ItemKind.File, "item", null, new string('a', 64),
+            1, DateTimeOffset.UnixEpoch, ItemFlags.None);
+        var gen = store.BeginGeneration(pair.A.RootId, "fixture");
+        store.WriteSnapshot(new(pair.A.RootId, Side.A, gen, "cursor", [item], []));
+        store.CompleteGeneration(gen, "cursor", true);
+        using var run = store.OpenPlanningProtectionRun(pair);
+        void CompareScopes()
+        {
+            var links = LinkExclusions.Of(store, pair, false);
+            var reused = new RunScope(store, _ => true, _ => true, links, protectionRun: run).LoadFull(pair);
+            var fresh = new RunScope(store, _ => true, _ => true, links).LoadFull(pair);
+            using var freshProtection = store.OpenPlanningProtection(pair);
+            string[] probes = ["Parent", "Parent/Child", "Sibling"];
+            LocalChecks.Require(run.Snapshot().Read(probes).SequenceEqual(freshProtection.Read(probes)),
+                "cached exact protection matches fresh projection");
+            foreach (var path in probes)
+                LocalChecks.Require(run.Snapshot().RetryProtected(pair.PairId, path, false, new HashSet<string>(), false) ==
+                    freshProtection.RetryProtected(pair.PairId, path, false, new HashSet<string>(), false),
+                    "cached retries match fresh protection");
+            LocalChecks.Require(reused.A.SequenceEqual(fresh.A) && reused.B.SequenceEqual(fresh.B) &&
+                reused.Baselines.SequenceEqual(fresh.Baselines), "reused protection matches fresh scope");
+            Plan Decide(RunScope.Scope scope)
+            {
+                var rows = Planner.Join(scope.Baselines, scope.A, scope.B, new Dictionary<string, DateTimeOffset?>(),
+                    new Dictionary<string, DateTimeOffset?>(), new(true, true, new HashSet<string>(), new HashSet<string>()), false);
+                return Planner.Decide(pair.PairId, gen, rows, new(TimeSpan.Zero, false,
+                    new("{name} [{side}]{ext}", "s", TimeSpan.Zero, "Left", "Right"), 10));
+            }
+            var a = Decide(reused);
+            var b = Decide(fresh);
+            LocalChecks.Require(a.Actions.SequenceEqual(b.Actions) && a.Notices.SequenceEqual(b.Notices),
+                "cached and rebuild-every-time plans and notices are identical");
+        }
+        for (var i = 0; i < 48; i++) CompareScopes();
+        LocalChecks.Require(run.Builds == 1, "48 unchanged scopes build one protection snapshot");
+        void Changed(Action write, string table)
+        {
+            var before = run.Builds;
+            write();
+            CompareScopes();
+            LocalChecks.Require(run.Builds == before + 1, table + " write invalidates snapshot");
+            CompareScopes();
+            LocalChecks.Require(run.Builds == before + 1, table + " unchanged follow-up reuses snapshot");
+        }
+        Changed(() => store.RequireRehash(pair.A.RootId, item, "fixture"), "file_state/local_rehash");
+        Changed(() => store.SaveSyncRetry(pair.PairId, new(item.Path, "sync", 1, "fixture", DateTimeOffset.MaxValue)), "sync_retry");
+        Changed(() => store.DeferPlanning(pair.PairId, [(pair.A.RootId, item)]), "planning_deferred");
+        Changed(() => store.AddNotices([new(pair.PairId, 40, NoticeKind.Info, item.Path, "fixture", "fixture")]), "notice");
+        var action = new SyncAction("fixture", 1, ActionKind.CopyNew, Side.B, item.Path, null, item, null, false, "key");
+        Changed(() => store.RecordIntent(pair.PairId, action), "pending_effect");
+        using var external = new SqliteConnection($"Data Source={SqliteStateStore.DatabasePath(folder)};Pooling=False");
+        external.Open();
+        Changed(() => StoreSchema.Execute(external, null, "INSERT INTO dir(path,path_key) VALUES('Other','OTHER');"), "external dir");
+        Changed(() => StoreSchema.Execute(external, null, "UPDATE root SET cursor='external';"), "external root");
+        Changed(() => StoreSchema.Execute(external, null, "UPDATE pair SET first_sync_done=1;"), "external pair");
+        Changed(() => StoreSchema.Execute(external, null, "INSERT INTO local_gap(root_no,epoch,journal_cursor,boundary,trust_usn,discovery_done) SELECT root_no,'fixture','cursor',0,0,1 FROM root LIMIT 1;"), "local_gap");
+        Changed(() => StoreSchema.Execute(external, null, "INSERT INTO local_gap_item(root_no,object_id,epoch,expected_json) SELECT root_no,object_id,'fixture','{}' FROM file_state LIMIT 1;"), "local_gap_item");
+        Console.WriteLine("PLANPERF protection unchanged-scopes=48 old-builds=48 new-builds=1; mutation rebuild checks passed");
+        CheckOpenTransaction(store, pair);
+    }
+
+    private static void CheckOpenTransaction(SqliteStateStore store, PairDef pair)
+    {
+        var connection = (SqliteConnection)typeof(SqliteStateStore).GetField("_connection",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(store)!;
+        using var run = store.OpenPlanningProtectionRun(pair);
+        var before = run.Snapshot();
+        LocalChecks.Require(ReferenceEquals(before, run.Snapshot()), "autocommit reuses protection snapshot");
+        using (var transaction = connection.BeginTransaction())
+        {
+            StoreSchema.Execute(connection, transaction, "UPDATE root SET cursor='transaction-fixture';");
+            var first = run.Snapshot();
+            var second = run.Snapshot();
+            LocalChecks.Require(!ReferenceEquals(before, first) && !ReferenceEquals(first, second) && run.Builds == 3,
+                "open main transaction rebuilds protection on every scope without another write");
+            transaction.Commit();
+        }
+        var committed = run.Snapshot();
+        LocalChecks.Require(run.Builds == 4 && ReferenceEquals(committed, run.Snapshot()),
+            "commit invalidates transaction snapshot then restores autocommit reuse");
+    }
+
+    private static void CheckTouchedOverlap()
+    {
+        string[] paths = ["", "Parent", "parent/Child", "Parent/Child/Leaf", "Parents", "Other",
+            "Other/Child", "Name:part", "Name_part", "Unicode/é", "UNICODE/É", "Trailing/"];
+        foreach (var touched in paths.Select(path => new[] { path }).Append(paths))
+        {
+            var index = new PendingPathIndex(touched);
+            foreach (var path in paths)
+                LocalChecks.Require(index.Overlaps(path) == touched.Any(other =>
+                    PairPath.IsSelfOrUnder(path, other) || PairPath.IsSelfOrUnder(other, path)),
+                    "indexed settle overlap preserves case, segment, mapping and empty-path semantics");
+        }
     }
 
     private static void CheckDamageBoundaries(string folder)

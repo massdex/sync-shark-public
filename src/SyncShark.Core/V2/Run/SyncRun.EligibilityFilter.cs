@@ -59,33 +59,8 @@ public sealed partial class SyncRun
         var blocked = reasons.Keys.ToHashSet();
         // Collision cleanup can have the occupant's ObjectKey rather than the move's. Follow shared paths
         // as well as keys, transitively, so no destination delete or baseline forget runs without its move.
-        // Index only the skipped component so a single skip cannot multiply whole-plan memory.
         if (blocked.Count > 0 || plan.SkippedActions.Count > 0)
-        {
-            var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var keys = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var action in blocked.Concat(plan.SkippedActions)) Index(action);
-            // Keep only the blocked connected component, never dictionaries of the whole plan.
-            // Repeat a streaming pass for reverse-ordered links; most plans settle in one pass.
-            bool changed;
-            do
-            {
-                changed = false;
-                foreach (var action in plan.Actions)
-                {
-                    if (blocked.Contains(action) ||
-                        !(action.ObjectKey is { } key && keys.Contains(key) || RowPaths(action).Any(paths.Contains))) continue;
-                    blocked.Add(action);
-                    Index(action);
-                    changed = true;
-                }
-            } while (changed);
-            void Index(SyncAction action)
-            {
-                foreach (var path in RowPaths(action)) paths.Add(path);
-                if (action.ObjectKey is { } key) keys.Add(key);
-            }
-        }
+            PropagateBlocked(plan, blocked);
         foreach (var action in plan.Actions)
         {
             if (!blocked.Contains(action))
@@ -110,6 +85,47 @@ public sealed partial class SyncRun
             notices.Add(new Notice(pair.PairId, 40, NoticeKind.Info, string.Empty,
                 PlanNotices.PairExcluded.Detail + ": " + string.Join(", ", pair.Excluded), PlanNotices.PairExcluded.Key));
         return plan with { Actions = kept, Notices = notices, SkippedActions = skipped };
+    }
+
+    private static void PropagateBlocked(Plan plan, HashSet<SyncAction> blocked)
+    {
+        // An isolated hold needs only a seed-sized index and one scan, not whole-plan adjacency.
+        var seedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seedKeys = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var seed in blocked.Concat(plan.SkippedActions))
+        {
+            foreach (var path in RowPaths(seed)) seedPaths.Add(path);
+            if (seed.ObjectKey is { } key) seedKeys.Add(key);
+        }
+        if (!plan.Actions.Any(action => !blocked.Contains(action) &&
+            (action.ObjectKey is { } key && seedKeys.Contains(key) || RowPaths(action).Any(seedPaths.Contains))))
+            return;
+        // Index references, not action copies; each adjacency list is consumed at most once.
+        // Keep ordinal object identity separate from case-insensitive path occupancy.
+        var paths = new Dictionary<string, List<SyncAction>>(StringComparer.OrdinalIgnoreCase);
+        var keys = new Dictionary<string, List<SyncAction>>(StringComparer.Ordinal);
+        foreach (var action in plan.Actions)
+        {
+            foreach (var path in RowPaths(action)) Add(paths, path, action);
+            if (action.ObjectKey is { } key) Add(keys, key, action);
+        }
+        var pending = new Queue<SyncAction>(blocked.Concat(plan.SkippedActions));
+        while (pending.TryDequeue(out var action))
+        {
+            foreach (var path in RowPaths(action)) Visit(paths, path);
+            if (action.ObjectKey is { } key) Visit(keys, key);
+        }
+        static void Add(Dictionary<string, List<SyncAction>> index, string value, SyncAction action)
+        {
+            if (!index.TryGetValue(value, out var adjacent)) index[value] = adjacent = [];
+            adjacent.Add(action);
+        }
+        void Visit(Dictionary<string, List<SyncAction>> index, string value)
+        {
+            if (!index.Remove(value, out var adjacent)) return;
+            foreach (var related in adjacent)
+                if (blocked.Add(related)) pending.Enqueue(related);
+        }
     }
 
     private static Notice EligibilityNotice(string pairId, string path, string reason)

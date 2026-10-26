@@ -41,6 +41,10 @@ internal sealed class PendingPathIndex
             _containers[path[..cut]] = (byte)(_containers.GetValueOrDefault(path[..cut]) | kind);
     }
 
+    // Unlike Covers/Contains, the settle overlap predicate does not treat empty as the root.
+    internal bool Overlaps(string path) => _all.Contains(path) ||
+        PairPath.Ancestors(path).Any(_all.Contains) || path.Length > 0 && _containers.ContainsKey(path);
+
     internal int Count => _all.Count;
     internal bool Covers(string path) => PairPath.CoveredBy(path, _all);
     internal bool Contains(string path) => _all.Count > 0 && (path.Length == 0 || _containers.ContainsKey(path));

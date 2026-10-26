@@ -4,16 +4,17 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SyncRun
 {
-    // A settle chunk line is time-throttled like the protection-scope progress lines: the first and
-    // last chunk always report, and a long lane reports at most about one chunk line this often.
-    private const double SettleChunkTraceSeconds = 3;
+    // A settle chunk line is throttled at the run's progress interval, like the protection-scope
+    // progress lines: the first and last chunk always report, and a long lane reports at most about
+    // one chunk line per interval.
 
     // The same scope/join/decision owners as ordinary intake, but never hash or execute an endpoint
     // effect for this lane. A rejected chunk remains queued for ordinary intake, without rotation.
     private (IReadOnlyList<SqliteStateStore.DeferredPlanning> Rows, IReadOnlyList<SyncAction> Adopts, int Candidates)
         PlanSettlePage(PairDef pair, BothScan scan, LinkExclusions links,
             IReadOnlyList<SqliteStateStore.DeferredPlanning> ordinary, IReadOnlyList<string> touched,
-            Func<string, bool> includeA, Func<string, bool> includeB, CancellationToken ct)
+            Func<string, bool> includeA, Func<string, bool> includeB, CancellationToken ct,
+            SqliteStateStore.PlanningProtectionRun? protectionRun)
     {
         if (_store is not SqliteStateStore store || scan.AnyFull || !scan.A.Complete || !scan.B.Complete)
         {
@@ -32,9 +33,10 @@ public sealed partial class SyncRun
         // Inventory predicates cover boundaries; the existing scan policy also covers ignores.
         // Reject the entire entity if any alias is outside sync authority, without acknowledging it.
         var notSynced = ScanPathsNotSynced(pair);
+        var touchedIndex = new PendingPathIndex(touched);
         var chunks = candidates.Where(row => row.Paths.All(path =>
             includeA(path) && includeB(path) && !notSynced(path))).Chunk(128).ToArray();
-        EvaluateSettleChunks(chunks, pair, scan, protection, touched, accepted, adopts, ct);
+        EvaluateSettleChunks(chunks, pair, scan, protection, touchedIndex, accepted, adopts, ct, protectionRun);
         var settled = adopts.Distinct().ToArray();
         RunTracePlanningStep("settle done", started, $"candidates={candidates.Count}; chunks={chunks.Length}; accepted={accepted.Count}; rejected={candidates.Count - accepted.Count}; adopts={settled.Length}");
         return (accepted, settled, candidates.Count);
@@ -43,26 +45,26 @@ public sealed partial class SyncRun
     // Chunk progress, in the protection-scope shape: the first and last chunk always report, and a
     // long lane reports at most about one line every few seconds.
     private void EvaluateSettleChunks(SqliteStateStore.DeferredPlanning[][] chunks, PairDef pair, BothScan scan,
-        LinkExclusions protection, IReadOnlyList<string> touched, List<SqliteStateStore.DeferredPlanning> accepted,
-        List<SyncAction> adopts, CancellationToken ct)
+        LinkExclusions protection, PendingPathIndex touched, List<SqliteStateStore.DeferredPlanning> accepted,
+        List<SyncAction> adopts, CancellationToken ct, SqliteStateStore.PlanningProtectionRun? protectionRun)
     {
         var lastTrace = Stopwatch.GetTimestamp();
         for (var index = 0; index < chunks.Length; index++)
         {
             var chunk = chunks[index];
             var acceptedBefore = accepted.Count;
-            EvaluateSettleChunk(pair, scan, protection, touched, accepted, adopts, chunk, ct);
+            EvaluateSettleChunk(pair, scan, protection, touched, accepted, adopts, chunk, ct, protectionRun);
             var chunkAccepted = accepted.Count - acceptedBefore;
             if (index != 0 && index != chunks.Length - 1 &&
-                Stopwatch.GetElapsedTime(lastTrace).TotalSeconds < SettleChunkTraceSeconds) continue;
+                Stopwatch.GetElapsedTime(lastTrace) < _settings.ProgressInterval) continue;
             lastTrace = Stopwatch.GetTimestamp();
             RunLog.Trace($"planning settle chunk {index + 1}/{chunks.Length}: candidates={chunk.Length}; accepted={chunkAccepted}; rejected={chunk.Length - chunkAccepted}; running-accepted={accepted.Count}");
         }
     }
 
     private void EvaluateSettleChunk(PairDef pair, BothScan scan, LinkExclusions protection,
-        IReadOnlyList<string> touched, List<SqliteStateStore.DeferredPlanning> accepted, List<SyncAction> adopts,
-        SqliteStateStore.DeferredPlanning[] initial, CancellationToken ct)
+        PendingPathIndex touched, List<SqliteStateStore.DeferredPlanning> accepted, List<SyncAction> adopts,
+        SqliteStateStore.DeferredPlanning[] initial, CancellationToken ct, SqliteStateStore.PlanningProtectionRun? protectionRun)
     {
         void Evaluate(SqliteStateStore.DeferredPlanning[] chunk)
         {
@@ -74,7 +76,7 @@ public sealed partial class SyncRun
             var page = FilterSettleProtection(pair, chunk, guarded, touched);
             if (page.Length == 0) return;
             paths = page.SelectMany(row => row.Paths).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-            var scope = LoadSettleScope(pair, guarded, page, paths, ct);
+            var scope = LoadSettleScope(pair, guarded, page, paths, ct, protectionRun);
             var rows = JoinRows(scope, scan, false);
             var plan = Decide(pair, scan, rows, null, scope, guarded);
             var evaluated = EvaluatedPaths(rows);
@@ -96,20 +98,22 @@ public sealed partial class SyncRun
     }
 
     private SqliteStateStore.DeferredPlanning[] FilterSettleProtection(PairDef pair,
-        SqliteStateStore.DeferredPlanning[] chunk, LinkExclusions guarded, IReadOnlyList<string> touched)
+        SqliteStateStore.DeferredPlanning[] chunk, LinkExclusions guarded, PendingPathIndex touched)
     {
         var notSynced = ScanPathsNotSynced(pair, ItemEligibility.Purpose.Settle,
             (_, _, item, _) => guarded.Covers(item.Path) || guarded.Contains(item.Path) ? "held:protection" : null);
         return chunk.Where(row => row.Paths.All(path => !notSynced(path) &&
-            !touched.Any(other => PairPath.IsSelfOrUnder(path, other) || PairPath.IsSelfOrUnder(other, path)))).ToArray();
+            !touched.Overlaps(path))).ToArray();
     }
 
     private RunScope.Scope LoadSettleScope(PairDef pair, LinkExclusions guarded,
-        SqliteStateStore.DeferredPlanning[] page, string[] paths, CancellationToken ct)
+        SqliteStateStore.DeferredPlanning[] page, string[] paths, CancellationToken ct,
+        SqliteStateStore.PlanningProtectionRun? protectionRun)
     {
         var predicates = Predicates(pair, guarded);
         var scanner = new RunScope(_store, predicates.A, predicates.B, guarded,
-            rules: PairInclude.IgnoreRules(pair), restoreProtection: RecoveryProtection(pair), cancellationToken: ct);
+            rules: PairInclude.IgnoreRules(pair), restoreProtection: RecoveryProtection(pair), cancellationToken: ct,
+            protectionRun: protectionRun);
         return scanner.LoadTouched(pair, paths,
             page.Where(row => row.RootId == pair.A.RootId).Select(row => row.ObjectId).ToArray(),
             page.Where(row => row.RootId == pair.B.RootId).Select(row => row.ObjectId).ToArray());

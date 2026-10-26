@@ -2,8 +2,59 @@ namespace Massdex.SyncShark.V2;
 
 internal static partial class RunChecks
 {
+    private static void BlockedClosureScale()
+    {
+        var fx = Build();
+        var run = fx.Run();
+        SyncAction Link(int i) => new("link-" + i, 15, ActionKind.Forget, Side.B,
+            "Node/" + i, "Node/" + (i - 1), null, null, false, null);
+        var seed = Link(0);
+        foreach (var count in new[] { 12, 20000 })
+        {
+            var actions = Enumerable.Range(1, count).Reverse().Select(Link).ToArray();
+            var referenceClock = System.Diagnostics.Stopwatch.StartNew();
+            var reference = new HashSet<SyncAction>();
+            var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { seed.Path, seed.FromPath! };
+            long visits = 0;
+            bool changed;
+            do
+            {
+                changed = false;
+                foreach (var action in actions)
+                {
+                    visits++;
+                    if (reference.Contains(action) || !(paths.Contains(action.Path) || paths.Contains(action.FromPath!))) continue;
+                    reference.Add(action);
+                    paths.Add(action.Path);
+                    paths.Add(action.FromPath!);
+                    changed = true;
+                }
+            } while (changed);
+            var before = referenceClock.Elapsed;
+            var plan = new Plan(fx.Pair.PairId, 1, actions, []) { SkippedActions = [seed] };
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var result = run.FilterNarrowedPrepare(fx.Pair, plan, ["FileExtension:tmp"]);
+            var elapsed = clock.Elapsed;
+            Require(reference.Count == count && result.Actions.Count == 0 && result.SkippedActions.SequenceEqual(new[] { seed }.Concat(actions)) &&
+                result.Notices.Count == 0, "reverse-connected closure retains identical order and no related-effect notices");
+            Require(elapsed < TimeSpan.FromSeconds(10), "20k reverse-chain closure is linear, not repeated whole-plan scans");
+            if (count == 20000)
+                Console.WriteLine($"PLANPERF closure rows={count}; old-pass-visits={visits}; old-ms={before.TotalMilliseconds:F1}; new-ms={elapsed.TotalMilliseconds:F1}");
+        }
+        // A key connects different paths, but key case must not connect distinct identities.
+        var linked = Link(1) with { Path = "independent", FromPath = null, ObjectKey = "key" };
+        var separate = linked with { ActionId = "separate", Path = "separate", ObjectKey = "KEY" };
+        var skipped = seed with { ObjectKey = "key" };
+        var filtered = run.FilterNarrowedPrepare(fx.Pair,
+            new Plan(fx.Pair.PairId, 1, [linked, separate], []) { SkippedActions = [skipped] }, ["FileExtension:tmp"]);
+        Require(filtered.Actions.SequenceEqual(new[] { separate }) &&
+            filtered.SkippedActions.SequenceEqual(new[] { skipped, linked }) && filtered.Notices.Count == 0,
+            "closure uses ordinal keys and preserves independent component");
+    }
+
     public static async Task NarrowedSafetyChecksAsync()
     {
+        BlockedClosureScale();
         foreach (var scenario in new[] { "move-in", "move-out", "folder-delete", "source-copy" })
         {
             var fx = Build();
