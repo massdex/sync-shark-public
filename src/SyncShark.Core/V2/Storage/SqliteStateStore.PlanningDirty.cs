@@ -29,7 +29,8 @@ public sealed partial class SqliteStateStore
 
     // Single admission owner; explicit run observations also retain work before first-sync completion.
     private void RetainPlanningObservations(Microsoft.Data.Sqlite.SqliteTransaction tx, long root,
-        IReadOnlyList<ItemState> items, bool incremental, PairDef? observationPair = null)
+        IReadOnlyList<ItemState> items, bool incremental, PairDef? observationPair = null,
+        Action<Microsoft.Data.Sqlite.SqliteTransaction, long, long, string[]>? published = null)
     {
         if (items.Count == 0) return;
         foreach (var (number, side) in RootSides(root, tx))
@@ -52,7 +53,10 @@ public sealed partial class SqliteStateStore
             var admitted = items.Where(item => PlanningObservationEligible(pair, side, item, eligibility))
                 .Select(item => new { root, id = item.ObjectId, path = item.Path }).ToArray();
             if (admitted.Length > 0)
+            {
                 WritePlanningDirty(tx, number, System.Text.Json.JsonSerializer.Serialize(admitted), ObservationPlanningReason);
+                published?.Invoke(tx, number, root, admitted.Select(item => item.id).Distinct().ToArray());
+            }
         }
     }
 

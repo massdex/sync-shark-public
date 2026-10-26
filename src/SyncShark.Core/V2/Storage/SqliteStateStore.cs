@@ -162,7 +162,10 @@ public sealed partial class SqliteStateStore : IStateStore
         ObserveDefenderGrants(snapshot.RootId, publish: true);
     }
 
-    public void WriteDelta(Delta delta)
+    public void WriteDelta(Delta delta) => WriteDelta(delta, null);
+
+    private void WriteDelta(Delta delta,
+        Action<Microsoft.Data.Sqlite.SqliteTransaction, long, IReadOnlyList<ItemState>>? observe)
     {
         InIndexingStore(() =>
         {
@@ -170,7 +173,7 @@ public sealed partial class SqliteStateStore : IStateStore
                 throw new InvalidOperationException("A cursor-invalid delta must not be written; run a full scan.");
             var rootNo = RootNo(delta.RootId) ?? throw new InvalidOperationException($"Unknown root {delta.RootId}");
             RequireOpenGen(null, delta.Gen, rootNo);
-            _files.WriteDelta(delta, rootNo);
+            _files.WriteDelta(delta, rootNo, observe);
             CleanupStorageItems();
             BindStoragePathIntents(delta.RootId);
         });

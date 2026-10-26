@@ -27,6 +27,7 @@ internal static partial class RunChecks
         await Group(nameof(ReconciliationClearsGapDebt), ReconciliationClearsGapDebt, failures);
         await Group(nameof(ReconciliationClearsLegacyEpoch), ReconciliationClearsLegacyEpoch, failures);
         await Group(nameof(ExecutionProofReflagRetainsDebtAsync), ExecutionProofReflagRetainsDebtAsync, failures);
+        await Group(nameof(PlanningEchoRetainsLaterObservationAsync), PlanningEchoRetainsLaterObservationAsync, failures);
         await Group(nameof(ReconciliationLegacyPartialCoverage), ReconciliationLegacyPartialCoverage, failures);
         await Group(nameof(ReconciliationCompletesCapturedEpochOnly), ReconciliationCompletesCapturedEpochOnly, failures);
         await Group(nameof(ReconciliationBacklogKeepsGapMarker), ReconciliationBacklogKeepsGapMarker, failures);

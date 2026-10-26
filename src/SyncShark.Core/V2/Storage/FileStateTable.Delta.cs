@@ -3,7 +3,8 @@ namespace Massdex.SyncShark.V2;
 internal sealed partial class FileStateTable
 {
     /// <summary>Applies a delta's deletes then upserts, each in list order, tombstoning every real deletion.</summary>
-    public void WriteDelta(Delta delta, long rootNo)
+    public void WriteDelta(Delta delta, long rootNo,
+        Action<Microsoft.Data.Sqlite.SqliteTransaction, long, IReadOnlyList<ItemState>>? observe = null)
     {
         var evidence = delta.DisplacementEvidence;
         using var verifier = evidence is { IncompleteSubtrees.Count: > 0 } ? evidence.OpenAbsenceVerifier?.Invoke() : null;
@@ -24,7 +25,7 @@ internal sealed partial class FileStateTable
         // upserts, so an interruption after an earlier batch cannot orphan its observation.
         foreach (var page in delta.Changes.Where(change => change.Kind == ChangeKind.Upsert &&
             (delta.IncludesPath?.Invoke(change.Path) ?? true)).Chunk(V2Settings.PlanningObservationBatchRows))
-            OnInventoryObserved?.Invoke(batch.Transaction, rootNo,
+            (observe ?? OnInventoryObserved)?.Invoke(batch.Transaction, rootNo,
                 page.Select(change => change.State).OfType<ItemState>().ToArray());
         batch.Flush();
     }

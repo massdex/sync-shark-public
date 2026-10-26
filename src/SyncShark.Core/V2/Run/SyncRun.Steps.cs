@@ -849,7 +849,7 @@ public sealed partial class SyncRun
                     changes.Add(new Change(ChangeKind.Upsert, item.ObjectId, path, item with { Hash = hash }, null));
             if (changes.Count == 0) continue;
             var cursor = _store.Cursor(root.RootId) ?? string.Empty;
-            _store.WriteDelta(new Delta(root.RootId, side, scan.Gen, cursor, cursor, changes, false, []));
+            WriteHashObservation(pair, scan, new Delta(root.RootId, side, scan.Gen, cursor, cursor, changes, false, []));
         }
     }
 
@@ -1189,14 +1189,8 @@ public sealed partial class SyncRun
                 empty[path] = result = EmptyPlanningPath(pair, scan, path, evaluated, unsettled, includeA, includeB);
             return result;
         }
-        if (deferredPlanning is not null && _store is SqliteStateStore deferredStore)
-            foreach (var page in deferredPlanning.Chunk(256))
-            {
-                ct.ThrowIfCancellationRequested();
-                deferredStore.AcknowledgeDeferredPlanning(pair.PairId, page, Settled, EmptySettled, acknowledged,
-                    batch is null ? null : (row, reason) =>
-                        RecordReconciliationBlocker(pair, batch, row, reason, scan, plan));
-            }
+        AcknowledgePlanningObservations(pair, scan, deferredPlanning, Settled, EmptySettled, acknowledged,
+            batch is null ? null : (row, reason) => RecordReconciliationBlocker(pair, batch, row, reason, scan, plan), ct);
         var executionProofs = FoldExecutionProofs(pair, scan, tally);
         RehashAcknowledgementForTest?.Invoke(scan.A.RehashThrough, scan.B.RehashThrough);
         _store.AcknowledgeRehash(pair.A.RootId, scan.A.RehashThrough, path => Settled(path) && includeA(path), ct, batch?.ObjectIdsA);

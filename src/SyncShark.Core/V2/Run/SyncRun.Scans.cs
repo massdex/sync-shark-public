@@ -56,6 +56,7 @@ public sealed partial class SyncRun
         public IReadOnlyDictionary<string, string> IncompleteReasons { get; init; } = new Dictionary<string, string>();
         public InventoryCoverage? ObservedCoverage { get; init; }
         public long RehashThrough { get; set; }
+        internal Dictionary<string, long> PlanningObservationVersions { get; } = new(StringComparer.Ordinal);
         public IReadOnlySet<string> ReleasedDeletionEvidence { get; init; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         public IReadOnlyDictionary<string, string> PendingDeletionEvidence { get; init; } =
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
