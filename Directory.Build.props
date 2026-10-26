@@ -1,6 +1,6 @@
 <Project>
   <PropertyGroup>
-    <Version Condition="'$(Version)' == ''">0.3.71.1</Version>
+    <Version Condition="'$(Version)' == ''">0.3.71</Version>
     <SyncSharkSourceRevision Condition="'$(SyncSharkSourceRevision)' == ''">UNBOUND</SyncSharkSourceRevision>
     <SyncSharkExpectedPreviousVersion Condition="'$(SyncSharkExpectedPreviousVersion)' == '' and '$(Configuration)' != 'Release'">0.3.47+19fb262ff6a943d5bf37b4ca003f07235e72515d</SyncSharkExpectedPreviousVersion>
     <InformationalVersion>$(Version)+$(SyncSharkSourceRevision)</InformationalVersion>
