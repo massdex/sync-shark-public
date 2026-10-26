@@ -186,7 +186,7 @@ internal static partial class AutoSyncChecks
         new RootDef("b-" + id, SyncProviders.Dropbox, "acc", "/" + id, "id:b-" + id), [], [], true);
 
     /// <summary>Forwards to a real store and makes one read slow, so the deadline is exercised after admission.</summary>
-    private sealed class SlowStatusStore : DispatchProxy
+    private class SlowStatusStore : DispatchProxy
     {
         private IStateStore _inner = null!;
         internal TimeSpan PairsDelay { get; set; }
