@@ -866,8 +866,7 @@ public sealed partial class SyncRun : ISyncRun
             return new(null, FailedRun(pairId, [new ActionResult(string.Empty, Outcome.Failed, null, null, null, error.Message)]), null);
         }
 
-        IReadOnlyList<ReconciliationCoverage> coverages = batch is null ? ActiveCoverages(pair, scan) : [];
-        if (coverages.Count != 0) scan = scan with { Unknown = (side, path) => coverages.Any(item => item.Unknown(side, path)) };
+        IReadOnlyList<ReconciliationCoverage> coverages = batch is null ? ActiveCoverages(pair, ref scan) : [];
         RecordScanRetries(pair, scan, batch?.Paths);
         var rootsComplete = !scan.A.IncompleteSubtrees.Contains(string.Empty) &&
             !scan.B.IncompleteSubtrees.Contains(string.Empty);
@@ -946,8 +945,7 @@ public sealed partial class SyncRun : ISyncRun
             scan.PendingChanges(scanner, changesA, changesB);
             var scope = scan.AnyFull ? scanner.LoadFull(pair) :
                 scanner.LoadTouched(pair, touched, changesA, changesB);
-            inventory = scope;
-            foreach (var coverage in coverages) coverage.Load(scope);
+            inventory = LoadReconciliationCoverage(scope, coverages);
             // Keep only small ancestor context, not a second full inventory, between planning passes.
             mappingContext = new([], [], []) { ContextA = scope.ContextA, ContextB = scope.ContextB };
             return scope;

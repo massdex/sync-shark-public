@@ -2,9 +2,16 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SyncRun
 {
-    private IReadOnlyList<ReconciliationCoverage> ActiveCoverages(PairDef pair, BothScan scan)
+    private static RunScope.Scope LoadReconciliationCoverage(RunScope.Scope scope, IReadOnlyList<ReconciliationCoverage> coverages)
+    {
+        foreach (var coverage in coverages) coverage.Load(scope);
+        return scope;
+    }
+
+    private IReadOnlyList<ReconciliationCoverage> ActiveCoverages(PairDef pair, ref BothScan scan)
     {
         if (_store is not SqliteStateStore sql) return [];
+        var observed = scan;
         var result = new List<ReconciliationCoverage>();
         var covered = new HashSet<Side>();
         lock (_stopGate)
@@ -19,6 +26,7 @@ public sealed partial class SyncRun
             if (root.Provider == SyncProviders.Local && !covered.Contains(root == pair.A ? Side.A : Side.B) &&
                 sql.PendingGapInventory(root.RootId) && ((ILocalGapStore)sql).GapEpoch(root.RootId) is { } gap)
                 Add(StateMonitor.FromGap(gap) with { RootId = root.RootId }, true, string.Empty);
+        if (result.Count != 0) scan = scan with { Unknown = (side, path) => result.Any(item => item.Unknown(side, path)) };
         return result;
 
         void Add(StateMonitorDecision decision, bool selecting, string session)
@@ -28,7 +36,7 @@ public sealed partial class SyncRun
                     (side == Side.A ? pair.A : pair.B).RootId == decision.RootId)).ToHashSet();
             if (sides.Count == 0) return;
             covered.UnionWith(sides);
-            result.Add(new(decision, selecting, session, sql, sides, scan));
+            result.Add(new(decision, selecting, session, sql, sides, observed));
         }
     }
 }
