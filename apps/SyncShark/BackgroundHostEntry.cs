@@ -16,7 +16,7 @@ internal static class BackgroundHostEntry
         if (await client.TrySendAsync(AutoSyncHostClient.Request("status"), TimeSpan.FromMilliseconds(300)) is { } existing)
         {
             Console.WriteLine($"AutoSync already running (PID {existing.Host.Pid}). Attached; no second engine created.");
-            if (logRoot is { } root) AutoSyncLog.Append(root, "host shutdown: attached to existing owner");
+            if (logRoot is { } root) AutoSyncLog.HostShutdown(root, "autosync-owner-attached");
             return 0;
         }
         // The owner is silent on stdout; stderr is durable so an externally ended host leaves evidence.
@@ -68,16 +68,16 @@ internal static class BackgroundHostEntry
 
     private static async Task<int> AttachToOwnerAsync(AutoSyncHostClient client, string? logRoot)
     {
-        var reason = "owner attach failed";
+        var reason = "autosync-owner-attach-failed";
         try
         {
             var attached = await client.TrySendAsync(AutoSyncHostClient.Request("status"), TimeSpan.FromSeconds(5));
-            reason = attached is not null ? "attached to existing owner" : "existing owner unavailable";
+            reason = attached is not null ? "autosync-owner-attached" : "autosync-owner-unavailable";
             return attached is not null ? 0 : (int)SyncCliExitCode.Busy;
         }
         finally
         {
-            if (logRoot is { } root) AutoSyncLog.Append(root, "host shutdown: " + reason);
+            if (logRoot is { } root) AutoSyncLog.HostShutdown(root, reason);
         }
     }
 

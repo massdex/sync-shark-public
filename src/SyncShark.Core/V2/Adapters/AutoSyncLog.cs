@@ -45,6 +45,10 @@ public static class AutoSyncLog
         }
     }
 
+    /// <summary>Records an early host exit using the shared catalog's shutdown reason.</summary>
+    public static void HostShutdown(string productRoot, string reasonKey) =>
+        Append(productRoot, "host shutdown: " + MessageCatalog.Default.Message(reasonKey));
+
     /// <summary>Routes a discarded stderr stream to the durable log, one complete line per event.</summary>
     public static TextWriter CreateStderrWriter(string productRoot) =>
         TextWriter.Synchronized(new LineWriter(productRoot));
@@ -55,7 +59,7 @@ public static class AutoSyncLog
         // the budget check and write. Failure propagates to Append's catch: never grow a full file.
         using var previous = new FileStream(path + ".previous", FileMode.Create, FileAccess.Write,
             FileShare.Read | FileShare.Delete);
-        current.Position = Math.Max(0, current.Length - FileBound);
+        current.Position = current.Length > FileBound ? current.Length - FileBound : 0;
         current.CopyTo(previous);
         previous.Flush();
         current.SetLength(0);

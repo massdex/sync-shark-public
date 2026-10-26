@@ -46,7 +46,8 @@ public sealed class AutoSyncBackgroundHost : IAsyncDisposable
 
     /// <summary>True when a stop request ended this host; the durable shutdown line uses it.</summary>
     public bool StopRequested => Volatile.Read(ref _stopRequested) != 0;
-    public string ShutdownReason => StopRequested ? "stop requested" : "listener ended without a stop request";
+    public string ShutdownReason => MessageCatalog.Default.Message(
+        StopRequested ? "autosync-stop-requested" : "autosync-listener-ended");
     public Task Completion => _listener;
 
     /// <summary>
