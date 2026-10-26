@@ -8,7 +8,9 @@ internal static partial class RunChecks
             TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.Seed("fresh.txt", "before");
+        fx.A.Seed("urgent.txt", "before");
         await FirstSyncAsync(fx.Run(), fx);
+        var urgent = fx.A.Seed("urgent.txt", "after");
         var backlog = Enumerable.Range(0, 5000).Select(index => fx.A.Seed($"queued-{index:D5}.txt", "same")).ToArray();
         foreach (var item in backlog) fx.B.Seed(item.Path, "same");
         foreach (var (root, endpoint) in new[] { (fx.Pair.A, fx.A), (fx.Pair.B, fx.B) })
@@ -19,13 +21,15 @@ internal static partial class RunChecks
             store.CompleteGeneration(gen, snapshot.CursorAfter, true);
         }
         store.DeferPlanning(fx.Pair.PairId, backlog.Select(item => (fx.Pair.A.RootId, item)).ToArray());
+        store.DeferPlanning(fx.Pair.PairId, [(fx.Pair.A.RootId, urgent)], urgent: true);
         fx.A.Seed("fresh.txt", "after");
         var writes = fx.B.WriteCalls;
         var run = fx.Run();
         var report = await ((ISyncRun)run).AutoSyncAsync(fx.Pair.PairId, new RecordingProgress(), default);
-        Require(report.Uploaded == 1 && fx.B.WriteCalls == writes + 1 && report.ChangedPaths == 1 &&
-            (await fx.B.ObserveAsync("fresh.txt", default))?.Hash == (await fx.A.ObserveAsync("fresh.txt", default))?.Hash,
-            "AutoSync applies only the fresh edit instead of admitting the 5000-row deferred backlog");
+        Require(report.Uploaded == 2 && fx.B.WriteCalls == writes + 2 && report.ChangedPaths == 2 &&
+            (await fx.B.ObserveAsync("fresh.txt", default))?.Hash == (await fx.A.ObserveAsync("fresh.txt", default))?.Hash &&
+            (await fx.B.ObserveAsync("urgent.txt", default))?.Hash == urgent.Hash,
+            "AutoSync applies fresh delta and checkpointed urgent work without admitting the 5000-row bulk backlog");
         Require(store.CountDeferredPlanning(fx.Pair.PairId) == backlog.Length && report.PlanningBacklog == backlog.Length,
             "the untouched backlog remains durable and visible in the AutoSync status report");
         var repaired = await run.ReconcileScopeAsync(fx.Pair.PairId, StateMonitor.PlanningBacklog(), new RecordingProgress(), default);

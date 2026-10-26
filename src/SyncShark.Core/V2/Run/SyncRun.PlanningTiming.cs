@@ -55,12 +55,12 @@ public sealed partial class SyncRun
     }
 
     // One oldest-first intake page. Apply rotates it; previews never mutate the queue.
-    internal IReadOnlyList<SqliteStateStore.DeferredPlanning> AdmitPlanningPage(string pairId, PairDef? observedPair = null)
+    internal IReadOnlyList<SqliteStateStore.DeferredPlanning> AdmitPlanningPage(string pairId, PairDef? observedPair = null, bool userOnly = false)
     {
         using var timing = new RunBoundaryTiming("intake", _settings.EnableRunInstrumentation);
         IReadOnlyList<SqliteStateStore.DeferredPlanning> page = _store is SqliteStateStore store
             ? store.AdmitDeferredPlanning(pairId, _time.GetUtcNow().UtcTicks,
-                rotate: _endpoints is not PlanOnlyEndpoints) : [];
+                rotate: _endpoints is not PlanOnlyEndpoints, userOnly: userOnly) : [];
         if (observedPair is not null && _store is SqliteStateStore retirement)
             page = RetireNonWorkPlanning(retirement, observedPair, page, out _);
         timing.Entities = page.Count;

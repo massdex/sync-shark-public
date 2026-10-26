@@ -112,12 +112,12 @@ public sealed partial class SqliteStateStore
     /// acknowledgement. Read-only callers pass <c>rotate: false</c> and write nothing.
     /// </summary>
     internal IReadOnlyList<DeferredPlanning> AdmitDeferredPlanning(string pairId, long beforeVersion,
-        bool rotate = true) => InStore(() =>
+        bool rotate = true, bool userOnly = false) => InStore(() =>
     {
         var pair = PairNo(pairId);
         if (pair is null) return (IReadOnlyList<DeferredPlanning>)Array.Empty<DeferredPlanning>();
         using var tx = _connection.BeginTransaction();
-        var admitted = ReadPlanningIntake(tx, pair.Value, beforeVersion);
+        var admitted = ReadPlanningIntake(tx, pair.Value, beforeVersion, userOnly);
         if (rotate && admitted.Count > 0)
         {
             // FIFO rotation: admitted versions move above the unadmitted eligible queue, keeping

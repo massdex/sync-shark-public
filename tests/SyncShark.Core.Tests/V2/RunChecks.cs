@@ -10,6 +10,8 @@ internal static partial class RunChecks
     public static async Task RunAsync()
     {
         var failures = new List<string>();
+        await Group(nameof(ReconciliationExactLocalDeletionAsync), ReconciliationExactLocalDeletionAsync, failures);
+        await Group(nameof(DropboxChecks.ReconciliationExactFolderRetryAsync), DropboxChecks.ReconciliationExactFolderRetryAsync, failures);
         await Group(nameof(AutoSyncLeavesPlanningBacklogAsync), AutoSyncLeavesPlanningBacklogAsync, failures);
         await Group(nameof(DropboxChecks.ReconciliationExactMetadataAsync), DropboxChecks.ReconciliationExactMetadataAsync, failures);
         await Group(nameof(ReconciliationDecisionBoundsAsync), ReconciliationDecisionBoundsAsync, failures);
