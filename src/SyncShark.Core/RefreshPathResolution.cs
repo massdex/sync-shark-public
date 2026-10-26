@@ -152,7 +152,11 @@ internal sealed class RefreshPathResolution
             !_wantedByParent.TryGetValue(requestedChild, out var wanted)) return;
         if (!_wantedByParent.TryGetValue(actualChild, out var actual))
             _wantedByParent[actualChild] = actual = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var retained = actual.Count;
         actual.UnionWith(wanted);
+        // A listing retained under the narrower wanted set must not answer the widened one: a second
+        // requested spelling would otherwise miss its own child and the walk would admit it absent.
+        if (actual.Count != retained) _parentListings?.Remove(actualChild);
     }
 
     // Null when absent, or when two ordinal names in one case-sensitive directory match: never choose one.
