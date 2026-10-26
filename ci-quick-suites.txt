@@ -1,0 +1,5 @@
+--v2-run-checks
+--v2-gap-checks
+--v2-journal-window-checks
+--v2-autosync-checks
+--cli-checks
