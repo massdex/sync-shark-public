@@ -1,0 +1,5 @@
+--v2-run-checks
+--cli-checks
+--v2-autosync-checks
+--v2-storage-checks
+--v2-runcli-checks
