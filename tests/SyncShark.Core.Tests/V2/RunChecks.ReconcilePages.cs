@@ -79,7 +79,8 @@ internal static partial class RunChecks
         finally { if (Directory.Exists(folder)) Directory.Delete(folder, true); }
     }
 
-    private static async Task ReconcileFolderPagesAsync(bool anchorFirst, bool completed, bool selectedMemberOnly = false)
+    private static async Task ReconcileFolderPagesAsync(bool anchorFirst, bool completed, bool selectedMemberOnly = false,
+        bool throughBatch = false)
     {
         var folder = Path.Combine(Path.GetTempPath(), "folder-pages-" + Guid.NewGuid().ToString("N"));
         try
@@ -111,7 +112,15 @@ internal static partial class RunChecks
             {
                 var selected = pending.First();
                 using var log = RunLog.Open(folder, "pair", "recovery", false);
-                await fx.Executor.ReconcileAsync([selected], 1, fx.WriterA, writer, default);
+                if (throughBatch)
+                {
+                    fx.A.Seed("unrelated.txt", "not selected");
+                    await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default,
+                        new RunOptions { Batch = BatchFor(selected.ExpectedTarget!) });
+                    Require(await fx.B.ObserveAsync("unrelated.txt", default) is null,
+                        "whole-group recovery does not broaden the batch planning scope");
+                }
+                else await fx.Executor.ReconcileAsync([selected], 1, fx.WriterA, writer, default);
                 log.Dispose();
                 await log.Completion;
                 Require(writer.TreeChecks == 1 && store.UnresolvedIntents(fx.Pair.PairId).Count == (completed ? 0 : count),

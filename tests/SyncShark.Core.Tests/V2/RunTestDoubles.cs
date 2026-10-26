@@ -405,7 +405,7 @@ internal sealed class RecordingStore : IStateStore
     public long RehashWatermark(string rootId) => _inner.RehashWatermark(rootId);
     public IReadOnlyList<ItemState> RehashCandidates(string rootId, int limit, long through) => _inner.RehashCandidates(rootId, limit, through);
     public IReadOnlyList<string> ObjectPaths(string rootId, string objectId, int offset, int limit) => _inner.ObjectPaths(rootId, objectId, offset, limit);
-    public void AcknowledgeRehash(string rootId, long through, Func<string, bool> settled, CancellationToken ct = default) => _inner.AcknowledgeRehash(rootId, through, settled, ct);
+    public void AcknowledgeRehash(string rootId, long through, Func<string, bool> settled, CancellationToken ct = default, IReadOnlyCollection<string>? objectIds = null) => _inner.AcknowledgeRehash(rootId, through, settled, ct, objectIds);
     public bool HasMultipleNames(string rootId, string objectId) => _inner.HasMultipleNames(rootId, objectId);
     public bool RehashTouches(string rootId, string path, bool descendants) => _inner.RehashTouches(rootId, path, descendants);
     public bool PairPaused(string pairId) => _inner.PairPaused(pairId);

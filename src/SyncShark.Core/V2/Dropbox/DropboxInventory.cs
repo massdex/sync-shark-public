@@ -38,7 +38,7 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
         }, ct);
 
     internal async Task<IReadOnlyDictionary<string, string>> HydratePrefixesAsync(IReadOnlyList<string> prefixes,
-        Func<IReadOnlyList<DropboxChange>, Task> accept, CancellationToken ct)
+        Func<IReadOnlyList<DropboxChange>, Task> accept, CancellationToken ct, Action<string>? listingBasis = null)
     {
         var requested = accept;
         accept = changes => requested(changes.Where(change => !ArtifactPaths.IsArtifactPath(change.Path)).ToArray());
@@ -47,6 +47,7 @@ public sealed class DropboxInventory : IInventorySource, IDeferredDeletionEviden
             // Root scope is "", never "id:/". A required full re-list uses the durable
             // inventory page journal; it is not an uncheckpointed prefix hydration.
             var listing = await ListCheckpointedAsync(null, ct);
+            listingBasis?.Invoke(listing.BasisCursor);
             foreach (var batch in listing.Entries.Select(entry => new DropboxChange(entry.RelativePath, entry)).Chunk(256))
                 await accept(batch);
             return listing.ScopedFailures;
