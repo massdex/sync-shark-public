@@ -178,9 +178,18 @@ public sealed partial class SqliteStateStore : ILocalGapStore
             ("$id", rootId)) is not null);
 
     internal void CompleteGapInventory(string rootId, string epoch) => InIndexingStore(() =>
-        StoreSchema.Execute(_connection, null,
-            "UPDATE local_gap SET inventory_pending=0 WHERE root_no=(SELECT root_no FROM root WHERE root_id=$r) AND epoch=$e;",
-            ("$r", rootId), ("$e", epoch)));
+    {
+        var root = RootNo(rootId);
+        if (root is null || ReadGap(root)?.Epoch != epoch) return;
+        using var tx = _connection.BeginTransaction();
+        // Root selection and accountable batch disposition supersede this epoch's legacy work.
+        // A replacement epoch never loses its frontier or item obligations here.
+        StoreSchema.Execute(_connection, tx, "DELETE FROM local_gap_item WHERE root_no=$r;", ("$r", root.Value));
+        StoreSchema.Execute(_connection, tx,
+            "UPDATE local_gap SET inventory_pending=0,discovery_done=1,worker_done=1,after_object=char(65535),worker_after=char(65535) " +
+            "WHERE root_no=$r AND epoch=$e;", ("$r", root.Value), ("$e", epoch));
+        tx.Commit();
+    });
 
     internal void SettleGapInventory(long completedGeneration, bool cursorHeldForEvidence = false) => InIndexingStore(() =>
         SettleGapInventory(null, completedGeneration, cursorHeldForEvidence));
@@ -192,7 +201,8 @@ public sealed partial class SqliteStateStore : ILocalGapStore
             "(SELECT root_no FROM generation WHERE gen=$g AND (complete=1 OR $e=1) AND finished IS NOT NULL);",
             ("$g", completedGeneration), ("$e", cursorHeldForEvidence ? 1 : 0));
 
-    void ILocalGapStore.BeginGap(string rootId, string journalCursor, long boundary, bool trustFileUsn, string reason) => InIndexingStore(() =>
+    void ILocalGapStore.BeginGap(string rootId, string journalCursor, long boundary, bool trustFileUsn,
+        string reason, bool protect) => InIndexingStore(() =>
     {
         var root = RootNo(rootId);
         if (root is null || StoreSchema.Scalar(_connection, null,
@@ -201,6 +211,8 @@ public sealed partial class SqliteStateStore : ILocalGapStore
         // An unfinished untrusted pass cannot become trusted just because the newest gap has a journal id.
         if (prior is not null && HasGapProtection(root))
         {
+            // Starting a monitor inventory is not authority to discharge legacy coverage.
+            protect = true;
             if (!prior.TrustFileUsn || !GapPredicates.SameJournal(prior.JournalCursor, journalCursor)) trustFileUsn = false;
             if (trustFileUsn) boundary = Math.Min(boundary, prior.Boundary);
         }
@@ -215,16 +227,7 @@ public sealed partial class SqliteStateStore : ILocalGapStore
             "boundary=excluded.boundary,trust_usn=excluded.trust_usn,reason=excluded.reason,after_object='',discovery_done=0,worker_after='',worker_done=0;",
             ("$r", root.Value), ("$e", Guid.NewGuid().ToString("N")), ("$c", journalCursor),
             ("$b", boundary), ("$t", trustFileUsn ? 1 : 0), ("$why", reason));
-        // journal_cursor is the covered-until checkpoint captured BEFORE any walk, not
-        // the oldest unresolved per-file proof boundary. Publish protection and replay
-        // position atomically: later journal changes must still be read normally.
-        if (NtfsUsnCheckpoint.TryParseCursor(journalCursor, out _, out _))
-        {
-            StoreSchema.Execute(_connection, tx,
-                "UPDATE local_gap SET inventory_pending=1 WHERE root_no=$r;" +
-                "UPDATE root SET cursor=$c WHERE root_no=$r;",
-                ("$r", root.Value), ("$c", journalCursor));
-        }
+        PublishGapInventory(tx, root.Value, journalCursor, protect);
         tx.Commit();
     });
 

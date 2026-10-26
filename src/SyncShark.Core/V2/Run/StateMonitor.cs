@@ -24,6 +24,19 @@ internal static class StateMonitor
             watcherFault ? ReconciliationTrigger.OverflowReplay : ReconciliationTrigger.JournalReplay, savedCursor);
     }
 
+    /// <summary>Reconstructs selection authority from the durable gap, not the advanced replay cursor.</summary>
+    internal static StateMonitorDecision FromGap(LocalGapEpoch gap)
+    {
+        var parsed = NtfsUsnCheckpoint.TryParseCursor(gap.JournalCursor, out var journal, out _);
+        var saved = parsed ? new NtfsUsnCheckpoint(journal, 0, gap.Boundary, 0).Cursor : null;
+        return new(gap.JournalCursor, ReconciliationScope.Root,
+            gap.TrustFileUsn && parsed ? ReconciliationTrigger.GapSameJournal :
+                parsed ? ReconciliationTrigger.JournalReplaced : ReconciliationTrigger.JournalPositionInvalid, saved);
+    }
+
+    internal static StateMonitorDecision PlanningBacklog() =>
+        new(null, ReconciliationScope.Root, ReconciliationTrigger.PlanningBacklog);
+
     /// <summary>After replay, only the uncovered subtrees need repair; known changes remain AutoSync input.</summary>
     internal static ReconciliationScope? ReplayGap(IReadOnlyCollection<string> uncoveredSubtrees) =>
         uncoveredSubtrees.Count == 0 ? null : new([], uncoveredSubtrees);

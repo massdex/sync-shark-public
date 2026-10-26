@@ -86,6 +86,7 @@ public sealed partial class SyncRun
             new InventoryProgress(throttle, root), ct);
         if (snapshot.IncompleteSubtrees.Count > 0)
             throw new IOException(string.Join("; ", snapshot.IncompleteReasons.Values));
+        listingBasis?.Invoke(snapshot.CursorAfter);
         foreach (var page in snapshot.Items.Chunk(V2Settings.PlanningObservationBatchRows)) await accept(page);
     }
 

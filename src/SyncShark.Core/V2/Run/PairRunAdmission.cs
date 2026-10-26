@@ -26,6 +26,15 @@ internal sealed class PairRunAdmission
         finally { scope.Active = false; _scope.Value = previous; }
     }
 
+    // Detached work cannot borrow a caller's lease: that caller will not await its effects.
+    internal async Task<T> WithoutBorrowedAdmissionAsync<T>(Func<Task<T>> body)
+    {
+        var previous = _scope.Value;
+        _scope.Value = null;
+        try { return await body().ConfigureAwait(false); }
+        finally { _scope.Value = previous; }
+    }
+
     internal Task<IDisposable> EnterAsync(string? pairId, CancellationToken ct, bool immediate = false) =>
         EnterAsync(pairId, ct, immediate, null);
 

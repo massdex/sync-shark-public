@@ -410,6 +410,7 @@ public sealed partial class LocalInventory : IInventorySource
     internal JournalRead? JournalReadForTest { get; set; }
     internal Func<(NtfsUsnCheckpoint? Checkpoint, bool Deleted)>? WalkCheckpointForTest { get; set; }
     internal Action<string>? DirectoryCompletedForTest { get; set; }
+    internal NtfsUsnCheckpoint? JournalCheckpoint() => ReadWalkCheckpointState().Checkpoint;
     private NtfsUsnCheckpoint? ReadWalkCheckpoint() => ReadWalkCheckpointState().Checkpoint;
     private (NtfsUsnCheckpoint? Checkpoint, bool Deleted) ReadWalkCheckpointState()
     {
@@ -570,7 +571,7 @@ public sealed partial class LocalInventory : IInventorySource
             ObserveCapacity(through.Cursor, overflow: true);
         (_known as ILocalGapStore)?.BeginGap(rootId, through.Cursor, next,
             journalId == through.JournalId && next <= through.NextUsn,
-            journalId != through.JournalId ? "journal replaced" : next > through.NextUsn ? "cursor ahead of journal" : "journal wrapped past saved cursor");
+            journalId != through.JournalId ? "journal replaced" : next > through.NextUsn ? "cursor ahead of journal" : "journal wrapped past saved cursor", protect: false);
     }
 
     internal void BeginFullGap(string rootId, string cursor, bool journalDeleted)
@@ -599,7 +600,7 @@ public sealed partial class LocalInventory : IInventorySource
             // would prevent its verification debt from draining. The existing verification
             // summary displays this persisted gap reason without changing retry eligibility.
             var detail = "journal range over limit: metadata rescan and trusted per-file verification; " + reason;
-            (_known as ILocalGapStore)?.BeginGap(rootId, through.Cursor, next, trustFileUsn: true, detail);
+            (_known as ILocalGapStore)?.BeginGap(rootId, through.Cursor, next, trustFileUsn: true, detail, protect: false);
             return Invalid(gen, rootId, cursor, detail);
         }
         return RetryJournal(gen, rootId, cursor, reason);

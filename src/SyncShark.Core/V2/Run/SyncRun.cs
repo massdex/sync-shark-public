@@ -866,6 +866,8 @@ public sealed partial class SyncRun : ISyncRun
             return new(null, FailedRun(pairId, [new ActionResult(string.Empty, Outcome.Failed, null, null, null, error.Message)]), null);
         }
 
+        IReadOnlyList<ReconciliationCoverage> coverages = batch is null ? ActiveCoverages(pair, scan) : [];
+        if (coverages.Count != 0) scan = scan with { Unknown = (side, path) => coverages.Any(item => item.Unknown(side, path)) };
         RecordScanRetries(pair, scan, batch?.Paths);
         var rootsComplete = !scan.A.IncompleteSubtrees.Contains(string.Empty) &&
             !scan.B.IncompleteSubtrees.Contains(string.Empty);
@@ -945,6 +947,7 @@ public sealed partial class SyncRun : ISyncRun
             var scope = scan.AnyFull ? scanner.LoadFull(pair) :
                 scanner.LoadTouched(pair, touched, changesA, changesB);
             inventory = scope;
+            foreach (var coverage in coverages) coverage.Load(scope);
             // Keep only small ancestor context, not a second full inventory, between planning passes.
             mappingContext = new([], [], []) { ContextA = scope.ContextA, ContextB = scope.ContextB };
             return scope;
@@ -1015,6 +1018,7 @@ public sealed partial class SyncRun : ISyncRun
         var retrySelection = RebuildableSelection.Sides(pair) is { } retrySides
             ? new RebuildableSelection(retrySides.Cloud, rebuildableRetries) : null;
         plan = await ApplyReviewedRetriesAsync(pair, plan, retries, ct);
+        foreach (var coverage in coverages) plan = coverage.DeferDependencies(plan);
         RefreshRetryProtection();
         plan = ApplySafetyFilter(pair, ActionPredicates(retryPair, links, retrySelection), plan);
         RaiseLinksSummary(pair, current);

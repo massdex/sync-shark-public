@@ -427,11 +427,6 @@ public sealed partial class SyncRun
                 cursor = null;
             }
         }
-        // The gap cursor can advance before a run completes, but its metadata/planning
-        // obligation cannot. Keep choosing full inventory after interruption; promotion
-        // above survives because this path does not replay the already-covered overflow.
-        if (RehearsalEndpoints.Unwrap(inventory) is LocalInventory && _store is SqliteStateStore gapSql && gapSql.GapInventoryPending(root.RootId))
-            cursor = null;
         if (inventory is LocalInventory verifying)
             verifying.VerificationProgress = (done, backlog) => throttle.Report(RunPhases.Verifying,
                 $"{SyncProviders.DisplayName(root.Provider)}: {backlog:N0} queued; bounded verification slice", done, backlog);
@@ -508,6 +503,15 @@ public sealed partial class SyncRun
                 ? RehearsalEndpoints.Apply(inventory, await dropbox.ChangesSinceAsync(cursor, deltaGen, include, ct, firstSync), include, echo: true)
                 : await inventory.ChangesSinceAsync(cursor, deltaGen, include, ct);
         delta = WithHydrationFailures(delta, hydrationFailures);
+        if (delta.CursorInvalid && !firstSync && !hydrationInvalid && _store is SqliteStateStore && _endpoints is not PlanOnlyEndpoints)
+        {
+            if (root.Provider == SyncProviders.Dropbox)
+            {
+                RequestReconciliation(pair.PairId, StateMonitor.DropboxReset() with { RootId = root.RootId }, null, ct);
+                return new SideScan(deltaGen, cursor, true, false, [], [], NoDeletions, []);
+            }
+            delta = await ReplayAfterGapAsync(pair, root, inventory, delta, include, ct);
+        }
         // Evidence availability is not cursor invalidity; first-sync absence uses targeted revision checks.
         if (delta.CursorInvalid)
         {

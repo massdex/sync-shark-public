@@ -6,7 +6,7 @@ public sealed partial class SyncRun
     private readonly AsyncLocal<string?> _reconciliationRunId = new();
 
     internal Task<RunReport> ReconcileScopeAsync(string pairId, StateMonitorDecision decision,
-        IProgress<RunProgress> progress, CancellationToken ct)
+        IProgress<RunProgress>? progress, CancellationToken ct)
     {
         var id = "reconcile-" + Guid.NewGuid().ToString("N");
         var active = new ActiveReconciliation(decision, "rc-" + id);
@@ -45,6 +45,9 @@ public sealed partial class SyncRun
     private async Task<RunReport> ReconcileScopeBodyAsync(string pairId, ActiveReconciliation active,
         IProgress<RunProgress> progress, CancellationToken ct)
     {
+        // Register scope and cancellable work synchronously, but never run selection on the monitor caller.
+        await Task.Yield();
+        ct.ThrowIfCancellationRequested();
         if (!_store.FirstSyncDone(pairId)) throw new SyncRunRefusedException("Review and apply the first sync first.");
         var pair = _store.Pair(pairId) ?? throw new SyncRunRefusedException("No pair " + pairId);
         var sql = _store as SqliteStateStore ?? throw new InvalidOperationException(MessageCatalog.Default.Template("reconciliation-staging-required"));

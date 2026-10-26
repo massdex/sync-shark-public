@@ -5,8 +5,12 @@ public sealed partial class SyncRun
     private IReadOnlyList<SqliteStateStore.DeferredPlanning> ReconciliationPlanningPage(PairDef pair, ReconcileBatch batch)
     {
         var sql = (SqliteStateStore)_store;
-        var rows = sql.DeferredPlanningFor(pair.PairId, pair.A.RootId, batch.ObjectIdsA)
-            .Concat(sql.DeferredPlanningFor(pair.PairId, pair.B.RootId, batch.ObjectIdsB)).ToArray();
+        // Fresh reads observe both counterparts, even when selection staged only one side.
+        // Capture their new observation debt now, under admission, for the same acknowledgement.
+        var idsA = batch.ObjectIdsA.Concat(_store.Live(pair.A.RootId, batch.Paths).Select(item => item.ObjectId)).Distinct().ToArray();
+        var idsB = batch.ObjectIdsB.Concat(_store.Live(pair.B.RootId, batch.Paths).Select(item => item.ObjectId)).Distinct().ToArray();
+        var rows = sql.DeferredPlanningFor(pair.PairId, pair.A.RootId, idsA)
+            .Concat(sql.DeferredPlanningFor(pair.PairId, pair.B.RootId, idsB)).ToArray();
         return RetireNonWorkPlanning(sql, pair, rows);
     }
 
