@@ -108,6 +108,8 @@ internal sealed class RefreshPathResolution
     }
 
     // Null when absent, or when two ordinal names in one case-sensitive directory match: never choose one.
+    // A parent that cannot be listed also resolves nothing, so the ordinary per-item scan decision still
+    // owns the failure instead of aborting the walk.
     private DirectoryEntryInfo? MatchComponent(string parent, string component)
     {
         DirectoryEntryInfo? match = null;
@@ -121,7 +123,7 @@ internal sealed class RefreshPathResolution
                 match = entry;
             }
         }
-        catch (Win32Exception error) when (error.NativeErrorCode is 2 or 3) { return null; }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or Win32Exception) { return null; }
         return match;
     }
 
