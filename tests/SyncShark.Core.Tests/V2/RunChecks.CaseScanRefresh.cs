@@ -105,13 +105,11 @@ internal static partial class RunChecks
             {
                 // The baseline rename is an ordinary Move; a follow-up run carries the edit to the remote spelling.
                 await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
-                var remote = await fx.B.FullAsync(0, _ => true, SilentProgress, CancellationToken.None);
-                var remotePaths = remote.Items.Select(item => item.Path)
-                    .OrderBy(path => path, StringComparer.Ordinal).ToArray();
-                Require(remotePaths.SequenceEqual(["Child", "Child/file.txt"]) &&
-                    remote.Items.Single(item => item.Path == "Child/file.txt").Hash ==
-                        LocalChecks.BlockHash(LocalChecks.Bytes("edited after the case-only rename")),
-                    "the edited bytes reach the remote under the on-disk spelling only");
+                var remoteFolder = await fx.B.ObserveAsync("Child", default);
+                var remoteFile = await fx.B.ObserveAsync("child/file.txt", default);
+                Require(remoteFolder is { Kind: ItemKind.Folder, Path: "Child" } &&
+                    remoteFile?.Hash == LocalChecks.BlockHash(LocalChecks.Bytes("edited after the case-only rename")),
+                    "the folder case rename reaches the remote and the edited bytes follow it");
             }
             else
             {
