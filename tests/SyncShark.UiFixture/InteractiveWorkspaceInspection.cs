@@ -662,23 +662,15 @@ internal static partial class Program
             await database.RegisterMembershipAsync(id + "-membership", id, sourceRoot, path, 1);
             await database.RegisterObjectVersionAsync(id + "-version", id, sourceSide, "{}", hash, 340880);
             var fixtureAdmission = await database.CreateAcceptedCommandAdmissionAsync(null, "run_pair", pair.Id, null, null, "{}", SyncAuthorityCommandPurpose.NormalEffect);
-            // A fresh action must carry exact current planning authority for its object; the fixture
-            // seeds the same object-scoped cut the production planner binds, on the pair's true roots.
-            var planningAuthority = await FixturePlanningAuthority.CurrentAsync(database, pair.Id,
-                pair.Id + "-local", pair.Id + "-remote", id);
-            // An absent-destination action also needs its own fresh registration ticket; a bare
-            // retained operation id is not an insertion grant.
-            var registration = await database.ReserveActionAsync(id + "-key", fixtureAdmission);
-            await database.CreateOperationAsync(new SyncAuthorityOperationPlan(registration.OperationId, id + "-key",
+            await database.CreateOperationAsync(new SyncAuthorityOperationPlan(id, id + "-key",
                 index == 0 ? SyncAuthorityOperationKind.CreateRemote : SyncAuthorityOperationKind.CreateLocal,
-                pair.Id, id, planningAuthority.ConfigurationRevision, "inspection-profile", "{}", pair.Priority,
+                pair.Id, id, pair.PolicyRevision, "inspection-profile", "{}", pair.Priority,
                 [new(id + "-source", pair.Id, id, "source", sourceRoot, id + "-membership", id + "-version", 1, path, "{\"kind\":\"file\"}"),
-                 new(id + "-destination", pair.Id, id, "destination", destinationRoot, null, null, null, path, "{\"kind\":\"file\",\"absent\":true}")], [], [],
-                PlanningAuthorities: [planningAuthority]), fixtureAdmission, reservation: registration.Reservation);
+                 new(id + "-destination", pair.Id, id, "destination", destinationRoot, null, null, null, path, "{\"kind\":\"file\",\"absent\":true}")], [], []), fixtureAdmission);
             if (index == 0)
             {
-                var lease = await database.AcquireOperationLeaseAsync(registration.OperationId, "inspection-seed", TimeSpan.FromMinutes(1));
-                var attempt = await database.StartDispatchedAttemptAsync(registration.OperationId, lease, hash, "inspection-no-provider-effect");
+                var lease = await database.AcquireOperationLeaseAsync(id, "inspection-seed", TimeSpan.FromMinutes(1));
+                var attempt = await database.StartDispatchedAttemptAsync(id, lease, hash, "inspection-no-provider-effect");
                 await database.RecordReceiptAsync(attempt.AttemptId, lease, SyncAuthorityReceiptCertainty.Unknown,
                     "{}", "{}", "{\"example\":true}", hash);
                 await database.ReleaseLeaseAsync(lease);

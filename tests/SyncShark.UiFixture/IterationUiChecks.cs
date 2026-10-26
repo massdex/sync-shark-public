@@ -278,20 +278,14 @@ internal static class IterationUiChecks
             catch { if (!process.HasExited) process.Kill(); throw; }
             return (process.ExitCode, await output, await error, File.Exists(marker));
         }
-        // Only a removable fixture root can exercise the volume-refusal leg. On a fixed root (the CI
-        // runner's C: scratch root) the package reaches the signature guard instead, so that leg is
-        // skipped there and the ordinary fixed-NTFS signature contract below still runs unchanged.
-        if (new DriveInfo(Path.GetPathRoot(Path.GetFullPath(root))!).DriveType == DriveType.Removable)
-        {
-            var removable = await RunAsync(root);
-            Require(removable.Exit != 0 && !removable.Marker,
-                "The update bridge refuses an unsigned package placed on the removable F: volume without executing it");
-            Require(removable.Error.Contains("NTFS", StringComparison.OrdinalIgnoreCase) ||
-                    removable.Error.Contains("drive", StringComparison.OrdinalIgnoreCase) ||
-                    removable.Error.Contains("local", StringComparison.OrdinalIgnoreCase) ||
-                    removable.Error.Contains("volume", StringComparison.OrdinalIgnoreCase),
-                "The F: placement refusal is the volume input-lease refusal, not a signature verdict: " + removable.Error.Trim());
-        }
+        var removable = await RunAsync(root);
+        Require(removable.Exit != 0 && !removable.Marker,
+            "The update bridge refuses an unsigned package placed on the removable F: volume without executing it");
+        Require(removable.Error.Contains("NTFS", StringComparison.OrdinalIgnoreCase) ||
+                removable.Error.Contains("drive", StringComparison.OrdinalIgnoreCase) ||
+                removable.Error.Contains("local", StringComparison.OrdinalIgnoreCase) ||
+                removable.Error.Contains("volume", StringComparison.OrdinalIgnoreCase),
+            "The F: placement refusal is the volume input-lease refusal, not a signature verdict: " + removable.Error.Trim());
         var tempParent = Path.Combine(Path.GetTempPath(), "syncshark-update-bridge-" + Guid.NewGuid().ToString("N"));
         try
         {

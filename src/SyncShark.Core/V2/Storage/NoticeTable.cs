@@ -10,6 +10,20 @@ namespace Massdex.SyncShark.V2;
 /// </remarks>
 internal sealed partial class NoticeTable
 {
+    /// <summary>
+    /// The saturation value of the one open-conflict count behind the tray icon: at or past this many visible
+    /// notices the icon says 99+ and never claims an exact total. Only the result is capped. The traversal is
+    /// not row-bounded: the same indexed pass also visits open notices whose choice is ignore/quarantine-ignore
+    /// before the NOT filter removes them. That residual cost is deferral #25, the designed paging lane, and is
+    /// not changed here (no index or schema change).
+    /// </summary>
+    internal const int AttentionCountCap = 100;
+
+    internal static readonly string VisibleCountSql =
+        "SELECT COUNT(*) FROM (SELECT 1 FROM notice n INDEXED BY nt_open JOIN pair p ON p.pair_no=n.pair_no WHERE " +
+        VisibleSql("n.state") + " AND NOT (" + IgnoredSql("n.choice") + ") LIMIT " +
+        AttentionCountCap.ToString(CultureInfo.InvariantCulture) + ");";
+
     private readonly SqliteConnection _connection;
 
     private readonly TimeProvider _clock;

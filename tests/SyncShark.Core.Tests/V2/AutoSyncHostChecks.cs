@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.IO.Pipes;
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
 
 namespace Massdex.SyncShark.V2;
 
@@ -16,6 +17,7 @@ internal static class AutoSyncHostChecks
         await ReadsNeverLaunchAsync();
         await GuiAdapterSharesHostAsync();
         await ProductionWiringWithEmptyTempStoreAsync();
+        await OpenConflictCountAsync();
         await ReadsBypassMutationSlotsAsync();
         await SafeStopAsync();
         await DisconnectDoesNotReplayAsync();
@@ -230,6 +232,7 @@ internal static class AutoSyncHostChecks
         await using var engine = new ProductionAutoSyncEngine(authority, root);
         var status = JsonSerializer.SerializeToElement(await engine.ExecuteAsync(AutoSyncHostClient.Request("status"), default));
         Require(status.GetProperty("running").GetBoolean(), "production engine opens only the explicit temp store");
+        Require(status.GetProperty("openConflicts").GetInt32() == 0, "the empty production store reports no open conflict");
         await engine.ExecuteAsync(AutoSyncHostClient.Request("interval", minutes: 7), default);
         Require(new SyncAutomationStore(authority.StateAuthority).Load().IntervalMinutes == 7, "host interval persists");
         await engine.ExecuteAsync(AutoSyncHostClient.Request("cli") with
@@ -244,6 +247,50 @@ internal static class AutoSyncHostChecks
         { CliArgs = ["--cli", "settings", "set", "--settings", "{\"automation\":{\"intervalMinutes\":9}}", "--yes"] }, default);
         Require(new SyncAutomationStore(authority.StateAuthority).Load().IntervalMinutes == 9, "CLI settings shares host authority");
         await engine.StopAsync();
+    }
+
+    // The tray icon's red is exactly this count: one indexed COUNT whose result saturates at the cap over the
+    // rows `conflicts list` shows. Past the cap the count is the saturation value, never the true total.
+    private static Task OpenConflictCountAsync()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "autosync-conflict-count-" + Guid.NewGuid().ToString("N"));
+        using var store = OpenChoiceStore(root);
+        Require(store.OpenConflictCount() == 0, "an empty store reports no open conflict");
+        store.AddNotices([
+            new Notice("pair-1", 0, NoticeKind.UserDecision, "file.txt", "Both copies changed.", "conflict"),
+            new Notice("pair-1", 0, NoticeKind.UserDecision, "ignored.txt", "Ignored episode.", "conflict")
+        ]);
+        var ignored = store.OpenNotices("pair-1").Single(notice => notice.Path == "ignored.txt");
+        store.CloseNotice(ignored.NoticeId!, NoticeChoices.Ignore);
+        Require(store.OpenConflictCount() == 1,
+            "the open-conflict count matches the visible conflicts list and excludes an ignored notice");
+        // More visible rows than the cap: the result saturates at the cap.
+        store.AddNotices(Enumerable.Range(0, NoticeTable.AttentionCountCap + 50).Select(index =>
+            new Notice("pair-1", 0, NoticeKind.KeepBoth, "bulk/" + index + ".txt", "Kept both.", "bulk-kept")).ToArray());
+        Require(store.OpenNotices("pair-1").Count > NoticeTable.AttentionCountCap,
+            "the saturation check has more visible notices than the cap");
+        Require(store.OpenConflictCount() == NoticeTable.AttentionCountCap,
+            "more than the cap of open conflicts returns the saturation value, not the true total");
+        PlanOpenConflictCount(root);
+        return Task.CompletedTask;
+    }
+
+    private static void PlanOpenConflictCount(string root)
+    {
+        using var database = new SqliteConnection(new SqliteConnectionStringBuilder
+        { DataSource = Path.Combine(root, "v2", "state.db") }.ToString());
+        database.Open();
+        using var command = StoreSchema.Command(database, null, "EXPLAIN QUERY PLAN " + NoticeTable.VisibleCountSql);
+        using var reader = command.ExecuteReader();
+        var plan = new List<string>();
+        while (reader.Read()) plan.Add(reader.GetString(3));
+        Require(plan.Any(line => line.Contains("nt_open (state=?)")),
+            "the open-conflict count seeks the nt_open index rather than scanning notices");
+        // The bounded inner select is a co-routine ("SCAN (subquery-1)"); only a notice/pair table scan
+        // would mean the count reads the table, so the check ignores the co-routine step.
+        Require(!plan.Any(line => line.Contains("SCAN ", StringComparison.Ordinal) &&
+                                  !line.Contains("(subquery", StringComparison.Ordinal)),
+            "the open-conflict count never scans a table");
     }
 
     private static async Task ReadsNeverLaunchAsync()

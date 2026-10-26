@@ -10,6 +10,8 @@ public partial class App : System.Windows.Application
     private ThemeManager? _themeManager;
     private MainWindow? _mainWindow;
     private TrayFlyoutWindow? _flyout;
+    private TrayClient? _trayClient;
+    private IDisposable? _trayOwnership;
     private System.Windows.Forms.NotifyIcon? _trayIcon;
     private System.Windows.Forms.ToolStripMenuItem? _trayStatusItem;
     private System.Windows.Forms.ToolStripMenuItem? _trayPauseItem;
@@ -60,6 +62,28 @@ public partial class App : System.Windows.Application
             ShutdownMode = ShutdownMode.OnMainWindowClose;
             MainWindow = new SharedAutoSyncWindow();
             MainWindow.Show();
+            return;
+        }
+        // Pure background-tray client. Like the shared-client branch it must precede the product lock and
+        // every preference store: it attaches to the one host and never owns an engine or the store.
+        var trayRoute = TrayStartup.Decide(useCoreV2, args);
+        if (trayRoute != TrayStartup.Route.NotTray)
+        {
+            base.OnStartup(e);
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            if (trayRoute == TrayStartup.Route.Invalid)
+            {
+                AppDialogWindow.Inform(null, "Tray could not start", "The background tray attaches to the core v2 AutoSync host.",
+                    "Start it with --core v2 --tray; nothing was opened or changed.");
+                Shutdown(2);
+                return;
+            }
+            var host = BackgroundHostEntry.Client();
+            var tray = TrayStartup.Start(useCoreV2, args, host.TrySendAsync, () => Shutdown(),
+                message => WriteStartupProgress("tray", message));
+            _trayOwnership = tray.Ownership;
+            _trayClient = tray.Client;
+            if (tray.ExitCode is { } exitCode) Shutdown(exitCode);
             return;
         }
         if (args.Length == 3 && args[0] == "--move-data")
@@ -175,6 +199,10 @@ public partial class App : System.Windows.Application
     protected override void OnExit(ExitEventArgs e)
     {
         _flyout?.Close();
+        _trayClient?.Dispose();
+        _trayClient = null;
+        _trayOwnership?.Dispose();
+        _trayOwnership = null;
         if (_trayIcon is not null)
         {
             _trayIcon.Visible = false;

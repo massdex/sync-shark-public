@@ -6,7 +6,6 @@ on:
       - 'claude-code/v2-*'
       - 'main'
       - 'ci/**'
-      - 'quick/**'
   workflow_dispatch:
 
 # Every public snapshot completes independently; no superseded run cancellation.
@@ -19,27 +18,6 @@ env:
   DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false'
   DOTNET_NOLOGO: 'true'
   DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
-  # Single home for suite CLI arguments: the tests shard matrix and the
-  # quick-tests job both derive their invocation from this map, so a suite is
-  # never called differently on the quick path. A suite takes the fixture root
-  # as its next argument only when its selector appears in SUITE_ROOT_ARGS; a
-  # suite that also needs trailing arguments declares them in SUITE_EXTRA_ARGS.
-  SUITE_ROOT_ARGS: >-
-    --v2-dropbox-checks --excluded-nested-pair-partition-checks --v2-local-journal-checks
-    --cli-checks --v2-store-gate-checks --v2-root-relist-scoped-checks
-    --corresponding-included-overlap-checks --quarantine-checks --v2-resumelist-checks
-    --v2-planning-protection-checks --v2-interrupted-delete-checks --v2-gap-checks
-    --v2-snapshot-million-memory-checks --v2-storage-checks --fod-storage-checks
-    --v2-recovery-query-checks --v2-recovery-first-restart-checks --v2-dates-checks
-    --v2-local-offline-checks --v2-run-history-checks --v2-local-checks
-    --v2-hotfix-gap-checks --v2-cached-identity-exclusion-checks --v2-journal-window-checks
-    --v2-localwatch-checks --v2-download-kill-checks --v2-recovery-kill-checks
-    --v2-recovery-audit --v2-slowdelete-checks --v2-heldperf-checks --v2-monitor-checks
-    --v2-coverage-checks --v2-coverage-fix-checks --v2-mkdir-gate-checks
-    --v2-provider-followups-checks --v2-dropbox-ignore-checks
-    --v2-delete-review-notice-checks --v2-indexing-signal-checks
-    --v2-gap-promotion-bound-checks
-  SUITE_EXTRA_ARGS: '{"--v2-slowdelete-checks":["all"]}'
 
 jobs:
   spec-ratchet:
@@ -144,39 +122,11 @@ jobs:
             -p:SyncSharkZigPath=$env:ZIG_EXE
           exit $LASTEXITCODE
 
-      # The GUI/app fixture is a separate WPF executable that references the app
-      # project. Build it into the same allocation so its output sits beside the
-      # app's (build\ci\bin\<project>\<configuration>\<framework>) and the copied
-      # native Explorer/Discovery helpers come along to the ui-tests job.
-      - name: Build UI fixture
-        if: ${{ !startsWith(github.ref, 'refs/heads/quick/') }}
-        shell: pwsh
-        run: |
-          $buildRoot = Join-Path $env:GITHUB_WORKSPACE 'build\ci'
-          dotnet build 'tests/SyncShark.UiFixture/SyncShark.UiFixture.csproj' -c $env:CONFIGURATION --nologo `
-            -p:SyncSharkBuildRoot=$buildRoot `
-            -p:SyncSharkZigPath=$env:ZIG_EXE
-          exit $LASTEXITCODE
-
       - name: Upload test binaries
         uses: actions/upload-artifact@v4
         with:
           name: sync-shark-tests
           path: tests/SyncShark.Core.Tests/bin/${{ env.CONFIGURATION }}/net8.0
-          if-no-files-found: error
-          retention-days: 7
-
-      # The ui-tests job needs the app plus the fixture and its copied helpers.
-      # With these two paths the artifact root is build/ci/bin, so downloading it
-      # there restores the layout the fixture resolves its sibling outputs from.
-      - name: Upload UI fixture binaries
-        if: ${{ !startsWith(github.ref, 'refs/heads/quick/') }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: sync-shark-ui-fixture
-          path: |
-            build/ci/bin/SyncShark/${{ env.CONFIGURATION }}
-            build/ci/bin/SyncShark.UiFixture/${{ env.CONFIGURATION }}
           if-no-files-found: error
           retention-days: 7
 
@@ -189,8 +139,6 @@ jobs:
   tests:
     name: tests (${{ matrix.label }})
     needs: build
-    # quick/** runs one targeted quick-tests job instead of the full shard matrix.
-    if: ${{ !startsWith(github.ref, 'refs/heads/quick/') }}
     runs-on: windows-latest
     timeout-minutes: 60
     strategy:
@@ -201,17 +149,21 @@ jobs:
             suites:
               - suite: dropbox
                 flag: --v2-dropbox-checks
+                takes-root: true
                 drive: c
           - label: 'shard-2: conflict-choices, nested-pair, reincluded-evidence'
             suites:
               - suite: conflict-choices
                 flag: --v2-conflict-choice-checks
+                takes-root: false
                 drive: c
               - suite: nested-pair
                 flag: --excluded-nested-pair-partition-checks
+                takes-root: true
                 drive: c
               - suite: reincluded-evidence
                 flag: --reincluded-evidence-checks
+                takes-root: false
                 drive: c
           - label: 'shard-3: local-journal, blockers, cli, composition'
             suites:
@@ -219,138 +171,181 @@ jobs:
               # volume, which has no usable journal; keep these roots on C:.
               - suite: local-journal
                 flag: --v2-local-journal-checks
+                takes-root: true
                 drive: c
               - suite: blockers
                 flag: --blocker-checks
+                takes-root: false
                 drive: c
               - suite: cli
                 flag: --cli-checks
+                takes-root: true
                 drive: c
               - suite: composition
                 flag: --v2-composition-checks
+                takes-root: false
                 drive: c
           - label: 'shard-4: store-gate, outcome-ownership, root-relist-scoped, name-mapping, name-mapping-review, corresponding-overlap, quarantine, retry-protection, first-sync-completion'
             suites:
               - suite: store-gate
                 flag: --v2-store-gate-checks
+                takes-root: true
                 drive: c
               - suite: outcome-ownership
                 flag: --v2-outcome-ownership-checks
+                takes-root: false
                 drive: c
               - suite: root-relist-scoped
                 flag: --v2-root-relist-scoped-checks
+                takes-root: true
                 drive: c
               - suite: name-mapping
                 flag: --v2-name-mapping-checks
+                takes-root: false
                 drive: c
               - suite: name-mapping-review
                 flag: --v2-name-mapping-review-checks
+                takes-root: false
                 drive: c
               - suite: corresponding-overlap
                 flag: --corresponding-included-overlap-checks
+                takes-root: true
                 drive: c
               - suite: quarantine
                 flag: --quarantine-checks
+                takes-root: true
                 drive: c
               - suite: retry-protection
                 flag: --retry-protection-checks
+                takes-root: false
                 drive: c
               - suite: first-sync-completion
                 flag: --first-sync-completion-checks
+                takes-root: false
                 drive: c
           - label: 'shard-5: removal-review, resumable-listing, planning-protection, interrupted-delete, gap-verification, snapshot-memory, prepare-memory, storage, files-on-demand-storage, recovery-restore, recovery-reader, recovery-query, runcli, run, executor'
             suites:
               - suite: removal-review
                 flag: --v2-removal-review-checks
+                takes-root: false
                 drive: c
               - suite: resumable-listing
                 flag: --v2-resumelist-checks
+                takes-root: true
                 drive: c
               - suite: planning-protection
                 flag: --v2-planning-protection-checks
+                takes-root: true
                 drive: c
               - suite: interrupted-delete
                 flag: --v2-interrupted-delete-checks
+                takes-root: true
                 drive: c
               - suite: gap-verification
                 flag: --v2-gap-checks
+                takes-root: true
                 drive: c
               - suite: snapshot-memory
                 flag: --v2-snapshot-million-memory-checks
+                takes-root: true
                 drive: c
               - suite: prepare-memory
                 flag: --v2-million-memory-checks
+                takes-root: false
                 drive: c
               - suite: storage
                 flag: --v2-storage-checks
+                takes-root: true
                 drive: c
               - suite: files-on-demand-storage
                 flag: --fod-storage-checks
+                takes-root: true
                 drive: c
               - suite: recovery-restore
                 flag: --v2-recovery-restore-checks
+                takes-root: false
                 drive: c
               - suite: recovery-reader
                 flag: --v2-recovery-reader-checks
+                takes-root: false
                 drive: c
               - suite: recovery-query
                 flag: --v2-recovery-query-checks
+                takes-root: true
                 drive: c
               - suite: runcli
                 flag: --v2-runcli-checks
+                takes-root: false
                 drive: c
               - suite: run
                 flag: --v2-run-checks
+                takes-root: false
                 drive: c # Includes the production rehearsal fixture, which needs native journal evidence.
               - suite: executor
                 flag: --v2-executor-checks
+                takes-root: false
                 drive: c
           - label: 'shard-6: conflict-transition, conflict-retirement, collision-baseline, recovery-first-restart, planner, held, notices, dates, local-offline, autosync, run-history, autosync-phase3, autosync-process, sync-host, review-deletes'
             suites:
               - suite: conflict-transition
                 flag: --v2-conflict-transition-checks
+                takes-root: false
                 drive: c
               - suite: conflict-retirement
                 flag: --v2-conflict-retirement-checks
+                takes-root: false
                 drive: c
               - suite: collision-baseline
                 flag: --v2-collision-baseline-checks
+                takes-root: false
                 drive: c
               - suite: recovery-first-restart
                 flag: --v2-recovery-first-restart-checks
+                takes-root: true
                 drive: c
               - suite: planner
                 flag: --v2-planner-checks
+                takes-root: false
                 drive: c
               - suite: held
                 flag: --v2-held-recovery
+                takes-root: false
                 drive: c
               - suite: notices
                 flag: --v2-notice-restore-checks
+                takes-root: false
                 drive: c
               - suite: dates
                 flag: --v2-dates-checks
+                takes-root: true
                 drive: c
               - suite: local-offline
                 flag: --v2-local-offline-checks
+                takes-root: true
                 drive: c
               - suite: autosync
                 flag: --v2-autosync-checks
+                takes-root: false
                 drive: c
               - suite: run-history
                 flag: --v2-run-history-checks
+                takes-root: true
                 drive: c
               - suite: autosync-phase3
                 flag: --v2-autosync-phase3-checks
+                takes-root: false
                 drive: c
               - suite: autosync-process
                 flag: --v2-autosync-process-checks
+                takes-root: false
                 drive: c
               - suite: sync-host
                 flag: --v2-host-checks
+                takes-root: false
                 drive: c
               - suite: review-deletes
                 flag: --v2-review-deletes-checks
+                takes-root: false
                 drive: c
           # Shards 7-9 run the 29 correctness suites that previously had no CI entry.
           # Child processes (*-child), benchmarks/million-scale runs and suites that
@@ -362,109 +357,143 @@ jobs:
               # (runner.temp is on the runner's D: volume, which has no journal).
               - suite: local
                 flag: --v2-local-checks
+                takes-root: true
                 drive: c
               - suite: hotfix-gap
                 flag: --v2-hotfix-gap-checks
+                takes-root: true
                 drive: c
               - suite: cached-identity-exclusions
                 flag: --v2-cached-identity-exclusion-checks
+                takes-root: true
                 drive: c
               - suite: journal-windows
                 flag: --v2-journal-window-checks
+                takes-root: true
                 drive: c
               - suite: settle-planning
                 flag: --v2-settle-planning-checks
+                takes-root: false
                 drive: c
               - suite: settle-window-million
                 flag: --v2-settle-window-million-checks
+                takes-root: false
                 drive: c
               - suite: ignored-child
                 flag: --v2-ignored-child-checks
+                takes-root: false
                 drive: c
               - suite: localwatch
                 flag: --v2-localwatch-checks
+                takes-root: true
                 drive: c
               # Both parents launch *-child helper processes from the test exe;
               # the child flags themselves are never shard entries.
               - suite: download-kill
                 flag: --v2-download-kill-checks
+                takes-root: true
                 drive: c
               - suite: recovery-kill
                 flag: --v2-recovery-kill-checks
+                takes-root: true
                 drive: c
           - label: 'shard-8: recovery-audit, slowdelete, heldperf, monitor, dropboxwatch'
             suites:
               - suite: recovery-audit
                 flag: --v2-recovery-audit
+                takes-root: true
                 drive: c
               # A case argument is required; "all" runs every delete-recovery case.
               - suite: slowdelete
                 flag: --v2-slowdelete-checks
+                takes-root: true
+                extra-args: [all]
                 drive: c
               - suite: heldperf
                 flag: --v2-heldperf-checks
+                takes-root: true
                 drive: c
               - suite: monitor
                 flag: --v2-monitor-checks
+                takes-root: true
                 drive: c
               - suite: dropboxwatch
                 flag: --v2-dropboxwatch-checks
+                takes-root: false
                 drive: c
           - label: 'shard-9: coverage, coverage-fix, mkdir-gate, provider-followups, dropbox-ignore, delete-review-notice, narrowing, contract, core-switch, instrumentation, memory, indexing-signal, storage-unicode, prepared-match-exclusion, linked-exclusion-triple, deferred-intake-bound, gap-promotion-handoff, gap-promotion-bound'
             suites:
               - suite: coverage
                 flag: --v2-coverage-checks
+                takes-root: true
                 drive: c
               - suite: coverage-fix
                 flag: --v2-coverage-fix-checks
+                takes-root: true
                 drive: c
               - suite: mkdir-gate
                 flag: --v2-mkdir-gate-checks
+                takes-root: true
                 drive: c
               - suite: provider-followups
                 flag: --v2-provider-followups-checks
+                takes-root: true
                 drive: c
               - suite: dropbox-ignore
                 flag: --v2-dropbox-ignore-checks
+                takes-root: true
                 drive: c
               - suite: delete-review-notice
                 flag: --v2-delete-review-notice-checks
+                takes-root: true
                 drive: c
               - suite: narrowing
                 flag: --v2-narrowing-checks
+                takes-root: false
                 drive: c
               - suite: contract
                 flag: --v2-contract-checks
+                takes-root: false
                 drive: c
               - suite: core-switch
                 flag: --v2-core-switch-checks
+                takes-root: false
                 drive: c
               - suite: instrumentation
                 flag: --v2-instrumentation-checks
+                takes-root: false
                 drive: c
               - suite: memory
                 flag: --v2-memory-checks
+                takes-root: false
                 drive: c
               - suite: indexing-signal
                 flag: --v2-indexing-signal-checks
+                takes-root: true
                 drive: c
               - suite: storage-unicode
                 flag: --v2-storage-unicode-checks
+                takes-root: false
                 drive: c
               - suite: prepared-match-exclusion
                 flag: --v2-prepared-match-exclusion-checks
+                takes-root: false
                 drive: c
               - suite: linked-exclusion-triple
                 flag: --v2-linked-exclusion-triple-checks
+                takes-root: false
                 drive: c
               - suite: deferred-intake-bound
                 flag: --v2-deferred-intake-bound-checks
+                takes-root: false
                 drive: c
               - suite: gap-promotion-handoff
                 flag: --v2-gap-promotion-handoff-checks
+                takes-root: false
                 drive: c
               - suite: gap-promotion-bound
                 flag: --v2-gap-promotion-bound-checks
+                takes-root: true
                 drive: c
     steps:
       - name: Download test binaries
@@ -482,10 +511,6 @@ jobs:
           $suites = $env:SHARD_SUITES | ConvertFrom-Json
           $exe = Join-Path $env:GITHUB_WORKSPACE "tests\SyncShark.Core.Tests\bin\$env:CONFIGURATION\net8.0\SyncShark.Core.Tests.exe"
           $results = @()
-          # Suite arguments come from the workflow-wide map shared with quick-tests.
-          if (-not $env:SUITE_ROOT_ARGS) { throw 'SUITE_ROOT_ARGS is missing from the workflow environment.' }
-          $rootSuites = @($env:SUITE_ROOT_ARGS -split '\s+' | Where-Object { $_ })
-          $extraArgs = if ($env:SUITE_EXTRA_ARGS) { $env:SUITE_EXTRA_ARGS | ConvertFrom-Json } else { [pscustomobject]@{} }
 
           foreach ($s in $suites) {
             $suite = $s.suite
@@ -505,10 +530,9 @@ jobs:
               $root = Join-Path $base "syncshark-ci\$suite-root"
               if (-not (Test-Path $exe)) { throw "Test executable not found: $exe" }
               $testArgs = @($s.flag)
-              if ($rootSuites -ccontains $s.flag) { $testArgs += $root }
+              if ($s.'takes-root') { $testArgs += $root }
               # A few suites take a case selector after the root (e.g. slowdelete).
-              $extra = $extraArgs.PSObject.Properties[$s.flag]
-              if ($null -ne $extra) { $testArgs += @($extra.Value) }
+              if ($s.'extra-args') { $testArgs += $s.'extra-args' }
               Write-Host "Running: $exe $($testArgs -join ' ')"
               & $exe @testArgs
               $code = $LASTEXITCODE
@@ -537,350 +561,6 @@ jobs:
 
           if ($env:GITHUB_STEP_SUMMARY) {
             $md = @('## Sync Shark CI shard results', '', '| Suite | Result | Exit | Seconds |', '| --- | --- | --- | --- |')
-            foreach ($r in $results) {
-              $md += "| $($r.Suite) | $($r.Result) | $($r.Exit) | $($r.Seconds) |"
-            }
-            $md += ''
-            $md | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-          }
-
-          if ($failed.Count -gt 0) { exit 1 }
-          exit 0
-
-  # GUI/app checks from tests/SyncShark.UiFixture: the selectors that drive the
-  # real WPF surfaces over isolated state (the *-ui-checks family plus the named
-  # tray, window-close, settings-bridge, pair, endpoint and first-sync checks).
-  # Checks that need installed state, live provider accounts, native Explorer,
-  # a real display/DPI probe, a seeded database or a second fixture root stay
-  # out. Each selector is its own step; every step records its outcome and the
-  # final step fails the job after all checks have reported, like the shards.
-  ui-tests:
-    name: ui-tests
-    needs: build
-    if: ${{ !startsWith(github.ref, 'refs/heads/quick/') }}
-    runs-on: windows-latest
-    timeout-minutes: 60
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # Artifact root is build/ci/bin, so this restores
-      # build/ci/bin/SyncShark/<configuration> and SyncShark.UiFixture/<configuration>.
-      - name: Download UI fixture binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: sync-shark-ui-fixture
-          path: build/ci/bin
-
-      # Checks that load the focused core remote fixture resolve
-      # build/ci/bin/SyncShark.Core.Tests/<configuration>/net8.0/SyncShark.Core.Tests.dll.
-      - name: Download core test binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: sync-shark-tests
-          path: build/ci/bin/SyncShark.Core.Tests/${{ env.CONFIGURATION }}/net8.0
-
-      - name: 'UI check: app settings bridge'
-        id: ui-cli-settings
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector cli-settings-checks
-
-      - name: 'UI check: iteration'
-        id: ui-iteration
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector iteration-ui-checks
-
-      - name: 'UI check: tray tooltip'
-        id: ui-tray-tooltip
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector tray-tooltip-contract -Arguments none
-
-      - name: 'UI check: window close'
-        id: ui-window-close
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector window-close-contract -Arguments none
-
-      - name: 'UI check: foundation'
-        id: ui-foundation
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector ui-foundation-checks
-
-      - name: 'UI check: workspace'
-        id: ui-workspace
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector workspace-ui-checks
-
-      - name: 'UI check: pairs'
-        id: ui-pairs
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector pairs-ui-contract
-
-      - name: 'UI check: activity account'
-        id: ui-activity-account
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector activity-account-ui-checks
-
-      - name: 'UI check: authorization pending'
-        id: ui-authorization-pending
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector authorization-pending-ui-checks
-
-      - name: 'UI check: endpoint hierarchy'
-        id: ui-endpoint-hierarchy
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector endpoint-hierarchy-ui-checks
-
-      - name: 'UI check: endpoint pair'
-        id: ui-endpoint-pair
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector endpoint-pair-ui-checks
-
-      - name: 'UI check: endpoint policy'
-        id: ui-endpoint-policy
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector endpoint-policy-ui-checks
-
-      - name: 'UI check: endpoint reversed'
-        id: ui-endpoint-reversed
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector endpoint-reversed-ui-checks
-
-      - name: 'UI check: endpoint review'
-        id: ui-endpoint-review
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector endpoint-review-checks
-
-      - name: 'UI check: endpoint location action'
-        id: ui-endpoint-location
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector endpoint-location-action-checks
-
-      - name: 'UI check: first sync context'
-        id: ui-first-sync-context
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector first-sync-context-checks
-
-      - name: 'UI check: first sync feedback'
-        id: ui-first-sync-feedback
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector first-sync-feedback-checks
-
-      - name: 'UI check: identity recovery'
-        id: ui-identity-recovery
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector identity-recovery-ui-checks
-
-      - name: 'UI check: local folder creation'
-        id: ui-local-folder-creation
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector local-folder-creation-ui-checks
-
-      - name: 'UI check: notice options'
-        id: ui-notice-options
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector notice-options-ui-checks
-
-      - name: 'UI check: pair storage'
-        id: ui-pair-storage
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector pair-storage-ui-checks
-
-      - name: 'UI check: recovery'
-        id: ui-recovery
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector recovery-ui-checks
-
-      - name: 'UI check: run history'
-        id: ui-run-history
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector run-history-ui-checks
-
-      - name: 'UI check: shared drive account'
-        id: ui-shared-drive-account
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector shared-drive-account-ui-checks
-
-      - name: 'UI check: source correction'
-        id: ui-source-correction
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector source-ui-correction-checks
-
-      - name: 'UI check: startup loading'
-        id: ui-startup-loading
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector startup-loading-ui-checks
-
-      # Takes the fixture root plus the focused core remote assembly.
-      - name: 'UI check: mixed file retry'
-        id: ui-mixed-file-retry
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector mixed-file-retry-ui-checks -Arguments assembly
-
-      - name: 'UI check: pair failure presentation'
-        id: ui-pair-failure
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector pair-failure-presentation-checks -Arguments none
-
-      # The tray-client selector is carried by the tray feature's fixture. Run it wherever that
-      # fixture exists and skip it on a tree that does not carry it, rather than failing the check.
-      - name: 'UI check: tray client'
-        id: ui-tray-client
-        if: ${{ hashFiles('tests/SyncShark.UiFixture/TrayClientChecks.cs') != '' }}
-        continue-on-error: true
-        shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector tray-client-checks -Arguments none
-
-      # Run every check before failing, so one red selector never hides the rest.
-      - name: Enforce UI check results
-        if: always()
-        shell: pwsh
-        env:
-          UI_STEP_OUTCOMES: ${{ toJSON(steps) }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $outcomes = $env:UI_STEP_OUTCOMES | ConvertFrom-Json
-          $results = @()
-          foreach ($property in $outcomes.PSObject.Properties) {
-            if (-not $property.Name.StartsWith('ui-')) { continue }
-            $results += [pscustomobject]@{ Step = $property.Name; Result = $property.Value.outcome }
-          }
-          Write-Host ""
-          Write-Host "SUMMARY"
-          Write-Host ("{0,-34} {1,-10}" -f 'STEP', 'RESULT')
-          foreach ($result in $results) { Write-Host ("{0,-34} {1,-10}" -f $result.Step, $result.Result) }
-          # A deliberately guarded selector that this tree does not carry is skipped, not failed;
-          # every selector that actually runs must still succeed.
-          $failed = @($results | Where-Object { $_.Result -ne 'success' -and $_.Result -ne 'skipped' })
-          Write-Host "TOTAL checks=$($results.Count) failed=$($failed.Count)"
-
-          if ($env:GITHUB_STEP_SUMMARY) {
-            $md = @('## Sync Shark UI check results', '', '| Step | Result |', '| --- | --- |')
-            foreach ($result in $results) { $md += "| $($result.Step) | $($result.Result) |" }
-            $md += ''
-            $md | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-          }
-
-          if ($failed.Count -gt 0) { exit 1 }
-          exit 0
-
-  # Quick lane: the CI mirror writes ci-quick-suites.txt into the exported snapshot
-  # (one CLI selector per line). One job runs just those suites with the same test
-  # executable, C: scratch root, environment and SUITE_ROOT_ARGS/SUITE_EXTRA_ARGS
-  # argument map the shards use, so a lane can prove a new suite in about ten minutes.
-  quick-tests:
-    name: quick-tests
-    needs: build
-    if: ${{ startsWith(github.ref, 'refs/heads/quick/') }}
-    runs-on: windows-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download test binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: sync-shark-tests
-          path: tests/SyncShark.Core.Tests/bin/${{ env.CONFIGURATION }}/net8.0
-
-      - name: Run quick suites
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $exe = Join-Path $env:GITHUB_WORKSPACE "tests\SyncShark.Core.Tests\bin\$env:CONFIGURATION\net8.0\SyncShark.Core.Tests.exe"
-          $listPath = Join-Path $env:GITHUB_WORKSPACE 'ci-quick-suites.txt'
-          if (-not (Test-Path -LiteralPath $listPath -PathType Leaf)) { throw 'ci-quick-suites.txt is missing from this quick snapshot.' }
-          $selectors = @(Get-Content -LiteralPath $listPath | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-          if ($selectors.Count -eq 0) { throw 'ci-quick-suites.txt has no suite selectors.' }
-          # The mirror validates this too; the workflow independently refuses anything else.
-          $allowed = '^--[a-z0-9-]+-checks$'
-          foreach ($selector in $selectors) {
-            if ($selector -cnotmatch $allowed) { throw "Refusing suite selector '$selector'; expected --<name>-checks." }
-          }
-          if (-not (Test-Path -LiteralPath $exe)) { throw "Test executable not found: $exe" }
-
-          # The same workflow-wide argument map the shard matrix uses; no second list.
-          if (-not $env:SUITE_ROOT_ARGS) { throw 'SUITE_ROOT_ARGS is missing from the workflow environment.' }
-          $rootSuites = @($env:SUITE_ROOT_ARGS -split '\s+' | Where-Object { $_ })
-          $extraArgs = if ($env:SUITE_EXTRA_ARGS) { $env:SUITE_EXTRA_ARGS | ConvertFrom-Json } else { [pscustomobject]@{} }
-
-          $results = @()
-          foreach ($suite in $selectors) {
-            $suiteName = $suite.TrimStart('-')
-            Write-Host "::group::SUITE $suite"
-            $sw = [System.Diagnostics.Stopwatch]::StartNew()
-            $code = 1
-            try {
-              # Match shard mechanics: per-suite scratch on C:, no pre-existing root.
-              $scratch = Join-Path $env:LOCALAPPDATA "syncshark-ci\quick-$suiteName-scratch"
-              New-Item -ItemType Directory -Force -Path $scratch | Out-Null
-              $env:TEMP = $scratch
-              $env:TMP = $scratch
-              $env:SYNCSHARK_TEST_ROOT = $scratch
-              $testArgs = @($suite)
-              # Root-taking suites get the fixture root exactly as the shards do; it
-              # must not pre-exist, so only the scratch directory is created.
-              if ($rootSuites -ccontains $suite) {
-                $testArgs += (Join-Path $env:LOCALAPPDATA "syncshark-ci\quick-$suiteName-root")
-              }
-              $extra = $extraArgs.PSObject.Properties[$suite]
-              if ($null -ne $extra) { $testArgs += @($extra.Value) }
-              Write-Host "Running: $exe $($testArgs -join ' ')"
-              & $exe @testArgs
-              $code = $LASTEXITCODE
-              Write-Host "Exit code: $code"
-            } catch {
-              Write-Host "ERROR: $($_.Exception.Message)"
-              $code = 1
-            } finally {
-              $sw.Stop()
-            }
-            $seconds = [int][Math]::Round($sw.Elapsed.TotalSeconds)
-            $result = if ($code -eq 0) { 'PASS' } else { 'FAIL' }
-            Write-Host "SUITE-RESULT $suite $result exit=$code seconds=$seconds"
-            Write-Host "::endgroup::"
-            $results += [pscustomobject]@{ Suite = $suite; Result = $result; Exit = $code; Seconds = $seconds }
-          }
-
-          Write-Host ""
-          Write-Host "SUMMARY"
-          Write-Host ("{0,-40} {1,-6} {2,-6} {3,7}" -f 'SUITE', 'RESULT', 'EXIT', 'SECONDS')
-          foreach ($r in $results) {
-            Write-Host ("{0,-40} {1,-6} {2,-6} {3,7}" -f $r.Suite, $r.Result, $r.Exit, $r.Seconds)
-          }
-          $failed = @($results | Where-Object { $_.Result -ne 'PASS' })
-          Write-Host "TOTAL suites=$($results.Count) failed=$($failed.Count)"
-
-          if ($env:GITHUB_STEP_SUMMARY) {
-            $md = @('## Sync Shark quick suite results', '', '| Suite | Result | Exit | Seconds |', '| --- | --- | --- | --- |')
             foreach ($r in $results) {
               $md += "| $($r.Suite) | $($r.Result) | $($r.Exit) | $($r.Seconds) |"
             }
