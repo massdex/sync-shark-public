@@ -5,19 +5,32 @@ public sealed partial class ProductionAutoSyncEngine
     private StatusCache _statusCache = StatusCache.Empty;
 
     /// <summary>One pair's store-sourced status fields, cached while the gate is unavailable.</summary>
-    internal sealed record PairStatus(string PairId, string Name, bool Enabled, RunSummary? LastResult,
-        long UrgentPending, int PlanningBacklog);
+    internal sealed record PairStatus(string PairId, string? Name, bool Enabled, RunSummary? LastResult,
+        long? UrgentPending, int? PlanningBacklog, bool StoreKnown)
+    {
+        internal static PairStatus FromStore(PairDef pair, RunSummary? last, long urgent, int backlog) =>
+            new(pair.PairId, pair.Name, pair.Enabled, last, urgent, backlog, StoreKnown: true);
 
-    /// <summary>The last successful store read, so status can answer while another owner holds the gate.</summary>
+        /// <summary>A pair the runtime already knows from memory, whose store fields are not available.</summary>
+        internal static PairStatus FromMemory(string pairId) =>
+            new(pairId, null, false, null, null, null, StoreKnown: false);
+    }
+
+    /// <summary>The last successful store projection, so status can answer while another owner holds the gate.</summary>
     internal sealed record StatusCache(IReadOnlyList<PairStatus> Pairs, DateTimeOffset AsOf)
     {
         internal static StatusCache Empty { get; } = new([], DateTimeOffset.MinValue);
+
+        /// <summary>The pair identities already read at startup; their retained fields are not read yet.</summary>
+        internal static StatusCache Seeded(IReadOnlyList<PairDef> pairs, DateTimeOffset asOf) => new(
+            pairs.Select(pair => new PairStatus(pair.PairId, pair.Name, pair.Enabled, null, null, null,
+                StoreKnown: false)).ToArray(), asOf);
     }
 
     /// <summary>
     /// Composes status from memory first (states, live progress, automation and the cached pair list), then one bounded
-    /// store read for the retained fields. While another owner holds the store gate the cached rows answer with
-    /// <c>storeStale</c>, so a status read never queues behind a run.
+    /// store read for the retained fields. While another owner holds the store gate, or the read runs past its
+    /// deadline, the cached rows answer with <c>storeStale</c>, so a status read never queues behind a run.
     /// </summary>
     internal static (object Status, StatusCache Cache) ReadStatus(IReadOnlyList<PairAutoState> states,
         IReadOnlyDictionary<string, LiveProgress> progress, bool automationEnabled, int intervalMinutes,
@@ -26,11 +39,13 @@ public sealed partial class ProductionAutoSyncEngine
     {
         var byPair = states.ToDictionary(state => state.PairId, StringComparer.Ordinal);
         var (pairs, cache, stale) = ReadStoreStatus(store, settings, time, cached);
+        // A pair the runtime is already driving stays visible even when the projection that would name it is stale.
+        if (stale) pairs = KeepMemoryPairs(pairs, states, progress);
         var status = new
         {
             running = true, automationEnabled, intervalMinutes, storeStale = stale, storeAsOf = cache.AsOf,
             pairs = pairs.Select(pair => Pair(pair, byPair.GetValueOrDefault(pair.PairId),
-                progress.GetValueOrDefault(pair.PairId), intakeRetired(pair.PairId))).ToArray()
+                progress.GetValueOrDefault(pair.PairId), intakeRetired(pair.PairId), stale)).ToArray()
         };
         return (status, cache);
     }
@@ -43,10 +58,14 @@ public sealed partial class ProductionAutoSyncEngine
         {
             IReadOnlyList<PairStatus> pairs;
             using (StoreAdmission.WithCancellation(deadline.Token))
-                pairs = store.Pairs().Select(pair => new PairStatus(pair.PairId, pair.Name, pair.Enabled,
-                    store.ReadRunHistory(pair.PairId, 1).FirstOrDefault(),
-                    store is SqliteStateStore sql ? sql.UrgentPending(pair.PairId) : 0,
-                    store is SqliteStateStore planning ? planning.CountDeferredPlanning(pair.PairId) : 0)).ToArray();
+            {
+                // SQLite reads abort a running statement at the deadline through the storage owner.
+                pairs = store is SqliteStateStore sql
+                    ? sql.BoundedRead(deadline.Token, token => Project(sql, token))
+                    : Project(store, deadline.Token);
+            }
+            // A projection the deadline already overtook is never published as fresh cache.
+            deadline.Token.ThrowIfCancellationRequested();
             return (pairs, new StatusCache(pairs, time.GetUtcNow()), false);
         }
         catch (OperationCanceledException) when (deadline.IsCancellationRequested)
@@ -55,10 +74,42 @@ public sealed partial class ProductionAutoSyncEngine
         }
     }
 
+    // One owner for the retained projection; the token is checked between its bounded store calls.
+    private static IReadOnlyList<PairStatus> Project(IStateStore store, CancellationToken token)
+    {
+        var pairs = store.Pairs();
+        token.ThrowIfCancellationRequested();
+        var rows = new List<PairStatus>(pairs.Count);
+        foreach (var pair in pairs)
+        {
+            token.ThrowIfCancellationRequested();
+            var last = store.ReadRunHistory(pair.PairId, 1).FirstOrDefault();
+            token.ThrowIfCancellationRequested();
+            var urgent = store is SqliteStateStore sql ? sql.UrgentPending(pair.PairId) : 0;
+            token.ThrowIfCancellationRequested();
+            var backlog = store is SqliteStateStore planning ? planning.CountDeferredPlanning(pair.PairId) : 0;
+            token.ThrowIfCancellationRequested();
+            rows.Add(PairStatus.FromStore(pair, last, urgent, backlog));
+        }
+        return rows;
+    }
+
+    // Pairs the runtime already drives in memory are never dropped by a cache that predates them.
+    private static IReadOnlyList<PairStatus> KeepMemoryPairs(IReadOnlyList<PairStatus> cached,
+        IReadOnlyList<PairAutoState> states, IReadOnlyDictionary<string, LiveProgress> progress)
+    {
+        var known = cached.Select(pair => pair.PairId).ToHashSet(StringComparer.Ordinal);
+        return cached.Concat(states.Select(state => state.PairId).Concat(progress.Keys)
+            .Where(pairId => !known.Contains(pairId)).Distinct(StringComparer.Ordinal)
+            .Select(PairStatus.FromMemory)).ToArray();
+    }
+
     private static object Pair(PairStatus pair, PairAutoState? state, LiveProgress? progress,
-        IntakeRetirement? intake) => new
+        IntakeRetirement? intake, bool storeStale) => new
     {
         pair.PairId, pair.Name, pair.Enabled,
+        // The cached row can be old, and a memory-only pair has no retained fields at all.
+        storeStale = storeStale || !pair.StoreKnown,
         state = state?.Status.ToString() ?? "starting",
         lastResult = pair.LastResult,
         lastChecked = state?.LastReport?.CompletedUtc,

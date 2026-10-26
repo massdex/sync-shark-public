@@ -356,6 +356,9 @@ internal sealed class FakeSyncRun : ISyncRun
 
     internal ConcurrentQueue<string> MonitorOrder { get; } = new();
 
+    /// <summary>When set, the next monitoring pass throws this before the incremental run starts.</summary>
+    public Exception? MonitorThrow { get; set; }
+
     /// <summary>Reports progress through the sink the pair loop passes to reconciliation monitoring.</summary>
     public Action<IProgress<RunProgress>>? MonitorProgressScript { get; set; }
 
@@ -367,6 +370,11 @@ internal sealed class FakeSyncRun : ISyncRun
         ct.ThrowIfCancellationRequested();
         MonitorOrder.Enqueue("monitor:" + pairId);
         MonitorProgressScript?.Invoke(progress);
+        if (MonitorThrow is { } error)
+        {
+            MonitorThrow = null;
+            throw error;
+        }
         return Task.FromResult(false);
     }
 

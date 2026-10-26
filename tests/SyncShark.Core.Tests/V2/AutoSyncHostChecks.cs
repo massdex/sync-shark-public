@@ -16,6 +16,7 @@ internal static class AutoSyncHostChecks
         await ReadsNeverLaunchAsync();
         await GuiAdapterSharesHostAsync();
         await ProductionWiringWithEmptyTempStoreAsync();
+        await RunsListDispatchesWhileAutoSyncRunsAsync();
         await ReadsBypassMutationSlotsAsync();
         await SafeStopAsync();
         await DisconnectDoesNotReplayAsync();
@@ -245,6 +246,41 @@ internal static class AutoSyncHostChecks
         await engine.ExecuteAsync(AutoSyncHostClient.Request("cli") with
         { CliArgs = ["--cli", "settings", "set", "--settings", "{\"automation\":{\"intervalMinutes\":9}}", "--yes"] }, default);
         Require(new SyncAutomationStore(authority.StateAuthority).Load().IntervalMinutes == 9, "CLI settings shares host authority");
+        await engine.StopAsync();
+    }
+
+    // H1: a read-only run-history command must be dispatched by the running host, not refused by its allowlist.
+    private static async Task RunsListDispatchesWhileAutoSyncRunsAsync()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "autosync-runslist-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        using var authority = PilotInstanceLock.Acquire(Path.Combine(root, "state", "instance.lock"));
+        await using var engine = new ProductionAutoSyncEngine(authority, root);
+        var composition = (EngineComposition)typeof(ProductionAutoSyncEngine)
+            .GetField("_composition", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(engine)!;
+        var started = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        composition.Store.RecordRunSummary(new RunSummary(0, "reconcile-fixture", "pair-fixture", started,
+            started.AddSeconds(1), RunOutcomes.Complete, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+        composition.Store.RecordRunSummary(new RunSummary(0, "autosync-fixture", "pair-fixture", started,
+            started.AddSeconds(2), RunOutcomes.Complete, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+        var before = composition.Store.ReadRunHistory(null, 50).Select(run => run.RunId).ToArray();
+        var statusBefore = JsonSerializer.SerializeToElement(
+            await engine.ExecuteAsync(AutoSyncHostClient.Request("status"), default));
+        Require(statusBefore.GetProperty("running").GetBoolean(), "AutoSync is running before the host read");
+        var output = (HostCliOutput)await engine.ExecuteAsync(AutoSyncHostClient.Request("cli") with
+            { CliArgs = ["--cli", "runs", "list", "--json"] }, default);
+        Require(output.ExitCode == 0, "runs list is dispatched through the running host: " + output.Stderr);
+        using var parsed = JsonDocument.Parse(output.Stdout);
+        var kinds = parsed.RootElement.GetProperty("data").GetProperty("runs").EnumerateArray()
+            .Select(run => run.GetProperty("kind").GetString()).ToArray();
+        Require(kinds.Contains("reconciliation") && kinds.Contains("autosync"),
+            "runs list returns the retained run kinds through the host: " + output.Stdout);
+        var after = composition.Store.ReadRunHistory(null, 50).Select(run => run.RunId).ToArray();
+        Require(before.SequenceEqual(after), "the host read leaves retained run history unchanged");
+        var statusAfter = JsonSerializer.SerializeToElement(
+            await engine.ExecuteAsync(AutoSyncHostClient.Request("status"), default));
+        Require(statusAfter.GetProperty("running").GetBoolean(), "AutoSync is still running after the host read");
         await engine.StopAsync();
     }
 

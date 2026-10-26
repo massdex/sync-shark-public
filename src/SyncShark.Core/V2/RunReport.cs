@@ -29,6 +29,12 @@ public sealed record RunReport(string PairId, string Outcome, int Done, int Fail
     public int PendingVerification { get; init; }
     public long UrgentPending { get; init; }
 
+    /// <summary>
+    /// Distinct changed/selected paths the scan observed for this run, when its owner knows the selection.
+    /// It is not the completed-effect count: a selected path whose effect failed still counts here.
+    /// </summary>
+    public int? ChangedPaths { get; init; }
+
     /// <summary>Total failed or unconfirmed effects, independent of the retained examples.</summary>
     public int FailureCount => Failed + Uncertain;
 

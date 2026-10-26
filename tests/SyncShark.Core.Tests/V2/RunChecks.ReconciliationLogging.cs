@@ -1,8 +1,7 @@
 namespace Massdex.SyncShark.V2;
 
 internal static partial class RunChecks
-{
-    // d1: the reconciliation run owns a dedicated log that names its trigger and scope, selection source and counts,
+{    // d1: the reconciliation run owns a dedicated log that names its trigger and scope, selection source and counts,
     // each batch's paths/bytes/admission wait/plan summary, its acknowledgement counts, the intake retirement count
     // per batch and in total, and the selecting/repairing phases.
     private static async Task ReconciliationLogsEveryStage()
@@ -33,13 +32,20 @@ internal static partial class RunChecks
             Require(text.Contains("reconciliation phase=" + RunPhases.Selecting, StringComparison.Ordinal) &&
                 text.Contains("reconciliation phase=" + RunPhases.Repairing, StringComparison.Ordinal),
                 "the reconciliation log names the selecting and repairing phases");
-            Require(text.Contains("reconciliation selection source: planning backlog", StringComparison.Ordinal) &&
-                text.Contains("reconciliation backlog selection: enumerated=1 selected=1", StringComparison.Ordinal),
+            var catalog = MessageCatalog.Default;
+            var source = string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                catalog.Template("reconciliation-source-trace"), catalog.Template("source-planning-backlog"));
+            var selection = string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                catalog.Template("reconcile-backlog-selection"), 1, 1);
+            Require(text.Contains(source, StringComparison.Ordinal) &&
+                text.Contains(selection, StringComparison.Ordinal),
                 "the reconciliation log names the selection source and its counts");
             Require(text.Contains("reconciliation batch: paths=1 bytes=", StringComparison.Ordinal) &&
                 text.Contains("admissionWaitMs=", StringComparison.Ordinal),
                 "the reconciliation log names each batch's paths, bytes and admission wait");
-            Require(text.Contains("reconciliation batch dispositions: selected=1", StringComparison.Ordinal),
+            var dispositionsPrefix = string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                catalog.Template("reconcile-dispositions-trace").Split("{1}")[0], 1);
+            Require(text.Contains(dispositionsPrefix, StringComparison.Ordinal),
                 "the reconciliation log names the acknowledgement dispositions");
             Require(text.Contains("reconciliation intake retired batch=1 total=1", StringComparison.Ordinal) &&
                 text.Contains("reconciliation intake retired total=1", StringComparison.Ordinal),

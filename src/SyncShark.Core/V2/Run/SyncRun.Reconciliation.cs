@@ -14,6 +14,9 @@ public sealed partial class SyncRun
     internal IntakeRetirement? IntakeRetired(string pairId) =>
         _intakeRetired.TryGetValue(pairId, out var intake) ? intake : null;
 
+    /// <summary>A removed pair leaves no reachable retirement total; drop it with the pair's other in-memory state.</summary>
+    internal void ForgetIntakeRetirement(string pairId) => _intakeRetired.TryRemove(pairId, out _);
+
     internal Task<RunReport> ReconcileScopeAsync(string pairId, StateMonitorDecision decision,
         IProgress<RunProgress>? progress, CancellationToken ct)
     {

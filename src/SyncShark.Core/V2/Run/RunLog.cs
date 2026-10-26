@@ -80,12 +80,19 @@ internal sealed class RunLog : RunTrace, IDisposable
         (string.IsNullOrEmpty(value.Path) ? $"{value.Phase} ({value.Done}/{value.Total}){Extra(value.Extra)}"
             : $"{value.Phase}: {value.Path} ({value.Done}/{value.Total}){Extra(value.Extra)}");
 
-    /// <summary>One bounded summary of an automatic run: changed paths, actions by kind and the outcome.</summary>
-    internal static string RunSummaryLine(RunReport report) => string.Format(CultureInfo.InvariantCulture,
-        MessageCatalog.Default.Template("autosync-run-summary"),
-        report.Uploaded + report.Downloaded + report.Deleted + report.Moved + report.KeptBoth,
-        report.Uploaded, report.Downloaded, report.Deleted, report.Moved, report.KeptBoth, report.Held,
-        report.Failed, report.Outcome);
+    /// <summary>One bounded summary of an automatic run: effects by kind, the observed changed paths and the outcome.</summary>
+    internal static string RunSummaryLine(RunReport report)
+    {
+        var line = string.Format(CultureInfo.InvariantCulture,
+            MessageCatalog.Default.Template("autosync-run-summary"),
+            report.Uploaded + report.Downloaded + report.Deleted + report.Moved + report.KeptBoth,
+            report.Uploaded, report.Downloaded, report.Deleted, report.Moved, report.KeptBoth, report.Held,
+            report.Failed, report.Outcome);
+        // Completed effects are not selected paths: a failed upload still counts as one changed path.
+        return report.ChangedPaths is { } changed
+            ? line + " changedPaths=" + changed.ToString(CultureInfo.InvariantCulture)
+            : line;
+    }
 
     /// <summary>One bounded summary for an automatic run that could not return a report.</summary>
     internal static string RunFailureLine(Exception error) => string.Format(CultureInfo.InvariantCulture,

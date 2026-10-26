@@ -248,6 +248,9 @@ internal sealed partial class PairLoop
     private async Task RunOnceAsync(CancellationToken stop)
     {
         using var source = CancellationTokenSource.CreateLinkedTokenSource(stop);
+        // The handlers below record the failure summary, so the scope must outlive them; a `using var`
+        // inside the try would restore the previous trace before Hold/RecordFailure runs.
+        RunLog? log = null;
         try
         {
             lock (_lock)
@@ -258,7 +261,7 @@ internal sealed partial class PairLoop
                 if (_in.Ineligible(_in.Store.Pair(_pairId)) is not null) source.Cancel();
             }
             Publish(AutoStatus.Running, null);
-            using var log = _in.BeginRunLog?.Invoke(_pairId, _wakeCause);
+            log = _in.BeginRunLog?.Invoke(_pairId, _wakeCause);
             _wakeCause = "watch-signal";
             var reconciliation = new PairProgress(_in, _pairId, LiveProgress.ReconciliationKind, _in.Time);
             // Includes safety-poll runs: register repair coverage before incremental preparation.
@@ -282,6 +285,7 @@ internal sealed partial class PairLoop
         }
         finally
         {
+            log?.Dispose();
             lock (_lock) _runSource = null;
         }
     }

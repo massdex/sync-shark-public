@@ -30,7 +30,10 @@ public sealed partial class ProductionAutoSyncEngine : IAutoSyncHostEngine
                 pair => CloudFilesLifetime.IsRegisteredPair(pair, V2Settings.Default),
                 (SqliteStateStore)_composition.Store, _composition.Endpoints.ObserveStorageRemoteAsync);
             // Independent of run/pause state: retained pointers still need foreground hydration.
-            _cloudFiles.Reconnect(_composition.Store.Pairs(), CancellationToken.None, (pair, error) =>
+            var pairs = _composition.Store.Pairs();
+            // Seed the status cache from the identities just read, so the first contended request still names pairs.
+            _statusCache = StatusCache.Seeded(pairs, TimeProvider.System.GetUtcNow());
+            _cloudFiles.Reconnect(pairs, CancellationToken.None, (pair, error) =>
                 _composition.Store.AddNotices(new[] { new Notice(pair.PairId, 38, NoticeKind.Info, string.Empty,
                     "Cloud Files reconnect failed: " + error.Message +
                     " Review the retained root binding and Retry. No registration was removed.",
@@ -125,6 +128,7 @@ public sealed partial class ProductionAutoSyncEngine : IAutoSyncHostEngine
         if (invocation.Command is not ("status" or "pairs list" or "pairs show" or "accounts list" or
             "run" or "run pause" or "run resume" or "index run" or "index status" or "pause" or "resume" or "settings show" or "settings set" or
             "conflicts list" or "conflicts show" or "conflicts resolve" or "accounts show" or "accounts reauthorize" or "accounts pending" or
+            "runs list" or
             "storage online-only" or "storage offline" or "storage inherit" or "storage list"))
             throw new SyncCliUsageException("This command is not yet available through the shared host. Stop AutoSync at its safe point, run the direct command, then restart AutoSync. Nothing was changed.");
         // Dispatch into the SAME runtime; the transport owns admission and cancellation, not the client.

@@ -1,3 +1,5 @@
+using System.Globalization;
+
 namespace Massdex.SyncShark.V2;
 
 public sealed partial class SyncRun
@@ -74,7 +76,8 @@ public sealed partial class SyncRun
             batch.Dispositions[path] = "deferred: " + cause;
             if (notice is null || !PairPath.Same(notice.Path, path))
                 WriteNotices([FailureRetryOwner.RetryNotice(pair.PairId, path, cause, 1)]);
-            RunTrace.Emit($"reconciliation acknowledgement blocked: path={path} reason={cause}");
+            RunTrace.Emit(string.Format(CultureInfo.InvariantCulture,
+                MessageCatalog.Default.Template("reconciliation-ack-blocked-trace"), path, cause));
         }
     }
 
@@ -93,10 +96,13 @@ public sealed partial class SyncRun
                 SaveFailedRetry(pair, path, reason, retry);
                 batch.Dispositions[path] = "notice: " + reason;
             }
-            RunTrace.Emit($"reconciliation disposition: path={path} {batch.Dispositions[path]}");
+            RunTrace.Emit(string.Format(CultureInfo.InvariantCulture,
+                MessageCatalog.Default.Template("reconciliation-disposition-trace"), path, batch.Dispositions[path]));
         }
         var counts = batch.Dispositions.Values.GroupBy(value => value.Split(':')[0])
             .Select(group => group.Key + "=" + group.Count());
-        RunTrace.Emit("reconciliation batch dispositions: selected=" + batch.Paths.Count + " " + string.Join(" ", counts));
+        RunTrace.Emit(string.Format(CultureInfo.InvariantCulture,
+            MessageCatalog.Default.Template("reconcile-dispositions-trace"), batch.Paths.Count,
+            string.Join(" ", counts)));
     }
 }

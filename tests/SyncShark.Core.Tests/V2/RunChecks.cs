@@ -36,6 +36,7 @@ internal static partial class RunChecks
         await Group(nameof(ReconciliationAccountedBacklogDoesNotRestart), ReconciliationAccountedBacklogDoesNotRestart, failures);
         await Group(nameof(ReconciliationEveryItemAccountable), ReconciliationEveryItemAccountable, failures);
         await Group(nameof(ReconciliationLogsEveryStage), ReconciliationLogsEveryStage, failures);
+        await Group(nameof(SummaryNamesChangedPathsAsync), SummaryNamesChangedPathsAsync, failures);
         await Group(nameof(ReconciliationRetainedNoticeResolves), ReconciliationRetainedNoticeResolves, failures);
         await Group(nameof(ReconciliationAdmitsAutoSyncBetweenBatches), ReconciliationAdmitsAutoSyncBetweenBatches, failures);
         await Group(nameof(ReconciliationStaleAdoptBetweenBatches), ReconciliationStaleAdoptBetweenBatches, failures);
