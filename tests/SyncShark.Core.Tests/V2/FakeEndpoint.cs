@@ -32,6 +32,12 @@ internal sealed class FakeEndpoint : IInventorySource, IEndpointWriter, ISourceA
     /// <summary>Write attempts reaching the mutation guard, including put, delete, move, mkdir and preserve.</summary>
     public int WriteCalls { get; private set; }
 
+    /// <summary>
+    /// Every mutation that passed its guards and was applied, in order (kind, rule, target and paths); a directory
+    /// create is recorded with a synthetic action id because MkDir carries no planned action.
+    /// </summary>
+    internal List<SyncAction> AppliedActions { get; } = new();
+
     /// <summary>Like the real writers (decision 16): refuse to delete a folder that still has children.</summary>
     public bool RefuseNonEmptyFolderDelete { get; set; }
 
@@ -122,6 +128,7 @@ internal sealed class FakeEndpoint : IInventorySource, IEndpointWriter, ISourceA
             ThrowIfInjectedFailure();
             if (a.ExpectedTarget is null) EnsureFree(a.Path, null, "put");
             else EnsureExpected(a.Path, a.ExpectedTarget, "put");
+            AppliedActions.Add(a);
             var state = Store(a.Path, bytes, a.Source?.Kind ?? ItemKind.File, a.Source?.IdentityJson);
             LogUpsert(state);
             if (NextWriteUncertain)
@@ -144,6 +151,7 @@ internal sealed class FakeEndpoint : IInventorySource, IEndpointWriter, ISourceA
             if (!_items.TryGetValue(source, out var entry))
                 throw new InvalidOperationException($"FakeEndpoint move: '{source}' does not exist.");
             EnsureFree(a.Path, source, "move");
+            AppliedActions.Add(a);
             _items.Remove(source);
             var moved = entry.State with { Path = a.Path };
             _items[a.Path] = entry with { State = moved };
@@ -181,6 +189,7 @@ internal sealed class FakeEndpoint : IInventorySource, IEndpointWriter, ISourceA
                 _items.Keys.Any(path => PairPath.IsUnder(path, a.Path)))
                 throw new IOException("Reviewed folder is no longer empty.");
             if (!_items.Remove(a.Path, out var entry)) return;
+            AppliedActions.Add(a);
             LogDelete(a.Path, entry.State.ObjectId);
             if (NextWriteUncertain)
             {
@@ -196,6 +205,7 @@ internal sealed class FakeEndpoint : IInventorySource, IEndpointWriter, ISourceA
         lock (_gate)
         {
             ThrowIfInjectedFailure();
+            AppliedActions.Add(new SyncAction("mkdir:" + path, 0, ActionKind.MkDir, _side, path, null, null, null, false, null));
             var state = Store(path, Array.Empty<byte>(), ItemKind.Folder, null);
             LogUpsert(state);
             if (NextWriteUncertain)

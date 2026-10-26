@@ -5,6 +5,11 @@ internal static class LocalScanEntries
 {
     private const string CollisionReason = "A case- or Unicode-normalization-colliding local name is not accepted.";
 
+    // A refresh request the on-disk tree cannot resolve to one name is the same collision a walk reports when
+    // two ordinal names share a canonical key: the subtree stays incomplete, never absent or borrowed.
+    internal static PilotDecision AmbiguousRefreshPath(string relative) =>
+        new(relative, PilotDecisionKind.Blocked, CollisionReason);
+
     // Keep just one canonical index during the walk. Published lookups retain their original
     // spelling and OrdinalIgnoreCase contract; canonical keys never escape the scanner.
     internal static IReadOnlyDictionary<string, PilotLocalEntry> PublishEntries(

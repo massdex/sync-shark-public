@@ -1,7 +1,8 @@
 {
   "templates": {
     "command": "{what} is not in core v2 yet. The legacy compatibility engine requires explicit --core v1 and uses separate legacy state.",
-    "notice": "{what} is not in core v2 yet."
+    "notice": "{what} is not in core v2 yet.",
+    "refresh-case-resolved": "refresh path case resolved: {0} -> {1}"
   },
   "what": {
     "storageInventory": "Storage inventory",

@@ -56,8 +56,6 @@ public sealed class PilotLocalScanner
     // Hashing reads larger chunks and bypasses this small buffer instead of allocating four MiB
     // for every tiny file. The held handle, exclusive sharing and fresh byte digest are unchanged.
     private const int ReadBufferSize = 64 * 1024;
-    // One owner for the refresh-spelling trace text. The relative path format matches the scan's paths.
-    internal const string RefreshCaseResolvedTrace = "refresh path case resolved: ";
     internal SyncTransferSchedulingScope? InventoryScheduling { get; init; }
     internal Action<string>? SharingRetryForTest { get; init; }
     // Two-phase inventory: the held, identity-verified metadata pass reads no file bytes. The caller
@@ -217,9 +215,13 @@ public sealed class PilotLocalScanner
             maxEntries is not null, cancellationToken, parent => ReadDirectoryIdentity(parent, rootLease),
             ParentListingRetainedForTest);
         var explicitChildren = refreshResolution.ExplicitChildren;
+        // A requested path the on-disk tree cannot resolve to one name stays incomplete, exactly like a
+        // genuine local collision: it can never publish an entry or authorize absence for either spelling.
+        foreach (var ambiguousPath in refreshResolution.AmbiguousPaths)
+            decisions.Add(LocalScanEntries.AmbiguousRefreshPath(ambiguousPath));
         if (refreshPaths is null) pendingDirectories.Push((rootLease.Path, rootLease.Identity));
-        DirectoryEntryInfo? ResolveFromParent(string exactPath) =>
-            refreshResolution.ResolveFromParent(exactPath, ListedMetadata);
+        DirectoryEntryInfo? ResolveFromParent(string exactPath, out bool ambiguous) =>
+            refreshResolution.ResolveFromParent(exactPath, ListedMetadata, out ambiguous);
         try
         {
         while (pendingDirectories.Count > 0 || explicitChildren is not null)
@@ -340,7 +342,15 @@ public sealed class PilotLocalScanner
                 DirectoryEntryInfo? metadata = child.Metadata;
                 try
                 {
-                    if (metadata is null && MetadataOnly) metadata = ResolveFromParent(exactPath);
+                    if (metadata is null && MetadataOnly)
+                    {
+                        metadata = ResolveFromParent(exactPath, out var ambiguous);
+                        if (ambiguous)
+                        {
+                            decisions.Add(LocalScanEntries.AmbiguousRefreshPath(relative));
+                            continue;
+                        }
+                    }
                     if (metadata is null && MetadataOnly) continue; // vanished: admitted as absent
                     attributes = metadata?.Attributes ?? File.GetAttributes(exactPath);
                 }
@@ -370,8 +380,14 @@ public sealed class PilotLocalScanner
                 var nativeObserved = !probeOwned || TryReadOwnedPlaceholder(exactPath, out ownedPlaceholder);
                 if (probeOwned && !nativeObserved && KnownOwnedPointerPath is not null)
                 {
-                    try { metadata ??= ResolveFromParent(exactPath); }
+                    var ambiguousParent = false;
+                    try { metadata ??= ResolveFromParent(exactPath, out ambiguousParent); }
                     catch (Exception error) when (error is IOException or UnauthorizedAccessException or Win32Exception) { }
+                    if (ambiguousParent)
+                    {
+                        decisions.Add(LocalScanEntries.AmbiguousRefreshPath(relative));
+                        continue;
+                    }
                     if (metadata is null)
                     {
                         decisions.Add(new PilotDecision(relative, PilotDecisionKind.Blocked, V2.OwnedPointerProof.ObservationMessage));
@@ -398,9 +414,15 @@ public sealed class PilotLocalScanner
                 if (CloudFilesAware && !owned && PilotPath.IsUnsafeAttributes(attributes))
                 {
                     DirectoryEntryInfo? listed;
-                    try { listed = metadata ?? ResolveFromParent(exactPath); }
+                    var ambiguousParent = false;
+                    try { listed = metadata ?? ResolveFromParent(exactPath, out ambiguousParent); }
                     catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
                         or Win32Exception) { listed = null; }
+                    if (ambiguousParent)
+                    {
+                        decisions.Add(LocalScanEntries.AmbiguousRefreshPath(relative));
+                        continue;
+                    }
                     // Astra fix 3: a known link tag wins over online-only bits (a file symlink can carry OFFLINE/RECALL).
                     var kind = listed is null ? ForeignObjectKind.None
                         : PilotPath.ClassifyForeign(listed.Attributes, listed.ReparseTag);

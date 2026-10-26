@@ -1,6 +1,8 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Win32.SafeHandles;
 
 namespace Massdex.SyncShark.V2;
 
@@ -119,6 +121,38 @@ internal static class LocalChecks
 
     internal static Task<LocalWriter> OpenWriter(string root, string recoveryRoot, CancellationToken ct) =>
         LocalWriter.OpenAsync(RootOf(root, "root-local"), Side.A, PairId, InstallationId, recoveryRoot, ct, isStateDamage: StorageFailureClassifier.IsStateDamage);
+
+    /// <summary>
+    /// Enables per-directory case sensitivity on NTFS so a fixture can hold two names that differ only by case.
+    /// The native flag the existing case-collision fixtures use is tried first, then fsutil, which needs no
+    /// elevation for a directory the current user owns. Throws with the native/fsutil result when both refuse,
+    /// so a check reports why the fixture is unusable instead of silently proving nothing.
+    /// </summary>
+    internal static void EnableCaseSensitiveDirectory(string directory)
+    {
+        using (var handle = PilotDirectoryLease.CreateFile(directory, 0x100,
+            FileShare.Read | FileShare.Write | FileShare.Delete, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero))
+        {
+            uint flags = 1; // FILE_CS_FLAG_CASE_SENSITIVE_DIR for FileCaseSensitiveInfo (23).
+            if (!handle.IsInvalid && SetCaseSensitiveDirectory(handle, 23, ref flags, sizeof(uint))) return;
+        }
+        using var process = Process.Start(new ProcessStartInfo("fsutil",
+            "file setCaseSensitiveInfo \"" + directory + "\" enable")
+        {
+            UseShellExecute = false, CreateNoWindow = true,
+            RedirectStandardOutput = true, RedirectStandardError = true
+        }) ?? throw new IOException("The case-sensitive directory fixture command could not be started.");
+        var error = process.StandardError.ReadToEnd();
+        process.StandardOutput.ReadToEnd();
+        process.WaitForExit();
+        if (process.ExitCode != 0)
+            throw new IOException("The case-sensitive directory fixture is unavailable: " + error.Trim());
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "SetFileInformationByHandle", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetCaseSensitiveDirectory(SafeFileHandle handle, int informationClass,
+        ref uint information, uint size);
 
     internal static byte[] Bytes(string text) => Encoding.UTF8.GetBytes(text);
 
