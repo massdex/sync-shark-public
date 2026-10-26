@@ -118,20 +118,26 @@ internal static partial class RunChecks
             }
             if (mode is "owned-pointer" or "owned-pointer-needs-rehash")
             {
-                // A verified online-only pointer keeps OwnedPointer permanently; only a rehash keeps
-                // its content unproven.
-                var flags = mode == "owned-pointer"
-                    ? ItemFlags.OwnedPointer
-                    : ItemFlags.OwnedPointer | ItemFlags.NeedsRehash;
+                // A verified online-only pointer keeps OwnedPointer permanently. The rehash owner, not the
+                // snapshot, marks content that is still unproven (RequireRehash), as production does.
                 var pointerGen = store.BeginGeneration(fx.Pair.A.RootId, "owned-pointer");
                 var pointer = await fx.A.FullAsync(pointerGen, _ => true, null!, default);
                 store.WriteSnapshot(pointer with
                 {
                     Items = pointer.Items.Select(item => PairPath.Same(item.Path, baseline.A.Path)
-                        ? item with { Hash = baseline.B.Hash, Flags = flags } : item).ToArray()
+                        ? item with { Hash = baseline.B.Hash, Flags = ItemFlags.OwnedPointer } : item).ToArray()
                 });
-                Require(store.Live(fx.Pair.A.RootId, [baseline.A.Path]).Single().Flags == flags,
-                    "retry fixture carries the pointer flags its mode names");
+                var livePointer = store.Live(fx.Pair.A.RootId, [baseline.A.Path]).Single();
+                Require(livePointer.Flags == ItemFlags.OwnedPointer && livePointer.Hash is not null,
+                    "verified owned pointer is stored as OwnedPointer with a known hash");
+                if (mode == "owned-pointer-needs-rehash")
+                {
+                    store.RequireRehash(fx.Pair.A.RootId, livePointer, "content verification pending");
+                    var unproven = store.Live(fx.Pair.A.RootId, [baseline.A.Path]).Single();
+                    Require((unproven.Flags & (ItemFlags.OwnedPointer | ItemFlags.NeedsRehash)) ==
+                        (ItemFlags.OwnedPointer | ItemFlags.NeedsRehash) && unproven.Hash is null,
+                        "unverified owned pointer carries NeedsRehash and no hash");
+                }
             }
             store.SaveSyncRetry(fx.Pair.PairId, new SyncRetry(baseline.A.Path, "sync", 4,
                 "effect outcome unknown", DateTimeOffset.MinValue));
