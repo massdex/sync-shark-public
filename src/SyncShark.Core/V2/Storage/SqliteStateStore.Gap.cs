@@ -178,18 +178,9 @@ public sealed partial class SqliteStateStore : ILocalGapStore
             ("$id", rootId)) is not null);
 
     internal void CompleteGapInventory(string rootId, string epoch) => InIndexingStore(() =>
-    {
-        var root = RootNo(rootId);
-        if (root is null || ReadGap(root)?.Epoch != epoch) return;
-        using var tx = _connection.BeginTransaction();
-        // Root selection and accountable batch disposition supersede this epoch's legacy work.
-        // A replacement epoch never loses its frontier or item obligations here.
-        StoreSchema.Execute(_connection, tx, "DELETE FROM local_gap_item WHERE root_no=$r;", ("$r", root.Value));
-        StoreSchema.Execute(_connection, tx,
-            "UPDATE local_gap SET inventory_pending=0,discovery_done=1,worker_done=1,after_object=char(65535),worker_after=char(65535) " +
-            "WHERE root_no=$r AND epoch=$e;", ("$r", root.Value), ("$e", epoch));
-        tx.Commit();
-    });
+        StoreSchema.Execute(_connection, null,
+            "UPDATE local_gap SET inventory_pending=0 WHERE root_no=(SELECT root_no FROM root WHERE root_id=$r) AND epoch=$e;",
+            ("$r", rootId), ("$e", epoch)));
 
     internal void SettleGapInventory(long completedGeneration, bool cursorHeldForEvidence = false) => InIndexingStore(() =>
         SettleGapInventory(null, completedGeneration, cursorHeldForEvidence));
