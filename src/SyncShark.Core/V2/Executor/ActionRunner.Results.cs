@@ -10,7 +10,12 @@ internal sealed partial class ActionRunner
         if (action.ConflictTransitionKey is not null && !action.SuppressReconciledBaseline &&
             result.Outcome is Outcome.Skipped or Outcome.Refused)
             result = result with { Outcome = Outcome.Failed };
-        await _committer.CommitAsync(action, result).ConfigureAwait(false);
+        try { await _committer.CommitAsync(action, result).ConfigureAwait(false); }
+        catch (Exception error)
+        {
+            RunTrace.EffectCommitFailed(action, result, error);
+            throw;
+        }
         RunTrace.EffectResult(action, result);
         return result;
     }

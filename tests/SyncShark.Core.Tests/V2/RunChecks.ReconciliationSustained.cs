@@ -24,7 +24,8 @@ internal static partial class RunChecks
         fx.Provider.AddInventory(fx.Pair.A, new ReconciliationBarrierInventory(fx.A, async () =>
         {
             var batch = Interlocked.Increment(ref reads) - 2;
-            if (batch < 0) return; // Selection precedes the six exact-path batches.
+            if (batch < 0) return; // Selection precedes the exact-path batches.
+            if (batch == 6) return; // The unchanged user file also needs proof after an untrusted epoch.
             Require(batch < 6 && edits >= batch, "each later repair batch follows the intervening user edit");
             entered[batch].TrySetResult();
             await release[batch].Task.WaitAsync(TimeSpan.FromSeconds(20));
@@ -60,8 +61,8 @@ internal static partial class RunChecks
             await entered[5].Task.WaitAsync(TimeSpan.FromSeconds(20));
             release[5].TrySetResult();
             await repair.WaitAsync(TimeSpan.FromSeconds(20));
-            Require(edits == 5 && reads == 7 && fx.WriterA.Puts + fx.WriterB.Puts == puts + 11,
-                "one run repairs six batches and applies five edits without duplicate copies");
+            Require(edits == 5 && reads == 8 && fx.WriterA.Puts + fx.WriterB.Puts == puts + 11,
+                "one run repairs six changed files, rechecks the retained user file and applies five edits without duplicate copies");
             await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
             Require(fx.WriterA.Puts + fx.WriterB.Puts == puts + 11, "subsequent replay cannot duplicate settled edits");
             await MirrorAsync(fx);

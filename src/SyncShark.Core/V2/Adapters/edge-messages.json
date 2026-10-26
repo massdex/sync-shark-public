@@ -1,6 +1,8 @@
 {
   "templates": {
-    "untrusted-journal-invalidation": "untrusted journal: invalidation page {0}, more={1}",
+    "reconciliation-epoch-replaced": "gap epoch replaced during selection; restarting cycle",
+    "effect-uncommitted-trace": "effect uncommitted outcome={0} kind={1} side={2} path={3} category={4} reason={5} commitFailure={6}",
+    "untrusted-journal-invalidation": "untrusted journal: page {0}: examined {1} of {2} retained files (root count at pass start), invalidated {3} eligible, total invalidated {4} this pass",
     "trusted-journal-reproof": "trusted journal: {0} rows selected for re-proof",
     "reconcile-journal-proof": "The change journal identifies unprocessed changes. Verify this file's content before planning.",
     "effect-result-trace": "effect outcome={0} kind={1} side={2} path={3} category={4} reason={5}",

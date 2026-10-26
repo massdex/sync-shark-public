@@ -34,8 +34,15 @@ internal static partial class LocalJournalChecks
             var gaps = (ILocalGapStore)store;
             gaps.BeginGap(root.RootId, new NtfsUsnCheckpoint(1, 0, 200, 0).Cursor, 0, false, protect: false);
             epoch = gaps.GapEpoch(root.RootId)!.Epoch;
-            LocalChecks.Require(store.InvalidateReconciliationPage(root.RootId, epoch, _ => true),
+            LocalChecks.Require(store.ReconciliationRetainedFileCount(root.RootId) == rows.Length,
+                "set-based progress denominator counts retained file identities");
+            var examined = 0;
+            var invalidated = 0;
+            LocalChecks.Require(store.InvalidateReconciliationPage(root.RootId, epoch, _ => true,
+                (read, changed) => { examined = read; invalidated = changed; }),
                 "first bounded invalidation page leaves a durable frontier");
+            LocalChecks.Require(examined == V2Settings.PlanningObservationBatchRows && invalidated == examined,
+                "committed page progress reports exact examined and newly invalidated counts");
             firstWatermark = store.RehashWatermark(root.RootId);
             LocalChecks.Require(store.RehashPendingCount(root.RootId) == V2Settings.PlanningObservationBatchRows,
                 "invalidation creates one page of actual rehash debt");

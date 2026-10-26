@@ -26,6 +26,13 @@ internal static partial class RunChecks
                     "real effect catalog formats outcome, kind, side, relative path, category and escaped reason");
             }
             Require(trace.Lines.Count == 2, "failed and uncertain effects each emit exactly one trace line");
+            RunTrace.EffectResult(action, new(action.ActionId, Outcome.Refused, null, null, null, "guard refused"));
+            Require(trace.Lines.Last().Contains("outcome=Refused", StringComparison.Ordinal), "refused effects are logged");
+            RunTrace.EffectCommitFailed(action, new(action.ActionId, Outcome.Done, null, null, null, null),
+                new IOException("commit unavailable"));
+            Require(trace.Lines.Last().StartsWith("effect uncommitted outcome=Done kind=CopyNew side=B path=\"file.txt\"", StringComparison.Ordinal) &&
+                trace.Lines.Last().Contains("IOException: commit unavailable", StringComparison.Ordinal),
+                "failed result commits retain effect identity and explicitly uncommitted outcome");
         }
         finally { RunTrace.Slot.Value = previous; }
     }

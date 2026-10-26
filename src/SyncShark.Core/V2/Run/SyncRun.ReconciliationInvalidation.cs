@@ -21,15 +21,22 @@ public sealed partial class SyncRun
         var eligibility = new ItemEligibility(_store.Pairs(), _productOwned(pair));
         bool eligible(ItemState item) => eligibility.EvaluateObservation(pair, side, item,
             !_settings.ReplaceOnlineOnlyStubs).Eligible;
+        var total = await _admission.WithAsync(pair.PairId,
+            () => Task.FromResult(sql.ReconciliationRetainedFileCount(root.RootId)), ct);
         var page = default(int);
+        var examined = default(long);
+        var invalidated = default(long);
         bool more;
         do
         {
             ct.ThrowIfCancellationRequested();
+            var pageInvalidated = default(int);
             more = await _admission.WithAsync(pair.PairId,
-                () => Task.FromResult(sql.InvalidateReconciliationPage(root.RootId, epoch.Epoch, eligible)), ct);
+                () => Task.FromResult(sql.InvalidateReconciliationPage(root.RootId, epoch.Epoch, eligible,
+                    (read, changed) => { examined += read; invalidated += changed; pageInvalidated = changed; })), ct);
             RunTrace.Emit(string.Format(System.Globalization.CultureInfo.InvariantCulture,
-                MessageCatalog.Default.Template("untrusted-journal-invalidation"), ++page, more));
+                MessageCatalog.Default.Template("untrusted-journal-invalidation"), ++page,
+                examined, total, pageInvalidated, invalidated));
         } while (more);
         // NeedsRehash now marks unproven content. Live edits after proof are re-flagged by
         // LocalInventory.JournalCatchUp's RequireRehashBatch; never restart blanket invalidation here.

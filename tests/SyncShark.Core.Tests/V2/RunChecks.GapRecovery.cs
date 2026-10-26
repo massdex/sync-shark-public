@@ -144,6 +144,7 @@ internal static partial class RunChecks
             Require(fx.WriterA.Calls + fx.WriterB.Calls == 0, "overflow preview executes no endpoint effect");
             return;
         }
+        using var overflowLog = cause == "overflow" ? RunLog.Open(Path.Combine(folder, "logs"), pair.PairId, "gap", false) : null;
         try
         {
             var report = await run.IncrementalAsync(pair.PairId, new RecordingProgress(), default);
@@ -158,6 +159,13 @@ internal static partial class RunChecks
                     "read outage finishes Partial with durable root retry and notice");
         }
         catch (GapWalkInterrupted) { }
+        if (overflowLog is not null)
+        {
+            overflowLog.Dispose();
+            await overflowLog.Completion;
+            Require(File.ReadAllText(overflowLog.Path!).Contains("synthetic overflow", StringComparison.Ordinal),
+                "nonverbose operational log retains the exact overflow reason while reconciliation owns recovery");
+        }
         var epoch = gaps.GapEpoch(root.RootId)!;
         Require(epoch is not null && store.GapInventoryPending(root.RootId) && store.Cursor(root.RootId) == checkpoint.Cursor,
             cause + ": interrupted run publishes checkpoint and retains full obligation");

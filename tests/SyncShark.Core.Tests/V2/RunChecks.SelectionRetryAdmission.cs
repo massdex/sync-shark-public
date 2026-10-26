@@ -4,6 +4,7 @@ internal static partial class RunChecks
 {
     private static async Task SelectionRetryPublishesAfterAutoSync()
     {
+        await InvalidationWaitsForAutoSync();
         using var store = SqliteStateStore.Open(FixtureFolder("selection-retry-admission"),
             StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);

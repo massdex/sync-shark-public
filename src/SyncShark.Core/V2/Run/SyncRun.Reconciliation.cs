@@ -65,9 +65,9 @@ public sealed partial class SyncRun
         var sql = _store as SqliteStateStore ?? throw new InvalidOperationException(MessageCatalog.Default.Template("reconciliation-staging-required"));
         await _endpoints.PrepareAsync(pair, ct);
         var throttle = new ProgressThrottle(progress, _time, _settings.ProgressInterval);
-        await SelectReconciliationAsync(pair, active, throttle, ct);
-        lock (_stopGate) active.Selecting = false;
         var total = new RunReport(pairId, string.Empty, 0, 0, 0, 0, 0, 0, 0, 0, []);
+        if (!await SelectStableReconciliationAsync(pair, active, throttle, ct)) return total with { Deferred = 1 };
+        lock (_stopGate) active.Selecting = false;
         long previousDeferred = long.MaxValue;
         while (true)
         {
