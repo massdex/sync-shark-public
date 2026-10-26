@@ -83,6 +83,7 @@ internal static partial class RunChecks
         await Group(nameof(Incremental_SleepingRetryIsPartialAsync), Incremental_SleepingRetryIsPartialAsync, failures);
         await Group(nameof(Incremental_SplitBaselineRetrySettlesAsync), Incremental_SplitBaselineRetrySettlesAsync, failures);
         await Group(nameof(Incremental_SleepingRootRetryAvoidsWholePairLoadAsync), Incremental_SleepingRootRetryAvoidsWholePairLoadAsync, failures);
+        await Group(nameof(PlanningSubStageTracesAsync), PlanningSubStageTracesAsync, failures);
         await Group(nameof(RecoveryRestore_NoNoticeRunsWithoutLookupsAsync), RecoveryRestore_NoNoticeRunsWithoutLookupsAsync, failures);
         await Group(nameof(Incremental_FullRescanAfterForgetCursorAsync), Incremental_FullRescanAfterForgetCursorAsync, failures);
         await Group(nameof(RequestRescan_WaitsForRunningScanAsync), RequestRescan_WaitsForRunningScanAsync, failures);
@@ -127,6 +128,7 @@ internal static partial class RunChecks
         await Group(nameof(CopyHash_KeepBothHeldTogetherAsync), CopyHash_KeepBothHeldTogetherAsync, failures);
         await Group(nameof(CopyHash_SourceUnderMovedFolderAsync), CopyHash_SourceUnderMovedFolderAsync, failures);
         await Group(nameof(CopyHash_FolderRemoveHashesVictimsAsync), CopyHash_FolderRemoveHashesVictimsAsync, failures);
+        await Group(nameof(WaitNoticeCleanupTimeoutSurvivesAsync), WaitNoticeCleanupTimeoutSurvivesAsync, failures);
         await Group("LinkExclusionChecks.RunAsync", LinkExclusionChecks.RunAsync, failures);
         await Group("DecisionHoldChecks.RunAsync", DecisionHoldChecks.RunAsync, failures);
         await Group("ConcurrentScanChecks.RunAsync", ConcurrentScanChecks.RunAsync, failures);

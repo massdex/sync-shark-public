@@ -1,7 +1,13 @@
+using System.Diagnostics;
+
 namespace Massdex.SyncShark.V2;
 
 public sealed partial class SyncRun
 {
+    // A settle chunk line is time-throttled like the protection-scope progress lines: the first and
+    // last chunk always report, and a long lane reports at most about one chunk line this often.
+    private const double SettleChunkTraceSeconds = 3;
+
     // The same scope/join/decision owners as ordinary intake, but never hash or execute an endpoint
     // effect for this lane. A rejected chunk remains queued for ordinary intake, without rotation.
     private (IReadOnlyList<SqliteStateStore.DeferredPlanning> Rows, IReadOnlyList<SyncAction> Adopts, int Candidates)
@@ -10,7 +16,13 @@ public sealed partial class SyncRun
             Func<string, bool> includeA, Func<string, bool> includeB, CancellationToken ct)
     {
         if (_store is not SqliteStateStore store || scan.AnyFull || !scan.A.Complete || !scan.B.Complete)
+        {
+            RunLog.Trace("planning settle: skipped; " + (_store is not SqliteStateStore
+                ? "store-not-settle-capable" : scan.AnyFull ? "full-scan" : "incomplete-scan"));
             return ([], [], 0);
+        }
+        var started = PlanningStepStarted();
+        RunLog.Trace($"planning settle: start; ordinary={ordinary.Count}; capacity={SqliteStateStore.SettlePathCapacity(ordinary)}");
         var candidates = store.SettlePlanningCandidates(pair.PairId, _time.GetUtcNow().UtcTicks,
             SqliteStateStore.SettlePathCapacity(ordinary), ordinary, advance: _endpoints is not PlanOnlyEndpoints);
         var accepted = new List<SqliteStateStore.DeferredPlanning>();
@@ -20,10 +32,32 @@ public sealed partial class SyncRun
         // Inventory predicates cover boundaries; the existing scan policy also covers ignores.
         // Reject the entire entity if any alias is outside sync authority, without acknowledging it.
         var notSynced = ScanPathsNotSynced(pair);
-        foreach (var chunk in candidates.Where(row => row.Paths.All(path =>
-                     includeA(path) && includeB(path) && !notSynced(path))).Chunk(128))
+        var chunks = candidates.Where(row => row.Paths.All(path =>
+            includeA(path) && includeB(path) && !notSynced(path))).Chunk(128).ToArray();
+        EvaluateSettleChunks(chunks, pair, scan, protection, touched, accepted, adopts, ct);
+        var settled = adopts.Distinct().ToArray();
+        RunTracePlanningStep("settle done", started, $"candidates={candidates.Count}; chunks={chunks.Length}; accepted={accepted.Count}; rejected={candidates.Count - accepted.Count}; adopts={settled.Length}");
+        return (accepted, settled, candidates.Count);
+    }
+
+    // Chunk progress, in the protection-scope shape: the first and last chunk always report, and a
+    // long lane reports at most about one line every few seconds.
+    private void EvaluateSettleChunks(SqliteStateStore.DeferredPlanning[][] chunks, PairDef pair, BothScan scan,
+        LinkExclusions protection, IReadOnlyList<string> touched, List<SqliteStateStore.DeferredPlanning> accepted,
+        List<SyncAction> adopts, CancellationToken ct)
+    {
+        var lastTrace = Stopwatch.GetTimestamp();
+        for (var index = 0; index < chunks.Length; index++)
+        {
+            var chunk = chunks[index];
+            var acceptedBefore = accepted.Count;
             EvaluateSettleChunk(pair, scan, protection, touched, accepted, adopts, chunk, ct);
-        return (accepted, adopts.Distinct().ToArray(), candidates.Count);
+            var chunkAccepted = accepted.Count - acceptedBefore;
+            if (index != 0 && index != chunks.Length - 1 &&
+                Stopwatch.GetElapsedTime(lastTrace).TotalSeconds < SettleChunkTraceSeconds) continue;
+            lastTrace = Stopwatch.GetTimestamp();
+            RunLog.Trace($"planning settle chunk {index + 1}/{chunks.Length}: candidates={chunk.Length}; accepted={chunkAccepted}; rejected={chunk.Length - chunkAccepted}; running-accepted={accepted.Count}");
+        }
     }
 
     private void EvaluateSettleChunk(PairDef pair, BothScan scan, LinkExclusions protection,

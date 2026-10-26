@@ -37,6 +37,18 @@ internal static partial class PlannerChecks
                 held.Notices.Select(n => (n.Path, n.ReasonKey)).Distinct().Count() == held.Notices.Count,
                 "unsupported pointer content operation is pending with deduplicated actionable notices");
         }
+        // The per-row pointer read check scans every draft entry the row appended, not only its first.
+        // A both-edited row emits Forget then two KeepBoth actions, so a pointer source can land at
+        // either copy; both must hold the whole row with no partial effect.
+        foreach (var pointerSide in new[] { Side.A, Side.B })
+        {
+            var editedA = F("x", "idA", "h2", flags: pointerSide == Side.A ? ItemFlags.OwnedPointer : ItemFlags.None);
+            var editedB = F("x", "idB", "h3", flags: pointerSide == Side.B ? ItemFlags.OwnedPointer : ItemFlags.None);
+            var held = PlanRows(Row(Base("k1", F("x", "idA", "h1"), F("x", "idB", "h1")), editedA, editedB));
+            AssertNoActions(held);
+            Require(held.Notices.Any(n => n.ReasonKey == "sync-retry"),
+                $"a keep-both copy whose source is an owned pointer ({pointerSide}) holds the whole row");
+        }
         foreach (var move in new[] { false, true })
         {
             var edited = remote with { Hash = "edited", VersionId = "revision-2", Mtime = T0.AddHours(1),

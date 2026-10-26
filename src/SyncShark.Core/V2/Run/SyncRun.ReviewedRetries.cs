@@ -15,6 +15,17 @@ public sealed partial class SyncRun
         DeleteSourceGuard.RecordRemovalConsentAsync(action, pair, _store,
             _endpoints.Inventory(action.Target == Side.A ? pair.A : pair.B), ct, isStateDamage: StorageFailureClassifier.IsStateDamage);
 
+    // The reviewed-retry stage's start and end braces: the contract below is unchanged, and its
+    // elapsed time and action counts reach the run log without growing that long method.
+    private async Task<Plan> TracedReviewedRetriesAsync(PairDef pair, Plan plan, IReadOnlyList<SyncRetry> retries, CancellationToken ct)
+    {
+        var started = PlanningStepStarted();
+        RunLog.Trace($"planning retries: start; candidates={retries.Count}; actions={plan.Actions.Count}");
+        var applied = await ApplyReviewedRetriesAsync(pair, plan, retries, ct);
+        RunTracePlanningStep("retries done", started, $"actions={plan.Actions.Count}->{applied.Actions.Count}");
+        return applied;
+    }
+
     private async Task<Plan> ApplyReviewedRetriesAsync(PairDef pair, Plan plan, IReadOnlyList<SyncRetry> retries, CancellationToken ct)
     {
         // Re-read persisted scheduling authority: neither a rounded index candidate nor a stale

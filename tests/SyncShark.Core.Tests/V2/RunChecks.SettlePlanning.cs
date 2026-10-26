@@ -84,7 +84,22 @@ internal static partial class RunChecks
             var journal = new SettleBacklogInventory(fx.A);
             fx.Provider.AddInventory(fx.Pair.A, journal);
             var progress = new RecordingProgress();
-            var report = await run.IncrementalAsync(fx.Pair.PairId, progress, default);
+            string tracePath;
+            RunReport report;
+            using (var log = RunLog.Open(folder, fx.Pair.PairId, RunLog.AutoSyncCommand, verbose: false))
+            {
+                Require(SpinUntil(() => log.FileAvailable, TimeSpan.FromSeconds(2)), "the settle run log opens");
+                report = await run.IncrementalAsync(fx.Pair.PairId, progress, default);
+                tracePath = log.JsonPath!;
+            }
+            var trace = File.ReadAllLines(tracePath);
+            Require(trace.Any(line => line.Contains("planning settle chunk 1/", StringComparison.Ordinal) &&
+                line.Contains("candidates=", StringComparison.Ordinal) &&
+                line.Contains("accepted=", StringComparison.Ordinal) && line.Contains("rejected=", StringComparison.Ordinal)),
+                "the settle lane reports chunk progress, candidates, accepted and rejected where it runs");
+            Require(trace.Any(line => line.Contains("planning settle done:", StringComparison.Ordinal) &&
+                !line.Contains("chunks=0;", StringComparison.Ordinal)),
+                "the settle lane reports its accepted and rejected totals where it runs");
             Require(report.Failed == 0, "mixed settle run completes without failure");
             Require(report.JournalBacklog && report.PlanningBacklog > 0, "both backlog signals survive incremental completion");
             journal.Backlog = false;

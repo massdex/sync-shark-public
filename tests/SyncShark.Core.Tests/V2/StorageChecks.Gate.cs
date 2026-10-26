@@ -101,6 +101,12 @@ internal static partial class StorageChecks
             }
             Require(cleanupTimedOut && gate.Waiting == 0,
                 "blocked cleanup surfaces timeout instead of cancellation or silent loss and removes its ticket");
+            var bestEffortBodyRan = false;
+            using (FairStoreGate.WithCancellation(cancel.Token))
+                FairStoreGate.CleanupBestEffort(() => bestEffortBodyRan = store.CountHeldIntents("p1") == 768,
+                    TimeSpan.FromMilliseconds(50));
+            Require(!bestEffortBodyRan && gate.Waiting == 0,
+                "the info-notice best-effort cleanup observes the same blocked admission without failing the run");
             var fatal = new StateDamagedException("original state damage");
             Exception? retained = null;
             try

@@ -58,7 +58,7 @@ public static partial class Planner
             {
                 var start = ctx.Draft.Count;
                 Dispatch(ctx, row);
-                if (ctx.Draft.Skip(start).Any(entry => ReadsOwnedPointer(entry.Action)))
+                if (ctx.Draft.FindIndex(start, entry => ReadsOwnedPointer(entry.Action)) >= 0)   // not Skip(start): O(draft) per row
                 {
                     ctx.TruncateDraft(start);
                     ctx.Notices.RemoveAll(notice => PairPath.Same(notice.Path, PrimaryPath(row)) &&

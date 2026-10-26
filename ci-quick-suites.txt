@@ -1,4 +1,5 @@
 --v2-run-checks
+--v2-storage-checks
 --v2-autosync-checks
---v2-planning-protection-checks
 --v2-planner-checks
+--v2-local-journal-checks

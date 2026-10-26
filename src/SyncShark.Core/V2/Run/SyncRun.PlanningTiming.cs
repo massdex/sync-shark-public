@@ -1,7 +1,36 @@
+using System.Diagnostics;
+using System.Globalization;
+
 namespace Massdex.SyncShark.V2;
 
 public sealed partial class SyncRun
 {
+    // A planning sub-stage used to run silently between the comparison trace and the phase boundary line,
+    // so a slow stage was invisible in the run log. Each stage now names itself, its elapsed time and
+    // the counts it produced, through the same RunLog trace the run already writes.
+    private static long PlanningStepStarted() => Stopwatch.GetTimestamp();
+
+    // A stage names itself before it starts, so a stall points at the stage in progress rather than
+    // at the previous stage's completion line. Its input counts stay on the same trace line.
+    private static long PlanningStepStarted(string step, int actions)
+    {
+        RunLog.Trace(string.Create(CultureInfo.InvariantCulture, $"planning {step}: start; actions={actions}"));
+        return Stopwatch.GetTimestamp();
+    }
+
+    private static void RunTracePlanningStep(string step, long started, string counts) =>
+        RunLog.Trace(string.Create(CultureInfo.InvariantCulture, $"planning {step}: elapsed-ms={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0}; {counts}"));
+
+    // One safety-filter pass with the action counts it kept and dropped; ApplySafetyFilter's other
+    // callers (apply, deferred evidence) keep their untraced shape.
+    private Plan FilteredPlan(PairDef pair, string step, ActionGuard? guard, Plan plan)
+    {
+        var started = PlanningStepStarted("filter " + step, plan.Actions.Count);
+        var filtered = ApplySafetyFilter(pair, guard, plan);
+        RunTracePlanningStep("filter " + step, started, $"actions={plan.Actions.Count}->{filtered.Actions.Count}; blocked={filtered.SkippedActions.Count - plan.SkippedActions.Count}");
+        return filtered;
+    }
+
     private async Task<DeferredExecution> ExecuteMeasuredPlanAsync(Plan plan, PairDef pair,
         ProgressThrottle throttle, IReadOnlySet<string> reviewedDeletes, CancellationToken ct)
     {

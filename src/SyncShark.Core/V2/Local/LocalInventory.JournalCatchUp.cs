@@ -70,8 +70,6 @@ public sealed partial class LocalInventory
         {
             ct.ThrowIfCancellationRequested();
             var end = window.Through(next, through);
-            var recordsBefore = CatchUp?.Records ?? 0;
-            var pathsBefore = CatchUp?.Resolved ?? 0;
             Delta delta;
             try { delta = await ReadWindowAsync(lease, cursor, gen, rootId, journalId, next, end, window, include, ct).ConfigureAwait(false); }
             catch (RetrySmallerJournalWindow) { index--; continue; }
@@ -79,7 +77,9 @@ public sealed partial class LocalInventory
             if (delta.CursorInvalid || delta.IncompleteSubtrees.Count != 0 || delta.PendingDeletionEvidence.Count != 0 ||
                 !NtfsUsnCheckpoint.TryParseCursor(delta.CursorAfter, out _, out var consumed) || consumed <= next)
                 return delta;
-            RunTrace.Emit($"journal catch-up window {index}: {consumed - next} bytes, {(CatchUp?.Records ?? 0) - recordsBefore} records, {(CatchUp?.Resolved ?? 0) - pathsBefore} paths");
+            // The counters hold this successful window's own observations; a halved retry overwrote
+            // the failed attempt's, so differencing them would report a negative record count.
+            RunTrace.Emit($"journal catch-up window {index}: {consumed - next} bytes, {CatchUp?.Records ?? 0} records, {CatchUp?.Resolved ?? 0} paths");
             _known.SaveJournalWindowSize(_volume, Path.GetPathRoot(_root.RootPath)!.TrimEnd(Path.DirectorySeparatorChar).ToUpperInvariant(), rootId, window.Bytes);
             delta = delta with { JournalBacklog = consumed < through.NextUsn };
             // Run owns deletion timestamps, directory descendant expansion and move pre-images.

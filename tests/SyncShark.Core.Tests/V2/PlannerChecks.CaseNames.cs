@@ -48,10 +48,10 @@ internal static partial class PlannerChecks
     {
         foreach (var survivor in new[] { Side.A, Side.B })
         {
-            var a = F("Parent/capsules/work/item.json", "a", "same");
+            var a = F("Parent/child/work/item.json", "a", "same");
             var b = F(a.Path, "b", "same");
             var baseline = Base("drift-delete", a, b);
-            var current = (survivor == Side.A ? a : b) with { Path = "Parent/Capsules/work/item.json" };
+            var current = (survivor == Side.A ? a : b) with { Path = "Parent/Child/work/item.json" };
             var row = Row(baseline, survivor == Side.A ? current : null, survivor == Side.B ? current : null,
                 Ev(A: survivor == Side.B, B: survivor == Side.A));
             var plan = Planner.Decide(PairId, Gen, [row], Opt() with { ProviderA = SyncProviders.Local, ProviderB = SyncProviders.Local });
@@ -74,12 +74,12 @@ internal static partial class PlannerChecks
         foreach (var edited in new[] { Side.A, Side.B })
         foreach (var bothDrift in new[] { false, true })
         {
-            var a = F("Parent/capsules/work/item.json", "a", "old");
+            var a = F("Parent/child/work/item.json", "a", "old");
             var b = F(a.Path, "b", "old");
             var baseline = Base("ancestor", a, b);
-            var currentA = a with { Path = edited == Side.B || bothDrift ? "Parent/Capsules/work/item.json" : a.Path,
+            var currentA = a with { Path = edited == Side.B || bothDrift ? "Parent/Child/work/item.json" : a.Path,
                 Hash = edited == Side.A ? "new" : "old" };
-            var currentB = b with { Path = edited == Side.A || bothDrift ? "PARENT/capsules/work/item.json" : b.Path,
+            var currentB = b with { Path = edited == Side.A || bothDrift ? "PARENT/child/work/item.json" : b.Path,
                 Hash = edited == Side.B ? "new" : "old" };
             var plan = Decide(Row(baseline, currentA, currentB));
             Require(plan.Actions.Count == 1 && plan.Actions.Single() is { Kind: ActionKind.Update } update &&
@@ -91,7 +91,7 @@ internal static partial class PlannerChecks
             var unknown = Decide(Row(baseline, currentA with { Hash = null, Mtime = a.Mtime.AddMinutes(1) },
                 currentB with { Hash = null, Mtime = b.Mtime.AddMinutes(1) }));
             Require(!unknown.Actions.Any(x => x.Kind != ActionKind.Hold), "unknown content never authorizes an update or split");
-            var leaf = Decide(Row(baseline, a with { Path = "Parent/capsules/work/Item.json" }, b with { Hash = "new" }));
+            var leaf = Decide(Row(baseline, a with { Path = "Parent/child/work/Item.json" }, b with { Hash = "new" }));
             Require(leaf.Notices.Any(n => n.Rule == 27), "a real leaf rename plus an opposite edit remains a conflict");
         }
     }

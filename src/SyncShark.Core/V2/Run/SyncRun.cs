@@ -970,7 +970,7 @@ public sealed partial class SyncRun : ISyncRun
         var deciding = DecideWithHashedCopiesAsync(pair, scan, rows,
             () => JoinRows(loadScope(), scan, false),
             pass => ExpandOccupancyOnce(pair, loadScope, scan,
-                ApplySafetyFilter(pair, ActionPredicates(pair, links), Decide(pair, scan, pass, winners, mappingContext, links)), touched, links,
+                FilteredPlan(pair, "decide", ActionPredicates(pair, links), Decide(pair, scan, pass, winners, mappingContext, links)), touched, links,
                 winners, () => inventory = null),
             throttle, ct, refresh);
         rows = [];
@@ -1005,15 +1005,15 @@ public sealed partial class SyncRun : ISyncRun
         var retryPair = pair with { Excluded = pair.Excluded.Where(path => !reviewedRemovalScopes.Contains(path)).ToArray() };
         var retrySelection = RebuildableSelection.Sides(pair) is { } retrySides
             ? new RebuildableSelection(retrySides.Cloud, rebuildableRetries) : null;
-        plan = await ApplyReviewedRetriesAsync(pair, plan, retries, ct);
+        plan = await TracedReviewedRetriesAsync(pair, plan, retries, ct);
         RefreshRetryProtection();
-        plan = ApplySafetyFilter(pair, ActionPredicates(retryPair, links, retrySelection), plan);
+        plan = FilteredPlan(pair, "retries", ActionPredicates(retryPair, links, retrySelection), plan);
         RaiseLinksSummary(pair, current);
         var openNotices = _store.UnresolvedNotices(pair.PairId);
         RetainPlanningFailures(pair, plan);
         WriteNotices(plan.Notices);
         RefreshRetryProtection();
-        plan = ApplySafetyFilter(pair, ActionPredicates(retryPair, links.WithPending(
+        plan = FilteredPlan(pair, "notices", ActionPredicates(retryPair, links.WithPending(
             _store.ReadSyncRetries(pairId).Where(retry => retry.PendingNotice is not null).Select(retry => retry.Path)), retrySelection), plan);
         plan = plan with { HeldDeletions = retryHeld, FirstSyncOptions = Options(pair, false, winners, null) };
         var reviewedDeletes = retries.Where(item => item.HeldReviewed && item.Held is not null && item.HeldExpected is { } expected &&
@@ -1088,7 +1088,12 @@ public sealed partial class SyncRun : ISyncRun
     private Plan ExpandOccupancyOnce(PairDef pair, Func<RunScope.Scope> loadScope, BothScan scan, Plan plan,
         List<string> touched, LinkExclusions links, IReadOnlyDictionary<string, Side?>? winners, Action invalidate)
     {
-        if (scan.AnyFull) return plan;
+        if (scan.AnyFull)
+        {
+            RunLog.Trace("planning occupancy: skipped; full-scan=true");
+            return plan;
+        }
+        var started = PlanningStepStarted("occupancy", plan.Actions.Count);
         var scope = loadScope();
         var loadedA = new HashSet<string>(scope.A.Select(item => item.Path), StringComparer.OrdinalIgnoreCase);
         var loadedB = new HashSet<string>(scope.B.Select(item => item.Path), StringComparer.OrdinalIgnoreCase);
@@ -1103,12 +1108,19 @@ public sealed partial class SyncRun : ISyncRun
             if (_store.Live(target.RootId, [action.Path]).Count == 0) continue;
             extra.Add(action.Path);
         }
-        if (extra.Count == 0) return plan;
+        if (extra.Count == 0)
+        {
+            RunTracePlanningStep("occupancy", started, $"extra=0; actions={plan.Actions.Count}");
+            return plan;
+        }
         touched.AddRange(extra);
         invalidate(); // The cached scope belongs to the previous touched-path identity.
         scope = loadScope();
         var rows = JoinRows(scope, scan, false);
-        return ApplySafetyFilter(pair, ActionPredicates(pair, links), Decide(pair, scan, rows, winners, scope, links));
+        var decided = Decide(pair, scan, rows, winners, scope, links);
+        var filtered = ApplySafetyFilter(pair, ActionPredicates(pair, links), decided);
+        RunTracePlanningStep("occupancy", started, $"extra={extra.Count}; decided={decided.Actions.Count}; filtered={filtered.Actions.Count}");
+        return filtered;
     }
 
     private Plan Decide(PairDef pair, BothScan scan, IReadOnlyList<PlanRow> rows,
