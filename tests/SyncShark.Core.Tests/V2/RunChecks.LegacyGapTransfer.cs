@@ -19,6 +19,7 @@ internal static partial class RunChecks
         await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
         var root = side == Side.A ? pair.A : pair.B;
         var endpoint = side == Side.A ? fx.A : fx.B;
+        fx.A.ContentProofStore = fx.B.ContentProofStore = store;
         var counterpart = side == Side.A ? pair.B : pair.A;
         var other = side == Side.A ? fx.B : fx.A;
         var gaps = (ILocalGapStore)store;

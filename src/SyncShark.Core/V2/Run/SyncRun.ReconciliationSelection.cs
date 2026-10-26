@@ -3,7 +3,8 @@ namespace Massdex.SyncShark.V2;
 public sealed partial class SyncRun
 {
     internal async Task<SelectionCounts> SelectAsync(PairDef pair, Side side, StateMonitorDecision decision,
-        string session, ProgressThrottle throttle, CancellationToken ct, Action<string>? listingBasis = null)
+        string session, ProgressThrottle throttle, CancellationToken ct, Action<string>? listingBasis = null,
+        Action? walkCompleted = null)
     {
         var sql = _store as SqliteStateStore ?? throw new InvalidOperationException("Reconciliation requires persistent staging.");
         var root = side == Side.A ? pair.A : pair.B;
@@ -23,15 +24,12 @@ public sealed partial class SyncRun
                 return SelectPlanningBacklog(pair, side, scope, session, sql, ct);
             if (RehearsalEndpoints.Unwrap(inventory) is LocalInventory local)
                 counts = await SelectLocalAsync(pair, side, local, decision, scope, session, sql, eligibility, accounted, ct, incomplete);
-            else
-            {
-                await EnumerateSelectionAsync(root, inventory, scope, accept, throttle, ct, listingBasis, incomplete);
-                counts = SelectStaged(pair, side, session, sql, eligibility, accounted,
-                    RehearsalEndpoints.Unwrap(inventory) is DropboxInventory, ct);
-            }
+            else counts = await SelectInventoryAsync(pair, side, session, sql, eligibility, accounted,
+                root, inventory, scope, accept, throttle, ct, listingBasis, incomplete);
             await InvalidateUnreadableSelectionAsync(pair, root, side, incompletePaths, incompleteReasons, ct);
             counts = counts with { Missing = SelectMissing(pair, side, scope, session, sql, eligibility, incompletePaths, ct) };
             RunTrace.Emit($"reconciliation selection: enumerated={counts.Enumerated} changed={counts.Changed} new={counts.New} missing={counts.Missing} unaffected={counts.Unaffected} S-orphan={counts.Orphan} S-moved={counts.Moved} S-case={counts.Case}");
+            if (!incompletePaths.Contains(string.Empty)) walkCompleted?.Invoke();
             return counts;
         }
         catch (Exception error) when (ScopeFailure(error, ct))
@@ -40,6 +38,17 @@ public sealed partial class SyncRun
             return counts;
         }
         finally { sql.ClearRemovalObservation(session + ":seen"); }
+    }
+
+    private async Task<SelectionCounts> SelectInventoryAsync(PairDef pair, Side side, string session,
+        SqliteStateStore sql, ItemEligibility eligibility, (HashSet<string> Paths, HashSet<string> Ids) accounted,
+        RootDef root, IInventorySource inventory, ReconciliationScope scope,
+        Func<IReadOnlyList<ItemState>, Task> accept, ProgressThrottle throttle, CancellationToken ct,
+        Action<string>? listingBasis, Action<IReadOnlyList<string>, IReadOnlyDictionary<string, string>> incomplete)
+    {
+        await EnumerateSelectionAsync(root, inventory, scope, accept, throttle, ct, listingBasis, incomplete);
+        return SelectStaged(pair, side, session, sql, eligibility, accounted,
+            RehearsalEndpoints.Unwrap(inventory) is DropboxInventory, ct);
     }
 
     private void RecordSelectionIncomplete(PairDef pair, Side side, IReadOnlyList<string> paths,

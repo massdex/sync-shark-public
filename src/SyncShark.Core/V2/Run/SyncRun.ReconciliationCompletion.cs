@@ -17,7 +17,8 @@ public sealed partial class SyncRun
                 await InvalidateReconciliationAsync(pair, root, side, epoch, ct);
             }
             await SelectAsync(pair, side, active.Decision, active.Session, throttle, ct,
-                basis => active.ListingBases[root.RootId] = basis);
+                basis => active.ListingBases[root.RootId] = basis,
+                () => active.CompletedSelectionRoots.Add(root.RootId));
         }
     }
 
@@ -33,9 +34,10 @@ public sealed partial class SyncRun
         if ((active.Decision.UnknownScope ?? ReconciliationScope.Root).ReadScopes.Contains(string.Empty))
         {
             foreach (var (rootId, epoch) in active.GapEpochs)
-                completion.Step(() => sql.CompleteGapInventory(rootId, epoch));
+                if (active.CompletedSelectionRoots.Contains(rootId))
+                    completion.Step(() => sql.CompleteGapInventory(rootId, epoch));
             if (active.Decision.Trigger == ReconciliationTrigger.DropboxReset)
-                foreach (var (rootId, basis) in active.ListingBases)
+                foreach (var (rootId, basis) in active.ListingBases.Where(entry => active.CompletedSelectionRoots.Contains(entry.Key)))
                     completion.Step(() =>
                     {
                         _store.CompleteGeneration(_store.BeginGeneration(rootId, "delta"), basis, true);

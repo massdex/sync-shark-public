@@ -34,9 +34,19 @@ internal static partial class RunChecks
                 notice.Detail.Contains("Access denied", StringComparison.OrdinalIgnoreCase)),
             "unreadable folder retains a specific visible reason and the scan owner's backoff");
         var walks = fx.A.FullCalls;
-        Require(store.PendingGapInventory(fx.Pair.A.RootId) &&
+        Require(!store.PendingGapInventory(fx.Pair.A.RootId) &&
+            store.ProtectionBatch(fx.Pair.A.RootId, ItemFlags.NeedsRehash, ["Denied/held.txt"])[0].Covered &&
             !await run.MonitorAsync(fx.Pair.PairId, new RecordingProgress(), default) && fx.A.FullCalls == walks,
-            "monitor keeps the obligation without rewalking before its scan retry is due");
+            "readable remainder clears the epoch while unreadable proof and scan retry prevent premature rewalking");
+        gaps.BeginGap(fx.Pair.A.RootId, new NtfsUsnCheckpoint(3, 0, 300, 0).Cursor, 200, false, protect: false);
+        var interrupted = gaps.GapEpoch(fx.Pair.A.RootId)!;
+        inventory.FullError = new IOException("root enumeration interrupted");
+        report = await run.ReconcileScopeAsync(fx.Pair.PairId,
+            StateMonitor.FromGap(interrupted) with { RootId = fx.Pair.A.RootId }, new RecordingProgress(), default);
+        Require(store.PendingGapInventory(fx.Pair.A.RootId) && gaps.GapEpoch(fx.Pair.A.RootId)!.Epoch == interrupted.Epoch &&
+            store.Cursor(fx.Pair.A.RootId) == interrupted.JournalCursor && report.Deferred > 0 &&
+            store.SyncRetryAt(fx.Pair.PairId, "") is { Kind: "scan" },
+            "root-scope read failure retains the exact pending epoch checkpoint and full obligation with a Partial retry");
     }
 
     private static Task ReconciliationClearsGapDebt() => ReconcileGapDebt(false);
@@ -47,6 +57,7 @@ internal static partial class RunChecks
         using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "reconcile-gap-debt-" + Guid.NewGuid().ToString("N")),
             StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
+        fx.A.ContentProofStore = store;
         var items = Enumerable.Range(0, 50).Select(i => fx.A.Seed($"Parent/file-{i:D2}.txt", "original")).ToArray();
         await FirstSyncAsync(fx.Run(), fx);
         var gaps = (ILocalGapStore)store;
@@ -62,12 +73,15 @@ internal static partial class RunChecks
         for (var i = 0; i < 3; i++) fx.A.Seed(items[i].Path, "changed content");
         var writes = fx.WriterB.Calls;
         fx.A.HashedPaths.Clear(); fx.B.HashedPaths.Clear();
-        var report = await fx.Run().ReconcileScopeAsync(fx.Pair.PairId,
+        var run = new SyncRun(store, fx.Executor, fx.Provider,
+            Settings with { ReconciliationBatch = new(5, 64) }, TimeProvider.System);
+        var report = await run.ReconcileScopeAsync(fx.Pair.PairId,
             StateMonitor.FromGap(epoch) with { RootId = root }, new RecordingProgress(), default);
         Require(!report.CompletionFailed && report.Failed == 0 && fx.WriterB.Calls - writes == 3,
             "one gap reconciliation uploads exactly the three changed files");
-        Require(fx.A.HashedPaths.Count == 0 && fx.B.HashedPaths.Count == 0,
-            "available verified content hashes require no extra hashing");
+        Require(!epoch.TrustFileUsn && items.All(item => fx.A.HashedPaths.Contains(item.Path)) &&
+            fx.B.HashedPaths.Count == 0 && store.RehashPendingCount(root) == 0 && report.Deferred == 0,
+            "one untrusted reconciliation proves all 50 files with zero deferred debt and no counterpart rehash");
         Require(!store.PendingGapInventory(root) && !gaps.HasGapProtection(root) &&
             gaps.GapObligations(root, items.Select(item => item.ObjectId).ToArray()).Count == 0 &&
             store.PlanningBacklogPage(fx.Pair.PairId).Count == 0,

@@ -26,5 +26,6 @@ public sealed partial class SyncRun
         sql.ClearRemovalObservation(active.Session + ":seen");
         active.GapEpochs.Clear();
         active.ListingBases.Clear();
+        active.CompletedSelectionRoots.Clear();
     }
 }

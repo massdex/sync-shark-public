@@ -68,6 +68,9 @@ internal sealed class FakeEndpoint : IInventorySource, IEndpointWriter, ISourceA
     /// <summary>Every path HashAsync was asked for, in order.</summary>
     public List<string> HashedPaths { get; } = new();
 
+    // Opt-in local proof ownership: unlike a cloud hash, native HashAsync durably clears rehash debt.
+    internal IStateStore? ContentProofStore { get; set; }
+
     /// <summary>Adds one item as if it had always been present, and logs an upsert.</summary>
     public ItemState Seed(string path, string content, ItemKind kind = ItemKind.File,
         string? versionId = null, DateTimeOffset? mtime = null) =>
@@ -326,7 +329,18 @@ internal sealed class FakeEndpoint : IInventorySource, IEndpointWriter, ISourceA
             HashedPaths.AddRange(paths);
             foreach (var path in paths)
                 if (!Unhashable.Contains(path) && _items.TryGetValue(path, out var entry) && entry.State.Hash is string hash)
+                {
+                    if (ContentProofStore is { } store)
+                    {
+                        var expected = store.ByObject(_rootId, entry.State.ObjectId);
+                        if (expected is null || expected.Path != entry.State.Path || expected.Size != entry.State.Size ||
+                            expected.Mtime != entry.State.Mtime) continue;
+                        hash = DropboxHashes ? DropboxContentHash.Compute(entry.Bytes)
+                            : Convert.ToHexString(SHA256.HashData(entry.Bytes)).ToLowerInvariant();
+                        if (!store.CompleteRehash(_rootId, expected, hash)) continue;
+                    }
                     result[path] = hash;
+                }
             return Task.FromResult<IReadOnlyDictionary<string, string>>(result);
         }
     }

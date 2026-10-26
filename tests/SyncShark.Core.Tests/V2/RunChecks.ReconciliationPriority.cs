@@ -7,6 +7,7 @@ internal static partial class RunChecks
         using var store = SqliteStateStore.Open(FixtureFolder("reconciliation-priority"), StorageChecks.Fast,
             TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
+        fx.A.ContentProofStore = store;
         foreach (var path in new[] { "Edit", "Rename", "Move", "Remote", "bulk-a", "bulk-b", "bulk-c" })
             fx.A.Seed(path, "original");
         await FirstSyncAsync(fx.Run(), fx);
