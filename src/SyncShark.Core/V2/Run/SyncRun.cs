@@ -975,7 +975,8 @@ public sealed partial class SyncRun : ISyncRun
             // sleeping on its backoff), so the early return goes through the same outcome rule as execution.
             return new(new Plan(pairId, 0, [], []), IncrementalOutcome(
                 WithReconciliation(new RunReport(pairId, string.Empty, 0, 0, 0, 0, 0, 0, 0, 0, [])
-                    { Deferred = retryCount, JournalBacklog = scan.JournalBacklog, PlanningBacklog = remainingPlanning },
+                    { Deferred = retryCount, JournalBacklog = scan.JournalBacklog, PlanningBacklog = remainingPlanning,
+                        ChangedPaths = 0 },
                     reconcile), []), null);
         }
 
@@ -1061,7 +1062,7 @@ public sealed partial class SyncRun : ISyncRun
                 throttle.Flush();
                 return PlanBoundReport(WithReconciliation(
                     BuildReport(pairId, plan, new Tally(_settings), false), reconcile)
-                    with { JournalBacklog = scan.JournalBacklog });
+                    with { JournalBacklog = scan.JournalBacklog, ChangedPaths = ChangedPathCount(touched) });
             }
             ClosePlanBoundNotice(pairId);
             var execution = await ExecuteMeasuredPlanAsync(plan, pair, throttle, reviewedDeletes, ct);
@@ -1102,7 +1103,7 @@ public sealed partial class SyncRun : ISyncRun
                 if (batch is null) completion.Step(_store.Prune);
             }
             return FinishIncrementalCompletion(completion, pairId, plan, tally, reconcile, pendingEvidence.Keys,
-                unresolvedEvidence, throttle, scan.JournalBacklog, planningBacklog, ct);
+                unresolvedEvidence, throttle, scan.JournalBacklog, planningBacklog, ChangedPathCount(touched), ct);
         }
     }
 

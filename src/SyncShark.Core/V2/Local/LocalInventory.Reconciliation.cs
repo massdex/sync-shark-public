@@ -16,7 +16,7 @@ public sealed partial class LocalInventory
         var view = ConsistentDiscovery(discovered, checkpoint, root);
         if (view is not null)
         {
-            RunTrace.Emit("reconciliation selection source: Discovery metadata");
+            RunTrace.Emit(SelectionSource("source-local-discovery"));
             foreach (var page in view.Items.Values.Chunk(V2Settings.PlanningObservationBatchRows))
             {
                 ct.ThrowIfCancellationRequested();
@@ -24,7 +24,7 @@ public sealed partial class LocalInventory
             }
             return true;
         }
-        RunTrace.Emit("reconciliation selection source: metadata walk with file USN fallback");
+        RunTrace.Emit(SelectionSource("source-local-usn-fallback"));
         var scan = await ScanAsync(lease, ct, _ => true, null, null);
         var failed = DecisionPaths(scan, _ => true);
         if (!scan.Complete && failed.Count == 0) failed = [string.Empty];
@@ -51,4 +51,10 @@ public sealed partial class LocalInventory
         SyncLocalEndpointStore.ObjectId(_volume, item.FileId), null, null, item.Size,
         new DateTimeOffset(DateTime.SpecifyKind(item.ModifiedUtc, DateTimeKind.Utc)),
         (item.Attributes & FileAttributes.ReparsePoint) != 0 ? ItemFlags.Link : ItemFlags.None);
+
+    // One owner for the selection-source trace wording, shared with the generic and Dropbox selectors.
+    private static string SelectionSource(string key) => string.Format(
+        System.Globalization.CultureInfo.InvariantCulture,
+        MessageCatalog.Default.Template("reconciliation-source-trace"),
+        MessageCatalog.Default.Template(key));
 }

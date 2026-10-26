@@ -18,8 +18,13 @@ internal static partial class AutoSyncChecks
         Require(Settings.ChangeMaxDelay == TimeSpan.FromSeconds(5), "continuous changes run within the five-second maximum delay");
         await RunTimingLogAsync();
         await RunLogNamesWakeAndResultAsync();
+        await FailedRunKeepsSummaryAsync();
+        await MonitorFailureKeepsSummaryAsync();
         await LatestProgressPerPairAsync();
         await StatusAnswersWithoutStoreGateAsync();
+        await StatusFirstRequestSeededPairsAsync();
+        StatusDeadlineBoundsTheRead();
+        StatusKeepsMemoryPairsWhenStale();
         await JournalBacklog_ImmediateRunsAsync();
         await PlanningBacklog_DrainSignalAsync();
         await Burst_OneRunAsync();

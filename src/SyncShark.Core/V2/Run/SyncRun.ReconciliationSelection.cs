@@ -33,7 +33,10 @@ public sealed partial class SyncRun
             }
             await InvalidateUnreadableSelectionAsync(pair, root, side, incompletePaths, incompleteReasons, ct);
             counts = counts with { Missing = SelectMissing(pair, side, scope, session, sql, eligibility, incompletePaths, ct) };
-            RunTrace.Emit($"reconciliation selection: enumerated={counts.Enumerated} changed={counts.Changed} new={counts.New} missing={counts.Missing} unaffected={counts.Unaffected} S-orphan={counts.Orphan} S-moved={counts.Moved} S-case={counts.Case}");
+            RunTrace.Emit(string.Format(CultureInfo.InvariantCulture,
+                MessageCatalog.Default.Template("reconciliation-selection-trace"),
+                counts.Enumerated, counts.Changed, counts.New, counts.Missing, counts.Unaffected,
+                counts.Orphan, counts.Moved, counts.Case));
             return counts;
         }
         catch (Exception error) when (ScopeFailure(error, ct) && (error is IOException or UnauthorizedAccessException or TimeoutException))
@@ -88,7 +91,8 @@ public sealed partial class SyncRun
             }
             afterRoot = page[^1].Root; afterId = page[^1].ObjectId;
         }
-        RunTrace.Emit($"reconciliation backlog selection: enumerated={enumerated} selected={selected}");
+        RunTrace.Emit(string.Format(CultureInfo.InvariantCulture,
+            MessageCatalog.Default.Template("reconcile-backlog-selection"), enumerated, selected));
         return new(enumerated, selected, 0, 0, enumerated - Math.Min(enumerated, selected));
     }
 
@@ -98,13 +102,17 @@ public sealed partial class SyncRun
     {
         if (RehearsalEndpoints.Unwrap(inventory) is DropboxInventory dropbox)
         {
-            RunTrace.Emit("reconciliation selection source: Dropbox prefix hydration");
+            RunTrace.Emit(string.Format(CultureInfo.InvariantCulture,
+                MessageCatalog.Default.Template("reconciliation-source-trace"),
+                MessageCatalog.Default.Template("source-dropbox-prefix")));
             var failures = await RehearsalEndpoints.HydrateAsync(inventory, dropbox, scope.ReadScopes.ToArray(), rows =>
                 accept(rows.Where(row => row.Entry is not null).Select(row => DropboxItems.ToItem(row.Entry!)).ToArray()), ct, listingBasis);
             incomplete(failures.Keys.ToArray(), failures);
             return;
         }
-        RunTrace.Emit("reconciliation selection source: full metadata inventory");
+        RunTrace.Emit(string.Format(CultureInfo.InvariantCulture,
+            MessageCatalog.Default.Template("reconciliation-source-trace"),
+            MessageCatalog.Default.Template("source-full-metadata")));
         var snapshot = await inventory.FullAsync(0, path => scope.Touches(path, folder: true),
             new InventoryProgress(throttle, root), ct);
         incomplete(snapshot.IncompleteSubtrees, snapshot.IncompleteReasons);

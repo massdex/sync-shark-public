@@ -653,6 +653,8 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
                     // The store clears DB generations inside its existing removal transaction.
                     foreach (var id in pairIds.Append(pairId)) FirstSyncChoicesState.Clear(_productRoot, id);
                 }, invalidatePrepares: pairIds);
+                // Status projects these totals by pair id; a removed pair's retained count is unreachable.
+                _run.ForgetIntakeRetirement(pairId);
             }
             catch (ArgumentException error)
             {
