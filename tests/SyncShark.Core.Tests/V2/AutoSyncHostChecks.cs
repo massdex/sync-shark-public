@@ -259,7 +259,8 @@ internal static class AutoSyncHostChecks
         var composition = (EngineComposition)typeof(ProductionAutoSyncEngine)
             .GetField("_composition", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
             .GetValue(engine)!;
-        var started = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        // Retention prunes rows older than the settings horizon, so seed them at the current time.
+        var started = DateTimeOffset.UtcNow;
         composition.Store.RecordRunSummary(new RunSummary(0, "reconcile-fixture", "pair-fixture", started,
             started.AddSeconds(1), RunOutcomes.Complete, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0));
         composition.Store.RecordRunSummary(new RunSummary(0, "autosync-fixture", "pair-fixture", started,
