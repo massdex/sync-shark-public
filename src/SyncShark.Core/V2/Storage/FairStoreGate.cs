@@ -13,43 +13,53 @@ internal sealed class FairStoreGate
         Admit(cleanup, admissionTimeout, primaryError, bestEffort: false);
 
     // Admission for a cleanup that owns no safety authority (a transient info notice only). Same deadline
-    // and same diagnostics, but a missed admission is observed and left for the next pass instead of failing
-    // the run: a busy store must never cost a completed scan. Never use this for an effectful cleanup.
-    internal static void CleanupBestEffort(Action cleanup, TimeSpan? admissionTimeout = null, Exception? primaryError = null)
-    {
-        BeforeAdmissionForTest?.Invoke();
+    // and same diagnostics, but a missed admission is left for the next pass instead of failing the run:
+    // a busy store must never cost a completed scan. Returns false when the deadline was missed, so the
+    // caller can trace which notice it left open. Never use this for an effectful cleanup.
+    internal static bool CleanupBestEffort(Action cleanup, TimeSpan? admissionTimeout = null, Exception? primaryError = null) =>
         Admit(cleanup, admissionTimeout, primaryError, bestEffort: true);
-    }
 
-    private static void Admit(Action cleanup, TimeSpan? admissionTimeout, Exception? primaryError, bool bestEffort)
+    private static bool Admit(Action cleanup, TimeSpan? admissionTimeout, Exception? primaryError, bool bestEffort)
     {
         using var deadline = new CancellationTokenSource(admissionTimeout ?? TimeSpan.FromSeconds(5));
+        if (bestEffort) BestEffortAdmissionForTest?.Invoke(deadline.Token);
         using var admission = WithCancellation(deadline.Token);
         try
         {
             cleanup();
+            CleanupBodySettledForTest?.Invoke(bestEffort, deadline.Token);
             deadline.Token.ThrowIfCancellationRequested();
+            return true;
         }
         catch (OperationCanceledException error) when (deadline.IsCancellationRequested)
         {
             var failure = new TimeoutException(bestEffort
                 ? "Best-effort store cleanup admission timed out; the next pass repairs it."
                 : "Store cleanup admission timed out; retained safety state must be retried before dependent work.", error);
+            if (bestEffort)
+            {
+                // Secondary evidence only when the run already failed on state damage; the caller traces the miss.
+                RetainFatal(primaryError, failure);
+                return false;
+            }
             RunOutput.Observe(failure);
-            if (RetainFatal(primaryError, failure)) return;
-            if (!bestEffort) throw failure;
+            if (RetainFatal(primaryError, failure)) return false;
+            throw failure;
         }
         catch (Exception error)
         {
             RunOutput.Observe(error);
-            if (RetainFatal(primaryError, error)) return;
+            if (RetainFatal(primaryError, error)) return false;
             throw;
         }
     }
 
-    // The wait-notice close is the only production best-effort cleanup. A check holds the gate past the
-    // admission deadline from here, so it proves a completed scan survives a missed close without sleeping.
-    internal static Action? BeforeAdmissionForTest { get; set; }
+    // Test-only observation points, checked once per cleanup admission (never per store call) and null in
+    // production. Checks hold the gate or wait on the real deadline here, so they prove admission and
+    // post-check behaviour on the actual cancellation instead of a wall-clock sleep. The deadline token
+    // passed in is the cleanup's own admission token.
+    internal static Action<CancellationToken>? BestEffortAdmissionForTest { get; set; }
+    internal static Action<bool, CancellationToken>? CleanupBodySettledForTest { get; set; }
 
     private static bool RetainFatal(Exception? primaryError, Exception secondary)
     {

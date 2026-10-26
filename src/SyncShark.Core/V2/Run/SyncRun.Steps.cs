@@ -570,7 +570,8 @@ public sealed partial class SyncRun
             DropboxPilotClient.ReadWaiting.Value = previousWait;
             // A transient "reading" info notice carries no safety authority. A busy store that cannot admit
             // its close must not fail the completed scan (the 2026-10-25 livelock); the next side scan closes it.
-            FairStoreGate.CleanupBestEffort(CloseWaitNotice, primaryError: primaryError); // Including cancellation, cooperative pause and shutdown.
+            if (!FairStoreGate.CleanupBestEffort(CloseWaitNotice, primaryError: primaryError)) // Including cancellation, cooperative pause and shutdown.
+                RunLog.Trace($"cleanup best-effort timeout: closing inventory-waiting notice; pair={pair.PairId}; root={readRoot.RootId}");
         }
 
         void CloseWaitNotice() =>

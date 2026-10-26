@@ -59,60 +59,93 @@ internal static partial class RunChecks
     // 2026-10-25 livelock: a busy store left the transient "reading" info notice close unadmitted past its
     // 5 s deadline, and the tripwire then failed a scan that had already completed. No journal cursor advanced,
     // so every retry replayed the same records. The close owns no safety authority: a miss must leave the notice
-    // for the next scan and let the completed run commit its cursors.
+    // for the next scan and let the completed run commit its cursors. The seam waits on the cleanup's own
+    // admission token, so each case is driven by the real cancellation outcome, never a fixed sleep.
     internal static async Task WaitNoticeCleanupTimeoutSurvivesAsync()
     {
         const string reason = "inventory-waiting";
-        var folder = Path.Combine(Path.GetTempPath(), "wait-notice-cleanup-" + Guid.NewGuid().ToString("N"));
-        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
-        var fx = Build(suppliedStore: store);
-        store.MarkFirstSyncDone(fx.Pair.PairId);
-        var gate = (FairStoreGate)typeof(SqliteStateStore)
-            .GetField("_gate", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
-            .GetValue(store)!;
-        store.AddNotices([
-            new Notice(fx.Pair.PairId, 40, NoticeKind.Info, fx.Pair.A.RootId, "Reading local", reason),
-            new Notice(fx.Pair.PairId, 40, NoticeKind.Info, fx.Pair.B.RootId, "Reading cloud", reason)]);
-        var settled = 0;
-        using var bothSettled = new ManualResetEventSlim();
-        using var gateHeld = new ManualResetEventSlim();
-        // Both side scans reach the wait-notice close only after their inventory is stored. Hold the gate from
-        // then on, so it is the close's admission - not a fixture sleep - that outlasts the deadline.
-        FairStoreGate.BeforeAdmissionForTest = () =>
+        void WaitForAdmissionDeadline(CancellationToken deadline)
         {
-            if (Interlocked.Increment(ref settled) == 2) bothSettled.Set();
-            if (!gateHeld.Wait(TimeSpan.FromSeconds(15)))
-                throw new TimeoutException("the fixture gate holder did not take the store");
-        };
-        var holder = Task.Run(() =>
+            if (!deadline.CanBeCanceled) throw new InvalidOperationException("the seam did not receive an admission deadline");
+            if (!deadline.WaitHandle.WaitOne(TimeSpan.FromSeconds(20)))
+                throw new TimeoutException("the cleanup admission deadline did not fire");
+        }
+        void AddWaitNotices(IStateStore target, PairDef pair) => target.AddNotices([
+            new Notice(pair.PairId, 40, NoticeKind.Info, pair.A.RootId, "Reading local", reason),
+            new Notice(pair.PairId, 40, NoticeKind.Info, pair.B.RootId, "Reading cloud", reason)]);
+
+        // (1) Admission never happens: the close cannot reach the store, so the completed scan must survive,
+        // commit its cursors and leave both notices for the next scan.
+        var blockedFolder = Path.Combine(Path.GetTempPath(), "wait-notice-blocked-" + Guid.NewGuid().ToString("N"));
+        using (var store = SqliteStateStore.Open(blockedFolder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
-            if (!bothSettled.Wait(TimeSpan.FromSeconds(20)))
-                throw new TimeoutException("both scan sides did not reach the wait-notice close");
-            using (gate.Enter())
+            var fx = Build(suppliedStore: store);
+            store.MarkFirstSyncDone(fx.Pair.PairId);
+            AddWaitNotices(store, fx.Pair);
+            FairStoreGate.BestEffortAdmissionForTest = WaitForAdmissionDeadline;
+            try
             {
-                gateHeld.Set();
-                // Bounded: outlast the helper's 5 s admission deadline, then release for the completion steps.
-                using var release = new ManualResetEventSlim();
-                release.Wait(TimeSpan.FromSeconds(6));
+                var report = await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+                Require(report.Outcome == RunOutcomes.Complete && report.Failed == 0,
+                    "a wait-notice close that never reaches admission does not fail the completed run");
             }
-        });
-        RunReport? report = null;
-        try
-        {
-            report = await new SyncRun(store, fx.Executor, fx.Provider, Settings, TimeProvider.System)
-                .IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            finally { FairStoreGate.BestEffortAdmissionForTest = null; }
+            Require(store.UnresolvedNotices(fx.Pair.PairId).Count(n => n.ReasonKey == reason) == 2,
+                "every unadmitted close leaves its info notice open for the next scan");
+            Require(store.Cursor(fx.Pair.A.RootId) is not null && store.Cursor(fx.Pair.B.RootId) is not null,
+                "the surviving run still commits both cursors instead of replaying the same records");
         }
-        finally
+
+        // (2) The live shape: admission succeeds and the close completes, then the post-check deadline expires.
+        // The notice must be closed and the completed scan's cursor must advance to the newer increment.
+        var completedFolder = Path.Combine(Path.GetTempPath(), "wait-notice-completed-" + Guid.NewGuid().ToString("N"));
+        using (var store = SqliteStateStore.Open(completedFolder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
-            FairStoreGate.BeforeAdmissionForTest = null;
-            await holder.WaitAsync(TimeSpan.FromSeconds(30));
+            var fx = Build(suppliedStore: store);
+            store.MarkFirstSyncDone(fx.Pair.PairId);
+            var baseline = await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            Require(baseline.Outcome == RunOutcomes.Complete && store.Cursor(fx.Pair.A.RootId) == "0",
+                "fixture commits the local journal cursor before the newer increment");
+            fx.A.Seed("newer.txt", "newer");
+            AddWaitNotices(store, fx.Pair);
+            FairStoreGate.CleanupBodySettledForTest = (bestEffort, deadline) =>
+            {
+                if (bestEffort) WaitForAdmissionDeadline(deadline);
+            };
+            try
+            {
+                var report = await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+                Require(report.Outcome == RunOutcomes.Complete && report.Failed == 0,
+                    "a wait-notice close that completes after the admission deadline leaves the run complete");
+            }
+            finally { FairStoreGate.CleanupBodySettledForTest = null; }
+            Require(store.Cursor(fx.Pair.A.RootId) == "1",
+                "the completed scan advances the local journal cursor exactly to the newer increment");
+            Require(!store.UnresolvedNotices(fx.Pair.PairId).Any(n => n.ReasonKey == reason),
+                "the completed close retires the info notice instead of leaving it for another scan");
         }
-        Require(report!.Outcome == RunOutcomes.Complete && report.Failed == 0,
-            "a completed scan survives a wait-notice close that misses its admission deadline");
-        Require(store.Cursor(fx.Pair.A.RootId) is not null && store.Cursor(fx.Pair.B.RootId) is not null,
-            "the surviving run commits both sides' cursors instead of replaying the same records");
-        Require(store.UnresolvedNotices(fx.Pair.PairId).Count(n => n.ReasonKey == reason) == 2,
-            "the missed close leaves the transient info notices for the next scan");
+
+        // (3) An ordinary effectful cleanup keeps the fail-the-run contract under the same expired post-check.
+        var effectFolder = Path.Combine(Path.GetTempPath(), "wait-notice-effectful-" + Guid.NewGuid().ToString("N"));
+        using (var store = SqliteStateStore.Open(effectFolder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash))
+        {
+            var fx = Build(suppliedStore: store);
+            store.MarkFirstSyncDone(fx.Pair.PairId);
+            fx.A.Seed("effect.txt", "effect");
+            FairStoreGate.CleanupBodySettledForTest = (bestEffort, deadline) =>
+            {
+                if (!bestEffort) WaitForAdmissionDeadline(deadline);
+            };
+            RunReport report;
+            try
+            {
+                report = await fx.Run().IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            }
+            finally { FairStoreGate.CleanupBodySettledForTest = null; }
+            // The shared failure owner turns the timeout into retained retry debt, so the run must not complete.
+            Require(report.Outcome != RunOutcomes.Complete,
+                $"an effectful cleanup that completes after the admission deadline still fails the run (outcome {report.Outcome})");
+        }
     }
 
     internal static async Task LocalCatchUpNoticeLifecycleAsync(string folder)
