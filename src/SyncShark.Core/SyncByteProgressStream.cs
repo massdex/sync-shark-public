@@ -121,19 +121,19 @@ internal sealed class SyncByteProgressStream : Stream
     public override void Flush() => _inner.Flush();
     public override Task FlushAsync(CancellationToken token) => _inner.FlushAsync(token);
     public override int Read(byte[] buffer, int offset, int count)
-    { SetDirection(true); var read = _inner.Read(buffer, offset, count); _bytes += read; V2.ReconcileBatch.EffectCurrent.Value?.RecordEffectRead(read); return read; }
+    { SetDirection(true); var read = _inner.Read(buffer, offset, count); _bytes += read; V2.ReconciliationBudgetContext.EffectCurrent.Value?.RecordEffectRead(read); return read; }
     public override int Read(Span<byte> buffer)
-    { SetDirection(true); var read = _inner.Read(buffer); _bytes += read; V2.ReconcileBatch.EffectCurrent.Value?.RecordEffectRead(read); return read; }
+    { SetDirection(true); var read = _inner.Read(buffer); _bytes += read; V2.ReconciliationBudgetContext.EffectCurrent.Value?.RecordEffectRead(read); return read; }
     public override void Write(byte[] buffer, int offset, int count)
-    { SetDirection(false); _inner.Write(buffer, offset, count); _bytes += count; V2.ReconcileBatch.EffectCurrent.Value?.RecordEffectWrite(count); }
+    { SetDirection(false); _inner.Write(buffer, offset, count); _bytes += count; V2.ReconciliationBudgetContext.EffectCurrent.Value?.RecordEffectWrite(count); }
     public override void Write(ReadOnlySpan<byte> buffer)
-    { SetDirection(false); _inner.Write(buffer); _bytes += buffer.Length; V2.ReconcileBatch.EffectCurrent.Value?.RecordEffectWrite(buffer.Length); }
+    { SetDirection(false); _inner.Write(buffer); _bytes += buffer.Length; V2.ReconciliationBudgetContext.EffectCurrent.Value?.RecordEffectWrite(buffer.Length); }
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken token = default)
     {
         if (_readBackPhase is not null && !_reading) await ReportAsync(true).ConfigureAwait(false);
         SetDirection(true);
         var read = await _inner.ReadAsync(buffer, token).ConfigureAwait(false);
-        _bytes += read; V2.ReconcileBatch.EffectCurrent.Value?.RecordEffectRead(read); await ReportAsync(read == 0).ConfigureAwait(false); return read;
+        _bytes += read; V2.ReconciliationBudgetContext.EffectCurrent.Value?.RecordEffectRead(read); await ReportAsync(read == 0).ConfigureAwait(false); return read;
     }
     public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken token) =>
         ReadAsync(buffer.AsMemory(offset, count), token).AsTask();
@@ -141,7 +141,7 @@ internal sealed class SyncByteProgressStream : Stream
     {
         SetDirection(false);
         await _inner.WriteAsync(buffer, token).ConfigureAwait(false);
-        _bytes += buffer.Length; V2.ReconcileBatch.EffectCurrent.Value?.RecordEffectWrite(buffer.Length); await ReportAsync().ConfigureAwait(false);
+        _bytes += buffer.Length; V2.ReconciliationBudgetContext.EffectCurrent.Value?.RecordEffectWrite(buffer.Length); await ReportAsync().ConfigureAwait(false);
     }
     public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken token) =>
         WriteAsync(buffer.AsMemory(offset, count), token).AsTask();

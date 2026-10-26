@@ -318,7 +318,7 @@ public sealed partial class SqliteStateStore
                 recorded.VersionId == item.VersionId && recorded.Size == item.Size && recorded.Mtime == item.Mtime)
                 return item with { Hash = recorded.Hash };
             if (ct.IsCancellationRequested) return item;
-            if (ReconcileBatch.Current.Value is { } batch &&
+            if (ReconciliationBudgetContext.Current.Value is { } batch &&
                 (!batch.OwnsDecisionPath(item.Path) || !batch.AdmitDecisionHash(item))) return item;
             if (DefenderCaptureForTest is { } capture) return capture(item);
             return _captureOptionalHash(root, item, ct);
@@ -415,7 +415,7 @@ public sealed partial class SqliteStateStore
         var root = first.Side == Side.A ? first.Pair.A : first.Pair.B;
         if (root.Provider != ProviderIds.Local) return [];
         var prefix = RowCodec.Key(Path.GetFullPath(root.RootPath).TrimEnd('\\', '/') + Path.DirectorySeparatorChar);
-        var exactKeys = publish && ReconcileBatch.Current.Value is { } batch
+        var exactKeys = publish && ReconciliationBudgetContext.Current.Value is { } batch
             ? System.Text.Json.JsonSerializer.Serialize(batch.Paths.Concat(batch.AliasPaths).Distinct(StringComparer.OrdinalIgnoreCase)
                 .Select(path => RowCodec.Key(Path.GetFullPath(Path.Combine(root.RootPath, path.Replace('/', Path.DirectorySeparatorChar))))))
             : null;

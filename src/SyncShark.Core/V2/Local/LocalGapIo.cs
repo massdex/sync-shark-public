@@ -199,7 +199,7 @@ internal sealed partial class LocalGapIo(IStateStore known, V2Settings settings,
         setStage(stage = ProofStage.Read);
         using var stream = new FileStream(handle, FileAccess.Read, ContentBufferBytes, isAsync: false);
         var content = await ReadHashAsync(stream, urgent, ct,
-            ReconcileBatch.Current.Value is null ? null : item.Size).ConfigureAwait(false);
+            ReconciliationBudgetContext.Current.Value is null ? null : item.Size).ConfigureAwait(false);
         if (content is null) return new(LocalGapHashOutcome.Paused);
         setStage(stage = ProofStage.AfterRead);
         var after = FileProof(handle, out var afterFailure);
