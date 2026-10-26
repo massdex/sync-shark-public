@@ -32,13 +32,12 @@ internal sealed partial class PairLoop
         // SyncRun already recorded a returned report's failure. The host never counts or publishes it twice.
         if (report.CompletionFailed || report.Outcome == RunOutcomes.Failed || report.FailureCount > 0 || report.Failures.Count > 0)
             ScheduleRetry();
-        else if (report.DeletionEvidencePending.Count > 0) ScheduleDeferredRetry(report, previous);
         else if (report.JournalBacklog || DrainedPlanning(report, previous))
         {
             FailureRetryOwner.ResetDeferredRetry(_in.Store, _pairId);
             _retryAt = _in.Time.GetUtcNow(); // Useful bounded progress, not a failure/backoff.
         }
-        else if (report.Deferred > 0) ScheduleDeferredRetry(report, previous);
+        else if (report.Deferred > 0 || report.DeletionEvidencePending.Count > 0) ScheduleDeferredRetry(report, previous);
         // Nothing outstanding: the successful run already closed its run notice.
     }
 
