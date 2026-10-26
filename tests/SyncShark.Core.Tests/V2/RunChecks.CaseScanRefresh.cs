@@ -49,6 +49,15 @@ internal static partial class RunChecks
         return fx;
     }
 
+    // The incident's store held a mixed subtree: one canonical path's row under the stale spelling and
+    // another's under the current one. Rows are keyed per canonical path, so both spellings persist.
+    private static void SeedStoredSpelling(SqliteStateStore store, string rootId, ItemState row, string spelling)
+    {
+        var gen = store.BeginGeneration(rootId, "stored-spelling");
+        store.WriteDelta(new Delta(rootId, Side.A, gen, "", "",
+            [new Change(ChangeKind.Upsert, row.ObjectId, spelling, row with { Path = spelling }, null)], false, []));
+    }
+
     private static async Task RefreshResolvesOnDiskSpellingAsync()
     {
         var folder = FixtureFolder("case-scan-refresh");
@@ -235,7 +244,12 @@ internal static partial class RunChecks
             Directory.Move(Path.Combine(directory, "child"), Path.Combine(directory, "child-temp"));
             Directory.Move(Path.Combine(directory, "child-temp"), Path.Combine(directory, "Child"));
             LocalChecks.Seed(directory, "Child/file.txt", "edited after the case-only rename");
-            // The incident's durable shape: stored scopes under mixed subtree spellings, each with the collision error.
+            // The incident's durable rows: the folder keeps the stale spelling while its child already holds the
+            // current one; the collision scan retries carry those same mixed subtree spellings.
+            var storedFile = store.Live(fx.Pair.A.RootId, ["child/file.txt"]).Single();
+            SeedStoredSpelling(store, fx.Pair.A.RootId, storedFile, "Child/file.txt");
+            Require(store.Live(fx.Pair.A.RootId, ["Child/file.txt"]).SingleOrDefault()?.Path == "Child/file.txt",
+                "setup: the stored child row holds the current spelling while the folder row stays stale");
             foreach (var scope in new[] { "child", "Child/file.txt" })
                 store.SaveSyncRetry(pairId, new SyncRetry(scope, "scan", 1, CollisionReason,
                     DateTimeOffset.MinValue, ReadRoots: [fx.Pair.A.RootId]));
@@ -301,7 +315,12 @@ internal static partial class RunChecks
             Require(folderBaseline.A.Path == "Child" && folderBaseline.B.Path == "child",
                 "a pair adopted with both spellings present keeps Child (A) and child (B) as its baseline");
             var remoteChild = await fx.B.ObserveAsync("child/file.txt", default);
-            // Mixed stored subtree spellings plus the collision scan retries from the incident.
+            // The stored folder row keeps the stale spelling while its child holds the current one; the retry
+            // scopes carry those same mixed subtree spellings with the collision error from the incident.
+            var storedFolder = store.Live(fx.Pair.A.RootId, ["Child"]).Single();
+            SeedStoredSpelling(store, fx.Pair.A.RootId, storedFolder, "child");
+            Require(store.Live(fx.Pair.A.RootId, ["child"]).SingleOrDefault() is { Kind: ItemKind.Folder, Path: "child" },
+                "setup: the stored folder row keeps the stale spelling while its child holds the current one");
             foreach (var scope in new[] { "child", "Child/file.txt" })
                 store.SaveSyncRetry(pairId, new SyncRetry(scope, "scan", 1, CollisionReason,
                     DateTimeOffset.MinValue, ReadRoots: [fx.Pair.A.RootId]));
