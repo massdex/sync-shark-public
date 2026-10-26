@@ -52,8 +52,12 @@ internal sealed class ReconciliationCoverage
             .Concat(_store.StagedAmong(_session + ":deferred", side, paths))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-    private bool Fresh(Side side, string path) => _changed[side].Contains(path) ||
-        (side == Side.A ? _scan.A : _scan.B).ExactCreationObserved.Contains(path);
+    private bool Fresh(Side side, string path)
+    {
+        var scan = side == Side.A ? _scan.A : _scan.B;
+        return _changed[side].Contains(path) || scan.ExactCreationObserved.Contains(path) ||
+            scan.Full && scan.Complete && PairPath.Observed(path, scan.IncompleteSubtrees);
+    }
 
     private bool FolderDependency(string path) => _sides.Any(side => _selecting
         ? (_decision.UnknownScope ?? ReconciliationScope.Root).Touches(path, folder: true)
@@ -69,7 +73,7 @@ internal sealed class ReconciliationCoverage
             (FolderDependency(action.Path) || action.FromPath is { } folder && FolderDependency(folder)))
             .ToArray();
         if (deferred.Length == 0) return plan;
-        RunTrace.Emit($"reconciliation coverage: deferred dependencies={deferred.Length}");
+        RunTrace.Emit(MessageCatalog.Default.Template("reconciliation-deferred-dependencies") + deferred.Length);
         var ids = deferred.Select(action => action.ActionId).ToHashSet(StringComparer.Ordinal);
         return plan with
         {

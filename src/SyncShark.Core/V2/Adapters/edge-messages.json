@@ -1,5 +1,6 @@
 {
   "templates": {
+    "reconciliation-deferred-dependencies": "reconciliation coverage: deferred dependencies=",
     "reconciliation-replay-pending": "Journal replay remains unavailable; reconciliation retains the unknown scope.",
     "monitor-scope-decision": "monitor signal -> scope decision: scope=root trigger=",
     "reconciliation-active": "Reconciliation is already active for this pair.",
