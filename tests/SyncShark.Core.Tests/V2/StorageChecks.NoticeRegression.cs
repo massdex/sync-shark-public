@@ -8,6 +8,7 @@ internal static partial class StorageChecks
     {
         DedicatedRetryPublicationChecks(root);
         NoticePointLookupChecks(root);
+        WaitNoticeCloseScopesChecks(root);
         NoticeLookupUpgradeChecks(root);
         ScanNoticeAggregationRetainsDebt(root);
         RunCauseSuppressionChecks(root);
@@ -73,6 +74,39 @@ internal static partial class StorageChecks
         Require(store.UnresolvedNotices("p1").Count == 0 && store.UnresolvedNotices("p2").Count == 1,
             "reason-only closure is pair scoped");
         RequireIndexedNoticeProbe(folder);
+    }
+
+    // The scan-side "reading" info notice closes through the indexed store update. It must reach exactly
+    // that pair's inventory-waiting notice on that root: never another root, reason or pair.
+    private static void WaitNoticeCloseScopesChecks(string root)
+    {
+        var folder = Fresh(root, "wait-notice-close");
+        using var store = SqliteStateStore.Open(folder, Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
+        var pair = Pair("p1");
+        // Another pair whose notice repeats the closed notice's exact path and reason, so only pair scope excludes it.
+        var other = Pair("p2") with
+        {
+            A = new RootDef("ra2", "Local", null, "C:\\a2", "id:local:2"),
+            B = new RootDef("rb2", "Dropbox", "acc", "/b2", "id:dbx:2")
+        };
+        store.SavePair(pair);
+        store.SavePair(other);
+        store.AddNotices([
+            new Notice("p1", 40, NoticeKind.Info, pair.A.RootId, "Reading local", "inventory-waiting"),
+            new Notice("p1", 40, NoticeKind.Info, pair.B.RootId, "Reading cloud", "inventory-waiting"),
+            new Notice("p1", 40, NoticeKind.Info, pair.A.RootId, "Hydration fallback", "inventory-hydration-fallback"),
+            new Notice("p2", 40, NoticeKind.Info, pair.A.RootId, "Reading local", "inventory-waiting")]);
+        var closedId = store.UnresolvedNotices("p1")
+            .Single(n => n.ReasonKey == "inventory-waiting" && n.Path == pair.A.RootId).NoticeId!;
+        store.CloseUnresolvedNotices("p1", "inventory-waiting", "read-settled", pair.A.RootId);
+        var remaining = store.UnresolvedNotices(null);
+        Require(store.NoticeById("p1", closedId) is { Closed: true },
+            "the indexed wait-notice close retires the inventory-waiting notice of that pair and root");
+        Require(remaining.Count == 3 &&
+            remaining.Any(n => n.PairId == "p1" && n.Path == pair.B.RootId && n.ReasonKey == "inventory-waiting") &&
+            remaining.Any(n => n.PairId == "p1" && n.Path == pair.A.RootId && n.ReasonKey == "inventory-hydration-fallback") &&
+            remaining.Any(n => n.PairId == "p2" && n.Path == pair.A.RootId && n.ReasonKey == "inventory-waiting"),
+            "the wait-notice close reaches no other root, reason or pair");
     }
 
     private static void RequireIndexedNoticeProbe(string folder)

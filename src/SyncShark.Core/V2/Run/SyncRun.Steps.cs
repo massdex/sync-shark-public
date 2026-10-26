@@ -541,13 +541,15 @@ public sealed partial class SyncRun
         error is OperationCanceledException oce &&
         (oce.CancellationToken == linked || (ct.CanBeCanceled && oce.CancellationToken == ct));
 
+    private const string InventoryWaitingNoticeKey = "inventory-waiting";
+
     private async Task<SideScan> ScanSideAsync(PairDef pair, Side side, ProgressThrottle throttle, CancellationToken ct,
         IReadOnlyDictionary<string, string>? inventoryCursors = null, bool firstSync = false)
     {
         var readRoot = side == Side.A ? pair.A : pair.B;
         var previousWait = DropboxPilotClient.ReadWaiting.Value;
         DropboxPilotClient.ReadWaiting.Value = message => WriteNotices([
-            new Notice(pair.PairId, 40, NoticeKind.Info, readRoot.RootId, message, "inventory-waiting")]);
+            new Notice(pair.PairId, 40, NoticeKind.Info, readRoot.RootId, message, InventoryWaitingNoticeKey)]);
         Exception? primaryError = null;
         try
         {
@@ -566,15 +568,13 @@ public sealed partial class SyncRun
         finally
         {
             DropboxPilotClient.ReadWaiting.Value = previousWait;
-            FairStoreGate.Cleanup(CloseWaitNotice, primaryError: primaryError); // Including cancellation, cooperative pause and shutdown.
+            // A transient "reading" info notice carries no safety authority. A busy store that cannot admit
+            // its close must not fail the completed scan (the 2026-10-25 livelock); the next side scan closes it.
+            FairStoreGate.CleanupBestEffort(CloseWaitNotice, primaryError: primaryError); // Including cancellation, cooperative pause and shutdown.
         }
 
-        void CloseWaitNotice()
-        {
-            foreach (var notice in _store.UnresolvedNotices(pair.PairId))
-                if (notice.ReasonKey == "inventory-waiting" && notice.Path == readRoot.RootId && notice.NoticeId is not null)
-                    _store.CloseNotice(notice.NoticeId, "read-settled");
-        }
+        void CloseWaitNotice() =>
+            _store.CloseUnresolvedNotices(pair.PairId, InventoryWaitingNoticeKey, "read-settled", readRoot.RootId);
     }
 
     private async Task<SideScan> ScanSideCoreAsync(PairDef pair, Side side, ProgressThrottle throttle, CancellationToken ct,
@@ -845,13 +845,8 @@ public sealed partial class SyncRun
     private const string HydrationFallbackNoticeKey = "inventory-hydration-fallback";
 
     // A complete stored full inventory of this root resolves its hydration fallback; nothing else does.
-    private void CloseHydrationFallback(PairDef pair, RootDef root)
-    {
-        foreach (var notice in _store.UnresolvedNotices(pair.PairId))
-            if (notice.ReasonKey == HydrationFallbackNoticeKey && notice.NoticeId is not null &&
-                string.Equals(notice.Path, root.RootId, StringComparison.Ordinal))
-                _store.CloseNotice(notice.NoticeId, "resolved");
-    }
+    private void CloseHydrationFallback(PairDef pair, RootDef root) =>
+        _store.CloseUnresolvedNotices(pair.PairId, HydrationFallbackNoticeKey, "resolved", root.RootId);
 
     // A full inventory read reports its entries read through the run's progress log (see InventoryProgress);
     // provider process messages reach the same log through the run-wide scope RunActivity owns, so "Reading Dropbox"

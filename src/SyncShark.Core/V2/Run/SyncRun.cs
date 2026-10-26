@@ -1169,7 +1169,7 @@ public sealed partial class SyncRun : ISyncRun
         }
     }
 
-    // Both sides hold equal file content at the path: the same kind and the same non-empty content hash.
+    // Recovery verification needs current cross-side proof at this path, not unchanged split-baseline metadata.
     private bool SidesEqual(PairDef pair, string path)
     {
         var a = _store.Live(pair.A.RootId, [path]).FirstOrDefault();

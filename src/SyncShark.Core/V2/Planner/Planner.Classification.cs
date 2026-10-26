@@ -18,13 +18,21 @@ public static partial class Planner
         if (same is null)
             return RowState.Unreadable;
         if (same == true)
-            return PathEqual(cur.Path, baseSameSide.Path) ? RowState.Same : RowState.Moved;
+            return PairPath.SameLeafLocation(cur.Path, baseSameSide.Path) ? RowState.Same : RowState.Moved;
         if (cur.Kind != baseSameSide.Kind)
             return RowState.Replaced;
         return PathEqual(cur.Path, baseSameSide.Path) ? RowState.Edited : RowState.MovedEdited;
     }
 
+    /// <summary>Whether this side's content and location are unchanged under the planner's classification rules.</summary>
+    internal static bool Unchanged(ItemState current, ItemState baseline) =>
+        ClassifySide(current, baseline, false, true) == RowState.Same;
+
     private static bool PathEqual(string x, string y) => string.Equals(x, y, StringComparison.Ordinal);
+
+    private static bool BaselineSpellingChanged(PlanRow row) => row.Base is not null &&
+        row.A is not null && row.B is not null &&
+        (!PathEqual(row.A.Path, row.Base.A.Path) || !PathEqual(row.B.Path, row.Base.B.Path));
 
     private static bool Changed(RowState s) => s is RowState.Edited or RowState.Moved or RowState.MovedEdited;
 
@@ -55,7 +63,8 @@ public static partial class Planner
             var sB = ClassifySide(row.B, row.Base?.B, row.Ev.DeletedB, row.Ev.KnownB);
             // A spelling-only move needs cross-side proof, even when metadata matches its baseline.
             var compareContent = row.Base is null || (Changed(sA) && Changed(sB)) ||
-                sA == RowState.Moved || sB == RowState.Moved;
+                sA == RowState.Moved || sB == RowState.Moved ||
+                sA == RowState.Same && sB == RowState.Same && BaselineSpellingChanged(row);
             if (compareContent && Comparable(row.A) && Comparable(row.B) && DropboxNameMapping.SamePlace(row.A!, row.B!) &&
                 Content.SameContent(row.A!, row.B!) is null)
             {

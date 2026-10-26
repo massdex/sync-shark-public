@@ -1081,9 +1081,7 @@ internal static partial class Program
         window.UpdateLayout();
         if (window.FindName("LocalHierarchyEmptyState") is not Border { Visibility: Visibility.Collapsed } ||
             window.FindName("DropboxHierarchyEmptyState") is not Border { Visibility: Visibility.Visible } ||
-            window.FindName("DropboxHierarchyRootNameText") is not TextBlock dropboxHierarchyHeading ||
-            !dropboxHierarchyHeading.Text.Contains(" - ", StringComparison.Ordinal) ||
-            !dropboxHierarchyHeading.Text.Contains("Sync Shark Pilot", StringComparison.Ordinal) ||
+            window.FindName("DropboxHierarchyRootNameText") is not TextBlock { Text: "Sync Shark Pilot" } ||
             window.FindName("DropboxHierarchyEmptyStateText") is not TextBlock dropboxRootState ||
             !dropboxRootState.Text.Contains("1 file at this level", StringComparison.Ordinal) ||
             window.FindName("FolderSelectionSummary") is not TextBlock hierarchySummary ||

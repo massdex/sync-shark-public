@@ -56,6 +56,65 @@ internal static partial class RunChecks
             "normalized exclusions share the retry policy while reviewed rebuildable removal keeps its carve-out");
     }
 
+    // 2026-10-25 livelock: a busy store left the transient "reading" info notice close unadmitted past its
+    // 5 s deadline, and the tripwire then failed a scan that had already completed. No journal cursor advanced,
+    // so every retry replayed the same records. The close owns no safety authority: a miss must leave the notice
+    // for the next scan and let the completed run commit its cursors.
+    internal static async Task WaitNoticeCleanupTimeoutSurvivesAsync()
+    {
+        const string reason = "inventory-waiting";
+        var folder = Path.Combine(Path.GetTempPath(), "wait-notice-cleanup-" + Guid.NewGuid().ToString("N"));
+        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
+        var fx = Build(suppliedStore: store);
+        store.MarkFirstSyncDone(fx.Pair.PairId);
+        var gate = (FairStoreGate)typeof(SqliteStateStore)
+            .GetField("_gate", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(store)!;
+        store.AddNotices([
+            new Notice(fx.Pair.PairId, 40, NoticeKind.Info, fx.Pair.A.RootId, "Reading local", reason),
+            new Notice(fx.Pair.PairId, 40, NoticeKind.Info, fx.Pair.B.RootId, "Reading cloud", reason)]);
+        var settled = 0;
+        using var bothSettled = new ManualResetEventSlim();
+        using var gateHeld = new ManualResetEventSlim();
+        // Both side scans reach the wait-notice close only after their inventory is stored. Hold the gate from
+        // then on, so it is the close's admission - not a fixture sleep - that outlasts the deadline.
+        FairStoreGate.BeforeAdmissionForTest = () =>
+        {
+            if (Interlocked.Increment(ref settled) == 2) bothSettled.Set();
+            if (!gateHeld.Wait(TimeSpan.FromSeconds(15)))
+                throw new TimeoutException("the fixture gate holder did not take the store");
+        };
+        var holder = Task.Run(() =>
+        {
+            if (!bothSettled.Wait(TimeSpan.FromSeconds(20)))
+                throw new TimeoutException("both scan sides did not reach the wait-notice close");
+            using (gate.Enter())
+            {
+                gateHeld.Set();
+                // Bounded: outlast the helper's 5 s admission deadline, then release for the completion steps.
+                using var release = new ManualResetEventSlim();
+                release.Wait(TimeSpan.FromSeconds(6));
+            }
+        });
+        RunReport? report = null;
+        try
+        {
+            report = await new SyncRun(store, fx.Executor, fx.Provider, Settings, TimeProvider.System)
+                .IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+        }
+        finally
+        {
+            FairStoreGate.BeforeAdmissionForTest = null;
+            await holder.WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        Require(report!.Outcome == RunOutcomes.Complete && report.Failed == 0,
+            "a completed scan survives a wait-notice close that misses its admission deadline");
+        Require(store.Cursor(fx.Pair.A.RootId) is not null && store.Cursor(fx.Pair.B.RootId) is not null,
+            "the surviving run commits both sides' cursors instead of replaying the same records");
+        Require(store.UnresolvedNotices(fx.Pair.PairId).Count(n => n.ReasonKey == reason) == 2,
+            "the missed close leaves the transient info notices for the next scan");
+    }
+
     internal static async Task LocalCatchUpNoticeLifecycleAsync(string folder)
     {
         var directory = Path.Combine(folder, "root");

@@ -4,6 +4,8 @@ internal static partial class PlannerChecks
 {
     private static void CaseEquivalentMoves_AdoptOrUpdate()
     {
+        AncestorDrift_OneSidedEdit();
+        AncestorDrift_DeletionAndReplacement();
         foreach (var changed in new[] { Side.A, Side.B })
         foreach (var exact in new[] { false, true })
         foreach (var folder in new[] { false, true })
@@ -39,6 +41,58 @@ internal static partial class PlannerChecks
                 a, b with { Hash = "h2" }));
             Require(divergent.Actions.Count == 1 && divergent.Actions.Single() is { Kind: ActionKind.Hold, Rule: 29 },
                 "unchanged divergent baseline content requires a decision, never an arbitrary spelling winner");
+        }
+    }
+
+    private static void AncestorDrift_DeletionAndReplacement()
+    {
+        foreach (var survivor in new[] { Side.A, Side.B })
+        {
+            var a = F("Parent/capsules/work/item.json", "a", "same");
+            var b = F(a.Path, "b", "same");
+            var baseline = Base("drift-delete", a, b);
+            var current = (survivor == Side.A ? a : b) with { Path = "Parent/Capsules/work/item.json" };
+            var row = Row(baseline, survivor == Side.A ? current : null, survivor == Side.B ? current : null,
+                Ev(A: survivor == Side.B, B: survivor == Side.A));
+            var plan = Planner.Decide(PairId, Gen, [row], Opt() with { ProviderA = SyncProviders.Local, ProviderB = SyncProviders.Local });
+            Require(plan.Actions.Count == 1 && plan.Actions.Single() is { Kind: ActionKind.Delete, Rule: 6, RecoveryFirst: true } deletion &&
+                deletion.Target == survivor && deletion.ExpectedTarget == current,
+                "ancestor drift does not defeat evidenced deletion; both mirrors preserve the victim first");
+            var unknown = Decide(row with { Ev = new Evidence(false, false, false, false) });
+            Require(!unknown.Actions.Any(action => action.Kind == ActionKind.Delete), "unknown absence never authorizes a drifted survivor deletion");
+            var replacement = D(a.Path, "replacement");
+            var replaced = Decide(Row(baseline, survivor == Side.A ? current : replacement, survivor == Side.B ? current : replacement));
+            Require(replaced.Actions.Count == 2 && replaced.Actions.All(action => action.Rule == 26 && action.Target == survivor) &&
+                replaced.Actions.Any(action => action.Kind == ActionKind.Delete && action.RecoveryFirst && action.ExpectedTarget == current) &&
+                replaced.Actions.Any(action => action.Kind == ActionKind.MkDir),
+                "replacement against ancestor drift is rule 26 with recovery-first removal, in both directions");
+        }
+    }
+
+    private static void AncestorDrift_OneSidedEdit()
+    {
+        foreach (var edited in new[] { Side.A, Side.B })
+        foreach (var bothDrift in new[] { false, true })
+        {
+            var a = F("Parent/capsules/work/item.json", "a", "old");
+            var b = F(a.Path, "b", "old");
+            var baseline = Base("ancestor", a, b);
+            var currentA = a with { Path = edited == Side.B || bothDrift ? "Parent/Capsules/work/item.json" : a.Path,
+                Hash = edited == Side.A ? "new" : "old" };
+            var currentB = b with { Path = edited == Side.A || bothDrift ? "PARENT/capsules/work/item.json" : b.Path,
+                Hash = edited == Side.B ? "new" : "old" };
+            var plan = Decide(Row(baseline, currentA, currentB));
+            Require(plan.Actions.Count == 1 && plan.Actions.Single() is { Kind: ActionKind.Update } update &&
+                update.Target == Opposite(edited) && update.Path == (edited == Side.A ? currentB.Path : currentA.Path) &&
+                update.ObjectKey == baseline.ObjectKey && plan.Notices.Count == 0,
+                "ancestor-only drift plus an opposite edit is one update to existing spelling, never a split");
+            var twoEdits = Decide(Row(baseline, currentA with { Hash = "edit-a" }, currentB with { Hash = "edit-b" }));
+            Require(twoEdits.Notices.Any(n => n.Rule == 27), "genuine two-sided edits still keep both under rule 27");
+            var unknown = Decide(Row(baseline, currentA with { Hash = null, Mtime = a.Mtime.AddMinutes(1) },
+                currentB with { Hash = null, Mtime = b.Mtime.AddMinutes(1) }));
+            Require(!unknown.Actions.Any(x => x.Kind != ActionKind.Hold), "unknown content never authorizes an update or split");
+            var leaf = Decide(Row(baseline, a with { Path = "Parent/capsules/work/Item.json" }, b with { Hash = "new" }));
+            Require(leaf.Notices.Any(n => n.Rule == 27), "a real leaf rename plus an opposite edit remains a conflict");
         }
     }
 

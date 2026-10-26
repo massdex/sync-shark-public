@@ -131,7 +131,7 @@ internal static class RewindHandoffChecks
             Pump(window.RefreshRewindStateAsync());
             remote.Put("replace.txt", "provider rewind replacement");
             remote.Delete("removed.txt"); // Controlled provider input, not a provider operation under test.
-            Detect(window, host, token);
+            Detect(window, host);
             AssertPreview(window, host, pair);
 
             // Replace the retained preview through the real CLI while the GUI still holds what it
@@ -156,12 +156,12 @@ internal static class RewindHandoffChecks
             var replacementSession = JsonSerializer.Serialize(Active(host));
             phases.Clear();
             Dialog(window, "ApplyRewind_Click", "Apply Dropbox Rewind", dialog => AssertApplyDialog(dialog, pair), approve: true);
-            Settle(window, host, token);
+            Settle(window, host);
             Check(Effects(host, remote, localRoot) == staleGuiEffects &&
                   JsonSerializer.Serialize(Active(host)) == replacementSession && phases.Any(text => text.Contains(Refusal, StringComparison.Ordinal)),
                 "M25/GUI cached preview superseded by actual CLI preview refuses; replacement session and all targets preserved");
 
-            Detect(window, host, token);
+            Detect(window, host);
             var cancelEffects = Effects(host, remote, localRoot);
             Dialog(window, "ApplyRewind_Click", "Apply Dropbox Rewind", dialog => AssertApplyDialog(dialog, pair), approve: false);
             Check(Effects(host, remote, localRoot) == cancelEffects && Active(host).Status == SyncRewindStatus.PreviewReady,
@@ -178,18 +178,18 @@ internal static class RewindHandoffChecks
                 _ = Preview(host, instance.StateAuthority, token);
                 duringDialogReplacement = Active(host);
             }, approve: true);
-            Settle(window, host, token);
+            Settle(window, host);
             Check(duringDialogReplacement is not null && Effects(host, remote, localRoot) == duringDialogEffects &&
                   JsonSerializer.Serialize(Active(host)) == JsonSerializer.Serialize(duringDialogReplacement) &&
                   phases.Any(text => text.Contains(Refusal, StringComparison.Ordinal)),
                 "M25/GUI preview replaced while actual consent dialog is open refuses before forced deletion or replacement");
 
-            Detect(window, host, token);
+            Detect(window, host);
             var reviewed = SyncRewindApplyConfirmation.FromSession(Active(host));
             var admissions = new List<string>();
             host.RewindApplyPhaseForTest = stage => { admissions.Add(stage); return Task.CompletedTask; };
             Dialog(window, "ApplyRewind_Click", "Apply Dropbox Rewind", dialog => AssertApplyDialog(dialog, pair), approve: true);
-            Settle(window, host, token);
+            Settle(window, host);
             host.RewindApplyPhaseForTest = null;
             Check(admissions.Contains("confirmed_preview_admission", StringComparer.Ordinal) &&
                   SyncRewindApplyConfirmation.FromSession(Active(host)) == reviewed &&
@@ -329,12 +329,12 @@ internal static class RewindHandoffChecks
               AutomationProperties.GetName(Element<Button>(dialog, "PrimaryButton")) == "Apply reviewed rollback",
             "M25/GUI real Apply dialog confirms exact selected pair and two displayed rollback paths with paused scope");
 
-    private static void Detect(MainWindow window, SyncAuthorityRuntimeHost host, CancellationToken token)
+    private static void Detect(MainWindow window, SyncAuthorityRuntimeHost host)
     {
         Check(Element<Button>(window, "DetectRewindButton").IsEnabled,
             "M25/GUI actual Detect action is enabled for the retained checkpoint");
         Call(window, "DetectRewind_Click", Element<Button>(window, "DetectRewindButton"), new RoutedEventArgs());
-        Settle(window, host, token);
+        Settle(window, host);
         Check(Active(host).Status == SyncRewindStatus.PreviewReady, "M25/GUI actual Detect handler produces retained preview");
     }
 
@@ -459,55 +459,16 @@ internal static class RewindHandoffChecks
         Check(seen, "M25/GUI actual " + title + " dialog was presented and its real button handled consent");
     }
 
-    private static void Settle(MainWindow window, SyncAuthorityRuntimeHost host, CancellationToken token) =>
-        Until(() => !window.RunActiveForTest && !host.HasActiveRun && !Field<bool>(window, "_readingRunOutcomes"),
-            "actual Rewind handler/readback", token, () => Console.WriteLine("Rewind settle progress: " + DescribeRun(window, host)));
+    private static void Settle(MainWindow window, SyncAuthorityRuntimeHost host) => Until(() =>
+        !window.RunActiveForTest && !host.HasActiveRun && !Field<bool>(window, "_readingRunOutcomes"), "actual Rewind handler/readback");
 
-    // A real Host inventory is the work being waited for, so the wait is bounded by the selector's own
-    // cancellation token and reports the Host's actual phase instead of a fixed wall-clock deadline.
-    private static string DescribeRun(MainWindow window, SyncAuthorityRuntimeHost host)
-    {
-        var run = host.ActiveRun;
-        var comparison = run?.Progress?.Comparison;
-        var checkedCount = comparison is { } value ? $"{value.CompletedChecks:N0}/{value.TotalChecks:N0}" : "<none>";
-        var elapsed = run is { } active
-            ? (DateTimeOffset.UtcNow - active.StartedUtc).TotalSeconds.ToString("F1",
-                System.Globalization.CultureInfo.InvariantCulture)
-            : "<none>";
-        var uiPhase = window.FindName("PhaseText") is TextBlock phase ? phase.Text : string.Empty;
-        var rewindStatus = window.FindName("RewindStatusText") is TextBlock status ? status.Text : string.Empty;
-        return $"runActive={window.RunActiveForTest}; hostActive={host.HasActiveRun}; " +
-               $"readingOutcomes={Field<bool>(window, "_readingRunOutcomes")}; " +
-               $"kind={run?.Kind ?? "<none>"}; elapsedSeconds={elapsed}; " +
-               $"state={run?.Progress?.State ?? "<none>"}; phase={comparison?.Phase ?? "<none>"}; " +
-               $"path={comparison?.RelativePath ?? "<none>"}; checked={checkedCount}; " +
-               $"uiPhase={uiPhase}; rewindStatus={rewindStatus}";
-    }
-
-    private static void Until(Func<bool> ready, string label) => Until(ready, label, default, null);
-
-    private static void Until(Func<bool> ready, string label, CancellationToken token, Action? onProgress)
+    private static void Until(Func<bool> ready, string label)
     {
         var started = Stopwatch.StartNew();
-        TimeSpan? lastProgress = null;
         while (!ready())
         {
             Dispatcher.CurrentDispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
-            if (onProgress is not null &&
-                (lastProgress is null || started.Elapsed - lastProgress.Value >= TimeSpan.FromSeconds(2)))
-            {
-                lastProgress = started.Elapsed;
-                onProgress();
-            }
-            if (token.CanBeCanceled)
-            {
-                if (token.IsCancellationRequested)
-                    throw new TimeoutException("Timed out waiting for " + label + " before the selector's cancellation deadline.");
-            }
-            else if (started.Elapsed > TimeSpan.FromSeconds(30))
-            {
-                throw new TimeoutException("Timed out waiting for " + label);
-            }
+            if (started.Elapsed > TimeSpan.FromSeconds(30)) throw new TimeoutException("Timed out waiting for " + label);
             Thread.Sleep(1);
         }
     }

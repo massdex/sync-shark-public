@@ -20,7 +20,13 @@ public static partial class Planner
             return;
         }
         if (sA == RowState.Same && sB == RowState.Same)
+        {
+            // Ancestor spelling is not a move, but refreshing its baseline still needs
+            // cross-side proof; divergent baselines must not acquire a spelling winner.
+            if (BaselineSpellingChanged(row))
+                SameLocation(ctx, row, 20, row.A!, row.B!, key);
             return;                                                                       // rule 1
+        }
         if (sB == RowState.Same)
         {
             ChangedAgainstSame(ctx, row, Side.A, sA, key);

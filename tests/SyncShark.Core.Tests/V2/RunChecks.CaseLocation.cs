@@ -44,7 +44,44 @@ internal static partial class RunChecks
             Require(!store.UnresolvedIntents(fx.Pair.PairId).Any(), "case-only rows leave no failed Move intents");
         }
         await AncestorOnlyCaseLocationAsync();
+        await AncestorDriftEditColdReopenAsync();
         Console.WriteLine("PASS CaseLocation: known and unknown content through SQLite and SyncRun");
+    }
+
+    private static async Task AncestorDriftEditColdReopenAsync()
+    {
+        foreach (var driftSide in new[] { Side.A, Side.B })
+        {
+            var folder = FixtureFolder("drift-edit-cold");
+            using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
+            var fx = Build(suppliedStore: store);
+            const string path = "Parent/capsules/work/item.json";
+            const string driftPath = "Parent/Capsules/work/item.json";
+            fx.A.Seed(path, "original");
+            var run = fx.Run();
+            await FirstSyncAsync(run, fx);
+            var key = store.Baselines(fx.Pair.PairId).Single().ObjectKey;
+            var drifted = driftSide == Side.A ? fx.A : fx.B;
+            var edited = driftSide == Side.A ? fx.B : fx.A;
+            await drifted.MoveAsync(new("ancestor-drift", 20, ActionKind.Move, driftSide, driftPath, path,
+                null, null, false, null), default);
+            var content = edited.Seed(path, "updated bytes");
+            var first = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            Require(first.Done == 1 && first.Uploaded + first.Downloaded == 1 && first.KeptBoth == 0 && first.Deleted == 0 &&
+                first.Failed == 0 && (await drifted.ObserveAsync(driftPath, default))?.Hash == content.Hash,
+                $"live-shaped ancestor drift produces only the opposite edit, no Forget/split: {first}");
+            await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            store.Dispose();
+            using var reopened = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
+            var restarted = new SyncRun(reopened, NewExecutor(reopened), fx.Provider, Settings, TimeProvider.System);
+            var third = await restarted.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
+            var baseline = reopened.Baselines(fx.Pair.PairId).Single();
+            Require(third.Done == 0 && third.Outcome == RunOutcomes.Complete && baseline.ObjectKey == key &&
+                (driftSide == Side.A ? baseline.A.Path : baseline.B.Path) == driftPath &&
+                reopened.OpenNotices(fx.Pair.PairId).Count == 0 && !reopened.ReadSyncRetries(fx.Pair.PairId).Any(),
+                $"cold third run is quiet with the original correspondence and actual spelling: {third}");
+        }
+        Console.WriteLine("PASS AncestorDriftEditColdReopen");
     }
 
     private static async Task AncestorOnlyCaseLocationAsync()
