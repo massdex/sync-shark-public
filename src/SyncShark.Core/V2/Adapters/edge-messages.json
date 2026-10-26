@@ -2,6 +2,7 @@
   "templates": {
     "reconciliation-root-retry": "gap completion deferred: root scan retry on {0}",
     "autosync-delta-proof": "autosync: proved {0} delta rows inline (bytes {1})",
+    "execution-proofs-acknowledged": "execution proofs acknowledged: {0}",
     "reconciliation-epoch-replaced": "gap epoch replaced during selection; restarting cycle",
     "effect-uncommitted-trace": "effect uncommitted outcome={0} kind={1} side={2} path={3} category={4} reason={5} commitFailure={6}",
     "untrusted-journal-invalidation": "untrusted journal: page {0}: examined {1} of {2} retained files (root count at pass start), invalidated {3} eligible, total invalidated {4} this pass",

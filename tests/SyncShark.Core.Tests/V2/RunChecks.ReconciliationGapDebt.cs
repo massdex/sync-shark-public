@@ -49,7 +49,11 @@ internal static partial class RunChecks
             "root-scope read failure retains the exact pending epoch checkpoint and full obligation with a Partial retry");
     }
 
-    private static Task ReconciliationClearsGapDebt() => ReconcileGapDebt(false);
+    private static async Task ReconciliationClearsGapDebt()
+    {
+        await ReconcileGapDebt(false);
+        await ExecutionProofReflagRetainsDebtAsync();
+    }
     private static Task ReconciliationClearsLegacyEpoch() => ReconcileGapDebt(true);
 
     private static async Task ReconcileGapDebt(bool legacy)

@@ -170,6 +170,7 @@ public sealed partial class SyncRun
         // not in the plan; the planned action (when found) only picks the transfer bucket.
         public void Add(PairDef pair, SyncAction? action, ActionResult result)
         {
+            RecordExecutionProof(pair, action, result);
             var refused = result.ProviderNameRefused || result.ParentNameRefused || result.Quarantined || result.DefenderGrantHeld;
             if (refused) Skipped++;
             else if (result.Outcome == Outcome.Done)
@@ -1196,9 +1197,11 @@ public sealed partial class SyncRun
                     batch is null ? null : (row, reason) =>
                         RecordReconciliationBlocker(pair, batch, row, reason, scan, plan));
             }
+        var executionProofs = FoldExecutionProofs(pair, scan, tally);
         RehashAcknowledgementForTest?.Invoke(scan.A.RehashThrough, scan.B.RehashThrough);
         _store.AcknowledgeRehash(pair.A.RootId, scan.A.RehashThrough, path => Settled(path) && includeA(path), ct, batch?.ObjectIdsA);
         _store.AcknowledgeRehash(pair.B.RootId, scan.B.RehashThrough, path => Settled(path) && includeB(path), ct, batch?.ObjectIdsB);
+        TraceAcknowledgedExecutionProofs(executionProofs);
         if (batch is not null) AccountReconciliationBatch(pair, batch, plan, tally,
             path => Settled(path) || EmptySettled(path), includeA, includeB);
     }
