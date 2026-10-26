@@ -483,8 +483,9 @@ internal static partial class CliChecks
                 await RunCliAsync(["--cli", "autosync", command, "--pair", "fixture"], NeverOpensState), 2);
         }
         Require(SyncCliRegistry.Rows.Single(row => row.Command == "autosync start").Effect.Contains("unexpected exits relaunch", StringComparison.Ordinal) &&
-            SyncCliRegistry.Rows.Single(row => row.Command == "autosync stop").Effect.Contains("cancel supervision before draining", StringComparison.Ordinal) &&
-            SyncCliRegistry.Rows.Single(row => row.Command == "autosync stop").Effect.Contains("without a host", StringComparison.Ordinal),
+            SyncCliRegistry.Rows.Single(row => row.Command == "autosync stop").Effect.Contains("host cancels supervision before draining", StringComparison.Ordinal) &&
+            SyncCliRegistry.Rows.Single(row => row.Command == "autosync stop").Effect.Contains("send stop to host first", StringComparison.Ordinal) &&
+            SyncCliRegistry.Rows.Single(row => row.Command == "autosync stop").Effect.Contains("only without a host, never on failed or uncertain sends", StringComparison.Ordinal),
             "help and capabilities describe supervised start and deliberate stop including backoff");
         foreach (var command in new[] { "install-startup", "uninstall-startup" })
         {

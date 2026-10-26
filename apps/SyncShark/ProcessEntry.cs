@@ -32,7 +32,7 @@ internal static class ProcessEntry
             {
                 // A host failure is already recorded by BackgroundHostEntry; a supervisor failure must not vanish.
                 if (selected.Args[0] == "--autosync-supervisor")
-                    try { AutoSyncLog.Append(SyncDataLocation.ProductRoot, "supervisor terminated unexpectedly: " + SyncCli.DescribeException(error)); }
+                    try { AutoSyncLog.Failure(SyncDataLocation.ProductRoot, error); }
                     catch (Exception) { }
                 return (int)SyncCliExitCode.Failed;
             }
@@ -42,9 +42,6 @@ internal static class ProcessEntry
 
     private static int Supervise()
     {
-        // The supervisor is detached too: keep its own diagnostics durable instead of discarding them.
-        try { Console.SetError(AutoSyncLog.CreateStderrWriter(SyncDataLocation.ProductRoot)); }
-        catch (Exception) { } // an unusable data root is reported by the host this process launches
         // Only one relauncher per store/user/session. A second starter observes the existing host.
         using var mutex = new Mutex(false, @"Local\" + AutoSyncHostProtocol.PipeName(SyncSharkRuntimePaths.InstanceLockFile) + ".supervisor");
         bool owned;

@@ -3,11 +3,7 @@ using System.Text;
 
 namespace Massdex.SyncShark.V2;
 
-/// <summary>
-/// Durable, bounded event log shared by the AutoSync supervisor and host. One append-only line per event.
-/// A detached launch has no console and the host used to discard its stderr, so this file is the only
-/// evidence that survives an external stop; every failure to write it is therefore ignored, never thrown.
-/// </summary>
+/// <summary>Bounded explicit lifecycle events only; never captures runtime output or exception messages.</summary>
 public static class AutoSyncLog
 {
     internal const string FileName = "autosync.log";
@@ -15,25 +11,29 @@ public static class AutoSyncLog
     // is one current and one previous generation, each at most ten MiB.
     internal const long FileBound = 10 * 1024 * 1024;
     internal const int LongestLine = 2048;
+    private static long _dropped;
 
     /// <summary>The log file in the product logs directory that RunLog already owns.</summary>
     public static string FilePath(string productRoot) =>
         Path.Combine(RunLog.LogsDirectory(productRoot, autoSync: true), FileName);
 
-    /// <summary>Appends one UTC-stamped line. Never throws: a diagnostic cannot terminate supervision.</summary>
-    public static void Append(string productRoot, string message)
+    // Only the supervisor's fixed events and the typed methods below may call this sink.
+    internal static void Append(string productRoot, string message)
     {
+        var dropped = Interlocked.Exchange(ref _dropped, 0);
         try
         {
             var path = FilePath(productRoot);
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             var stamp = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
-            var bytes = new UTF8Encoding(false).GetBytes(stamp + " " + OneLine(message) + Environment.NewLine);
-            // Deny other writers for the entire size-check/rotation/append transaction. Contention
-            // drops a diagnostic rather than blocking shutdown. No separate lock file is needed.
+            var line = message.ReplaceLineEndings(" ");
+            if (line.Length > LongestLine) line = line[..LongestLine];
+            if (dropped > 0) line = "dropped=" + dropped.ToString(CultureInfo.InvariantCulture) + " " + line;
+            var bytes = new UTF8Encoding(false).GetBytes(stamp + " " + line + Environment.NewLine);
+            // The current handle serializes size check, rotation and append across writers.
+            // Contention never blocks shutdown; dropped lines are counted on a later write.
             using var stream = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite,
                 FileShare.Read | FileShare.Delete);
-            if (bytes.Length > FileBound) return;
             if (stream.Length > FileBound - bytes.Length) Rotate(stream, path);
             stream.Position = stream.Length;
             stream.Write(bytes, 0, bytes.Length);
@@ -41,17 +41,23 @@ public static class AutoSyncLog
         }
         catch (Exception)
         {
-            // A detached diagnostic stream cannot terminate the pair (the existing supervisor rule).
+            Interlocked.Add(ref _dropped, dropped + 1);
         }
     }
 
-    /// <summary>Records an early host exit using the shared catalog's shutdown reason.</summary>
+    /// <summary>Records a host shutdown using a fixed reason from the existing catalog.</summary>
     public static void HostShutdown(string productRoot, string reasonKey) =>
         Append(productRoot, "host shutdown: " + MessageCatalog.Default.Message(reasonKey));
 
-    /// <summary>Routes a discarded stderr stream to the durable log, one complete line per event.</summary>
-    public static TextWriter CreateStderrWriter(string productRoot) =>
-        TextWriter.Synchronized(new LineWriter(productRoot));
+    /// <summary>Records numeric assembly version, never a free-form informational version.</summary>
+    public static void HostStarted(string productRoot, Version? version) =>
+        Append(productRoot, "host start version=" + version);
+
+    /// <summary>Records exception identity only, without message, data, inner exceptions or source paths.</summary>
+    public static void Failure(string productRoot, Exception error) =>
+        Append(productRoot, "lifecycle failure type=" + error.GetType().FullName +
+            " hresult=" + error.HResult.ToString("X8", CultureInfo.InvariantCulture) +
+            " method=" + error.TargetSite?.Name);
 
     private static void Rotate(FileStream current, string path)
     {
@@ -63,46 +69,5 @@ public static class AutoSyncLog
         current.CopyTo(previous);
         previous.Flush();
         current.SetLength(0);
-    }
-
-    private static string OneLine(string message)
-    {
-        var text = SyncActivityText.Safe(message, omitPrivateDetails: true);
-        return text.Length <= LongestLine ? text : text[..LongestLine] + "...";
-    }
-
-    private sealed class LineWriter(string productRoot) : TextWriter
-    {
-        private readonly StringBuilder _line = new();
-        public override Encoding Encoding => System.Text.Encoding.UTF8;
-
-        public override void Write(char value)
-        {
-            if (value == '\n') { FlushLine(); return; }
-            if (value == '\r') return;
-            if (_line.Length < LongestLine) _line.Append(value);
-        }
-
-        public override void Write(string? value)
-        {
-            if (value is null) return;
-            foreach (var character in value) Write(character);
-        }
-
-        public override void WriteLine(string? value)
-        {
-            Write(value);
-            FlushLine();
-        }
-
-        public override void Flush() => FlushLine();
-
-        private void FlushLine()
-        {
-            if (_line.Length == 0) return;
-            var text = _line.ToString();
-            _line.Clear();
-            Append(productRoot, text);
-        }
     }
 }

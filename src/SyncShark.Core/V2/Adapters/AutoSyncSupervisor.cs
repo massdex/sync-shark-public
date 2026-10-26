@@ -60,7 +60,7 @@ public sealed class AutoSyncSupervisor
             }
             catch (Exception error)
             {
-                Trace("child cycle failed: " + SyncCli.DescribeException(error));
+                AutoSyncLog.Failure(_productRoot, error);
             }
             Trace("relaunch delay=" + (long)delay.TotalSeconds + "s");
             if (Stopped(delay)) return 0;
@@ -84,7 +84,7 @@ public sealed class AutoSyncSupervisor
     private void RecordExistingOwnerNotice()
     {
         try { AutoSyncProcess.RecordExistingOwnerNotice(AutoSyncProcess.ExistingOwnerNoticePathFor(_productRoot)); }
-        catch (Exception error) { Trace("owner notice failed: " + error.Message); }
+        catch (Exception error) { AutoSyncLog.Failure(_productRoot, error); }
     }
 
     private void Trace(string message) => AutoSyncLog.Append(_productRoot, message);

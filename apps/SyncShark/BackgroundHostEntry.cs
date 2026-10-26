@@ -19,9 +19,8 @@ internal static class BackgroundHostEntry
             if (logRoot is { } root) AutoSyncLog.HostShutdown(root, "autosync-owner-attached");
             return 0;
         }
-        // The owner is silent on stdout; stderr is durable so an externally ended host leaves evidence.
-        Console.SetOut(TextWriter.Null);
-        Console.SetError(logRoot is { } logTarget ? AutoSyncLog.CreateStderrWriter(logTarget) : TextWriter.Null);
+        // Runtime output can contain file contents and identifiers. Never persist it as lifecycle evidence.
+        AutoSyncBackgroundHost.SuppressConsoleOutput();
         try
         {
             PilotInstanceLock? authority = null;
@@ -37,9 +36,11 @@ internal static class BackgroundHostEntry
                 },
                 () => new ProductionAutoSyncEngine(authority!, SyncDataLocation.ProductRoot, wake),
                 stopSupervisor: ProcessEntry.StopSupervisor);
+            if (logRoot is { } startRoot)
+                AutoSyncLog.HostStarted(startRoot, typeof(BackgroundHostEntry).Assembly.GetName().Version);
             await host.Completion.ConfigureAwait(false);
             if (logRoot is { } root)
-                AutoSyncLog.Append(root, "host shutdown: " + host.ShutdownReason);
+                AutoSyncLog.HostShutdown(root, host.StopRequested ? "autosync-stop-requested" : "autosync-listener-ended");
             return 0;
         }
         catch (AutoSyncHostReservationException)
@@ -55,7 +56,7 @@ internal static class BackgroundHostEntry
         catch (Exception error)
         {
             if (logRoot is { } root)
-                AutoSyncLog.Append(root, "host shutdown: unexpected termination: " + SyncCli.DescribeException(error));
+                AutoSyncLog.Failure(root, error);
             return (int)SyncCliExitCode.Failed;
         }
     }
@@ -122,7 +123,6 @@ internal static class BackgroundHostEntry
                 try { if (File.Exists(AutoSyncProcess.ExistingOwnerNoticePath)) error.WriteLine(File.ReadAllText(AutoSyncProcess.ExistingOwnerNoticePath)); }
                 catch (Exception noticeError) { error.WriteLine("Could not read the startup notice: " + noticeError.Message); }
             }
-            if (command == "stop") ProcessEntry.StopSupervisor();
             if (command is "install-startup" or "uninstall-startup")
             {
                 var running = Environment.ProcessPath ?? throw new IOException("Executable path unavailable.");
@@ -147,8 +147,9 @@ internal static class BackgroundHostEntry
             long cursor = options.TryGetValue("--after", out var after) && long.TryParse(after, out var value) ? value : 0;
             var request = AutoSyncHostClient.Request(command, invocation.PairId, options.ContainsKey("--all"), minutes,
                 invocation.Limit, cursor);
-            reply = command == "start" ? await StartAsync(ct) :
-                await Client().TrySendAsync(request, TimeSpan.FromMilliseconds(500), ct);
+            reply = command == "start" ? await StartAsync(ct) : command == "stop"
+                ? await Client().StopAsync(TimeSpan.FromMilliseconds(500), ProcessEntry.StopSupervisor, ct)
+                : await Client().TrySendAsync(request, TimeSpan.FromMilliseconds(500), ct);
             if (reply is null)
             {
                 output.WriteLine(JsonSerializer.Serialize(new { running = false, detail = "Host is not running. Use autosync start; this command did not launch it." }));
