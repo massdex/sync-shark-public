@@ -300,14 +300,8 @@ public sealed partial class SyncRun
                 if (notice.Rule == 27)
                     actions[0] = BindConflictCorrespondence(actions[0], link.ObjectKey, originalSide == (keepA ? Side.A : Side.B));
                 var saved = side == Side.A ? link.A : link.B;
-                var current = await (side == Side.A ? a : b).ObserveAsync(path, token);
-                if (current is { Kind: ItemKind.File, Hash: null })
-                {
-                    current = await ProveConflictContentAsync(side == Side.A ? pair.A : pair.B, current, token).ConfigureAwait(false);
-                    if (current is null) return RefuseConflictSuccessor(pair, notice, noticeId, "proof");
-                }
-                if (current is null || !SameConflictItem(current, saved, side == Side.A ? pair.A : pair.B))
-                    return Result(Outcome.Skipped, "A copy changed since it was synced. Keep both or compare the new versions.");
+                var (current, copyFailure) = await CheckConflictCopyAsync(pair, notice, noticeId, side, path, saved, token).ConfigureAwait(false);
+                if (copyFailure is not null) return copyFailure;
                 actions.Add(Action(ActionKind.Delete, side, path, null, current));
             }
         }

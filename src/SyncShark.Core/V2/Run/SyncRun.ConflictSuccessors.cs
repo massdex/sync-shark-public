@@ -102,6 +102,21 @@ public sealed partial class SyncRun
         return (occupants, null);
     }
 
+    private async Task<(ItemState? Item, ActionResult? Failure)> CheckConflictCopyAsync(PairDef pair, Notice notice,
+        string noticeId, Side side, string path, ItemState saved, CancellationToken ct)
+    {
+        var root = side == Side.A ? pair.A : pair.B;
+        var current = await _endpoints.Writer(root).ObserveAsync(path, ct).ConfigureAwait(false);
+        if (current is { Kind: ItemKind.File, Hash: null })
+        {
+            current = await ProveConflictContentAsync(root, current, ct).ConfigureAwait(false);
+            if (current is null) return (null, RefuseConflictSuccessor(pair, notice, noticeId, "proof"));
+        }
+        if (current is null || !SameConflictItem(current, saved, root))
+            return (null, RefuseConflictSuccessor(pair, notice, noticeId, current is null ? "missing" : "changed"));
+        return (current, null);
+    }
+
     private async Task<ItemState?> ProveConflictContentAsync(RootDef root, ItemState current, CancellationToken ct)
     {
         try

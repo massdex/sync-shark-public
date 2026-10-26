@@ -56,7 +56,10 @@ internal static partial class RunChecks
                     absent.Path, null, null, absent, false, null), default);
                 store.AddNotices([new(fx.Pair.PairId, 27, NoticeKind.KeepBoth, a.Path, "both kept", "keep-both",
                     ConflictVersions: new(mode == "missing-proof" ? a with { Hash = null } : a, b, basis, copyA.Path, copyB.Path))]);
-                var noticeId = store.OpenNotices(fx.Pair.PairId).Single().NoticeId!;
+                var noticesBefore = store.OpenNotices(fx.Pair.PairId);
+                var noticeId = noticesBefore.Single(item => item.Rule == 27).NoticeId!;
+                Console.WriteLine($"Conflict fixture {winner}/{mode}: notices={noticesBefore.Count}; " +
+                    string.Join(",", noticesBefore.Select(item => item.ReasonKey)));
                 // Cold-open every choice: provenance and checkpoints must come from durable state.
                 store.Dispose();
                 store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
@@ -92,7 +95,7 @@ internal static partial class RunChecks
                 {
                     var reason = MessageCatalog.Default.Message(reasonKey);
                     Require(result?.Reason == reason, $"{mode} reports {reasonKey}: {result?.Reason}");
-                    Require(store.OpenNotices(fx.Pair.PairId).Single().Detail.Contains(reason),
+                    Require(store.OpenNotices(fx.Pair.PairId).Single(item => item.NoticeId == noticeId).Detail.Contains(reason),
                         "open notice retains the specific refusal reason: " + mode);
                 }
                 if (mode is "restore" or "cli" or "null-hash" or "drift")
@@ -164,8 +167,9 @@ internal static partial class RunChecks
                         "unfinished restore retains a visible notice explaining the failure");
                 }
                 else Require(result?.Outcome == Outcome.Skipped && fx.WriterA.Calls == 0 && fx.WriterB.Calls == 0 &&
-                    store.OpenNotices(fx.Pair.PairId).Count == 1,
-                    "changed, foreign, missing, protected or unproven occupants refuse with one notice and no effects: " + mode);
+                    store.OpenNotices(fx.Pair.PairId).Select(item => item.NoticeId).Order().SequenceEqual(
+                        noticesBefore.Select(item => item.NoticeId).Order()),
+                    "refused choice preserves the exact notice set without new notices or effects: " + mode);
             }
             finally { store.Dispose(); }
         }
