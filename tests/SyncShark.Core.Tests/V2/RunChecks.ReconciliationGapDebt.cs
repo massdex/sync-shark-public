@@ -78,6 +78,10 @@ internal static partial class RunChecks
         var run = new SyncRun(store, fx.Executor, fx.Provider,
             Settings with { ReconciliationBatch = new(5, 64) }, TimeProvider.System);
         run.RehashAcknowledgementForTest = (a, b) => proofTrace.Enqueue($"ack scan.A.RehashThrough={a} scan.B.RehashThrough={b}");
+        var planningTrace = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        run.PlanningEchoForTest = (row, receipt, settled, reason) => planningTrace.Enqueue(
+            $"planning side={(row.RootId == root ? "A" : "B")} object={row.ObjectId} attemptedVersion={row.Version} " +
+            $"receipt={(receipt is { } version ? version.ToString() : "none")} settled={settled} blocker={reason}");
         var report = await run.ReconcileScopeAsync(fx.Pair.PairId,
             StateMonitor.FromGap(epoch) with { RootId = root }, new RecordingProgress(), default);
         Require(!report.CompletionFailed && report.Failed == 0 && fx.WriterB.Calls - writes == 3,
@@ -94,7 +98,7 @@ internal static partial class RunChecks
         Require(gaps.GapObligations(root, items.Select(item => item.ObjectId).ToArray()).Count == 0,
             "reconciliation clears concrete gap items: " + remaining);
         Require(store.PlanningBacklogPage(fx.Pair.PairId).Count == 0,
-            "reconciliation clears observation planning debt: " + remaining);
+            "reconciliation clears observation planning debt: " + remaining + " | " + string.Join(" | ", planningTrace));
         await MirrorAsync(fx);
     }
 }

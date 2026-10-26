@@ -3,6 +3,7 @@ namespace Massdex.SyncShark.V2;
 public sealed partial class SyncRun
 {
     internal Action? PlanningAcknowledgementForTest { get; set; }
+    internal Action<SqliteStateStore.DeferredPlanning, long?, bool, string>? PlanningEchoForTest { get; set; }
 
     private void WriteHashObservation(PairDef pair, SideScan scan, Delta observation)
     {
@@ -27,9 +28,14 @@ public sealed partial class SyncRun
                 var echoes = folded.Where((row, index) => row.Version != page[index].Version).ToHashSet();
                 var echoPaths = echoes.SelectMany(row => row.Paths).ToHashSet(StringComparer.OrdinalIgnoreCase);
                 deferredStore.AcknowledgeDeferredPlanning(pair.PairId, folded,
-                    path => settled(path) && (!echoPaths.Contains(path) || PlanningEchoEqual(pair, path)),
+                    path => settled(path) && (!echoPaths.Contains(path) || PlanningEchoVerified(pair, path)),
                     path => !echoPaths.Contains(path) && emptySettled(path),
-                    row => { if (echoes.Contains(row)) echoesRetired++; acknowledged?.Invoke(row); }, blocked);
+                    row => { if (echoes.Contains(row)) echoesRetired++; acknowledged?.Invoke(row); },
+                    (row, reason) =>
+                    {
+                        PlanningEchoForTest?.Invoke(row, PlanningObservationVersion(pair, scan, row), row.Paths.All(settled), reason);
+                        blocked?.Invoke(row, reason);
+                    });
             }
         RunTrace.Emit(string.Format(System.Globalization.CultureInfo.InvariantCulture,
             MessageCatalog.Default.Template("deferred-echoes-retired"), echoesRetired));
@@ -38,19 +44,23 @@ public sealed partial class SyncRun
     private static SqliteStateStore.DeferredPlanning FoldPlanningObservation(
         PairDef pair, BothScan scan, SqliteStateStore.DeferredPlanning row)
     {
-        var versions = row.RootId == pair.A.RootId ? scan.A.PlanningObservationVersions :
-            row.RootId == pair.B.RootId ? scan.B.PlanningObservationVersions : null;
-        return versions is not null && versions.TryGetValue(row.ObjectId, out var version) && version > row.Version
-            ? row with { Version = version } : row;
+        var version = PlanningObservationVersion(pair, scan, row);
+        return version is { } observed && observed > row.Version ? row with { Version = observed } : row;
     }
 
-    private bool PlanningEchoEqual(PairDef pair, string path)
+    private static long? PlanningObservationVersion(PairDef pair, BothScan scan, SqliteStateStore.DeferredPlanning row)
+    {
+        var versions = row.RootId == pair.A.RootId ? scan.A.PlanningObservationVersions :
+            row.RootId == pair.B.RootId ? scan.B.PlanningObservationVersions : null;
+        return versions is not null && versions.TryGetValue(row.ObjectId, out var version) ? version : null;
+    }
+
+    private bool PlanningEchoVerified(PairDef pair, string path)
     {
         var a = _store.Live(pair.A.RootId, [path]);
         var b = _store.Live(pair.B.RootId, [path]);
         return a.Count == 1 && b.Count == 1 &&
             VerificationPolicy.CanAcknowledge(a[0].Hash, a[0].Flags) &&
-            VerificationPolicy.CanAcknowledge(b[0].Hash, b[0].Flags) &&
-            Content.SameContent(a[0], b[0]) == true;
+            VerificationPolicy.CanAcknowledge(b[0].Hash, b[0].Flags);
     }
 }
