@@ -12,6 +12,7 @@ public sealed partial class SqliteStateStore
     // snapshot materialization uses its own connection and cannot invalidate this counter.
     private long PlanningProtectionVersion() => InStore(() =>
     {
+        if (SQLitePCL.raw.sqlite3_get_autocommit(_connection.Handle) == 0) return checked(++_protectionVersion);
         var changes = Convert.ToInt64(StoreSchema.Scalar(_connection, null, "SELECT total_changes();"));
         var external = Convert.ToInt64(StoreSchema.Scalar(_connection, null, "PRAGMA data_version;"));
         if (changes != _protectionChanges || external != _protectionExternalVersion)
