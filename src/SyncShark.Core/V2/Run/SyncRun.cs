@@ -797,6 +797,9 @@ public sealed partial class SyncRun : ISyncRun
         string? resolvingNoticeId, IProgress<RunProgress> progress, CancellationToken ct, RunOptions? options)
     {
         using var pause = PairPause.Begin(_store, pairId);
+        using var gapCoverage = options?.Batch is not null && _store is SqliteStateStore sql
+            ? sql.BeginReconciliationGapCoverage(pairId) : null;
+        if (options?.Batch is { } batch) batch.GapCoverage = gapCoverage;
         var prepared = await PrepareIncrementalAsync(pairId, decisions, resolvingNoticeId, progress, ct, options);
         if (prepared.Completed is { Failed: 0 } && prepared.Plan is not null) ClosePlanBoundNotice(pairId);
         return prepared.Completed ?? await prepared.Execute!();

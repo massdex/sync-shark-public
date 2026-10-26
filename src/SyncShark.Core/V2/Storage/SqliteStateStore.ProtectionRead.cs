@@ -8,11 +8,17 @@ public sealed partial class SqliteStateStore
     // obligations belong to the current entity, not the path saved in expected_json.
     // One owner: the alias is a parameter, so a caller inspecting a second file_state alias
     // formats the same predicate instead of re-aliasing it by text substitution.
+    private const string GapUnobservedTemplate = """
+        NOT EXISTS(SELECT 1 FROM json_each($observed) observed
+          WHERE json_extract(observed.value,'$.dir')=(SELECT path_key FROM dir WHERE dir_no={0}.dir_no)
+          AND json_extract(observed.value,'$.name')={0}.name_key)
+        """;
+
     private const string ProtectionHeldTemplate = """
         (({0}.flags!=0 AND ({0}.flags & $flags)!=0) OR ($gap=1 AND {0}.kind=0 AND
           (($done=0 AND {0}.object_id>$after) OR EXISTS(SELECT 1 FROM local_gap_item gi
-            WHERE gi.root_no={0}.root_no AND gi.object_id={0}.object_id))))
-        """;
+            WHERE gi.root_no={0}.root_no AND gi.object_id={0}.object_id)) AND
+        """ + " " + GapUnobservedTemplate + "))";
 
     internal static readonly string ProtectionHeldSql =
         string.Format(System.Globalization.CultureInfo.InvariantCulture, ProtectionHeldTemplate, "f");
@@ -46,14 +52,15 @@ public sealed partial class SqliteStateStore
           SELECT 1 FROM file_state f NOT INDEXED WHERE f.root_no=$r AND f.dir_no=d.dir_no AND
         """ + ProtectionHeldSql + ");";
 
-    internal static readonly string ProtectionRootSql = """
+    internal static readonly string ProtectionRootSql = string.Format(System.Globalization.CultureInfo.InvariantCulture,
+        """
         SELECT EXISTS(SELECT 1 FROM file_state f INDEXED BY fs_flagged
           WHERE f.root_no=$r AND f.flags!=0 AND (f.flags & $flags)!=0)
         OR ($gap=1 AND (($done=0 AND EXISTS(SELECT 1 FROM file_state f INDEXED BY fs_obj
-          WHERE f.root_no=$r AND f.object_id>$after AND f.kind=0))
-          OR EXISTS(SELECT 1 FROM local_gap_item gi CROSS JOIN file_state f INDEXED BY fs_obj
-            ON f.root_no=gi.root_no AND f.object_id=gi.object_id WHERE gi.root_no=$r AND f.kind=0)));
-        """;
+          WHERE f.root_no=$r AND f.object_id>$after AND f.kind=0 AND
+        """ + " " + GapUnobservedTemplate + ")) OR EXISTS(SELECT 1 FROM local_gap_item gi CROSS JOIN file_state f INDEXED BY fs_obj " +
+        "ON f.root_no=gi.root_no AND f.object_id=gi.object_id WHERE gi.root_no=$r AND f.kind=0 AND " +
+        GapUnobservedTemplate + ")));", "f");
 
     private static void BindProtection(SqliteCommand command, long root, ItemFlags flags,
         bool gap, bool done, string after)
@@ -63,6 +70,7 @@ public sealed partial class SqliteStateStore
         command.Parameters.AddWithValue("$gap", gap ? 1 : 0);
         command.Parameters.AddWithValue("$done", done ? 1 : 0);
         command.Parameters.AddWithValue("$after", after);
+        command.Parameters.AddWithValue("$observed", GapObservedPaths(command.Connection!, command.Transaction, root));
     }
 
     private static bool ProtectionDescendant(string directory, string candidate) =>

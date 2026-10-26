@@ -115,6 +115,7 @@ public sealed partial class SyncRun
         var atPath = _store.BaselinesAt(pair.PairId, side, page.Select(item => item.Path))
             .ToLookup(baseline => PathKey.Of((side == Side.A ? baseline.A : baseline.B).Path));
         var work = new List<ItemState>();
+        var legacy = ((ILocalGapStore)sql).HasGapProtection(root.RootId);
         foreach (var item in page)
         {
             counts = counts with { Enumerated = counts.Enumerated + 1 };
@@ -126,7 +127,7 @@ public sealed partial class SyncRun
             var moved = eligible && baselines.Any(baseline => SelectionMoved(pair, side, item, baseline));
             var casing = eligible && baselines.Any(baseline => SelectionCase(pair, side, item, baseline));
             var added = eligible && previous is null && !atPath[PathKey.Of(item.Path)].Any() && baselines.Length == 0;
-            var changed = eligible && (previous is null ||
+            var changed = eligible && (legacy || previous is null ||
                 (changedLocal?.Invoke(item, previous) ?? SelectionChanged(item, previous, dropbox)));
             if (added || changed || orphan || moved || casing) work.Add(item);
             counts = counts with { New = counts.New + (added ? 1 : 0),

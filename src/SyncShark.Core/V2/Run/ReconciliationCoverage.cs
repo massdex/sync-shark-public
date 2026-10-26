@@ -23,6 +23,11 @@ internal sealed class ReconciliationCoverage
         };
     }
 
+    internal static void ObserveBatch(ReconcileBatch batch, SyncRun.SideScan a, SyncRun.SideScan b) =>
+        batch.GapCoverage?.Observe(a.ExactCreationObserved.Intersect(b.ExactCreationObserved, StringComparer.OrdinalIgnoreCase)
+            .Where(path => PairPath.Observed(path, a.IncompleteSubtrees) && PairPath.Observed(path, b.IncompleteSubtrees)),
+            batch.ObjectIdsA.Concat(batch.ObjectIdsB).Distinct().ToArray());
+
     internal void Load(RunScope.Scope scope)
     {
         if (_selecting) return;
