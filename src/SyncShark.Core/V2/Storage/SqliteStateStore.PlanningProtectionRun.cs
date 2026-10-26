@@ -38,7 +38,7 @@ public sealed partial class SqliteStateStore
         {
             var version = store.PlanningProtectionVersion();
             if (_snapshot is not null && version == _version) return _snapshot;
-            ReleaseSnapshot();
+            Dispose();
             // Capture the version BEFORE materialization: an intervening write forces the next
             // scope to rebuild, never labels a pre-write snapshot with a post-write version.
             _snapshot = store.OpenPlanningProtection(pair);
@@ -54,12 +54,6 @@ public sealed partial class SqliteStateStore
         }
 
         public void Dispose()
-        {
-            RunLog.Trace($"Planning protection snapshots: builds={Builds}");
-            ReleaseSnapshot();
-        }
-
-        private void ReleaseSnapshot()
         {
             var stream = _stream;
             var snapshot = _snapshot;

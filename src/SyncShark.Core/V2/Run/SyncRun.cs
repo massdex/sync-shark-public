@@ -1025,6 +1025,7 @@ public sealed partial class SyncRun : ISyncRun
                     .Select(item => FolderDelete.VictimKey(item.Held!.Local, item.Path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
         planningTiming.PeakScopeRows = scanner.PeakMaterializedRows;
         planningTiming.Dispose();
+        RunLog.Trace($"Planning protection snapshots: builds={protectionRun?.Builds ?? 0}");
         return new(plan, null, ExecutePreparedAsync, () =>
         {
             var initial = PrepareInitialExecution(plan, pair, reviewedDeletes, allowUnreviewedEvidence: true);
