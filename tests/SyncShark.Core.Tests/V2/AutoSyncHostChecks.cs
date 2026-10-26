@@ -296,9 +296,26 @@ internal static class AutoSyncHostChecks
         var address = Address();
         var lease = new Lease();
         var engine = new FakeEngine { WaitAtSafePoint = true };
-        await using var host = Start(address, lease, engine);
+        using var supervisorStop = new ManualResetEvent(false);
+        await using var host = AutoSyncBackgroundHost.Start(address, () => lease, () => engine,
+            _ => true, () => supervisorStop.Set());
+        Require(!host.StopRequested && host.ShutdownReason == "listener ended without a stop request",
+            "completion without an accepted stop has the non-deliberate reason");
+        var logRoot = Path.Combine(Path.GetTempPath(), "supervised-stop-" + Guid.NewGuid().ToString("N"));
+        var starts = 0;
+        var childStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var supervisor = new AutoSyncSupervisor(logRoot, () =>
+        {
+            Interlocked.Increment(ref starts);
+            childStarted.TrySetResult();
+            return new HostChild(host);
+        }, wait => supervisorStop.WaitOne(wait), TimeSpan.Zero, TimeSpan.Zero, TimeSpan.FromMinutes(10));
+        var supervised = Task.Run(supervisor.Run);
+        await childStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
         var stop = SendAsync(Client(address), "stop");
         await engine.StopEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Require(supervisorStop.WaitOne(0) && host.StopRequested && host.ShutdownReason == "stop requested",
+            "accepted IPC stop selects the deliberate reason and cancels supervision before draining");
         Require(!stop.IsCompleted && !lease.Disposed && !engine.Disposed, "stop waits for the safe point with the authority held");
         var status = await SendAsync(Client(address), "status");
         Require(status.Ok && status.State == "stopping", "status stays available while draining");
@@ -310,6 +327,17 @@ internal static class AutoSyncHostChecks
         Require(reply.Ok && reply.State == "stopped" && engine.Disposed && lease.Disposed,
             "stop replies only after safe drain; engine closes before authority release");
         Require(engine.StopCalls == 1, "stop is idempotent");
+        Require(await supervised.WaitAsync(TimeSpan.FromSeconds(5)) == 0 && starts == 1,
+            "accepted IPC stop under supervision never relaunches the host");
+        Directory.Delete(logRoot, recursive: true);
+    }
+
+    private sealed class HostChild(AutoSyncBackgroundHost host) : AutoSyncSupervisor.IChild
+    {
+        public int ProcessId => host.Identity.Pid;
+        public int ExitCode => 0;
+        public void WaitForExit() => host.Completion.GetAwaiter().GetResult();
+        public void Dispose() { }
     }
 
     private static async Task DisconnectDoesNotReplayAsync()

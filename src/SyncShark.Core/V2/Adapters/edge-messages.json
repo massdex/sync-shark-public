@@ -25,6 +25,11 @@
     "discoveryCheck": "The fast discovery check"
   },
   "messages": {
+    "autosync-stop-requested": "stop requested",
+    "autosync-listener-ended": "listener ended without a stop request",
+    "autosync-owner-attached": "attached to existing owner",
+    "autosync-owner-attach-failed": "owner attach failed",
+    "autosync-owner-unavailable": "existing owner unavailable",
     "proof-required": "Required content proof was unavailable.",
     "proof-parent-guard": "Parent identity could not be guarded.",
     "proof-journal-unavailable": "A readable journal checkpoint is unavailable.",
