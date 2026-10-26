@@ -184,7 +184,7 @@ public sealed partial class SqliteStateStore
     /// <summary>Applies one version-guarded acknowledgement page, retaining unresolved entity work.</summary>
     internal void AcknowledgeDeferredPlanning(string pairId, IReadOnlyList<DeferredPlanning> page,
         Func<string, bool> settled, Func<string, bool>? emptyPath = null,
-        Action<DeferredPlanning>? acknowledged = null) => InStore(() =>
+        Action<DeferredPlanning>? acknowledged = null, Action<int>? respellingDecisions = null) => InStore(() =>
     {
         var pair = PairNo(pairId);
         if (pair is null) return;
@@ -196,6 +196,7 @@ public sealed partial class SqliteStateStore
         foreach (var entry in rows) SettleDeferredRow(tx, pair.Value, entry, retired);
         tx.Commit();
         foreach (var row in retired) acknowledged?.Invoke(row);
+        respellingDecisions?.Invoke(rows.Count(entry => entry.Respell is not null));
     });
 
     // An empty-path retirement is structural: it may only retire work for an entity that has no current row

@@ -28,7 +28,7 @@ internal static partial class AutoSyncChecks
         await Deferred_BacklogWaitsForEarliestAsync();
         await Deferred_NoProgressBacksOffAsync();
         await Deferred_FreshSignalsInterruptBackoffAsync();
-        await Deferred_OuterFailureReplacesBackoffAsync();
+        await Deferred_ReviewRegressionsAsync();
         await RefusedOrAccess_HeldUntilKickAsync();
         await ClashingLayout_HeldAtStartupAsync();
         await SafetyPoll_RunsAndRebuildsAsync();
@@ -263,13 +263,14 @@ internal static partial class AutoSyncChecks
         await rig.StartAsync();
         await rig.ParkedAsync(AutoStatus.Waiting);
         var first = rig.State("p1").RetryAt - rig.Clock.GetUtcNow();
-        Require(first == Settings.AutoRetryDelay, "a failed run retries after AutoRetryDelay");
-        rig.Clock.Advance(Settings.AutoRetryDelay);
+        var firstTier = FailureRetryOwner.Failed(0, rig.Clock.GetUtcNow()).RetryAfter - rig.Clock.GetUtcNow();
+        Require(first == firstTier, "a failed run retries after the shared first tier");
+        rig.Clock.Advance(firstTier);
         await rig.ParkedAsync(AutoStatus.Waiting);
         var second = rig.State("p1").RetryAt - rig.Clock.GetUtcNow();
         var measuredDebt = FailureRetryOwner.RunFailureState(rig._store, "p1");
         Console.WriteLine($"RETRY MEASUREMENT first={first}; second={second}; ownerAttempts={measuredDebt?.Attempts}; ownerDue={measuredDebt?.RetryAfter}; runs={rig.Run.Runs("p1")}");
-        Require(second == Settings.AutoRetryDelay * 2, "the retry delay doubles");
+        Require(second == FailureRetryOwner.Failed(1, rig.Clock.GetUtcNow()).RetryAfter - rig.Clock.GetUtcNow(), "the retry delay doubles");
         rig.Clock.Advance(second!.Value);
         await rig.ParkedAsync(AutoStatus.Idle);
         rig.Run.Then(failed);
@@ -277,7 +278,7 @@ internal static partial class AutoSyncChecks
         await rig.ParkedAsync(AutoStatus.Waiting);
         rig.Clock.Advance(Settings.ChangeQuietWindow);
         await rig.ParkedAsync(AutoStatus.Waiting);
-        Require(rig.State("p1").RetryAt - rig.Clock.GetUtcNow() == Settings.AutoRetryDelay,
+        Require(rig.State("p1").RetryAt - rig.Clock.GetUtcNow() == firstTier,
             "a complete run resets the backoff");
         Pass("Failed_RetryBacksOffAndResets");
     }
@@ -351,12 +352,14 @@ internal static partial class AutoSyncChecks
                 rig.WatchA.Parked && rig.WatchB.Parked && rig.Clock.ActiveTimers == 1, "high-tier deferred wait is armed");
             var deadline = rig.State("p1").RetryAt!.Value;
             rig.Clock.Advance(TimeSpan.FromSeconds(30));
+            await rig.ParkedAsync(AutoStatus.Waiting);
             Require(rig.Run.Runs("p1") == 1, "without a new signal the high-tier backoff holds");
             (side == Side.A ? rig.WatchA : rig.WatchB).Signal();
             await Until(() => rig.State("p1").RetryAt is null && rig.WatchA.Parked && rig.WatchB.Parked &&
                 rig.Clock.ActiveTimers == 1, "fresh endpoint signal enters the existing debounce");
             var almostQuiet = Settings.ChangeQuietWindow - TimeSpan.FromMilliseconds(1);
             rig.Clock.Advance(almostQuiet);
+            await rig.ParkedAsync(AutoStatus.Waiting);
             Require(rig.Run.Runs("p1") == 1, "fresh work waits for the quiet window");
             rig.Clock.Advance(TimeSpan.FromMilliseconds(1));
             await Until(() => rig.Run.Runs("p1") == 2 && rig.State("p1").RetryAt is not null &&
@@ -364,6 +367,7 @@ internal static partial class AutoSyncChecks
             Require(rig.Clock.GetUtcNow() < deadline && rig._store.SyncRetryAt("p1", "sleeping.txt")?.RetryAfter == due,
                 "either endpoint wakes before the deferred deadline without advancing sleeping item retries");
             rig.Clock.Advance(TimeSpan.FromSeconds(30));
+            await rig.ParkedAsync(AutoStatus.Waiting);
             Require(rig.Run.Runs("p1") == 2, "the consumed signal cannot recreate a ten-second retry spin");
         }
         Pass("Deferred_FreshSignalsInterruptBackoff");
@@ -382,7 +386,7 @@ internal static partial class AutoSyncChecks
         var deferredDeadline = rig.State("p1").RetryAt!.Value;
         var expected = FailureRetryOwner.Failed(0, rig.Clock.GetUtcNow());
         rig.ThrowEligibility = true;
-        // A watch fault returns to the outer eligibility check without clearing the deferred deadline.
+        // A watch fault returns to the outer eligibility check; its failure must install a real cooldown.
         rig.WatchA.Fail(new IOException("one-shot watch fault"));
         await Until(() => FailureRetryOwner.RunFailureState(rig._store, "p1") == expected &&
             rig.WatchA.Disposed && rig.WatchB.Disposed && rig.Clock.ActiveTimers == 1,
@@ -394,6 +398,7 @@ internal static partial class AutoSyncChecks
         rig.WatchA.Signal();
         rig.WatchB.Signal();
         rig.Clock.Advance(expected.RetryAfter - rig.Clock.GetUtcNow() - TimeSpan.FromMilliseconds(1));
+        await rig.ParkedAsync(AutoStatus.Waiting);
         Require(rig.Run.Runs("p1") == 1 && rig.Watches.Created == 2,
             "signals from retired watches cannot bypass the real-failure cooldown or re-arm early");
         rig.Clock.Advance(TimeSpan.FromMilliseconds(1));
@@ -403,6 +408,7 @@ internal static partial class AutoSyncChecks
         await rig.ParkedAsync(AutoStatus.Idle);
         Require(rig.Run.Runs("p1") == 2, "outer recovery produces exactly one retry run");
         rig.Clock.Advance(Settings.ChangeQuietWindow);
+        await rig.ParkedAsync(AutoStatus.Idle);
         Require(rig.Run.Runs("p1") == 2, "consumed startup signals cannot produce a duplicate recovery run");
         Pass("Deferred_OuterFailureReplacesBackoff");
     }
