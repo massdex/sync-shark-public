@@ -943,7 +943,7 @@ public sealed partial class SyncRun : ISyncRun
         var touched = new List<string>(scan.Touched(recoveryPaths.Concat(retryPaths)
             .Concat(decisions?.Keys ?? Enumerable.Empty<string>())));
         if (options?.AutoSyncFreshDelta == true)
-            RunTrace.Emit($"autosync: fresh delta {scan.Touched([]).Distinct(StringComparer.OrdinalIgnoreCase).Count()} paths; retry follow-ups {recoveryPaths.Concat(retryPaths).Distinct(StringComparer.OrdinalIgnoreCase).Count()} paths; backlog left to reconciliation: {_store.CountDeferredPlanning(pairId)}");
+            RunTrace.Emit($"autosync: fresh delta {scan.Touched([]).Distinct(StringComparer.OrdinalIgnoreCase).Count()} paths; retry follow-ups {recoveryPaths.Concat(retryPaths).Distinct(StringComparer.OrdinalIgnoreCase).Count()} paths; backlog left to reconciliation: {(_store as SqliteStateStore)?.CountDeferredPlanning(pairId) ?? 0}");
         // Finding 3: a whole-root read retry expands planning to the whole pair only in the run where
         // that debt actually settles. While another root is unreadable its empty-path failure keeps
         // every row protected, and no retry can retire, so an earlier sleeping retry on the healthy
