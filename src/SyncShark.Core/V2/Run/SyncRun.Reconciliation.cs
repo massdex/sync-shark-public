@@ -54,7 +54,14 @@ public sealed partial class SyncRun
 
     private static void LogScope(StateMonitorDecision decision) => RunTrace.Emit(string.Format(
         CultureInfo.InvariantCulture, MessageCatalog.Default.Template("reconciliation-scope-trace"), decision.Trigger,
-        decision.UnknownScope is null ? "root" : string.Join(",", decision.UnknownScope.ReadScopes)));
+        ScopeText(decision)));
+
+    // The root scope is the empty subtree; no decided scope is the same root.
+    private static string ScopeText(StateMonitorDecision decision)
+    {
+        var scopes = decision.UnknownScope?.ReadScopes.ToArray() ?? Array.Empty<string>();
+        return scopes.Length == 0 || scopes.Contains(string.Empty) ? "root" : string.Join(",", scopes);
+    }
 
     private static void ReportPhase(IProgress<RunProgress> progress, string phase)
     {
