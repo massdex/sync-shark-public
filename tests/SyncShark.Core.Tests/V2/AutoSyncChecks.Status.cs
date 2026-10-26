@@ -210,7 +210,16 @@ internal static partial class AutoSyncChecks
                 HistoryReads++;
                 if (HistoryDelay > TimeSpan.Zero) Thread.Sleep(HistoryDelay);
             }
-            return targetMethod!.Invoke(_inner, args);
+            try
+            {
+                return targetMethod!.Invoke(_inner, args);
+            }
+            catch (TargetInvocationException error) when (error.InnerException is not null)
+            {
+                // A proxied call must surface the store's own exception, not reflection's wrapper;
+                // the production path has no reflection layer.
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw();
+            }
         }
     }
 }
