@@ -71,14 +71,8 @@ public sealed partial class SyncRun
             var observedB = await ObserveAsync(_endpoints.Writer(pair.B), caseChoice ? notice.ConflictVersions!.B.Path : notice.Path, token).ConfigureAwait(false);
             if (caseChoice && notice.ConflictVersions!.A.Kind == ItemKind.Folder &&
                 notice.ConflictOperation is { } saved)
-            {
-                if (!string.Equals(decisionToken, Token(noticeId, observedA, observedB), StringComparison.Ordinal))
-                    throw new SyncRunRefusedException(DecisionChangedSinceLooked);
-                if (saved.Choice != (winner == Side.A ? NoticeChoices.KeepA : NoticeChoices.KeepB))
-                    throw new SyncRunRefusedException("Finish the saved spelling choice before choosing the other side.");
-                return FolderSpellingReport(pairId,
-                    await ApplyConflictOperationAsync(pair, noticeId, saved, token).ConfigureAwait(false));
-            }
+                return await ResumeFolderSpellingChoiceAsync(pair, noticeId, saved, decisionToken,
+                    observedA, observedB, winner, token).ConfigureAwait(false);
             if (caseChoice && !CaseChoiceStillCurrent(pairId, notice, observedA, observedB))
             {
                 RefreshStaleSpellingNotice(notice, observedA, observedB);
@@ -94,22 +88,38 @@ public sealed partial class SyncRun
                 notice.NoticeId, sink, token);
             if (caseChoice)
                 await CloseProvedSpellingChoiceAsync(pair, notice, observedA!, observedB!, winner, token).ConfigureAwait(false);
-            // The notice closes only on evidence, so a still-open one means the decision did not take effect.
-            if (!_store.UnresolvedNotices(pairId).Any(open => open.NoticeId == notice.NoticeId)) return report;
-            var (refusedA, refusedB) = ProviderRefusedPaths.Load(_store, pair);
-            var refused = _store.Live(pair.A.RootId, [notice.Path]).Any(refusedA.Contains) ||
-                _store.Live(pair.B.RootId, [notice.Path]).Any(refusedB.Contains);
-            var reason = DecisionNotApplied + ": " + (refused ? ProviderNameRefusedException.Detail : NotAppliedReason(pairId, notice.Path));
-            if (refused)
-                return report with { DecisionFailureReason = reason };
-            return report with
-            {
-                Failures = report.Failures.Append(new ActionResult(notice.NoticeId!, Outcome.Failed, null, null,
-                    null, reason)).Take(_settings.FailureSampleLimit).ToArray(),
-                DecisionFailureReason = reason,
-                Failed = report.Failed + 1
-            };
+            return DecisionReport(pair, notice, report);
         }, ct, admissionPairId: pairId);
+
+    private RunReport DecisionReport(PairDef pair, Notice notice, RunReport report)
+    {
+        // The notice closes only on evidence, so a still-open one means the decision did not take effect.
+        if (!_store.UnresolvedNotices(pair.PairId).Any(open => open.NoticeId == notice.NoticeId)) return report;
+        var (refusedA, refusedB) = ProviderRefusedPaths.Load(_store, pair);
+        var refused = _store.Live(pair.A.RootId, [notice.Path]).Any(refusedA.Contains) ||
+            _store.Live(pair.B.RootId, [notice.Path]).Any(refusedB.Contains);
+        var reason = DecisionNotApplied + ": " + (refused ? ProviderNameRefusedException.Detail : NotAppliedReason(pair.PairId, notice.Path));
+        if (refused)
+            return report with { DecisionFailureReason = reason };
+        return report with
+        {
+            Failures = report.Failures.Append(new ActionResult(notice.NoticeId!, Outcome.Failed, null, null,
+                null, reason)).Take(_settings.FailureSampleLimit).ToArray(),
+            DecisionFailureReason = reason,
+            Failed = report.Failed + 1
+        };
+    }
+
+    private async Task<RunReport> ResumeFolderSpellingChoiceAsync(PairDef pair, string noticeId,
+        ConflictNoticeOperation saved, string decisionToken, ItemState? a, ItemState? b, Side winner, CancellationToken ct)
+    {
+        if (!string.Equals(decisionToken, Token(noticeId, a, b), StringComparison.Ordinal))
+            throw new SyncRunRefusedException(DecisionChangedSinceLooked);
+        if (saved.Choice != (winner == Side.A ? NoticeChoices.KeepA : NoticeChoices.KeepB))
+            throw new SyncRunRefusedException("Finish the saved spelling choice before choosing the other side.");
+        return FolderSpellingReport(pair.PairId,
+            await ApplyConflictOperationAsync(pair, noticeId, saved, ct).ConfigureAwait(false));
+    }
 
     private async Task CloseProvedSpellingChoiceAsync(PairDef pair, Notice notice, ItemState a, ItemState b,
         Side winner, CancellationToken ct)

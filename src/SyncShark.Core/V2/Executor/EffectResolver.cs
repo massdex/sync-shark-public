@@ -15,7 +15,6 @@ internal static partial class EffectResolver
         CancellationToken ct, Func<Exception, bool> isStateDamage, TimeSpan? unknownCommitGracePeriod = null, TimeProvider? timeProvider = null,
         ProviderJobCheckCache? jobChecks = null, string? materializationBlock = null,
         ItemState? historicalDeleteSource = null, RecoveryRef? preserved = null, bool deleteRestorePending = true)
-
     {
         ArgumentNullException.ThrowIfNull(isStateDamage);
         // Restore creates only: without the atomic receipt we cannot claim ownership. Abandon the
