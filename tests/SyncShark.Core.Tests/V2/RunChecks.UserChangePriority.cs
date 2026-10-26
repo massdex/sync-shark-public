@@ -4,14 +4,15 @@ internal static partial class RunChecks
 {
     private static async Task UserChangePriorityChecksAsync()
     {
-        await UrgentIncidentAsync();
+        await ReconciliationUserChangePriorityAsync();
+        await LegacyPriorityCleanupAsync();
         await UrgentBoundsAsync();
         await UrgentFairnessAsync();
         await UrgentMutationAsync();
         Console.WriteLine("PASS UserChangePriority: incident, retry, restart, handoff, rotation, gates and bounds");
     }
 
-    private static async Task UrgentIncidentAsync()
+    private static async Task LegacyPriorityCleanupAsync()
     {
         var folder = FixtureFolder("urgent-incident");
         var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
@@ -37,7 +38,7 @@ internal static partial class RunChecks
             store.Dispose();
             store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             Require(store.UrgentPending(fx.Pair.PairId) == count, "urgent provenance survives store reopen");
-            await VerifyPriorityAsync(store, fx, expected);
+            await VerifyLegacyPriorityProofsAsync(store, fx, expected);
             Require(store.UrgentPending(fx.Pair.PairId) == count, "index planning handoff preserves urgent provenance");
             var run = new SyncRun(store, NewExecutor(store), fx.Provider, Settings, TimeProvider.System);
             var applied = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
@@ -90,7 +91,7 @@ internal static partial class RunChecks
             "rename and move retire their old remote spellings");
     }
 
-    private static async Task VerifyPriorityAsync(SqliteStateStore store, Fixture fx, string[] expected)
+    private static async Task VerifyLegacyPriorityProofsAsync(SqliteStateStore store, Fixture fx, string[] expected)
     {
         var io = new UrgentCheckIo(fx.A) { FailPath = "Edit" };
         var gaps = (ILocalGapStore)store;
