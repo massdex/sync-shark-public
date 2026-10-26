@@ -354,6 +354,15 @@ internal sealed class FakeSyncRun : ISyncRun
 
     public int Runs(string pairId) => Started.Count(id => id == pairId);
 
+    internal ConcurrentQueue<string> MonitorOrder { get; } = new();
+
+    Task<bool> ISyncRun.MonitorAsync(string pairId, IProgress<RunProgress> progress, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        MonitorOrder.Enqueue("monitor:" + pairId);
+        return Task.FromResult(false);
+    }
+
     // The real run owns returned-report failure persistence; PairLoop only reads this debt.
     internal IStateStore? FailureStore { get; set; }
     internal TimeProvider FailureClock { get; set; } = TimeProvider.System;
@@ -380,6 +389,7 @@ internal sealed class FakeSyncRun : ISyncRun
 
     public async Task<RunReport> IncrementalAsync(string pairId, IProgress<RunProgress> p, CancellationToken ct)
     {
+        MonitorOrder.Enqueue("incremental:" + pairId);
         Entered.Enqueue(pairId);
         await _gate.WaitAsync(ct);
         try

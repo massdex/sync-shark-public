@@ -122,6 +122,7 @@ public sealed partial class SqliteStateStore
             command.Parameters.AddWithValue("$gap", 1);
             command.Parameters.AddWithValue("$done", 1);
             command.Parameters.AddWithValue("$after", "");
+            command.Parameters.AddWithValue("$observed", "[]");
             using var reader = command.ExecuteReader();
             var complete = true;
             while (reader.Read())

@@ -7,6 +7,7 @@ public sealed partial class SyncRun
     {
         var a = await ReadSide(pair.A, Side.A);
         var b = await ReadSide(pair.B, Side.B);
+        ReconciliationCoverage.ObserveBatch(batch, a, b);
         return new(a, b) { Unknown = batch.Remaining };
 
         async Task<SideScan> ReadSide(RootDef root, Side side)

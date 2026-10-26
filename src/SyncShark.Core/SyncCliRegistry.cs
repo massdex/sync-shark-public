@@ -302,7 +302,7 @@ public static class SyncCliRegistry
             "the product state or the running application", "direct|running-application", None),
         new("index run", "index run --root <exact-local-root-id> --yes [--timeout-seconds <seconds>]",
             SyncCliRequestKind.State, "yes",
-            "one independent inventory indexing pass for exactly one retained local root; it runs beside a sync " +
+            "one independent rehash indexing pass for exactly one retained local root; gap repair belongs to reconciliation; it runs beside a sync " +
             "run and never joins or blocks one, and a root whose every pair is paused or disabled is reported " +
             "paused without resuming anything; bounded user-change proofs bypass idle/AC, bulk proofs do not",
             "the product state or the running application and the exact local root",

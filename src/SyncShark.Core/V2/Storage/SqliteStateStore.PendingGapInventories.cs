@@ -21,8 +21,8 @@ public sealed partial class SqliteStateStore
     internal bool PendingGapInventory(string rootId) => InStore(() =>
         StoreSchema.Scalar(_connection, null,
             "SELECT 1 FROM local_gap g JOIN root r ON r.root_no=g.root_no WHERE r.root_id=$id " +
-            "AND (g.inventory_pending=1 OR g.discovery_done=0 OR EXISTS " +
-            "(SELECT 1 FROM local_gap_item i WHERE i.root_no=g.root_no LIMIT 1));",
+            "AND (g.inventory_pending=1 OR g.discovery_done=0 OR EXISTS (" +
+            "SELECT 1 FROM local_gap_item i WHERE i.root_no=g.root_no LIMIT 1));",
             ("$id", rootId)) is not null);
 
     // Root-sized restart work, not a walk through the per-file legacy verification queue.

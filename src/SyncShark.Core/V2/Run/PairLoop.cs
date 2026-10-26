@@ -262,6 +262,8 @@ internal sealed partial class PairLoop
             Publish(AutoStatus.Running, null);
             using var log = _in.BeginRunLog?.Invoke(_pairId, _wakeCause);
             _wakeCause = "watch-signal";
+            // Includes safety-poll runs: register repair coverage before incremental preparation.
+            await _in.Run.MonitorAsync(_pairId, NoProgress, source.Token).ConfigureAwait(false);
             AfterReport(await _in.Run.IncrementalAsync(_pairId, NoProgress, source.Token).ConfigureAwait(false));
             _deadWatchRebuilds = 0;
         }

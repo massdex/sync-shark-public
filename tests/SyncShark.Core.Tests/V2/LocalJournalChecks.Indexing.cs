@@ -8,6 +8,8 @@ internal static partial class LocalJournalChecks
     // The durable handoff itself (local_rehash) is the real store table.
     private static async Task IndexingRunsAsync(string folder)
     {
+        await ReconciliationOwnsGapWorkAsync(Path.Combine(folder, "reconciliation-gap-owner"));
+        await FullWalkDoesNotCreateGapAsync(Path.Combine(folder, "full-walk-no-gap"));
         await IndexIndependentOfCompletedSyncAsync(Path.Combine(folder, "index-sync-independent"));
         await IndexPerRootStopAndResumeAsync(Path.Combine(folder, "index-per-root"));
         await IndexDirectRunCancellationAsync(Path.Combine(folder, "index-direct"));

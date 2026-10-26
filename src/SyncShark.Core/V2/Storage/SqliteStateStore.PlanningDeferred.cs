@@ -201,7 +201,11 @@ public sealed partial class SqliteStateStore
             var row = entry.Row;
             if (row.AllAliases && entry.Settled && !row.AliasUnsettled)
             {
-                if (AcknowledgePlanningVersion(tx, pair.Value, row)) retired.Add(row);
+                if (AcknowledgePlanningVersion(tx, pair.Value, row))
+                {
+                    AcknowledgeReconciliationGap(tx, row);
+                    retired.Add(row);
+                }
                 else blockers.Add((row, "newer planning version"));
             }
             else

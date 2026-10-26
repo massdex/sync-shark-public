@@ -6,8 +6,6 @@ internal sealed class LocalIndexingRuns : IAsyncDisposable
     private readonly IStateStore _store;
     private readonly Func<RootDef, CancellationToken, Task<int>> _inventory;
     private readonly LocalGapWorker _gaps;
-    private readonly ILocalGapIo _io;
-    private readonly Func<RootDef, NtfsUsnCheckpoint?> _checkpoint;
     private readonly object _gate = new();
     private readonly Dictionary<string, (CancellationTokenSource Stop, Task<string> Task)> _roots = new(StringComparer.Ordinal);
     private CancellationTokenSource? _stop;
@@ -18,8 +16,7 @@ internal sealed class LocalIndexingRuns : IAsyncDisposable
     internal LocalIndexingRuns(IStateStore store, Func<RootDef, CancellationToken, Task<int>> inventory,
         LocalGapWorker gaps, ILocalGapIo io, Func<RootDef, NtfsUsnCheckpoint?>? checkpoint = null)
     {
-        _store = store; _inventory = inventory; _gaps = gaps; _io = io;
-        _checkpoint = checkpoint ?? (root => NtfsUsnJournal.TryReadCheckpoint(root.RootPath, out var value) ? value : null);
+        _store = store; _inventory = inventory; _gaps = gaps;
     }
 
     internal void Start(Func<PairDef, bool> paused, Action<string> wake)
@@ -38,8 +35,7 @@ internal sealed class LocalIndexingRuns : IAsyncDisposable
     private bool Active(PairDef pair) => pair.Enabled && !_paused(pair) && !_store.PairPaused(pair.PairId);
     private bool Active(RootDef root) => _store.Pairs().Any(pair =>
         (pair.A.RootId == root.RootId || pair.B.RootId == root.RootId) && Active(pair));
-    private bool Debt(RootDef root) => (_store is ILocalGapStore gaps && gaps.HasGapProtection(root.RootId)) ||
-        _store.RehashPendingCount(root.RootId) != 0;
+    private bool Debt(RootDef root) => _store.RehashPendingCount(root.RootId) != 0;
 
     private async Task HostAsync(CancellationToken ct)
     {
@@ -143,7 +139,7 @@ internal sealed class LocalIndexingRuns : IAsyncDisposable
                 if (!Debt(root)) return "complete";
                 if (_store.IndexRetryDue(root.RootId))
                 {
-                    try { await PassAsync(root, continuous, ct).ConfigureAwait(false); }
+                    try { await PassAsync(root, ct).ConfigureAwait(false); }
                     catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                     catch (Exception error) when (!_gaps.IsStateDamage(error))
                     {
@@ -184,19 +180,10 @@ internal sealed class LocalIndexingRuns : IAsyncDisposable
         catch (OperationCanceledException) when (!ct.IsCancellationRequested && wait.IsCancellationRequested) { }
     }
 
-    private async Task PassAsync(RootDef root, bool continuous, CancellationToken ct)
+    private async Task PassAsync(RootDef root, CancellationToken ct)
     {
         var dirtyBefore = _store.IndexPlanningWatermark(root.RootId);
-        if (_store is ILocalGapStore gaps)
-        {
-            if (continuous) _gaps.Start(root);
-            else if (gaps.GapEpoch(root.RootId) is { } epoch)
-                await Task.WhenAll(Task.Run(() => _gaps.Discover(root, epoch, ct), ct),
-                    _gaps.HashPage(root, epoch, ct)).ConfigureAwait(false);
-            LocalGapWorker.PromoteDiscovery(gaps, root, ct, _gaps.IsStateDamage);
-            LocalGapWorker.Promote(gaps, _store, _io, root, gaps.GapResultWatermark(root.RootId),
-                _checkpoint(root), _ => true, _ => { }, ct, _gaps.IsStateDamage);
-        }
+        // Reconciliation owns gap discovery and settlement; this lane verifies explicit rehash debt only.
         await _inventory(root, ct).ConfigureAwait(false);
         // Selection is bounded by entities; the existing planning owner pages aliases later.
         var ready = _store.RehashCandidates(root.RootId, 512, _store.RehashWatermark(root.RootId), needsVerification: false);

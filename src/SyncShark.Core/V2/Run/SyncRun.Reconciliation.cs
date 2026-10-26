@@ -6,7 +6,7 @@ public sealed partial class SyncRun
     private readonly AsyncLocal<string?> _reconciliationRunId = new();
 
     internal Task<RunReport> ReconcileScopeAsync(string pairId, StateMonitorDecision decision,
-        IProgress<RunProgress> progress, CancellationToken ct)
+        IProgress<RunProgress>? progress, CancellationToken ct)
     {
         var id = "reconcile-" + Guid.NewGuid().ToString("N");
         var active = new ActiveReconciliation(decision, "rc-" + id);
@@ -22,28 +22,34 @@ public sealed partial class SyncRun
             _reconciliationRunId.Value = id;
             try
             {
-                return await RunExclusiveAsync(progress, async (sink, token) =>
-                {
-                    // Registration is synchronous; metadata selection must not block the monitor caller.
-                    await Task.Yield();
-                    token.ThrowIfCancellationRequested();
-                    return await ReconcileScopeBodyAsync(pairId, active, sink, token);
-                },
+                return await RunExclusiveAsync(progress, (sink, token) => ReconcileScopeBodyAsync(pairId, active, sink, token),
                     ct, historyPairId: pairId, admissionPairId: pairId, admitBody: false);
             }
             finally
             {
-                lock (_stopGate) _reconciling.Remove(pairId);
                 _reconciliationRunId.Value = null;
-                try
-                {
-                    if (_store is SqliteStateStore sql)
-                    {
-                        sql.ClearRemovalObservation(active.Session + ":work");
-                        sql.ClearRemovalObservation(active.Session + ":deferred");
-                    }
-                }
-                catch (Exception error) { RunOutput.Observe(error); }
+                FinishReconciliationScope(pairId, active);
+            }
+        }
+    }
+
+    private void FinishReconciliationScope(string pairId, ActiveReconciliation active)
+    {
+        try
+        {
+            if (_store is SqliteStateStore sql)
+            {
+                sql.ClearRemovalObservation(active.Session + ":work");
+                sql.ClearRemovalObservation(active.Session + ":deferred");
+            }
+        }
+        catch (Exception error) { RunOutput.Observe(error); }
+        finally
+        {
+            lock (_stopGate)
+            {
+                _reconciling.Remove(pairId);
+                active.Drained.TrySetResult();
             }
         }
     }
@@ -51,6 +57,9 @@ public sealed partial class SyncRun
     private async Task<RunReport> ReconcileScopeBodyAsync(string pairId, ActiveReconciliation active,
         IProgress<RunProgress> progress, CancellationToken ct)
     {
+        // Register scope and cancellable work synchronously, but never run selection on the monitor caller.
+        await Task.Yield();
+        ct.ThrowIfCancellationRequested();
         if (!_store.FirstSyncDone(pairId)) throw new SyncRunRefusedException("Review and apply the first sync first.");
         var pair = _store.Pair(pairId) ?? throw new SyncRunRefusedException("No pair " + pairId);
         var sql = _store as SqliteStateStore ?? throw new InvalidOperationException(MessageCatalog.Default.Template("reconciliation-staging-required"));

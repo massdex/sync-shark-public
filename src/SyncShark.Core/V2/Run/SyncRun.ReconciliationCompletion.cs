@@ -31,8 +31,11 @@ public sealed partial class SyncRun
                 completion.Step(() => sql.CompleteGapInventory(rootId, epoch));
             if (active.Decision.Trigger == ReconciliationTrigger.DropboxReset)
                 foreach (var (rootId, basis) in active.ListingBases)
-                    completion.Step(() => _store.CompleteGeneration(
-                        _store.BeginGeneration(rootId, "delta"), basis, true));
+                    completion.Step(() =>
+                    {
+                        _store.CompleteGeneration(_store.BeginGeneration(rootId, "delta"), basis, true);
+                        lock (_stopGate) _pendingResets.Remove((pair.PairId, rootId));
+                    });
         }
         completion.Step(_store.Prune);
         completion.Step(() => sql.ClearRemovalObservation(active.Session + ":work"));

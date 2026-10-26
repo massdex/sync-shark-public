@@ -4,6 +4,7 @@ namespace Massdex.SyncShark.V2;
 internal sealed record ReconcileBatch(string Session, IReadOnlyList<string> Paths,
     IReadOnlySet<string> ObjectIdsA, IReadOnlySet<string> ObjectIdsB, Func<Side, string, bool> Remaining)
 {
+    internal SqliteStateStore.ReconciliationGapCoverage? GapCoverage { get; set; }
     internal IReadOnlyList<ItemState> RowsA { get; init; } = [];
     internal IReadOnlyList<ItemState> RowsB { get; init; } = [];
     internal Dictionary<string, string> Dispositions { get; } = new(StringComparer.OrdinalIgnoreCase);

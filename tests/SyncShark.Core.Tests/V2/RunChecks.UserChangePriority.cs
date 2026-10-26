@@ -4,14 +4,15 @@ internal static partial class RunChecks
 {
     private static async Task UserChangePriorityChecksAsync()
     {
-        await UrgentIncidentAsync();
+        await ReconciliationUserChangePriorityAsync();
+        await LegacyPriorityCleanupAsync();
         await UrgentBoundsAsync();
         await UrgentFairnessAsync();
         await UrgentMutationAsync();
         Console.WriteLine("PASS UserChangePriority: incident, retry, restart, handoff, rotation, gates and bounds");
     }
 
-    private static async Task UrgentIncidentAsync()
+    private static async Task LegacyPriorityCleanupAsync()
     {
         var folder = FixtureFolder("urgent-incident");
         var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
@@ -37,7 +38,7 @@ internal static partial class RunChecks
             store.Dispose();
             store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             Require(store.UrgentPending(fx.Pair.PairId) == count, "urgent provenance survives store reopen");
-            await VerifyPriorityAsync(store, fx, expected);
+            await VerifyLegacyPriorityProofsAsync(store, fx, expected);
             Require(store.UrgentPending(fx.Pair.PairId) == count, "index planning handoff preserves urgent provenance");
             var run = new SyncRun(store, NewExecutor(store), fx.Provider, Settings, TimeProvider.System);
             var applied = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
@@ -90,7 +91,7 @@ internal static partial class RunChecks
             "rename and move retire their old remote spellings");
     }
 
-    private static async Task VerifyPriorityAsync(SqliteStateStore store, Fixture fx, string[] expected)
+    private static async Task VerifyLegacyPriorityProofsAsync(SqliteStateStore store, Fixture fx, string[] expected)
     {
         var io = new UrgentCheckIo(fx.A) { FailPath = "Edit" };
         var gaps = (ILocalGapStore)store;
@@ -104,10 +105,14 @@ internal static partial class RunChecks
         await worker.HashPage(fx.Pair.A, epoch, default);
         Require(io.Attempts.Count == count, "failed urgent hash obeys backoff and does not loop");
         store.RequestIndexRetry(fx.Pair.A.RootId);
-        await using var indexing = new LocalIndexingRuns(store, (_, _) => Task.FromResult(0), worker, io, _ => PriorityCheckpoint);
-        await indexing.RunAsync(fx.Pair.A, default);
+        // Retained legacy-proof compatibility check, not a production indexing entry point.
+        // ReconciliationOwnership checks separately that LocalIndexingRuns cannot invoke these helpers.
+        await worker.HashPage(fx.Pair.A, epoch, default);
+        LocalGapWorker.PromoteDiscovery(gaps, fx.Pair.A, default, StorageFailureClassifier.IsStateDamage);
+        LocalGapWorker.Promote(gaps, store, io, fx.Pair.A, gaps.GapResultWatermark(fx.Pair.A.RootId),
+            PriorityCheckpoint, _ => true, _ => { }, default, StorageFailureClassifier.IsStateDamage);
         Require(expected.All(path => !store.ProtectionBatch(fx.Pair.A.RootId, ItemFlags.NeedsRehash, [path])[0].Covered),
-            "real indexing run publishes verified proofs and hands them to planning");
+            "retained legacy proof helpers publish verified proofs and hand them to planning");
         var budget = new LocalGapIo(store, Settings, new HashSet<string>(), () => true);
         Require(!await budget.Budget(1, default) && await budget.Budget(1, default, urgent: true),
             "production byte budget retains the bulk activity gate but bypasses it for urgent work");

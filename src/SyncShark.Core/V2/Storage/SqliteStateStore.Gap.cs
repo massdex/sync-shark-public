@@ -179,7 +179,9 @@ public sealed partial class SqliteStateStore : ILocalGapStore
 
     internal void CompleteGapInventory(string rootId, string epoch) => InIndexingStore(() =>
         StoreSchema.Execute(_connection, null,
-            "UPDATE local_gap SET inventory_pending=0 WHERE root_no=(SELECT root_no FROM root WHERE root_id=$r) AND epoch=$e;",
+            "UPDATE local_gap SET inventory_pending=0,discovery_done=1,worker_done=1,after_object=char(65535),worker_after=char(65535) " +
+            "WHERE root_no=(SELECT root_no FROM root WHERE root_id=$r) AND epoch=$e AND NOT EXISTS(" +
+            "SELECT 1 FROM local_gap_item i WHERE i.root_no=local_gap.root_no);",
             ("$r", rootId), ("$e", epoch)));
 
     internal void SettleGapInventory(long completedGeneration, bool cursorHeldForEvidence = false) => InIndexingStore(() =>
@@ -212,12 +214,16 @@ public sealed partial class SqliteStateStore : ILocalGapStore
         // A later gap requires a new pass even if an earlier epoch is still unfinished.
         // Old entity obligations survive replacement; their staged hashes become ineligible.
         using var tx = _connection.BeginTransaction();
+        var epoch = Guid.NewGuid().ToString("N");
         StoreSchema.Execute(_connection, tx,
             "INSERT INTO local_gap(root_no,epoch,journal_cursor,boundary,trust_usn,reason) VALUES($r,$e,$c,$b,$t,$why) " +
             "ON CONFLICT(root_no) DO UPDATE SET epoch=excluded.epoch,journal_cursor=excluded.journal_cursor," +
             "boundary=excluded.boundary,trust_usn=excluded.trust_usn,reason=excluded.reason,after_object='',discovery_done=0,worker_after='',worker_done=0;",
-            ("$r", root.Value), ("$e", Guid.NewGuid().ToString("N")), ("$c", journalCursor),
+            ("$r", root.Value), ("$e", epoch), ("$c", journalCursor),
             ("$b", boundary), ("$t", trustFileUsn ? 1 : 0), ("$why", reason));
+        StoreSchema.Execute(_connection, tx,
+            "UPDATE local_gap_item SET epoch=$e,metadata_ready=0,metadata_stamp=NULL,hash=NULL,proof_json=NULL,result_seq=0 " +
+            "WHERE root_no=$r;", ("$e", epoch), ("$r", root.Value));
         PublishGapInventory(tx, root.Value, journalCursor, protect);
         tx.Commit();
     });

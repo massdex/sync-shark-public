@@ -104,6 +104,8 @@ internal sealed class LocalChangeWatch : IChangeWatch
     private void OnError(object sender, ErrorEventArgs e)
     {
         Signal();
+        if (e.GetException() is InternalBufferOverflowException)
+            RunTrace.Emit(MessageCatalog.Default.Template("local-watch-replay"));
         try
         {
             using var lease = PilotDirectoryLease.Open(_rootPath, _identity);

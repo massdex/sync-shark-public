@@ -231,12 +231,17 @@ public sealed partial class SyncRun : ISyncRun
     public async Task StopAsync()
     {
         KeyValuePair<CancellationTokenSource, (TaskCompletionSource Done, bool Preserve)>[] active;
-        lock (_stopGate) active = _active.ToArray();
+        Task[] reconciliations;
+        lock (_stopGate)
+        {
+            active = _active.ToArray();
+            reconciliations = _reconciling.Values.Select(scope => scope.Drained.Task).ToArray();
+        }
         // Signal every worker before waiting for any one pair to drain.
         var signals = new List<Task>();
         foreach (var entry in active.Where(entry => !entry.Value.Preserve))
             try { signals.Add(entry.Key.CancelAsync()); } catch (ObjectDisposedException) { }
-        await Task.WhenAll(signals.Concat(active.Select(entry => entry.Value.Done.Task))).ConfigureAwait(false);
+        await Task.WhenAll(signals.Concat(active.Select(entry => entry.Value.Done.Task)).Concat(reconciliations)).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -797,6 +802,9 @@ public sealed partial class SyncRun : ISyncRun
         string? resolvingNoticeId, IProgress<RunProgress> progress, CancellationToken ct, RunOptions? options)
     {
         using var pause = PairPause.Begin(_store, pairId);
+        using var gapCoverage = options?.Batch is not null && _store is SqliteStateStore sql
+            ? sql.BeginReconciliationGapCoverage(pairId) : null;
+        if (options?.Batch is { } batch) batch.GapCoverage = gapCoverage;
         var prepared = await PrepareIncrementalAsync(pairId, decisions, resolvingNoticeId, progress, ct, options);
         if (prepared.Completed is { Failed: 0 } && prepared.Plan is not null) ClosePlanBoundNotice(pairId);
         return prepared.Completed ?? await prepared.Execute!();
@@ -866,6 +874,7 @@ public sealed partial class SyncRun : ISyncRun
             return new(null, FailedRun(pairId, [new ActionResult(string.Empty, Outcome.Failed, null, null, null, error.Message)]), null);
         }
 
+        IReadOnlyList<ReconciliationCoverage> coverages = batch is null ? ActiveCoverages(pair, ref scan) : [];
         RecordScanRetries(pair, scan, batch?.Paths);
         var rootsComplete = !scan.A.IncompleteSubtrees.Contains(string.Empty) &&
             !scan.B.IncompleteSubtrees.Contains(string.Empty);
@@ -944,7 +953,7 @@ public sealed partial class SyncRun : ISyncRun
             scan.PendingChanges(scanner, changesA, changesB);
             var scope = scan.AnyFull ? scanner.LoadFull(pair) :
                 scanner.LoadTouched(pair, touched, changesA, changesB);
-            inventory = scope;
+            inventory = LoadReconciliationCoverage(scope, coverages);
             // Keep only small ancestor context, not a second full inventory, between planning passes.
             mappingContext = new([], [], []) { ContextA = scope.ContextA, ContextB = scope.ContextB };
             return scope;
@@ -1015,6 +1024,7 @@ public sealed partial class SyncRun : ISyncRun
         var retrySelection = RebuildableSelection.Sides(pair) is { } retrySides
             ? new RebuildableSelection(retrySides.Cloud, rebuildableRetries) : null;
         plan = await ApplyReviewedRetriesAsync(pair, plan, retries, ct);
+        foreach (var coverage in coverages) plan = coverage.DeferDependencies(plan);
         RefreshRetryProtection();
         plan = ApplySafetyFilter(pair, ActionPredicates(retryPair, links, retrySelection), plan);
         RaiseLinksSummary(pair, current);

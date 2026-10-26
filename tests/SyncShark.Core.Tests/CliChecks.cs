@@ -468,6 +468,9 @@ internal static partial class CliChecks
         Require(SyncCliRegistry.Rows.Single(row => row.Command == "index run").Effect.Contains(
                 "bounded user-change proofs bypass idle/AC, bulk proofs do not", StringComparison.Ordinal),
             "index capability documents urgent proof without weakening bulk or pair pause");
+        Require(SyncCliRegistry.Rows.Single(row => row.Command == "index run").Effect.Contains(
+                "gap repair belongs to reconciliation", StringComparison.Ordinal),
+            "index capability assigns gap repair to reconciliation rather than the rehash lane");
         var indexStatus = SyncCliRegistry.Rows.Single(row => row.Command == "index status");
         Require(!indexStatus.Mutating && !indexStatus.RequiresRoot &&
                 SyncCliRegistry.Rows.Single(row => row.Command == "index run").RequiresRoot &&
