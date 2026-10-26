@@ -13,8 +13,14 @@ public sealed partial class SyncRun
         lock (_stopGate) if (_reconciling.ContainsKey(pairId)) return Task.FromResult(false);
         if (_store is not SqliteStateStore sql || !_store.FirstSyncDone(pairId) ||
             _store.Pair(pairId) is not { Enabled: true } pair) return Task.FromResult(false);
-        var decision = SampleReconciliation(pair, sql);
-        return Task.FromResult(decision is not null && RequestReconciliation(pairId, decision, progress, ct));
+        return _admission.WithAsync(pairId, async () =>
+        {
+            ct.ThrowIfCancellationRequested();
+            lock (_stopGate) if (_reconciling.ContainsKey(pairId)) return false;
+            await _endpoints.PrepareAsync(pair, ct).ConfigureAwait(false);
+            var decision = SampleReconciliation(pair, sql);
+            return decision is not null && RequestReconciliation(pairId, decision, progress, ct);
+        }, ct);
     }
 
     private bool RequestReconciliation(string pairId, StateMonitorDecision decision,
