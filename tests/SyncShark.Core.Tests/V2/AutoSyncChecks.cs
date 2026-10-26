@@ -27,6 +27,8 @@ internal static partial class AutoSyncChecks
         StatusKeepsMemoryPairsWhenStale();
         await JournalBacklog_ImmediateRunsAsync();
         await PlanningBacklog_DrainSignalAsync();
+        await UrgentPagesRunWithoutActivityAsync();
+        await NoticeHeldUrgentDoesNotSpinAsync();
         await Burst_OneRunAsync();
         await SteadyStream_RunsAtMaxDelayAsync();
         await SignalDuringRun_ExactlyOneMoreAsync();
@@ -689,12 +691,13 @@ internal static partial class AutoSyncChecks
     /// <summary>A store with enabled, first-synced pairs, and AutoSync over fakes and a manual clock.</summary>
     private sealed class Rig : IAsyncDisposable
     {
-        internal readonly InMemoryStateStore _store = new();
+        internal readonly IStateStore _store;
         private readonly string[] _pairIds;
 
         public Rig(string[] pairIds, bool enabled = true, Func<string, string, IDisposable>? beginRunLog = null,
-            V2Settings? settings = null)
+            V2Settings? settings = null, IStateStore? store = null)
         {
+            _store = store ?? new InMemoryStateStore();
             _pairIds = pairIds;
             Run.FailureStore = _store;
             Run.FailureClock = Clock;

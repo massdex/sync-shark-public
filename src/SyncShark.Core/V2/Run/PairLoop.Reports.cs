@@ -4,7 +4,7 @@ internal sealed partial class PairLoop
 {
     // Retry when something failed or could not be verified (outcome failed, or partial with failures); a run whose
     // only leftover is held rows waits for the user's decision, not for a retry.
-    private void AfterReport(RunReport report)
+    private void AfterReport(RunReport report, long urgentBefore = 0)
     {
         _deferredRetry = false;
         if (RunLog.Current is { } log) log.Summary(RunLog.RunSummaryLine(report));
@@ -33,7 +33,7 @@ internal sealed partial class PairLoop
         // SyncRun already recorded a returned report's failure. The host never counts or publishes it twice.
         if (report.CompletionFailed || report.Outcome == RunOutcomes.Failed || report.FailureCount > 0 || report.Failures.Count > 0)
             ScheduleRetry();
-        else if (report.JournalBacklog || DrainedPlanning(report, previous))
+        else if (report.JournalBacklog || (report.UrgentPending > 0 && report.UrgentPending < urgentBefore) || DrainedPlanning(report, previous))
         {
             FailureRetryOwner.ResetDeferredRetry(_in.Store, _pairId);
             _retryAt = _in.Time.GetUtcNow(); // Useful bounded progress, not a failure/backoff.

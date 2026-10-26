@@ -43,5 +43,13 @@ internal static partial class DropboxChecks
         Require(delta.IncompleteSubtrees.ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(["Missing", "unknown.txt"]) &&
             delta.Changes.All(change => change.Path != "unknown.txt" && change.Path != "Missing"),
             "failed metadata is explicitly incomplete, never a deletion candidate or observed receipt");
+        cloud.ExactMetadataForTest = (_, _) => Task.FromResult<IReadOnlyDictionary<string, PilotRemoteEntry?>>(
+            new Dictionary<string, PilotRemoteEntry?>());
+        var omitted = await cloud.ReadExactAsync(["unknown.txt"], "cursor", observedGen, _ => true, default);
+        store.WriteDelta(omitted);
+        Require(omitted.IncompleteSubtrees.SequenceEqual(["unknown.txt"]) &&
+            omitted.IncompleteReasons.ContainsKey("unknown.txt") && omitted.IncludesPath!("unknown.txt") == false &&
+            omitted.Changes.Count == 0 && store.Live(RootId, ["unknown.txt"]).Count == 1,
+            "an omitted metadata key without a failure callback is unknown, never an observed receipt or deletion");
     }
 }

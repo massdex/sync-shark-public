@@ -281,7 +281,8 @@ internal sealed partial class PairLoop
             var reconciliation = new PairProgress(_in, _pairId, LiveProgress.ReconciliationKind, _in.Time);
             // Includes safety-poll runs: register repair coverage before incremental preparation.
             await _in.Run.MonitorAsync(_pairId, reconciliation, source.Token).ConfigureAwait(false);
-            AfterReport(await _in.Run.AutoSyncAsync(_pairId, new PairProgress(_in, _pairId, LiveProgress.AutoSyncKind, _in.Time), source.Token).ConfigureAwait(false));
+            var urgentBefore = (_in.Store as SqliteStateStore)?.UrgentPending(_pairId) ?? 0;
+            AfterReport(await _in.Run.AutoSyncAsync(_pairId, new PairProgress(_in, _pairId, LiveProgress.AutoSyncKind, _in.Time), source.Token).ConfigureAwait(false), urgentBefore);
             _deadWatchRebuilds = 0;
         }
         catch (OperationCanceledException) when (source.IsCancellationRequested)

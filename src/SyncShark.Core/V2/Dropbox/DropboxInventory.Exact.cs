@@ -2,6 +2,7 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class DropboxInventory
 {
+    internal Func<IReadOnlyList<string>, CancellationToken, Task<IReadOnlyDictionary<string, PilotRemoteEntry?>>>? ExactMetadataForTest { get; set; }
     internal async Task<Delta> ReadExactAsync(IReadOnlyList<string> paths, string cursor, long gen,
         Func<string, bool> include, CancellationToken ct)
     {
@@ -12,8 +13,8 @@ public sealed partial class DropboxInventory
         {
             // Existing metadata owner verifies the account/root and uses the existing HTTP limiter.
             // Only a present dictionary key with a null value is proven provider not_found.
-            var metadata = await _client.ReadMetadataPageAsync(page, ct,
-                (path, error) => failures[path] = error.Message);
+            var metadata = ExactMetadataForTest is { } read ? await read(page, ct) :
+                await _client.ReadMetadataPageAsync(page, ct, (path, error) => failures[path] = error.Message);
             var before = _known.Live(_root.RootId, page);
             foreach (var path in page)
             {
