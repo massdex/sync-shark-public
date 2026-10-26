@@ -26,10 +26,10 @@ internal static partial class RunChecks
             {
                 var fx = Build(suppliedStore: store);
                 fx.A.DropboxHashes = fx.B.DropboxHashes = true;
-                var a = fx.A.Seed(mode == "drift" ? "Parent/Capsules/work/item.json" : "Parent/capsules/work/item.json", "local version");
-                var b = fx.B.Seed("Parent/capsules/work/item.json", "cloud version");
-                var copyA = fx.A.Seed("Parent/capsules/work/cloud-copy.json", "cloud version");
-                var copyB = fx.B.Seed("Parent/capsules/work/local-copy.json", "local version");
+                var a = fx.A.Seed(mode == "drift" ? "Parent/Child/work/item.json" : "Parent/child/work/item.json", "local version");
+                var b = fx.B.Seed("Parent/child/work/item.json", "cloud version");
+                var copyA = fx.A.Seed("Parent/child/work/cloud-copy.json", "cloud version");
+                var copyB = fx.B.Seed("Parent/child/work/local-copy.json", "local version");
                 var basis = new Baseline(fx.Pair.PairId, "original-key", a, b, 1);
                 var gen = store.BeginGeneration(fx.Pair.A.RootId, "fixture");
                 void Adopt(Side side, ItemState left, ItemState right)
