@@ -102,7 +102,9 @@ public static class SyncActivityText
 
     // Only presentation text reaches this boundary. Do not pass provider payloads, redirects,
     // stacks or credentials. Redaction is additional defence, not permission to read secrets.
-    public static string Safe(string? value, bool omitPrivateDetails = false)
+    public static string Safe(string? value) => Safe(value, omitPrivateDetails: false);
+
+    public static string Safe(string? value, bool omitPrivateDetails)
     {
         var text = value is { Length: > 4096 } ? value[..4096] : value ?? "";
         text = Regex.Replace(text, @"(?i)\bBearer\s+[^\s,;]+", "Bearer [redacted]");
