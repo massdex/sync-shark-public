@@ -16,6 +16,7 @@ internal static partial class RunChecks
         {
             using var store = SqliteStateStore.Open(folder, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var fx = Build(suppliedStore: store);
+            fx.A.DropboxHashes = fx.B.DropboxHashes = true;
             fx.A.ContentProofStore = store;
             var legacy = fx.A.Seed("Parent/item.txt", "old");
             var other = fx.A.Seed("Parent/other.txt", "old");

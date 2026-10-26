@@ -23,9 +23,11 @@ public sealed partial class SyncRun
         }
     }
 
-    private bool RootScanRetryVetoesCompletion(PairDef pair, RootDef root)
+    private bool RootScanRetryVetoesCompletion(PairDef pair)
     {
-        if (!ScanRetriesForRoot(pair, root).Any(retry => retry.Kind == "scan" && retry.Path.Length == 0)) return false;
+        var root = new[] { pair.A, pair.B }.FirstOrDefault(candidate =>
+            ScanRetriesForRoot(pair, candidate).Any(retry => retry.Kind == "scan" && retry.Path.Length == 0));
+        if (root is null) return false;
         RunTrace.Emit(string.Format(System.Globalization.CultureInfo.InvariantCulture,
             MessageCatalog.Default.Template("reconciliation-root-retry"), root.RootId == pair.A.RootId ? Side.A : Side.B));
         return true;
@@ -33,7 +35,7 @@ public sealed partial class SyncRun
 
     private void CompleteReconciliationGap(PairDef pair, RootDef root, string epoch, ActiveReconciliation active, CancellationToken ct)
     {
-        if (RootScanRetryVetoesCompletion(pair, root)) return;
+        if (RootScanRetryVetoesCompletion(pair)) return;
         var sql = (SqliteStateStore)_store;
         var notices = _store.OpenNotices(pair.PairId);
         var folders = ScanRetriesForRoot(pair, root).Where(retry => retry.Kind == "scan" && retry.Path.Length > 0 &&
