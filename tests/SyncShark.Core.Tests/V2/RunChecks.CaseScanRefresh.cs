@@ -106,6 +106,10 @@ internal static partial class RunChecks
             LocalChecks.EnableCaseSensitiveDirectory(root);
             LocalChecks.Seed(root, "Foo/b.txt", "upper bytes");
             LocalChecks.Seed(root, "foo/c.txt", "lower bytes");
+            // One real folder with a single ordinal name: two stale request spellings of it must not hide
+            // each other's children behind a listing cached for the first spelling.
+            LocalChecks.Seed(root, "Solo/a.txt", "a bytes");
+            LocalChecks.Seed(root, "Solo/b.txt", "b bytes");
             using var lease = PilotDirectoryLease.Open(root);
             var scanner = new PilotLocalScanner { MetadataOnly = true };
             // Requesting both folders cannot choose one case variant's identity for the other.
@@ -121,6 +125,13 @@ internal static partial class RunChecks
                 children.Decisions.All(decision => decision.Reason == CollisionReason) &&
                 !children.Decisions.Any(decision => decision.QuarantineCode is not null),
                 "a case-ambiguous refresh blocks both paths and never publishes or quarantines an entry");
+            // Two request spellings of ONE folder: both resolve to the on-disk name. A retained listing for
+            // the first spelling must not answer the second with a narrower set and lose its real child.
+            var mixed = await scanner.ScanAsync(lease,
+                refreshPaths: ["Solo/a.txt", "solo/b.txt"], includePath: _ => true);
+            Require(mixed.Entries.Keys.OrderBy(path => path, StringComparer.Ordinal)
+                    .SequenceEqual(["Solo/a.txt", "Solo/b.txt"]) && mixed.Decisions.Count == 0,
+                "two request spellings of one folder both resolve, so no real child is admitted absent");
 
             // The same refresh through LocalInventory: a stored child in one spelling must not become a delete.
             using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast,
