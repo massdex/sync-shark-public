@@ -95,7 +95,7 @@ internal static partial class RunChecks
         var calls = fx.WriterA.Calls + fx.WriterB.Calls;
         var refused = false;
         try { await run.ResolveDecisionAsync(fx.Pair.PairId, notice.Path, snapshot.Token, Side.A, new RecordingProgress(), default); }
-        catch (SyncRunRefusedException error) { refused = error.Message.Contains("folder decisions can't be resolved yet", StringComparison.Ordinal); }
+        catch (SyncRunRefusedException error) { refused = error.Message == "folder decisions can't be resolved yet - decide the files inside, or use a per-path choice"; }
         Require(refused && fx.WriterA.Calls + fx.WriterB.Calls == calls,
             "non-case folder choices remain refused without effects");
     }
