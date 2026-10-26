@@ -23,7 +23,7 @@ internal static partial class RunChecks
         var gaps = (ILocalGapStore)store;
         gaps.BeginGap(root.RootId, new NtfsUsnCheckpoint(1, 0, 200, 0).Cursor, 100, false);
         var epoch = gaps.GapEpoch(root.RootId)!;
-        var items = store.Live(root.RootId, ["Parent"]).ToArray();
+        var items = store.Live(root.RootId, ["Parent/observed.txt", "Parent/held.txt"]).ToArray();
         gaps.GapDiscoveredBatch(root.RootId, epoch, items.Select(item => (item, true)).ToArray());
         endpoint.Seed("Parent/observed.txt", "fresh observed content");
         endpoint.Seed("Parent/held.txt", "fresh held content");

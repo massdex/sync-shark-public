@@ -58,7 +58,7 @@ public sealed partial class SqliteStateStore
           WHERE f.root_no=$r AND f.flags!=0 AND (f.flags & $flags)!=0)
         OR ($gap=1 AND (($done=0 AND EXISTS(SELECT 1 FROM file_state f INDEXED BY fs_obj
           WHERE f.root_no=$r AND f.object_id>$after AND f.kind=0 AND
-        """ + " " + GapUnobservedTemplate + ")) OR EXISTS(SELECT 1 FROM local_gap_item gi CROSS JOIN file_state f INDEXED BY fs_obj " +
+        """ + " " + GapUnobservedTemplate + "))" + " OR EXISTS(SELECT 1 FROM local_gap_item gi CROSS JOIN file_state f INDEXED BY fs_obj " +
         "ON f.root_no=gi.root_no AND f.object_id=gi.object_id WHERE gi.root_no=$r AND f.kind=0 AND " +
         GapUnobservedTemplate + ")));", "f");
 
