@@ -1,0 +1,3 @@
+--v2-local-journal-checks
+--v2-run-checks
+--cli-checks
