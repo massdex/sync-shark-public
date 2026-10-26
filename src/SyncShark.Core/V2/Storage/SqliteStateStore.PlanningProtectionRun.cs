@@ -12,6 +12,7 @@ public sealed partial class SqliteStateStore
     // snapshot materialization uses its own connection and cannot invalidate this counter.
     private long PlanningProtectionVersion() => InStore(() =>
     {
+        if (SQLitePCL.raw.sqlite3_get_autocommit(_connection.Handle) == 0) return checked(++_protectionVersion);
         var changes = Convert.ToInt64(StoreSchema.Scalar(_connection, null, "SELECT total_changes();"));
         var external = Convert.ToInt64(StoreSchema.Scalar(_connection, null, "PRAGMA data_version;"));
         if (changes != _protectionChanges || external != _protectionExternalVersion)
@@ -37,7 +38,7 @@ public sealed partial class SqliteStateStore
         {
             var version = store.PlanningProtectionVersion();
             if (_snapshot is not null && version == _version) return _snapshot;
-            Dispose();
+            ReleaseSnapshot();
             // Capture the version BEFORE materialization: an intervening write forces the next
             // scope to rebuild, never labels a pre-write snapshot with a post-write version.
             _snapshot = store.OpenPlanningProtection(pair);
@@ -53,6 +54,12 @@ public sealed partial class SqliteStateStore
         }
 
         public void Dispose()
+        {
+            RunLog.Trace($"Planning protection snapshots: builds={Builds}");
+            ReleaseSnapshot();
+        }
+
+        private void ReleaseSnapshot()
         {
             var stream = _stream;
             var snapshot = _snapshot;

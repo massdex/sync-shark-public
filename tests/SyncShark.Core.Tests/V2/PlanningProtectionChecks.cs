@@ -92,6 +92,28 @@ internal static class PlanningProtectionChecks
         Changed(() => StoreSchema.Execute(external, null, "INSERT INTO local_gap(root_no,epoch,journal_cursor,boundary,trust_usn,discovery_done) SELECT root_no,'fixture','cursor',0,0,1 FROM root LIMIT 1;"), "local_gap");
         Changed(() => StoreSchema.Execute(external, null, "INSERT INTO local_gap_item(root_no,object_id,epoch,expected_json) SELECT root_no,object_id,'fixture','{}' FROM file_state LIMIT 1;"), "local_gap_item");
         Console.WriteLine("PLANPERF protection unchanged-scopes=48 old-builds=48 new-builds=1; mutation rebuild checks passed");
+        CheckOpenTransaction(store, pair);
+    }
+
+    private static void CheckOpenTransaction(SqliteStateStore store, PairDef pair)
+    {
+        var connection = (SqliteConnection)typeof(SqliteStateStore).GetField("_connection",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(store)!;
+        using var run = store.OpenPlanningProtectionRun(pair);
+        var before = run.Snapshot();
+        LocalChecks.Require(ReferenceEquals(before, run.Snapshot()), "autocommit reuses protection snapshot");
+        using (var transaction = connection.BeginTransaction())
+        {
+            StoreSchema.Execute(connection, transaction, "UPDATE root SET cursor='transaction-fixture';");
+            var first = run.Snapshot();
+            var second = run.Snapshot();
+            LocalChecks.Require(!ReferenceEquals(before, first) && !ReferenceEquals(first, second) && run.Builds == 3,
+                "open main transaction rebuilds protection on every scope without another write");
+            transaction.Commit();
+        }
+        var committed = run.Snapshot();
+        LocalChecks.Require(run.Builds == 4 && ReferenceEquals(committed, run.Snapshot()),
+            "commit invalidates transaction snapshot then restores autocommit reuse");
     }
 
     private static void CheckTouchedOverlap()
