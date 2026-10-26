@@ -124,7 +124,8 @@ public sealed partial class SyncRun
             if (!unprotected(baseline.A.Path) || !unprotected(baseline.B.Path)) return false;
             var a = _store.Live(pair.A.RootId, [baseline.A.Path]).FirstOrDefault();
             var b = _store.Live(pair.B.RootId, [baseline.B.Path]).FirstOrDefault();
-            if (a is null || b is null || a.Flags != ItemFlags.None || b.Flags != ItemFlags.None) return false;
+            // OwnedPointer is the permanent, verified state of an online-only pointer, not an unproven flag.
+            if (a is null || b is null || ((a.Flags | b.Flags) & ~ItemFlags.OwnedPointer) != ItemFlags.None) return false;
             if (Content.SameContent(a, b) == true) continue;
             if (Content.SameContent(baseline.A, baseline.B) != true ||
                 a.ObjectId != baseline.A.ObjectId || b.ObjectId != baseline.B.ObjectId ||
