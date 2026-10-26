@@ -1138,15 +1138,23 @@ internal static partial class Program
 
         var pager = new EmbeddedDropboxPagingFixture();
         var root = PumpTask(window, window.PrepareDropboxDraftBrowserForTestAsync(pager));
-        if (root.LoadedChildCount != 1 || root.ContinueCursor != "cursor-1")
-            throw new InvalidDataException("The embedded Dropbox browser did not retain its first page.");
+        // Opening a folder follows its continuation pages automatically (bounded to 40 pages per open
+        // in LoadRemainingDraftFolderPagesAsync), then stops on a repeated cursor. This fixture's
+        // third page repeats "cursor-2", so the open retains page one, appends page two and fails
+        // closed on the cycle before a third page can be added.
+        if (root.LoadedChildCount != 2 ||
+            root.Children.All(child => child.Entry?.FolderId != "id:first") ||
+            root.Children.All(child => child.Entry?.FolderId != "id:second") ||
+            root.CanLoadMore || root.PaginationBlockedReason is not { } blockedCursor ||
+            !blockedCursor.Contains("cyclic", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException(
+                "The embedded Dropbox browser did not keep its first page and fail closed on a cursor cycle: " +
+                "children=" + root.LoadedChildCount + "; cursor=" + (root.ContinueCursor ?? "none") +
+                "; blocked=" + (root.PaginationBlockedReason ?? "none") + ".");
+        var retained = root.LoadedChildCount;
         PumpTask(window, window.LoadMoreDropboxRootForTestAsync());
-        if (root.LoadedChildCount != 2 || root.ContinueCursor != "cursor-2")
-            throw new InvalidDataException("The embedded Dropbox browser did not append its second page.");
-        PumpTask(window, window.LoadMoreDropboxRootForTestAsync());
-        if (root.CanLoadMore || root.PaginationBlockedReason is null ||
-            !root.PaginationBlockedReason.Contains("cyclic", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("The embedded Dropbox browser did not fail closed on a cursor cycle.");
+        if (root.LoadedChildCount != retained)
+            throw new InvalidDataException("The embedded Dropbox browser retried a stopped cursor cycle.");
 
         AssertResponsiveViewports(window);
         if (window.FindName("SidebarToggle") is Button toggle)

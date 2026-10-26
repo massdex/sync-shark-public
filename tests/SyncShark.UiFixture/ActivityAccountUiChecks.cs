@@ -297,11 +297,17 @@ internal static partial class Program
             Field<TabControl>("_activityTabs").SelectedIndex = 0;
             Pump((Task)Call("LoadActivityPageAsync", true, null)!);
             var delayed = new TaskCompletionSource<IReadOnlyList<SyncAuthorityActivityProjection>>();
-            var receivedAccount = "";
+            var receivedAccount = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
             MainWindow.ActivityProjectionLoaderForTest = (_, _, _, _, _, _, _, account) =>
-            { receivedAccount = account; return delayed.Task; };
+            { receivedAccount.TrySetResult(account); return delayed.Task; };
             var oldRequest = (Task)Call("LoadActivityPageAsync", true, null)!;
-            Require(receivedAccount == accounts[0].ConnectionId, "Delayed request captures the header's exact account");
+            // The refresh awaits retention maintenance and the retained-window read before it reaches
+            // the projection loader, so the loader is not invoked when Call returns. Read its own
+            // completion signal; asserting an assumed call point raced that asynchronous hop.
+            PumpUntil(() => receivedAccount.Task.IsCompleted,
+                "Delayed activity request never reached its projection loader.");
+            Require(string.Equals(receivedAccount.Task.Result, accounts[0].ConnectionId, StringComparison.Ordinal),
+                "Delayed request captures the header's exact account");
             MainWindow.ActivityProjectionLoaderForTest = null;
             Select(accounts[1].ConnectionId);
             delayed.SetResult([new(DateTimeOffset.UtcNow, pairs.Pairs[0].Id, "stale.txt", "Uploaded", "Stale response",

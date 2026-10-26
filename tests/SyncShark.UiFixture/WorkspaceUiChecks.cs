@@ -618,19 +618,35 @@ internal static class WorkspaceUiChecks
             TaskCreationOptions.RunContinuationsAsynchronously);
         var current = new TaskCompletionSource<IReadOnlyList<SyncAuthorityActivityProjection>>(
             TaskCreationOptions.RunContinuationsAsynchronously);
+        // Both readers reach the shared loader asynchronously, after retention maintenance and the
+        // retained-window read, so their call order is not a fact the fixture may assume. Wait until
+        // the first reader actually owns the pending page before starting the second one. Without
+        // this, the two can swap tasks and the first Pump below waits for a page that only this
+        // method completes later, which hung the selector.
+        var oldReaderStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var calls = 0;
         MainWindow.ActivityProjectionLoaderForTest = (_, _, _, _, _, _, _, _) =>
-            ++calls == 1 ? old.Task : current.Task;
+        {
+            if (Interlocked.Increment(ref calls) == 1)
+            {
+                oldReaderStarted.TrySetResult();
+                return old.Task;
+            }
+            return current.Task;
+        };
         try
         {
             var oldRead = window.LoadActivityPageForTestAsync(true);
+            Pump(oldReaderStarted.Task);
             var currentRead = window.LoadActivityPageForTestAsync(true);
             current.SetResult([]); Pump(currentRead);
             Require(Field<int>(window, "_activityPageLoads") == 1 &&
                     window.ActivityCountText().StartsWith("Loading retained activity", StringComparison.Ordinal),
                 "A completed latest request does not pretend an older activity reader has finished");
             Dispatcher.CurrentDispatcher.BeginInvoke(() => old.SetResult([]), DispatcherPriority.Background);
-            SettleActivityReaders(window); Pump(oldRead);
+            // The reader's own completion is the settle signal. Polling the shared load counter raced
+            // the finally block, which decrements it just before the reader task reports completion.
+            Pump(oldRead);
             Require(Field<int>(window, "_activityPageLoads") == 0 &&
                     !window.ActivityCountText().StartsWith("Loading retained activity", StringComparison.Ordinal),
                 "Finished-page assertions start only after every actual activity reader has completed");
@@ -641,6 +657,8 @@ internal static class WorkspaceUiChecks
             MainWindow.ActivityProjectionLoaderForTest = null;
         }
     }
+    // Readers started by the real UI handlers above are not owned here, so their only signal is the
+    // shared in-flight counter. Keep the poll bounded; a genuinely stuck reader fails the selector.
     private static void SettleActivityReaders(MainWindow window)
     {
         var started = Environment.TickCount64;
@@ -655,7 +673,21 @@ internal static class WorkspaceUiChecks
         Console.WriteLine("Activity finished-page ordering: initialReaders=" + initial +
             "; remainingReaders=" + Field<int>(window, "_activityPageLoads"));
     }
-    private static void Pump(Task task) { while(!task.IsCompleted) { Drain(); Thread.Sleep(1); } task.GetAwaiter().GetResult(); }
+    // Below the 300 s per-selector watchdog: a stuck operation fails this selector with its own
+    // diagnostic instead of being killed as an opaque timeout.
+    private static void Pump(Task task, TimeSpan? maximumWait = null)
+    {
+        var timeout = maximumWait ?? TimeSpan.FromSeconds(60);
+        var deadline = Environment.TickCount64 + (long)timeout.TotalMilliseconds;
+        while (!task.IsCompleted)
+        {
+            Drain(); Thread.Sleep(1);
+            if (Environment.TickCount64 > deadline)
+                throw new TimeoutException("The UI fixture operation did not complete within " +
+                    (int)timeout.TotalSeconds + " seconds; status=" + task.Status + ".");
+        }
+        task.GetAwaiter().GetResult();
+    }
     private static void Require(bool condition, string label) { if (!condition) throw new InvalidOperationException(label); Console.WriteLine("PASS " + label); }
 
     // The visible caption of a shared command button, read from the real element the production helper built.
