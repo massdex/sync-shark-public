@@ -33,10 +33,7 @@ public sealed partial class SyncRun
             }
             await InvalidateUnreadableSelectionAsync(pair, root, side, incompletePaths, incompleteReasons, ct);
             counts = counts with { Missing = SelectMissing(pair, side, scope, session, sql, eligibility, incompletePaths, ct) };
-            RunTrace.Emit(string.Format(CultureInfo.InvariantCulture,
-                MessageCatalog.Default.Template("reconciliation-selection-trace"),
-                counts.Enumerated, counts.Changed, counts.New, counts.Missing, counts.Unaffected,
-                counts.Orphan, counts.Moved, counts.Case));
+            TraceSelection(counts);
             return counts;
         }
         catch (Exception error) when (ScopeFailure(error, ct) && (error is IOException or UnauthorizedAccessException or TimeoutException))
@@ -170,6 +167,11 @@ public sealed partial class SyncRun
         sql.StageReconcile(session + ":work", side, work);
         return counts;
     }
+
+    private static void TraceSelection(SelectionCounts counts) => RunTrace.Emit(string.Format(
+        CultureInfo.InvariantCulture, MessageCatalog.Default.Template("reconciliation-selection-trace"),
+        counts.Enumerated, counts.Changed, counts.New, counts.Missing, counts.Unaffected,
+        counts.Orphan, counts.Moved, counts.Case));
 
     private static bool SelectionChanged(ItemState current, ItemState previous, bool dropbox) => dropbox
         ? current.VersionId != previous.VersionId || current.Hash != previous.Hash

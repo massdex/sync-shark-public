@@ -631,8 +631,7 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
         if (_store is not SqliteStateStore store)
             throw new SyncCliUnsupportedException(
                 "Pair archival and removal is available only with the core v2 SQLite store. Nothing was changed.");
-        // The same gate as prepare and apply: removal resets enclosing pairs' cursors, so it must not
-        // interleave with a scan or a reviewed apply.
+        // Removal resets enclosing pairs' cursors, so it takes the same gate as prepare and apply.
         return await _run.WithPairAdmissionAsync(null, () =>
         {
             var removedPair = RequirePair(pairId);
@@ -653,8 +652,7 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
                     // The store clears DB generations inside its existing removal transaction.
                     foreach (var id in pairIds.Append(pairId)) FirstSyncChoicesState.Clear(_productRoot, id);
                 }, invalidatePrepares: pairIds);
-                // Status projects these totals by pair id; a removed pair's retained count is unreachable.
-                _run.ForgetIntakeRetirement(pairId);
+                _run.ForgetIntakeRetirement(pairId); // No status projection may outlive its pair.
             }
             catch (ArgumentException error)
             {

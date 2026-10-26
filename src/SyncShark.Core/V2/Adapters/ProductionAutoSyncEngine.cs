@@ -128,8 +128,7 @@ public sealed partial class ProductionAutoSyncEngine : IAutoSyncHostEngine
         if (invocation.Command is not ("status" or "pairs list" or "pairs show" or "accounts list" or
             "run" or "run pause" or "run resume" or "index run" or "index status" or "pause" or "resume" or "settings show" or "settings set" or
             "conflicts list" or "conflicts show" or "conflicts resolve" or "accounts show" or "accounts reauthorize" or "accounts pending" or
-            "runs list" or
-            "storage online-only" or "storage offline" or "storage inherit" or "storage list"))
+            "runs list" or "storage online-only" or "storage offline" or "storage inherit" or "storage list"))
             throw new SyncCliUsageException("This command is not yet available through the shared host. Stop AutoSync at its safe point, run the direct command, then restart AutoSync. Nothing was changed.");
         // Dispatch into the SAME runtime; the transport owns admission and cancellation, not the client.
         var writesPreferences = invocation.Command is "pause" or "resume" or "run pause" or "run resume" or "settings set";

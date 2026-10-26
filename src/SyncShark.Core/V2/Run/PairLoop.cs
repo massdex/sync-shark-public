@@ -248,12 +248,9 @@ internal sealed partial class PairLoop
     private async Task RunOnceAsync(CancellationToken stop)
     {
         using var source = CancellationTokenSource.CreateLinkedTokenSource(stop);
-        // The handlers below record the failure summary, so the scope must outlive them; a `using var`
-        // inside the try would restore the previous trace before Hold/RecordFailure runs.
-        RunLog? log = null;
+        IDisposable? log = null; // Outlives the handlers, so a failed run still writes its summary.
         try
-        {
-            lock (_lock)
+        {            lock (_lock)
             {
                 // Admission: a pause or turn-off that landed after the last check cancels before Run takes its gate;
                 // one that lands later reaches this source through Kick, and Run re-checks the token under its gate.
@@ -283,11 +280,7 @@ internal sealed partial class PairLoop
             RecordFailure(error);
             ScheduleRetry();
         }
-        finally
-        {
-            log?.Dispose();
-            lock (_lock) _runSource = null;
-        }
+        finally { log?.Dispose(); lock (_lock) _runSource = null; }
     }
 
     private void RecordFailure(Exception error)
