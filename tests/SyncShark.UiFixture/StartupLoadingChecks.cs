@@ -315,14 +315,16 @@ internal static class StartupLoadingChecks
             Check(Persisted("startup repair cancelled") != "0",
                 "root731 a cancelled repair is persisted with its safe pair identity and no change");
             var profileId = Scalar("SELECT capability_profile_id FROM capability_profile LIMIT 1;", "$p", "");
-            Pump(window.AuthorityHost.Authority.RegisterPairAsync("pair-startup-repair", 4, repairConfig));
+            const long currentRepairRevision = 4;
+            Pump(window.AuthorityHost.Authority.RegisterPairAsync("pair-startup-repair", currentRepairRevision, repairConfig));
             Pump((Task)typeof(MainWindow).GetMethod("OfferStartupRepairAsync", flags)!.Invoke(window, null)!);
             Pump(window.AuthorityHost.Authority.RegisterObjectAsync("object-repair-pending", "directory"));
             var fixtureAdmission = window.AuthorityHost.Authority.CreateAcceptedCommandAdmissionAsync(null, "reconcile", "pair-startup-repair", null, null, "{}", SyncAuthorityCommandPurpose.NormalEffect).GetAwaiter().GetResult();
             // A fresh action must carry exact current planning authority for its object; seed the
             // same object-scoped cut the production planner binds, on this pair's registered roots.
             var repairPlanningAuthority = FixturePlanningAuthority.CurrentAsync(window.AuthorityHost.Authority,
-                "pair-startup-repair", "root-repair-local", "root-repair-cloud", "object-repair-pending").GetAwaiter().GetResult();
+                "pair-startup-repair", currentRepairRevision, "root-repair-local", "root-repair-cloud", "", "",
+                "object-repair-pending").GetAwaiter().GetResult();
             // An absent-destination action also needs its own fresh registration ticket; a bare
             // retained operation id is not an insertion grant.
             var repairRegistration = window.AuthorityHost.Authority.ReserveActionAsync(

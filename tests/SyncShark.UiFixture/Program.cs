@@ -1079,11 +1079,14 @@ internal static partial class Program
         ((TextBox)window.FindName("DropboxRootBox")!).Text = pair.DropboxRoot;
         window.ApplyFolderHierarchyPresentationForTest(emptyDropboxTree);
         window.UpdateLayout();
+        // The production heading is the provider title, then " - ", then the cloud folder's own
+        // display name (HierarchyPorts then ApplyHierarchyRootPresentation). This pair is the
+        // fixture's Dropbox pair rooted at /Sync Shark Pilot.
+        const string expectedDropboxHeading = "Dropbox - Sync Shark Pilot";
         if (window.FindName("LocalHierarchyEmptyState") is not Border { Visibility: Visibility.Collapsed } ||
             window.FindName("DropboxHierarchyEmptyState") is not Border { Visibility: Visibility.Visible } ||
             window.FindName("DropboxHierarchyRootNameText") is not TextBlock dropboxHierarchyHeading ||
-            !dropboxHierarchyHeading.Text.Contains(" - ", StringComparison.Ordinal) ||
-            !dropboxHierarchyHeading.Text.Contains("Sync Shark Pilot", StringComparison.Ordinal) ||
+            !string.Equals(dropboxHierarchyHeading.Text, expectedDropboxHeading, StringComparison.Ordinal) ||
             window.FindName("DropboxHierarchyEmptyStateText") is not TextBlock dropboxRootState ||
             !dropboxRootState.Text.Contains("1 file at this level", StringComparison.Ordinal) ||
             window.FindName("FolderSelectionSummary") is not TextBlock hierarchySummary ||

@@ -431,6 +431,7 @@ internal static partial class Program
             var installationId = await pairs.GetOrCreateInstallationIdAsync();
             await database.InitializeAsync(installationId, "inspection-profile", "local-ui-fixture", "{}");
             // These are current multi-account definitions, not a legacy single-account migration.
+            var scanIds = new Dictionary<string, (string Local, string Dropbox)>(StringComparer.Ordinal);
             foreach (var pair in samplePairs)
             {
                 await database.RegisterPairAsync(pair.Id, pair.PolicyRevision, new SyncAuthorityPairConfiguration(
@@ -441,9 +442,9 @@ internal static partial class Program
                 // editor journey must let the real BindPairAsync create its own
                 // current account/root identities, rather than collide with fixture IDs.
                 if (seedPending)
-                    await SeedInspectionPathIndexAsync(database, pair, accounts.Single(account => account.ConnectionId == pair.ConnectionId));
+                    scanIds[pair.Id] = await SeedInspectionPathIndexAsync(database, pair, accounts.Single(account => account.ConnectionId == pair.ConnectionId));
             }
-            if (seedPending) await SeedInspectionPendingAndConflictAsync(database, samplePairs);
+            if (seedPending) await SeedInspectionPendingAndConflictAsync(database, samplePairs, scanIds);
             var completedRun = await database.CreateAcceptedCommandAdmissionAsync(null, "run_pair", samplePairs[0].Id,
                 null, null, JsonSerializer.Serialize(new { pairIds = new[] { samplePairs[0].Id }, trigger = "Manual Check" }),
                 SyncAuthorityCommandPurpose.NormalEffect);
@@ -575,7 +576,7 @@ internal static partial class Program
         DisplayName:name, Email:suffix + "@example.test", AccountType:"Individual",
         ConnectedUtc:DateTimeOffset.Now.AddDays(-3), LastVerifiedUtc:DateTimeOffset.Now).Normalize();
 
-    private static async Task SeedInspectionPathIndexAsync(SyncAuthorityDatabase database, SyncPair pair, DropboxConnectionBinding account)
+    private static async Task<(string Local, string Dropbox)> SeedInspectionPathIndexAsync(SyncAuthorityDatabase database, SyncPair pair, DropboxConnectionBinding account)
     {
         var installationId = await database.LoadInstallationIdAsync()
             ?? throw new InvalidDataException("The isolated inspection database has no installation identity.");
@@ -640,6 +641,7 @@ internal static partial class Program
         await database.CompleteScanGenerationAsync(local); await database.CompleteScanGenerationAsync(remote);
         await database.ReplacePathIndexAsync(pair.Id, local.ScanGenerationId, remote.ScanGenerationId, entries,
             SyncSelectionPolicy.Compile(pair.SelectionRules, pair.SelectionDefaultIncluded));
+        return (local.ScanGenerationId, remote.ScanGenerationId);
     }
 
     // A provider folder identity belongs to one exact synthetic account. Reusing one id across
@@ -647,7 +649,8 @@ internal static partial class Program
     private static string RemoteInspectionIdentity(DropboxConnectionBinding account, string path) =>
         "id:" + account.ConnectionId + ":" + path;
 
-    private static async Task SeedInspectionPendingAndConflictAsync(SyncAuthorityDatabase database, IReadOnlyList<SyncPair> pairs)
+    private static async Task SeedInspectionPendingAndConflictAsync(SyncAuthorityDatabase database,
+        IReadOnlyList<SyncPair> pairs, IReadOnlyDictionary<string, (string Local, string Dropbox)> scanIds)
     {
         var hash = new string('a', 64);
         for (var index = 0; index < pairs.Count; index++)
@@ -664,8 +667,9 @@ internal static partial class Program
             var fixtureAdmission = await database.CreateAcceptedCommandAdmissionAsync(null, "run_pair", pair.Id, null, null, "{}", SyncAuthorityCommandPurpose.NormalEffect);
             // A fresh action must carry exact current planning authority for its object; the fixture
             // seeds the same object-scoped cut the production planner binds, on the pair's true roots.
-            var planningAuthority = await FixturePlanningAuthority.CurrentAsync(database, pair.Id,
-                pair.Id + "-local", pair.Id + "-remote", id);
+            var (localScanId, dropboxScanId) = scanIds[pair.Id];
+            var planningAuthority = await FixturePlanningAuthority.CurrentAsync(database, pair.Id, pair.PolicyRevision,
+                pair.Id + "-local", pair.Id + "-remote", localScanId, dropboxScanId, id);
             // An absent-destination action also needs its own fresh registration ticket; a bare
             // retained operation id is not an insertion grant.
             var registration = await database.ReserveActionAsync(id + "-key", fixtureAdmission);

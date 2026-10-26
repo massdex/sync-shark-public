@@ -36,6 +36,7 @@ internal static partial class Program
             var installationId = await new SyncPairStore(instance.StateAuthority).GetOrCreateInstallationIdAsync();
             await database.InitializeAsync(installationId, "inspection-profile", "fixture", "{}");
             var result = new List<SyncPair>();
+            var scanIds = new Dictionary<string, (string Local, string Dropbox)>(StringComparer.Ordinal);
             foreach (var (account, index) in accounts.Select((account, index) => (account, index)))
             {
                 var local = Path.Combine(root, "computer", "account-" + index);
@@ -52,7 +53,7 @@ internal static partial class Program
                     "recoverable", 0, 1, "manual_preserve_both", "content_times_basic_attrs", RecursiveMode: true,
                     AutomaticPruning: false, RecoveryRetentionDays: int.MaxValue));
                 await database.RetainPairDefinitionAsync(pair, index == 0);
-                await SeedInspectionPathIndexAsync(database, pair, account);
+                scanIds[pair.Id] = await SeedInspectionPathIndexAsync(database, pair, account);
                 // Account A dominates the newest unfiltered page; B must not disappear merely
                 // because an implementation filters the already-loaded All Accounts page.
                 for (var row = 0; row < (index == 0 ? 240 : 65); row++)
@@ -61,7 +62,7 @@ internal static partial class Program
                         "Success", "File", "Uploaded", "Fixture file uploaded", account.ConnectionId, pair.Id,
                         RelativePath: "file-" + row + ".txt"));
             }
-            await SeedInspectionPendingAndConflictAsync(database, result);
+            await SeedInspectionPendingAndConflictAsync(database, result, scanIds);
             // V6/F16-adjacent: retained terminal run rows in exactly the shape the product keeps, so the Home
             // last-success line has a real authoritative value per scope. They are written directly rather
             // than through the production transition, because that transition also appends presentation
