@@ -18,6 +18,7 @@ internal static class AutoSyncHostChecks
         await ProductionWiringWithEmptyTempStoreAsync();
         await ReadsBypassMutationSlotsAsync();
         await SafeStopAsync();
+        await StopFailuresPreserveSupervisionAsync();
         await DisconnectDoesNotReplayAsync();
         await MalformedFrameDoesNotKillHostAsync();
         await FailedConstructionReleasesAuthorityAsync();
@@ -312,7 +313,8 @@ internal static class AutoSyncHostChecks
         }, wait => supervisorStop.WaitOne(wait), TimeSpan.Zero, TimeSpan.Zero, TimeSpan.FromMinutes(10));
         var supervised = Task.Run(supervisor.Run);
         await childStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        var stop = SendAsync(Client(address), "stop");
+        var stop = Client(address).StopAsync(TimeSpan.FromSeconds(2),
+            () => throw new InvalidOperationException("A reached host owns supervisor cancellation."));
         await engine.StopEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Require(supervisorStop.WaitOne(0) && host.StopRequested && host.ShutdownReason == "stop requested",
             "accepted IPC stop selects the deliberate reason and cancels supervision before draining");
@@ -324,12 +326,54 @@ internal static class AutoSyncHostChecks
         engine.SafePoint.TrySetResult();
         var reply = await stop;
         await host.Completion.WaitAsync(TimeSpan.FromSeconds(5));
-        Require(reply.Ok && reply.State == "stopped" && engine.Disposed && lease.Disposed,
+        Require(reply is { Ok: true, State: "stopped" } && engine.Disposed && lease.Disposed,
             "stop replies only after safe drain; engine closes before authority release");
         Require(engine.StopCalls == 1, "stop is idempotent");
         Require(await supervised.WaitAsync(TimeSpan.FromSeconds(5)) == 0 && starts == 1,
             "accepted IPC stop under supervision never relaunches the host");
         Directory.Delete(logRoot, recursive: true);
+    }
+
+    private static async Task StopFailuresPreserveSupervisionAsync()
+    {
+        using var stopEvent = new ManualResetEvent(false);
+        var address = Address();
+        var lease = new Lease();
+        var engine = new FakeEngine();
+        await using (var host = AutoSyncBackgroundHost.Start(address, () => lease, () => engine,
+            _ => true, () => throw new IOException("synthetic stop signal failure")))
+        {
+            var rejected = await Client(address).StopAsync(TimeSpan.FromSeconds(2), () => stopEvent.Set());
+            Require(rejected is { Ok: false } && !stopEvent.WaitOne(0) && !host.StopRequested &&
+                !lease.Disposed && engine.StopCalls == 0, "rejected stop preserves supervision and the live authority");
+            Require((await SendAsync(Client(address), "status")).Ok, "failed stop callback keeps the listener available");
+            try
+            {
+                await new AutoSyncHostClient(address, _ => false).StopAsync(TimeSpan.FromSeconds(2), () => stopEvent.Set());
+                throw new InvalidOperationException("Untrusted stop transport must fail.");
+            }
+            catch (UnauthorizedAccessException) { }
+            Require(!stopEvent.WaitOne(0) && !host.StopRequested, "failed stop send preserves supervision");
+        }
+        var uncertainAddress = Address();
+        using (var server = new NamedPipeServerStream(uncertainAddress, PipeDirection.InOut, 1,
+            PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly))
+        {
+            var connected = server.WaitForConnectionAsync();
+            var request = Client(uncertainAddress).StopAsync(TimeSpan.FromSeconds(2), () => stopEvent.Set());
+            await connected.WaitAsync(TimeSpan.FromSeconds(5));
+            await AutoSyncHostProtocol.ReadAsync<AutoSyncHostRequest>(server, CancellationToken.None);
+            server.Disconnect(); // accepted request bytes, no reply: the outcome is uncertain
+            try
+            {
+                await request.WaitAsync(TimeSpan.FromSeconds(5));
+                throw new InvalidOperationException("Disconnected stop transport must report uncertainty.");
+            }
+            catch (AutoSyncHostUncertainException) { }
+            Require(!stopEvent.WaitOne(0), "uncertain stop send preserves supervision");
+        }
+        Require(await Client(Address()).StopAsync(TimeSpan.FromMilliseconds(100), () => stopEvent.Set()) is null &&
+            stopEvent.WaitOne(0), "only no-host connection timeout cancels relaunch backoff from the client");
     }
 
     private sealed class HostChild(AutoSyncBackgroundHost host) : AutoSyncSupervisor.IChild

@@ -45,6 +45,7 @@ internal static partial class AutoSyncChecks
         await WatchNotice_PersistsAndRecoversAsync();
         await ReviewStartupNoticeFaultAsync();
         await ReviewStartDuringStopDrainAsync();
+        await RunCliChecks.HostCompareOutputIsNotLifecycleEvidenceAsync();
         AutoSyncSupervisorChecks.Run();
         await AutoSyncHostChecks.RunAsync();
         Console.WriteLine($"v2 autosync checks passed in {clock.ElapsedMilliseconds} ms.");

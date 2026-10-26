@@ -114,36 +114,16 @@ internal static class AutoSyncSupervisorChecks
         var root = NewRoot();
         try
         {
-            foreach (var text in new[] { @"failure at X:\Parent\Child Name.txt", "failure at /Parent/Child",
-                "Bearer synthetic-secret", "password=synthetic-secret", "access_token=synthetic-secret",
-                "accountId=synthetic-account", "person@example.invalid", "https://example.invalid/Parent?code=synthetic-secret",
-                "\"password\": \"synthetic-secret with spaces\"", "password=synthetic-secret with spaces", "token=synthetic-secret" })
-                AutoSyncLog.Append(root, text);
-            var identifiers = new[] { "{\"accountId\":\"synthetic-account\"}",
-                "accountId=\"synthetic-account with spaces\"", "{'connection_id': 'synthetic-account with spaces'}",
-                "{\"pairId\":\"synthetic-account with spaces\"}", "user-id='synthetic-account with spaces'" };
-            using (var stderr = AutoSyncLog.CreateStderrWriter(root))
-            {
-                foreach (var identifier in identifiers)
-                {
-                    AutoSyncLog.Append(root, "append identifier " + identifier);
-                    stderr.WriteLine("stderr identifier " + identifier);
-                }
-                stderr.Write("stderr password=");
-                stderr.WriteLine("synthetic-secret");
-                stderr.Write("partial stderr at /Parent/Child");
-                stderr.Flush();
-            }
+            AutoSyncLog.HostStarted(root, new Version(1, 2, 3, 4));
+            try { throw new IOException("synthetic private file content Parent/Child.txt"); }
+            catch (Exception error) { AutoSyncLog.Failure(root, error); }
+            AutoSyncLog.HostShutdown(root, "autosync-stop-requested");
             var log = File.ReadAllText(AutoSyncLog.FilePath(root));
-            Require(!log.Contains("Parent") && !log.Contains("Child") && !log.Contains("synthetic-secret") &&
-                !log.Contains("synthetic-account") && !log.Contains("example.invalid") && !log.Contains("with spaces"),
-                "shared sink omits paths, identifiers, URLs and credentials, including fragmented stderr");
-            var lines = File.ReadAllLines(AutoSyncLog.FilePath(root));
-            foreach (var route in new[] { "append identifier ", "stderr identifier " })
-                Require(lines.Count(line => line.Contains(route) && line.Contains("[redacted]")) == identifiers.Length,
-                    "both sink routes retain every identifier case with complete redaction");
-            Require(log.Contains("stderr password=[redacted]") && log.Contains("partial stderr at [redacted]"),
-                "stderr remains durable with safe diagnostic markers");
+            Require(!log.Contains("synthetic private") && !log.Contains("Parent/Child"),
+                "exception messages never enter lifecycle evidence");
+            Require(log.Contains("type=System.IO.IOException") && log.Contains("hresult=") &&
+                log.Contains("method=PrivateDetailsAreOmitted") && log.Contains("host start version=1.2.3.4") &&
+                log.Contains("host shutdown: stop requested"), "typed lifecycle metadata remains available");
         }
         finally { Remove(root); }
     }
@@ -162,6 +142,7 @@ internal static class AutoSyncSupervisorChecks
                 Require(new FileInfo(path).Length == AutoSyncLog.FileBound, "failed rotation skips the append");
             }
             AutoSyncLog.Append(root, "rotation recovered");
+            Require(File.ReadAllText(path).Contains("dropped=1 "), "next successful write reports the dropped line");
             Require(new FileInfo(path).Length < AutoSyncLog.FileBound &&
                 new FileInfo(path + ".previous").Length == AutoSyncLog.FileBound,
                 "rotation recovers with one bounded previous generation");

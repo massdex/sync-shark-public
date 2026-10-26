@@ -74,6 +74,46 @@ internal static partial class RunCliChecks
         Console.WriteLine("PASS ConflictNoticeHandlerChecks");
     }
 
+    public static async Task HostCompareOutputIsNotLifecycleEvidenceAsync()
+    {
+        var root = TempRoot();
+        var output = Console.Out;
+        var error = Console.Error;
+        try
+        {
+            using var store = SqliteStateStore.Open(root, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
+            var fx = Build(store: store);
+            fx.A.DropboxHashes = fx.B.DropboxHashes = true;
+            var a = fx.A.Seed("choice.txt", "synthetic-content-a");
+            var b = fx.B.Seed("choice.txt", "synthetic-content-b");
+            store.AddNotices([new(fx.Pair.PairId, 27, NoticeKind.KeepBoth, a.Path,
+                "compare", "keep-both", ConflictVersions: new(a, b))]);
+            var notice = store.OpenNotices(fx.Pair.PairId).Single();
+            var runtime = Runtime(fx, root);
+            string[] args = ["--cli", "conflicts", "resolve", "--pair", fx.Pair.PairId,
+                "--path", a.Path, "--choice", NoticeChoices.Compare, "--key", notice.NoticeId!,
+                "--generation", "0", "--yes"];
+            using var capture = new StringWriter();
+            Console.SetError(capture);
+            await DispatchAsync(runtime, args);
+            Require(capture.ToString().Contains("synthetic-content-a") && capture.ToString().Contains("synthetic-content-b"),
+                "positive control exercises actual compare file-content output");
+            AutoSyncLog.HostStarted(root, new Version(1, 2, 3, 4));
+            var before = File.ReadAllText(AutoSyncLog.FilePath(root));
+            AutoSyncBackgroundHost.SuppressConsoleOutput();
+            Console.Error.WriteLine("stray Parent/Child.txt Pair A S-1-5-21-1-2-3-1001");
+            await DispatchAsync(runtime, args);
+            Require(File.ReadAllText(AutoSyncLog.FilePath(root)) == before,
+                "stray stderr and real compare output never enter autosync.log");
+        }
+        finally
+        {
+            Console.SetOut(output);
+            Console.SetError(error);
+            Cleanup(root);
+        }
+    }
+
     private static void Cli_RetainedNoticeGenerationParsing()
     {
         static string[] Resolve(string choice, string generation) =>

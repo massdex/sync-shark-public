@@ -25,6 +25,8 @@
     "discoveryCheck": "The fast discovery check"
   },
   "messages": {
+    "autosync-host-start": "host start version={0}",
+    "autosync-lifecycle-failure": "lifecycle failure type={0} hresult={1:X8} method={2}",
     "autosync-stop-requested": "stop requested",
     "autosync-listener-ended": "listener ended without a stop request",
     "autosync-owner-attached": "attached to existing owner",

@@ -56,6 +56,17 @@ public sealed class AutoSyncHostClient
         }
     }
 
+    /// <summary>Ask the host to stop first; only an absent host permits cancelling relaunch backoff here.</summary>
+    public async Task<AutoSyncHostReply?> StopAsync(TimeSpan connectionTimeout, Action stopSupervisorIfAbsent,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(stopSupervisorIfAbsent);
+        var reply = await TrySendAsync(Request("stop"), connectionTimeout, cancellationToken).ConfigureAwait(false);
+        // Failed, rejected and uncertain sends never cancel supervision from the client.
+        if (reply is null) stopSupervisorIfAbsent();
+        return reply;
+    }
+
     public static AutoSyncHostRequest Request(string command, string? pairId = null, bool all = false,
         int? minutes = null, int limit = 50, long after = 0) =>
         new(AutoSyncHostProtocol.Version, Guid.NewGuid().ToString("N"), command, pairId, all, minutes, limit, after);

@@ -52,25 +52,13 @@ public static class SyncActivityText
 
     // Only presentation text reaches this boundary. Do not pass provider payloads, redirects,
     // stacks or credentials. Redaction is additional defence, not permission to read secrets.
-    public static string Safe(string? value) => Safe(value, omitPrivateDetails: false);
-
-    public static string Safe(string? value, bool omitPrivateDetails)
+    public static string Safe(string? value)
     {
         var text = value is { Length: > 4096 } ? value[..4096] : value ?? "";
         text = Regex.Replace(text, @"(?i)\bBearer\s+[^\s,;]+", "Bearer [redacted]");
         text = Regex.Replace(text, @"(?i)\b(access_token|refresh_token|id_token|client_secret|authorization|password|code|state)\s*[=:]\s*[^\s,;&]+", "$1=[redacted]");
         text = Regex.Replace(text, @"https?://[^\s<>]+", match =>
             Uri.TryCreate(match.Value, UriKind.Absolute, out var uri) ? uri.GetLeftPart(UriPartial.Path) : "[link]");
-        if (omitPrivateDetails)
-        {
-            // Lifecycle stderr is not structured activity: paths and identifiers add no useful
-            // shutdown evidence. Drop the remainder of a path-bearing line (paths may contain spaces).
-            text = Regex.Replace(text, @"(?i)\b(access_token|refresh_token|id_token|client_secret|authorization|password|code|state|api[_-]?key|token)[""']?\s*[=:].*", "$1=[redacted]");
-            text = Regex.Replace(text, @"(?i)(?:[a-z]:[\\/]|\\\\|(?<!\w)/(?!/)).*", "[redacted]");
-            text = Regex.Replace(text, @"(?i)https?://\S+", "[redacted]");
-            text = Regex.Replace(text, @"[^\s<>]+@[^\s<>]+", "[redacted]");
-            text = Regex.Replace(text, @"(?i)\b(?:pair|account|user|connection)[_-]?id[""']?\s*[=:].*", "[redacted]");
-        }
         // Detailed retained records have their own bounded budget. The default 400-character
         // one-line CLI summary budget must not silently erase nested failure causes here.
         return SyncCliSanitize.Message(text, maximumLength: 4096) ?? "";

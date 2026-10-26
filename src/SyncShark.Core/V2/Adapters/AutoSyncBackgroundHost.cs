@@ -42,6 +42,13 @@ public sealed class AutoSyncBackgroundHost : IAsyncDisposable
         _listener = Task.Run(() => ListenAsync(first));
     }
 
+    /// <summary>Detached host runtime output is private, not lifecycle evidence. Call before creating its engine.</summary>
+    public static void SuppressConsoleOutput()
+    {
+        Console.SetOut(TextWriter.Null);
+        Console.SetError(TextWriter.Null);
+    }
+
     public AutoSyncHostIdentity Identity { get; }
 
     /// <summary>True when a stop request ended this host; the durable shutdown line uses it.</summary>
