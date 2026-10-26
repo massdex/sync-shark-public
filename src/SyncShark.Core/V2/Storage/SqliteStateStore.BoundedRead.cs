@@ -27,7 +27,7 @@ public sealed partial class SqliteStateStore
             }
             catch (SqliteException error) when (error.SqliteErrorCode == SQLitePCL.raw.SQLITE_INTERRUPT)
             {
-                throw new OperationCanceledException("The bounded store read was aborted at its deadline.", error, token);
+                throw new OperationCanceledException(error.Message, error, token);
             }
             finally
             {

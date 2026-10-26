@@ -975,8 +975,7 @@ public sealed partial class SyncRun : ISyncRun
             // sleeping on its backoff), so the early return goes through the same outcome rule as execution.
             return new(new Plan(pairId, 0, [], []), IncrementalOutcome(
                 WithReconciliation(new RunReport(pairId, string.Empty, 0, 0, 0, 0, 0, 0, 0, 0, [])
-                    { Deferred = retryCount, JournalBacklog = scan.JournalBacklog, PlanningBacklog = remainingPlanning,
-                        ChangedPaths = 0 },
+                    { Deferred = retryCount, JournalBacklog = scan.JournalBacklog, PlanningBacklog = remainingPlanning, ChangedPaths = 0 },
                     reconcile), []), null);
         }
 
