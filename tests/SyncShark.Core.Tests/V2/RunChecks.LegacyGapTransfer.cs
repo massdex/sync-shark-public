@@ -16,15 +16,19 @@ internal static partial class RunChecks
         await FirstSyncAsync(fx.Run(), fx);
         var pair = fx.Pair with { B = fx.Pair.B with { Provider = SyncProviders.Local } };
         store.SavePair(pair);
+        await fx.Run().IncrementalAsync(pair.PairId, new RecordingProgress(), default);
         var root = side == Side.A ? pair.A : pair.B;
         var endpoint = side == Side.A ? fx.A : fx.B;
         var counterpart = side == Side.A ? pair.B : pair.A;
         var other = side == Side.A ? fx.B : fx.A;
         var gaps = (ILocalGapStore)store;
         gaps.BeginGap(root.RootId, new NtfsUsnCheckpoint(1, 0, 200, 0).Cursor, 100, false);
-        var epoch = gaps.GapEpoch(root.RootId)!;
+        var epoch = gaps.GapEpoch(root.RootId);
+        Require(epoch is not null, $"legacy fixture opened a gap epoch on side {side} root");
         var items = store.Live(root.RootId, ["Parent/observed.txt", "Parent/held.txt"]).ToArray();
-        gaps.GapDiscoveredBatch(root.RootId, epoch, items.Select(item => (item, true)).ToArray());
+        Require(items.Length == 2 && items.All(item => item is not null),
+            $"legacy fixture has both live items on side {side}: {string.Join(",", items.Select(i => i?.Path ?? "<null>"))}");
+        gaps.GapDiscoveredBatch(root.RootId, epoch!, items.Select(item => (item, true)).ToArray());
         endpoint.Seed("Parent/observed.txt", "fresh observed content");
         endpoint.Seed("Parent/held.txt", "fresh held content");
         ReconcileBatch Selected(ItemState item) => new("legacy-batch", [item.Path],
@@ -46,7 +50,7 @@ internal static partial class RunChecks
         Require(gaps.GapObligations(root.RootId,
             [items.Single(item => item.Path == "Parent/observed.txt").ObjectId]).Count == 0,
             "fresh two-root observation acknowledges its settled gap item");
-        store.CompleteGapInventory(root.RootId, epoch.Epoch);
+        store.CompleteGapInventory(root.RootId, epoch!.Epoch);
         Require(store.PendingGapInventory(root.RootId) &&
             store.ProtectionBatch(root.RootId, ItemFlags.NeedsRehash, ["Parent/held.txt"])[0].Covered,
             "an unobserved sibling retains protection and prevents epoch clearance");
@@ -67,9 +71,9 @@ internal static partial class RunChecks
         }));
         await run.IncrementalAsync(pair.PairId, new RecordingProgress(), default,
             new RunOptions { Batch = Selected(held) });
-        store.CompleteGapInventory(root.RootId, epoch.Epoch);
+        store.CompleteGapInventory(root.RootId, epoch!.Epoch);
         Require(fx.WriterA.Calls + fx.WriterB.Calls == before &&
-            gaps.GapEpoch(root.RootId)!.Epoch != epoch.Epoch && store.PendingGapInventory(root.RootId) &&
+            gaps.GapEpoch(root.RootId)!.Epoch != epoch!.Epoch && store.PendingGapInventory(root.RootId) &&
             gaps.GapObligations(root.RootId, [held.ObjectId]).Count == 1,
             "an epoch replaced during the read retains its obligation and cannot inherit the old exemption");
     }
