@@ -22,16 +22,31 @@ public sealed partial class SyncRun
         }
     }
 
+    private bool RootScanRetryVetoesCompletion(PairDef pair)
+    {
+        var veto = false;
+        foreach (var (root, side) in new[] { (pair.A, Side.A), (pair.B, Side.B) })
+            if (ScanRetriesForRoot(pair, root).Any(retry => retry.Path.Length == 0))
+            {
+                RunTrace.Emit(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                    MessageCatalog.Default.Template("reconciliation-root-retry"), side));
+                veto = true;
+            }
+        return veto;
+    }
+
     private Task<RunReport> CompleteReconciliationAsync(PairDef pair, ActiveReconciliation active,
         RunReport report, CancellationToken ct) => _admission.WithAsync(pair.PairId, () =>
     {
         ct.ThrowIfCancellationRequested();
         var sql = (SqliteStateStore)_store;
         var completion = new CompletionSteps(this, pair.PairId, ct);
-        var unreadable = new[] { pair.A, pair.B }.SelectMany(root => ScanRetriesForRoot(pair, root))
-            .Select(retry => retry.Path).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+        var unreadablePaths = new[] { pair.A, pair.B }.SelectMany(root => ScanRetriesForRoot(pair, root))
+            .Select(retry => retry.Path).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var unreadable = unreadablePaths.Length;
         // Readable remainder completes; unreadable subtrees retain their scan retries and planning exclusion.
-        if ((active.Decision.UnknownScope ?? ReconciliationScope.Root).ReadScopes.Contains(string.Empty))
+        if ((active.Decision.UnknownScope ?? ReconciliationScope.Root).ReadScopes.Contains(string.Empty) &&
+            !RootScanRetryVetoesCompletion(pair))
         {
             foreach (var (rootId, epoch) in active.GapEpochs)
                 if (active.CompletedSelectionRoots.Contains(rootId))

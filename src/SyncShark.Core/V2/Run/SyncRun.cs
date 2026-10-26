@@ -865,7 +865,7 @@ public sealed partial class SyncRun : ISyncRun
         {
             scan = batch is null ? await ScanBothAsync(observationPair, throttle, ct) :
                 await ScanBatchAsync(observationPair, batch, throttle, ct);
-            if (batch is null) RetainReviewedRemovalObservations(observationPair, scan, reviewScopes, ct);
+            if (batch is null) await PrepareDeltaProofAsync(observationPair, scan, reviewScopes, ct);
         }
         catch (Exception error) when (RunFailure(error, ct))
         {

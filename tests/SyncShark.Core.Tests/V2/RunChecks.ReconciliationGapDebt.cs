@@ -79,9 +79,12 @@ internal static partial class RunChecks
             StateMonitor.FromGap(epoch) with { RootId = root }, new RecordingProgress(), default);
         Require(!report.CompletionFailed && report.Failed == 0 && fx.WriterB.Calls - writes == 3,
             "one gap reconciliation uploads exactly the three changed files");
-        Require(!epoch.TrustFileUsn && items.All(item => fx.A.HashedPaths.Contains(item.Path)) &&
-            fx.B.HashedPaths.Count == 0 && store.RehashPendingCount(root) == 0 && report.Deferred == 0,
-            "one untrusted reconciliation proves all 50 files with zero deferred debt and no counterpart rehash");
+        Require(!epoch.TrustFileUsn, "50-file fixture uses an untrusted epoch");
+        Require(items.All(item => fx.A.HashedPaths.Contains(item.Path)),
+            "every retained file was hashed: missing=" + string.Join(",", items.Where(item => !fx.A.HashedPaths.Contains(item.Path)).Select(item => item.Path)));
+        Require(fx.B.HashedPaths.Count == 0, "trusted counterpart has zero hash requests: actual=" + fx.B.HashedPaths.Count);
+        Require(store.RehashPendingCount(root) == 0, "all 50 files have zero remaining proof debt");
+        Require(report.Deferred == 0, "all 50 files settle within one run with zero deferred work");
         Require(!store.PendingGapInventory(root) && !gaps.HasGapProtection(root) &&
             gaps.GapObligations(root, items.Select(item => item.ObjectId).ToArray()).Count == 0 &&
             store.PlanningBacklogPage(fx.Pair.PairId).Count == 0,

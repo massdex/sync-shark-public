@@ -241,9 +241,10 @@ internal static partial class RunChecks
         Require(store.ByObject(root.RootId, original.ObjectId)?.Hash == DropboxContentHash.Compute(System.Text.Encoding.UTF8.GetBytes("new")),
             cause + ": same-size same-mtime crash-window write is rehashed by the independent index path");
         await owner.DrainAsync(pair.PairId, monitor: true);
-        Require(store.GapInventoryPending(root.RootId) == (cause == "cloud-outage") &&
-            store.Cursor(root.RootId) == checkpoint.Cursor,
-            cause + ": reconciliation retains unobserved cloud work and preserves the replay cursor");
+        Require(store.GapInventoryPending(root.RootId) == (cause == "cloud-outage"),
+            cause + ": reconciliation retains unobserved cloud work; pending=" + store.GapInventoryPending(root.RootId));
+        Require(store.Cursor(root.RootId) == checkpoint.Cursor,
+            cause + ": reconciliation preserves the replay cursor; actual=" + store.Cursor(root.RootId) + " expected=" + checkpoint.Cursor);
         if (cause == "cloud-outage")
         {
             var gapPuts = diagnostics!.Puts(Side.B, "file.txt", gapHash, completed: false);
