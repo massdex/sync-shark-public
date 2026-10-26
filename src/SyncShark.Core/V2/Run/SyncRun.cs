@@ -822,6 +822,13 @@ public sealed partial class SyncRun : ISyncRun
         string? resolvingNoticeId, IProgress<RunProgress> progress, CancellationToken ct) =>
         PrepareIncrementalAsync(pairId, decisions, resolvingNoticeId, progress, ct, null);
 
+    private string[] NoticeRetryPaths(string pairId) => _store.UnresolvedNotices(pairId).Where(PlanNotices.HasPathScope)
+        .Where(notice => (notice.Rule == UnconfirmedRule && notice.ReasonKey == PlanNotices.ContentUnconfirmed.Key) ||
+            notice.ReasonKey == "name-mapping-collision" ||
+            notice.ReasonKey is FreeSpaceRefusal.InsufficientReasonKey or FreeSpaceRefusal.UnknownSpaceReasonKey or
+                FreeSpaceRefusal.UnknownReserveReasonKey)
+        .Select(notice => notice.Path).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+
     private async Task<IncrementalPreparation> PrepareIncrementalAsync(string pairId, IReadOnlyDictionary<string, Side>? decisions,
         string? resolvingNoticeId, IProgress<RunProgress> progress, CancellationToken ct, RunOptions? options)
     {
@@ -889,12 +896,7 @@ public sealed partial class SyncRun : ISyncRun
             entry => (Side?)entry.Value, StringComparer.OrdinalIgnoreCase);
         // Execution-time space refusals have no intent. Their durable notices, like unconfirmed content,
         // must bring the paths back into an otherwise empty incremental run until they resolve.
-        var retryPaths = _store.UnresolvedNotices(pairId).Where(PlanNotices.HasPathScope)
-            .Where(notice => (notice.Rule == UnconfirmedRule && notice.ReasonKey == PlanNotices.ContentUnconfirmed.Key) ||
-                notice.ReasonKey == "name-mapping-collision" ||
-                notice.ReasonKey is FreeSpaceRefusal.InsufficientReasonKey or FreeSpaceRefusal.UnknownSpaceReasonKey or
-                    FreeSpaceRefusal.UnknownReserveReasonKey)
-            .Select(notice => notice.Path).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var retryPaths = NoticeRetryPaths(pairId);
         // Content/space notices explicitly rescope their work even before the retry backoff expires.
         // Otherwise that same retry row filters out the very path we just admitted for re-evaluation.
         var noticeHeldPaths = retryPaths.Where(path => _store.SyncRetryAt(pairId, path) is { } retry &&

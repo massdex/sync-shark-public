@@ -242,6 +242,14 @@ internal sealed partial class RunScope
         return changed is null ? baselines : changed;
     }
 
+    private void BeginProtectionMeasurement(long started, int a, int b, int baselines, int contextA, int contextB)
+    {
+        _protectionStarted = started;
+        _protectionBatches = 0;
+        _protectionTotal = Batches(a, ItemBatchSize) + Batches(b, ItemBatchSize) +
+            Batches(baselines, BaselineBatchSize) + Batches(contextA, ItemBatchSize) + Batches(contextB, ItemBatchSize);
+    }
+
     private Scope Prepare(PairDef pair, IReadOnlyList<ItemState> a, IReadOnlyList<ItemState> b,
         IReadOnlyList<Baseline> baselines, IReadOnlyList<ItemState> contextA, IReadOnlyList<ItemState> contextB,
         string provenanceScope = "Touched", IReadOnlyCollection<string>? closureHolds = null)
@@ -249,11 +257,7 @@ internal sealed partial class RunScope
         BeginMeasuredScope(provenanceScope, (long)a.Count + b.Count + baselines.Count + contextA.Count + contextB.Count);
         _cancellationToken.ThrowIfCancellationRequested();
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        _protectionStarted = started;
-        _protectionBatches = 0;
-        _protectionTotal = Batches(a.Count, ItemBatchSize) + Batches(b.Count, ItemBatchSize) +
-            Batches(baselines.Count, BaselineBatchSize) + Batches(contextA.Count, ItemBatchSize) +
-            Batches(contextB.Count, ItemBatchSize);
+        BeginProtectionMeasurement(started, a.Count, b.Count, baselines.Count, contextA.Count, contextB.Count);
         using var ownedSnapshot = _protectionRun is null ? (_store as SqliteStateStore)?.OpenPlanningProtection(pair) : null;
         var snapshot = _protectionRun?.Snapshot() ?? ownedSnapshot;
         _deferredPair = pair;
