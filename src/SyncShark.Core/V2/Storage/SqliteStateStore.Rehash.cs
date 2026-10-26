@@ -20,6 +20,7 @@ public sealed partial class SqliteStateStore
     public long RehashWatermark(string rootId) => InStore(() =>
     {
         var root = RootNo(rootId);
+        if (root is not null) ReportRehashOrderForTest("capture", root.Value, null);
         return root is null ? 0L : Convert.ToInt64(StoreSchema.Scalar(_connection, null,
             "SELECT COALESCE(MAX(last_attempt),0) FROM local_rehash WHERE root_no=$r;", ("$r", root.Value)));
     });
@@ -82,6 +83,7 @@ public sealed partial class SqliteStateStore
         StoreSchema.Execute(_connection, tx,
             "UPDATE file_state SET flags=flags | 256,hash=NULL WHERE root_no=$r AND object_id=$o;",
             ("$r", root), ("$o", item.ObjectId));
+        ReportRehashOrderForTest("reflag", root, tx, item.ObjectId);
     }
 
     internal string RehashRootSql => _storageEnabled
@@ -224,6 +226,8 @@ public sealed partial class SqliteStateStore
             row.Item.Path == expected.Path && row.Item.ObjectId == expected.ObjectId &&
             row.Item.Size == expected.Size && row.Item.Mtime == expected.Mtime);
         if (!exact) return false;
+        ReportRehashOrderForTest(sameProof ? "identical-proof" : "before-proof", root.Value, tx, expected.ObjectId);
+        if (sameProof) return true; // Identical accepted proof is a read-only success for every caller.
         // A validated handle proves one physical entity. Do not unhold aliases with different metadata.
         if (StoreSchema.Scalar(_connection, tx,
             "SELECT 1 FROM file_state INDEXED BY fs_obj WHERE root_no=$r AND object_id=$o AND (size!=$s OR mtime!=$m) LIMIT 1;",
@@ -238,10 +242,8 @@ public sealed partial class SqliteStateStore
         // Accepted proof ends this failure episode; the planning obligation still survives.
         StoreSchema.Execute(_connection, tx,
             "UPDATE local_rehash SET failure_count=0,retry_after=0,last_attempt=$order WHERE root_no=$r AND object_id=$o;",
-            ("$r", root.Value), ("$o", expected.ObjectId), ("$order", sameProof
-                ? StoreSchema.Scalar(_connection, tx, "SELECT last_attempt FROM local_rehash WHERE root_no=$r AND object_id=$o;",
-                    ("$r", root.Value), ("$o", expected.ObjectId)) ?? 0L
-                : NextRehashOrder(root.Value, tx)));
+            ("$r", root.Value), ("$o", expected.ObjectId), ("$order", NextRehashOrder(root.Value, tx)));
+        ReportRehashOrderForTest("after-proof", root.Value, tx, expected.ObjectId);
         // The queue is also the durable planning obligation. Only settled execution acknowledges it.
         CloseIndexItemFailure(tx, rootId, expected.Path);
         tx.Commit();

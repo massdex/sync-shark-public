@@ -4,13 +4,15 @@ internal static partial class RunChecks
 {
     private static async Task ReconciliationUserChangePriorityAsync()
     {
-        using var store = SqliteStateStore.Open(FixtureFolder("reconciliation-priority"), StorageChecks.Fast,
+        var folder = FixtureFolder("reconciliation-priority");
+        using var store = SqliteStateStore.Open(folder, StorageChecks.Fast,
             TimeProvider.System, LocalItems.CaptureOptionalHash);
         var fx = Build(suppliedStore: store);
         fx.A.ContentProofStore = store;
         foreach (var path in new[] { "Edit", "Rename", "Move", "Remote", "bulk-a", "bulk-b", "bulk-c" })
             fx.A.Seed(path, "original");
         await FirstSyncAsync(fx.Run(), fx);
+        var proofTrace = TraceRehashProofs(folder, store, fx);
         foreach (var path in new[] { "bulk-a", "bulk-b", "bulk-c" }) fx.A.Seed(path, "gap change");
         var cursor = (await fx.A.FullAsync(0, _ => true, SilentProgress, default)).CursorAfter;
         ((ILocalGapStore)store).BeginGap(fx.Pair.A.RootId, PriorityCheckpoint.Cursor, 100, false, protect: false);
@@ -38,6 +40,7 @@ internal static partial class RunChecks
         }));
         var run = new SyncRun(store, fx.Executor, fx.Provider,
             Settings with { ReconciliationBatch = new(1, 1024) }, TimeProvider.System);
+        run.RehashAcknowledgementForTest = (a, b) => proofTrace.Enqueue($"ack scan.A.RehashThrough={a} scan.B.RehashThrough={b}");
         try
         {
             Require(await run.MonitorAsync(fx.Pair.PairId, new RecordingProgress(), default),
@@ -54,7 +57,7 @@ internal static partial class RunChecks
                 await AssertPriorityAppliedAsync(fx, report);
                 var inline = store.Live(fx.Pair.A.RootId, ["Edit"]).Single();
                 Require(inline.Hash is { } hash && store.RehashProofOrder(fx.Pair.A.RootId, inline.ObjectId, hash) == 0,
-                    "AutoSync acknowledges its inline-proven changed row within the same run");
+                    "AutoSync acknowledges its inline-proven changed row within the same run: " + string.Join(" | ", proofTrace));
                 Require(store.PendingGapInventory(fx.Pair.A.RootId) &&
                     (await fx.B.ObserveAsync("bulk-b", default))?.Hash != (await fx.A.ObserveAsync("bulk-b", default))?.Hash,
                     "fresh user changes settle while later gap work remains pending");

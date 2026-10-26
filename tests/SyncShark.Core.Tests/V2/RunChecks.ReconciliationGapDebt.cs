@@ -61,6 +61,7 @@ internal static partial class RunChecks
         fx.A.ContentProofStore = store;
         var items = Enumerable.Range(0, 50).Select(i => fx.A.Seed($"Parent/file-{i:D2}.txt", "original")).ToArray();
         await FirstSyncAsync(fx.Run(), fx);
+        var proofTrace = TraceRehashProofs(folder, store, fx, items.Take(3).Select(item => item.ObjectId).ToHashSet());
         var gaps = (ILocalGapStore)store;
         var root = fx.Pair.A.RootId;
         gaps.BeginGap(root, new NtfsUsnCheckpoint(2, 0, 200, 0).Cursor, 100, false, protect: legacy);
@@ -76,6 +77,7 @@ internal static partial class RunChecks
         fx.A.HashedPaths.Clear(); fx.B.HashedPaths.Clear();
         var run = new SyncRun(store, fx.Executor, fx.Provider,
             Settings with { ReconciliationBatch = new(5, 64) }, TimeProvider.System);
+        run.RehashAcknowledgementForTest = (a, b) => proofTrace.Enqueue($"ack scan.A.RehashThrough={a} scan.B.RehashThrough={b}");
         var report = await run.ReconcileScopeAsync(fx.Pair.PairId,
             StateMonitor.FromGap(epoch) with { RootId = root }, new RecordingProgress(), default);
         Require(!report.CompletionFailed && report.Failed == 0 && fx.WriterB.Calls - writes == 3,
@@ -84,7 +86,7 @@ internal static partial class RunChecks
         Require(items.All(item => fx.A.HashedPaths.Contains(item.Path)),
             "every retained file was hashed: missing=" + string.Join(",", items.Where(item => !fx.A.HashedPaths.Contains(item.Path)).Select(item => item.Path)));
         Require(fx.B.HashedPaths.Count == 0, "trusted counterpart has zero hash requests: actual=" + fx.B.HashedPaths.Count);
-        Require(store.RehashPendingCount(root) == 0, "all 50 files have zero remaining proof debt: " + RehashDiagnostics(folder, fx.Pair));
+        Require(store.RehashPendingCount(root) == 0, "all 50 files have zero remaining proof debt: " + RehashDiagnostics(folder, fx.Pair) + " | " + string.Join(" | ", proofTrace));
         Require(report.Deferred == 0, "all 50 files settle within one run with zero deferred work");
         Require(!store.PendingGapInventory(root) && !gaps.HasGapProtection(root) &&
             gaps.GapObligations(root, items.Select(item => item.ObjectId).ToArray()).Count == 0 &&

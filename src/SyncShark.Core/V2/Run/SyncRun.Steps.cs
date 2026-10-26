@@ -1196,6 +1196,7 @@ public sealed partial class SyncRun
                     batch is null ? null : (row, reason) =>
                         RecordReconciliationBlocker(pair, batch, row, reason, scan, plan));
             }
+        RehashAcknowledgementForTest?.Invoke(scan.A.RehashThrough, scan.B.RehashThrough);
         _store.AcknowledgeRehash(pair.A.RootId, scan.A.RehashThrough, path => Settled(path) && includeA(path), ct, batch?.ObjectIdsA);
         _store.AcknowledgeRehash(pair.B.RootId, scan.B.RehashThrough, path => Settled(path) && includeB(path), ct, batch?.ObjectIdsB);
         if (batch is not null) AccountReconciliationBatch(pair, batch, plan, tally,

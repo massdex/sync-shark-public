@@ -2,6 +2,7 @@ namespace Massdex.SyncShark.V2;
 
 public sealed partial class SyncRun
 {
+    internal Action<long, long>? RehashAcknowledgementForTest { get; set; }
     private async Task PrepareDeltaProofAsync(PairDef pair, BothScan scan, IReadOnlySet<string> reviewScopes, CancellationToken ct)
     {
         RetainReviewedRemovalObservations(pair, scan, reviewScopes, ct);

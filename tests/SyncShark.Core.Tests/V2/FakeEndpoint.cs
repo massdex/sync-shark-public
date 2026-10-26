@@ -70,6 +70,7 @@ internal sealed class FakeEndpoint : IInventorySource, IEndpointWriter, ISourceA
 
     // Opt-in local proof ownership: unlike a cloud hash, native HashAsync durably clears rehash debt.
     internal IStateStore? ContentProofStore { get; set; }
+    internal Action<string, string>? ContentProofCompletedForTest { get; set; }
 
     /// <summary>Adds one item as if it had always been present, and logs an upsert.</summary>
     public ItemState Seed(string path, string content, ItemKind kind = ItemKind.File,
@@ -338,6 +339,7 @@ internal sealed class FakeEndpoint : IInventorySource, IEndpointWriter, ISourceA
                         hash = DropboxHashes ? DropboxContentHash.Compute(entry.Bytes)
                             : Convert.ToHexString(SHA256.HashData(entry.Bytes)).ToLowerInvariant();
                         if (!store.CompleteRehash(_rootId, expected, hash)) continue;
+                        ContentProofCompletedForTest?.Invoke(path, hash);
                     }
                     result[path] = hash;
                 }
