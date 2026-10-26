@@ -1,0 +1,7 @@
+--v2-run-checks
+--v2-planner-checks
+--v2-conflict-choice-checks
+--v2-autosync-checks
+--cli-checks
+--v2-storage-checks
+--v2-dropbox-checks
