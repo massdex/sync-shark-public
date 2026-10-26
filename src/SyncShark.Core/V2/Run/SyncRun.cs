@@ -1093,7 +1093,7 @@ public sealed partial class SyncRun : ISyncRun
             RunLog.Trace("planning occupancy: skipped; full-scan=true");
             return plan;
         }
-        var started = PlanningStepStarted();
+        var started = PlanningStepStarted("occupancy", plan.Actions.Count);
         var scope = loadScope();
         var loadedA = new HashSet<string>(scope.A.Select(item => item.Path), StringComparer.OrdinalIgnoreCase);
         var loadedB = new HashSet<string>(scope.B.Select(item => item.Path), StringComparer.OrdinalIgnoreCase);

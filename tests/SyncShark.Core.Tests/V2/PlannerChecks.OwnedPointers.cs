@@ -44,7 +44,7 @@ internal static partial class PlannerChecks
         {
             var editedA = F("x", "idA", "h2", flags: pointerSide == Side.A ? ItemFlags.OwnedPointer : ItemFlags.None);
             var editedB = F("x", "idB", "h3", flags: pointerSide == Side.B ? ItemFlags.OwnedPointer : ItemFlags.None);
-            var held = PlanRows(Row(Base("p1", F("x", "idA", "h1"), F("x", "idB", "h1")), editedA, editedB));
+            var held = PlanRows(Row(Base("k1", F("x", "idA", "h1"), F("x", "idB", "h1")), editedA, editedB));
             AssertNoActions(held);
             Require(held.Notices.Any(n => n.ReasonKey == "sync-retry"),
                 $"a keep-both copy whose source is an owned pointer ({pointerSide}) holds the whole row");

@@ -4,7 +4,11 @@ internal static partial class RunChecks
 {
     private static async Task Incremental_SplitBaselineRetrySettlesAsync()
     {
-        foreach (var mode in new[] { "settle", "equal-new-identity", "edited", "uncertain", "uncertain-other", "other-baseline" })
+        foreach (var mode in new[]
+                 {
+                     "settle", "equal-new-identity", "edited", "uncertain", "uncertain-other", "other-baseline",
+                     "other-baseline-equal", "owned-pointer", "owned-pointer-needs-rehash"
+                 })
         {
             var folder = FixtureFolder("split-retry-" + mode);
             using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
@@ -64,20 +68,37 @@ internal static partial class RunChecks
                     }
                 };
             }
-            if (mode is "other-baseline" or "uncertain-other")
+            Action<SqliteStateStore>? publishCorrespondence = null;
+            if (mode is "other-baseline" or "other-baseline-equal" or "uncertain-other")
             {
                 var other = fx.B.Seed("Parent/other.json", "cloud-edit");
                 var action = new SyncAction("other-link", 16, ActionKind.Adopt, Side.B, other.Path, null,
                     baseline.A, other, false, "other-link");
-                store.CommitResult(fx.Pair.PairId, gen, action, new(action.ActionId, Outcome.Done, baseline.A, other, null, null));
-                if (mode == "other-baseline")
+                if (mode is "other-baseline" or "other-baseline-equal")
                 {
-                    var editedOther = fx.B.Seed(other.Path, "later-edit", mtime: other.Mtime.AddMinutes(1));
-                    Require(editedOther.Hash is not null && Content.SameContent(editedOther, other) == false,
-                        "second correspondence is readable but edited against its baseline");
+                    // Publish after planning: otherwise baseline claiming consumes the shared A
+                    // identity and rule 7 rewrites this synthetic link before settlement can see it.
+                    publishCorrespondence = target =>
+                    {
+                        var editGen = target.BeginGeneration(fx.Pair.B.RootId, "concurrent-edit");
+                        target.CommitResult(fx.Pair.PairId, editGen, action,
+                            new(action.ActionId, Outcome.Done, baseline.A, other, null, null));
+                        var sibling = mode == "other-baseline"
+                            ? fx.B.Seed(other.Path, "later-edit", mtime: other.Mtime.AddMinutes(1))
+                            : fx.B.Seed(other.Path, "cloud-edit", mtime: other.Mtime);
+                        target.WriteSnapshot(new Snapshot(fx.Pair.B.RootId, Side.B, editGen, "concurrent-edit",
+                            [sibling], []) { IncludesPath = candidate => PairPath.Same(candidate, other.Path) });
+                        Require(mode == "other-baseline"
+                                ? sibling.Hash is not null && Content.SameContent(sibling, other) == false
+                                : sibling.Hash is not null && Content.SameContent(sibling, other) == true &&
+                                    Planner.Unchanged(sibling, other),
+                            "second correspondence is republished " + (mode == "other-baseline" ? "edited" : "unchanged"));
+                    };
                 }
                 else
                 {
+                    store.CommitResult(fx.Pair.PairId, gen, action,
+                        new(action.ActionId, Outcome.Done, baseline.A, other, null, null));
                     // Every footprint belongs only to the second correspondence's remote path.
                     var pendingOther = new SyncAction("pending-other", 2, ActionKind.Update, Side.B, other.Path, null,
                         other, other with { Hash = "previous", Mtime = other.Mtime.AddMinutes(-1) }, false, "other-link");
@@ -95,6 +116,23 @@ internal static partial class RunChecks
                     };
                 }
             }
+            if (mode is "owned-pointer" or "owned-pointer-needs-rehash")
+            {
+                // A verified online-only pointer keeps OwnedPointer permanently; only a rehash keeps
+                // its content unproven.
+                var flags = mode == "owned-pointer"
+                    ? ItemFlags.OwnedPointer
+                    : ItemFlags.OwnedPointer | ItemFlags.NeedsRehash;
+                var pointerGen = store.BeginGeneration(fx.Pair.A.RootId, "owned-pointer");
+                var pointer = await fx.A.FullAsync(pointerGen, _ => true, null!, default);
+                store.WriteSnapshot(pointer with
+                {
+                    Items = pointer.Items.Select(item => PairPath.Same(item.Path, baseline.A.Path)
+                        ? item with { Hash = baseline.B.Hash, Flags = flags } : item).ToArray()
+                });
+                Require(store.Live(fx.Pair.A.RootId, [baseline.A.Path]).Single().Flags == flags,
+                    "retry fixture carries the pointer flags its mode names");
+            }
             store.SaveSyncRetry(fx.Pair.PairId, new SyncRetry(baseline.A.Path, "sync", 4,
                 "effect outcome unknown", DateTimeOffset.MinValue));
             store.AddNotices([new Notice(fx.Pair.PairId, 40, NoticeKind.Info, baseline.A.Path,
@@ -102,30 +140,38 @@ internal static partial class RunChecks
             store.Dispose();
             using var reopened = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
             var restarted = new SyncRun(reopened, NewExecutor(reopened), fx.Provider, Settings, TimeProvider.System);
-            void Measure(string stage)
+            var publishedCorrespondence = false;
+            // Test-only observer write: subscribers run after the commit gate releases, and the final assertion re-checks published state.
+            void ObserveCommitted(PairDef pair, IReadOnlyList<CommittedAction> results)
             {
-                if (mode != "other-baseline") return;
-                Console.WriteLine($"RETRY-MEASUREMENT {stage} debt={reopened.SyncRetryAt(fx.Pair.PairId, baseline.A.Path) is not null}");
-                foreach (var link in reopened.Baselines(fx.Pair.PairId))
-                {
-                    var liveA = reopened.Live(fx.Pair.A.RootId, [link.A.Path]).FirstOrDefault();
-                    var liveB = reopened.Live(fx.Pair.B.RootId, [link.B.Path]).FirstOrDefault();
-                    Console.WriteLine($"RETRY-MEASUREMENT {stage} key={link.ObjectKey}; baseA={link.A}; baseB={link.B}; liveA={liveA}; liveB={liveB}; equal={(liveA is not null && liveB is not null ? Content.SameContent(liveA, liveB) : null)}");
-                }
-                foreach (var notice in reopened.OpenNotices(fx.Pair.PairId))
-                    Console.WriteLine($"RETRY-MEASUREMENT {stage} notice rule={notice.Rule}; path={notice.Path}; reason={notice.ReasonKey}");
+                if (mode is not ("other-baseline" or "other-baseline-equal")) return;
+                if (publishedCorrespondence || !results.Any(result => result.Outcome == Outcome.Done &&
+                    result.Action.Kind == ActionKind.CopyNew && result.Action.Path == "Parent/other.json")) return;
+                publishedCorrespondence = true;
+                publishCorrespondence!(reopened);
             }
-            Measure("before");
-            if (mode == "other-baseline")
-                reopened.ResultsCommitted += (_, results) =>
+            reopened.ResultsCommitted += ObserveCommitted;
+            try { await restarted.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default); }
+            finally { reopened.ResultsCommitted -= ObserveCommitted; }
+            if (mode is "other-baseline" or "other-baseline-equal" or "uncertain-other")
+            {
+                var sibling = reopened.BaselinesAt(fx.Pair.PairId, Side.A, [baseline.A.Path])
+                    .Single(link => link.ObjectKey == "other-link");
+                if (mode == "uncertain-other")
+                    Require(reopened.Live(fx.Pair.B.RootId, [sibling.B.Path]).Count == 1,
+                        "sibling correspondence still touches the retry at settlement: " + mode);
+                else
                 {
-                    foreach (var result in results)
-                        Console.WriteLine($"RETRY-MEASUREMENT committed kind={result.Action.Kind}; rule={result.Action.Rule}; path={result.Action.Path}; key={result.Action.ObjectKey}; outcome={result.Outcome}");
-                };
-            await restarted.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
-            Measure("after");
+                    Require(publishedCorrespondence, "mid-run correspondence hook published: " + mode);
+                    var live = reopened.Live(fx.Pair.B.RootId, [sibling.B.Path]).Single();
+                    Require(live.Hash is not null && live.Flags == ItemFlags.None &&
+                        Planner.Unchanged(live, sibling.B) == (mode == "other-baseline-equal"),
+                        "readable second correspondence proves the injected edit: " + mode);
+                }
+            }
             var settled = reopened.SyncRetryAt(fx.Pair.PairId, baseline.A.Path) is null;
-            Require(settled == (mode is "settle" or "equal-new-identity"), "only fully proved unprotected correspondences settle after cold reopen: " + mode);
+            Require(settled == (mode is "settle" or "equal-new-identity" or "owned-pointer" or "other-baseline-equal"),
+                "only fully proved unprotected correspondences settle after cold reopen: " + mode);
             if (mode == "edited")
             {
                 Require(!settled && reopened.OpenNotices(fx.Pair.PairId).Any(n =>
