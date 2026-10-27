@@ -1,0 +1,48 @@
+<Project>
+  <PropertyGroup>
+    <Version Condition="'$(Version)' == ''">0.3.72</Version>
+    <SyncSharkSourceRevision Condition="'$(SyncSharkSourceRevision)' == ''">UNBOUND</SyncSharkSourceRevision>
+    <SyncSharkExpectedPreviousVersion Condition="'$(SyncSharkExpectedPreviousVersion)' == '' and '$(Configuration)' != 'Release'">0.3.47+19fb262ff6a943d5bf37b4ca003f07235e72515d</SyncSharkExpectedPreviousVersion>
+    <InformationalVersion>$(Version)+$(SyncSharkSourceRevision)</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreLockedMode Condition="'$(ContinuousIntegrationBuild)' == 'true'">true</RestoreLockedMode>
+  </PropertyGroup>
+  <ItemGroup>
+    <AssemblyMetadata Include="SyncSharkSourceRevision" Value="$(SyncSharkSourceRevision)" />
+  </ItemGroup>
+  <Target Name="RequireBoundSyncSharkReleaseIdentity" BeforeTargets="CoreCompile"
+          Condition="'$(Configuration)' == 'Release' and ('$(MSBuildProjectName)' == 'SyncShark' or '$(MSBuildProjectName)' == 'SyncShark.Core') and !$([System.Text.RegularExpressions.Regex]::IsMatch('$(SyncSharkSourceRevision)', '^[0-9a-f]{40}$'))">
+    <Error Text="Release builds require SyncSharkSourceRevision to be the exact lowercase 40-character candidate commit." />
+  </Target>
+  <Target Name="RequireBoundSyncSharkReleasePredecessor" BeforeTargets="BuildSyncSharkDiscovery;BuildSyncSharkUpdater"
+          Condition="'$(Configuration)' == 'Release'">
+    <Error Condition="!$([System.Text.RegularExpressions.Regex]::IsMatch('$(SyncSharkExpectedPreviousVersion)', '^\d+\.\d+\.\d+\+[0-9a-f]{40}$'))"
+           Text="Release setup builds require an explicit SyncSharkExpectedPreviousVersion bound to the actual installed predecessor." />
+  </Target>
+  <PropertyGroup Condition="'$(SyncSharkBuildRoot)' != ''">
+    <SyncSharkStableProjectName>$([System.Text.RegularExpressions.Regex]::Replace('$(MSBuildProjectName)', '_.*_wpftmp$', ''))</SyncSharkStableProjectName>
+    <PathMap>$(SyncSharkBuildRoot)=/_syncshark_build</PathMap>
+    <BaseOutputPath>$(SyncSharkBuildRoot)\bin\$(MSBuildProjectName)\</BaseOutputPath>
+    <BaseIntermediateOutputPath>$(SyncSharkBuildRoot)\obj\$(SyncSharkStableProjectName)\</BaseIntermediateOutputPath>
+    <MSBuildProjectExtensionsPath>$(SyncSharkBuildRoot)\obj\$(SyncSharkStableProjectName)\</MSBuildProjectExtensionsPath>
+    <RestorePackagesPath>$(SyncSharkBuildRoot)\packages</RestorePackagesPath>
+    <DefaultItemExcludes>$(DefaultItemExcludes);bin\**;obj\**</DefaultItemExcludes>
+  </PropertyGroup>
+  <!-- SDK Clean can leave copied runtime dependencies after a framework-dependent publish.
+       Limit this lifecycle cleanup to this app's registered external Release output shape;
+       the separately staged package, Debug fixture and installed runtime are never targets. -->
+  <Target Name="CleanSyncSharkReleaseDependencies" AfterTargets="Clean"
+          Condition="'$(SyncSharkBuildRoot)' != '' and '$(Configuration)' == 'Release' and '$(MSBuildProjectName)' == 'SyncShark'">
+    <PropertyGroup>
+      <SyncSharkCleanPrefix>$([System.IO.Path]::GetFullPath('$(SyncSharkBuildRoot)\bin\SyncShark\Release\'))</SyncSharkCleanPrefix>
+      <SyncSharkCleanTarget>$([System.IO.Path]::GetFullPath('$(TargetDir)'))</SyncSharkCleanTarget>
+    </PropertyGroup>
+    <Error Condition="!$([System.String]::Copy('$(SyncSharkCleanTarget)').StartsWith('$(SyncSharkCleanPrefix)', System.StringComparison.OrdinalIgnoreCase))"
+           Text="Release dependency cleanup refused an output outside the owner build allocation." />
+    <ItemGroup>
+      <SyncSharkCleanDependency Include="$(SyncSharkCleanTarget)Microsoft.Windows.SDK.NET.dll;$(SyncSharkCleanTarget)WinRT.Runtime.dll;$(SyncSharkCleanTarget)Microsoft.Data.Sqlite.dll;$(SyncSharkCleanTarget)SQLitePCLRaw.*.dll;$(SyncSharkCleanTarget)e_sqlite3.dll;$(SyncSharkCleanTarget)SyncShark.Core.dll" />
+    </ItemGroup>
+    <Delete Files="@(SyncSharkCleanDependency)" />
+  </Target>
+</Project>
