@@ -14,7 +14,7 @@ public sealed partial class SyncRun
         if (batch is not null)
         {
             var coverage = new ReconciliationCoverage(StateMonitor.PlanningBacklog(), false, batch.Session, sql,
-                new HashSet<Side> { Side.A, Side.B }, scan, batch.UnobservedAlias);
+                new HashSet<Side> { Side.A, Side.B }, scan, batch.UnobservedAlias, batch.ObservedMovingPath);
             scan = scan with { Unknown = (side, path) => batch.UnobservedAlias(path) ||
                 !batch.ObservedAliases.Contains(path) && batch.Remaining(side, path) || coverage.Unknown(side, path) };
             return [coverage];

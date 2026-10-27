@@ -905,7 +905,7 @@ public sealed partial class SyncRun : ISyncRun
             .Where(retry => retry.Path.Length != 0 || retry.Kind != "run").ToArray() : [];
         ct.ThrowIfCancellationRequested();
         var deferredPlanning = batch is not null ? ReconciliationPlanningPage(pair, batch) :
-            AdmitPlanningPage(pairId, pair, userOnly: options?.AutoSyncFreshDelta == true);
+            options?.AutoSyncFreshDelta == true ? AutoSyncPlanningPage(pair, scan) : AdmitPlanningPage(pairId, pair);
         var current = LeftAlone(pair); // Admission may retire non-work; summaries must observe that transition.
         using var planningTiming = new RunBoundaryTiming("planning", _settings.EnableRunInstrumentation);
         var activeRetries = CachedIdentityRefresh.ActiveRetryPaths(retries);
@@ -943,7 +943,7 @@ public sealed partial class SyncRun : ISyncRun
         var touched = new List<string>(scan.Touched(recoveryPaths.Concat(retryPaths)
             .Concat(decisions?.Keys ?? Enumerable.Empty<string>())));
         if (options?.AutoSyncFreshDelta == true)
-            RunTrace.Emit($"autosync: fresh delta {scan.Touched([]).Distinct(StringComparer.OrdinalIgnoreCase).Count()} paths; urgent user-change handoffs {deferredPlanning.Count}; retry follow-ups {recoveryPaths.Concat(retryPaths).Distinct(StringComparer.OrdinalIgnoreCase).Count()} paths; backlog left to reconciliation: {(_store as SqliteStateStore)?.CountDeferredPlanning(pairId) ?? 0}");
+            RunTrace.Emit($"autosync: fresh delta {scan.Touched([]).Distinct(StringComparer.OrdinalIgnoreCase).Count()} paths; fresh observation and urgent handoffs {deferredPlanning.Count}; retry follow-ups {recoveryPaths.Concat(retryPaths).Distinct(StringComparer.OrdinalIgnoreCase).Count()} paths; backlog left to reconciliation: {(_store as SqliteStateStore)?.CountDeferredPlanning(pairId) ?? 0}");
         // Finding 3: a whole-root read retry expands planning to the whole pair only in the run where
         // that debt actually settles. While another root is unreadable its empty-path failure keeps
         // every row protected, and no retry can retire, so an earlier sleeping retry on the healthy
@@ -1005,7 +1005,7 @@ public sealed partial class SyncRun : ISyncRun
         deciding = null!;
         inventory = null;
         var planningBacklog = 0;
-        var settlement = batch is null ? PlanSettlePage(pair, scan, links, deferredPlanning, touched, predicates.A, predicates.B, ct, protectionRun) :
+        var settlement = batch is null && options?.AutoSyncFreshDelta != true ? PlanSettlePage(pair, scan, links, deferredPlanning, touched, predicates.A, predicates.B, ct, protectionRun) :
             (Rows: (IReadOnlyList<SqliteStateStore.DeferredPlanning>)[], Adopts: (IReadOnlyList<SyncAction>)[], Candidates: 0);
         settleEvaluated.UnionWith(settlement.Rows.SelectMany(row => row.Paths));
         deferredPlanning = deferredPlanning.Concat(settlement.Rows).ToArray();
@@ -1044,7 +1044,7 @@ public sealed partial class SyncRun : ISyncRun
         RefreshRetryProtection();
         plan = FilteredPlan(pair, "notices", ActionPredicates(retryPair, links.WithPending(
             _store.ReadSyncRetries(pairId).Where(retry => retry.PendingNotice is not null).Select(retry => retry.Path)), retrySelection), plan);
-        plan = plan with { HeldDeletions = retryHeld, FirstSyncOptions = Options(pair, false, winners, null) };
+        plan = ProtectMovingUnit(plan, batch) with { HeldDeletions = retryHeld, FirstSyncOptions = Options(pair, false, winners, null) };
         var reviewedDeletes = retries.Where(item => item.HeldReviewed && item.Held is not null && item.HeldExpected is { } expected &&
                     _store.Live(item.Held.Local == Side.A ? pair.A.RootId : pair.B.RootId, [item.Path]).FirstOrDefault() is { } currentHeld &&
                     expected.ObjectId == currentHeld.ObjectId && Content.SideStamp(expected) == Content.SideStamp(currentHeld))

@@ -8,6 +8,7 @@ public sealed partial class DropboxInventory
     {
         var exact = paths.Where(include).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var changes = new List<Change>();
+        var missingFolders = new List<ItemState>();
         var failures = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var page in exact.Chunk(DropboxPilotClient.MetadataPageLimit))
         {
@@ -28,15 +29,28 @@ public sealed partial class DropboxInventory
                 else
                     foreach (var item in before.Where(item => PairPath.Same(item.Path, path)))
                         if (item.Kind == ItemKind.Folder)
-                            failures.TryAdd(path, MessageCatalog.Default.Message("guardedInventoryIncomplete"));
+                            missingFolders.Add(item);
                         else changes.Add(new(ChangeKind.Delete, item.ObjectId, item.Path, null, null));
             }
         }
-        return new(_root.RootId, _side, gen, cursor, cursor, changes, false, failures.Keys.ToArray())
+        CompleteMissingFolders(missingFolders, changes, failures);
+        var incomplete = failures.Keys.ToArray();
+        return new(_root.RootId, _side, gen, cursor, cursor,
+            changes.Where(change => PairPath.Observed(change.Path, incomplete)).ToArray(), false, incomplete)
         {
-            IncludesPath = path => exact.Contains(path) && !failures.ContainsKey(path),
+            IncludesPath = path => exact.Contains(path) && PairPath.Observed(path, incomplete),
             ExactPaths = exact,
             IncompleteReasons = failures
         };
+    }
+
+    private static void CompleteMissingFolders(IReadOnlyList<ItemState> folders, IReadOnlyList<Change> changes,
+        System.Collections.Concurrent.ConcurrentDictionary<string, string> failures)
+    {
+        // A positive same-identity observation at its new alias proves a move, not subtree absence.
+        foreach (var folder in folders)
+            if (!changes.Any(change => change.Kind == ChangeKind.Upsert && change.ObjectId == folder.ObjectId &&
+                change.Path != folder.Path && !failures.ContainsKey(change.Path)))
+                failures.TryAdd(folder.Path, MessageCatalog.Default.Message("guardedInventoryIncomplete"));
     }
 }

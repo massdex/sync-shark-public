@@ -133,6 +133,7 @@ public sealed partial class SyncRun
             while (NextReconciliationBatch(sql, active.Session) is { } batch)
             {
                 ct.ThrowIfCancellationRequested();
+                batch = MovingFolderBatch(pair, sql, batch, ct);
                 var report = await RunAdmittedBatchAsync(pair, active, batch, progress, ct);
                 total = AddReconciliationReport(total, report);
                 LogBatch(batch, report);
@@ -158,6 +159,12 @@ public sealed partial class SyncRun
         return await _admission.WithAsync(pair.PairId, async () =>
         {
             batch.AdmissionWait = _time.GetUtcNow() - queuedAt;
+            if (batch.MovingUnit)
+            {
+                RunTrace.Emit($"reconciliation moving unit: folder={batch.MovingFolders[0]} children={batch.MovingItems - 1} paths={batch.Paths.Count} admission-ms={batch.AdmissionWait.TotalMilliseconds:F0}");
+                progress.Report(new RunProgress(RunPhases.Repairing, batch.MovingFolders[0], 0, batch.MovingItems)
+                { Message = string.Format(CultureInfo.InvariantCulture, MessageCatalog.Default.Template("reconciliation-moving-folder"), batch.MovingItems) });
+            }
             using var decisionBudget = batch.MeasureDecisions(_settings.ReconciliationBatch.MaxBytes);
             try
             {

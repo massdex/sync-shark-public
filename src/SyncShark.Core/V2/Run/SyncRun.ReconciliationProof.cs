@@ -5,7 +5,9 @@ public sealed partial class SyncRun
     private async Task ProveReconciliationBatchAsync(RootDef root, IInventorySource inventory,
         ReconcileBatch batch, ScopeRead read, CancellationToken ct)
     {
-        if (root.Provider != SyncProviders.Local) return;
+        // A folder move needs identity/metadata, not proactive child-content proof.
+        // Any actual child edit is hashed on demand by the planner through the same budget.
+        if (root.Provider != SyncProviders.Local || batch.MovingUnit) return;
         var observed = read.Observed.Where(path => PairPath.Observed(path, read.Incomplete)).ToArray();
         foreach (var item in _store.Live(root.RootId, observed))
         {

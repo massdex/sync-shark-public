@@ -34,7 +34,8 @@ internal static partial class DropboxChecks
             new HashSet<string> { selected.ObjectId }, (_, _) => false);
         await run.IncrementalAsync(pair.PairId, progress, default, new RunOptions { Batch = batch });
         Require(store.SyncRetryAt(pair.PairId, "Missing") is { Kind: "scan" } &&
-            store.Live(pair.B.RootId, ["Missing/child.txt"]).Count == 1,
+            store.Live(pair.B.RootId, ["Missing", "Missing/child.txt"]).Count == 2 &&
+            batch.AliasPaths.Contains("Missing/child.txt"),
             "an exact missing cloud folder retains descendants and hands observation to scan retry");
         Require(a.AppliedActions.All(action => action.Kind != ActionKind.MkDir && action.Kind != ActionKind.Delete) &&
             store.OpenNotices(pair.PairId).All(notice => notice.ReasonKey == "sync-retry"),
