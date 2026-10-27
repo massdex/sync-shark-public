@@ -437,7 +437,9 @@ internal static partial class CliChecks
             SyncCliRegistry.Rows.Single(row => row.Command == "autosync now").Effect.Contains(
                 "urgent user-change handoffs", StringComparison.Ordinal) &&
             SyncCliRegistry.Rows.Single(row => row.Command == "autosync now").Effect.Contains(
-                "urgent progress requeues immediately", StringComparison.Ordinal),
+                "urgent progress requeues immediately", StringComparison.Ordinal) &&
+            SyncCliRegistry.Rows.Single(row => row.Command == "autosync now").Effect.Contains(
+                "including bulk settlement; moved folders use atomic metadata units in Repair", StringComparison.Ordinal),
             "AutoSync CLI documents shared fresh-delta and reconciliation backlog ownership");
         var proofList = SyncCliRegistry.Parse(["--cli", "conflicts", "list", "--pair", "fixture", "--limit", "10", "--json"]);
         Require(!SyncCliRegistry.MutatesProductState(proofList) &&

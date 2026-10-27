@@ -5,6 +5,11 @@ internal sealed record ReconcileBatch(string Session, IReadOnlyList<string> Path
     IReadOnlySet<string> ObjectIdsA, IReadOnlySet<string> ObjectIdsB, Func<Side, string, bool> Remaining)
 {
     internal SqliteStateStore.ReconciliationGapCoverage? GapCoverage { get; set; }
+    internal IReadOnlyList<string> MovingFolders { get; init; } = [];
+    internal int MovingItems { get; init; }
+    internal bool MovingUnit => MovingFolders.Count > 0;
+    internal bool OwnsMovingPath(string path) => MovingFolders.Any(folder => PairPath.IsSelfOrUnder(path, folder));
+    internal bool ObservedMovingPath(string path) => MovingUnit && OwnsMovingPath(path) && Paths.All(ObservedAliases.Contains);
     internal IReadOnlyList<ItemState> RowsA { get; init; } = [];
     internal IReadOnlyList<ItemState> RowsB { get; init; } = [];
     internal Dictionary<string, string> Dispositions { get; } = new(StringComparer.OrdinalIgnoreCase);

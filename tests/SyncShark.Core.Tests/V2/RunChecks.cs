@@ -26,6 +26,7 @@ internal static partial class RunChecks
         await Group(nameof(AutoSyncInScopeFreshChange), AutoSyncInScopeFreshChange, failures);
         await Group(nameof(AutoSyncInScopeDependencies), AutoSyncInScopeDependencies, failures);
         await Group(nameof(ReconciliationFolderMoveAcrossBatches), ReconciliationFolderMoveAcrossBatches, failures);
+        await Group(nameof(ReconciliationMovingUnitAsync), ReconciliationMovingUnitAsync, failures);
         await Group(nameof(ReconciliationFileMoveAliasesAcrossBatches), ReconciliationFileMoveAliasesAcrossBatches, failures);
         await Group(nameof(ReconciliationDependencyReason), ReconciliationDependencyReason, failures);
         await Group(nameof(ReconciliationProofBudgetDefers), ReconciliationProofBudgetDefers, failures);

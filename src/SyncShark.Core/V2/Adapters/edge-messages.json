@@ -28,6 +28,7 @@
     "reconciliation-unsettled": "The selected path was not settled by the admitted plan. Its read or planning protection remains unresolved." ,
     "phase-selecting": "Finding affected files",
     "phase-repairing": "Repairing",
+    "reconciliation-moving-folder": "Repair: moving folder ({0} items)",
     "reconciliation-scope-trace": "reconciliation trigger={0} scope={1}",
     "reconciliation-phase-trace": "reconciliation phase={0}",
     "reconciliation-source-trace": "reconciliation selection source: {0}",

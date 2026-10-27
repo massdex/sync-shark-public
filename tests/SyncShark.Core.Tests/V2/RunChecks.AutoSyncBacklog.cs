@@ -20,8 +20,14 @@ internal static partial class RunChecks
             store.WriteSnapshot(snapshot);
             store.CompleteGeneration(gen, snapshot.CursorAfter, true);
         }
+        // Snapshot publication itself queues both roots. Finish that fixture-owned handoff
+        // before seeding exactly the independent backlog this check measures.
+        while (store.AdmitDeferredPlanning(fx.Pair.PairId, long.MaxValue, rotate: false) is { Count: > 0 } observed)
+            store.AcknowledgeDeferredPlanning(fx.Pair.PairId, observed, _ => true);
         store.DeferPlanning(fx.Pair.PairId, backlog.Select(item => (fx.Pair.A.RootId, item)).ToArray());
         store.DeferPlanning(fx.Pair.PairId, [(fx.Pair.A.RootId, urgent)], urgent: true);
+        Require(store.CountDeferredPlanning(fx.Pair.PairId) == backlog.Length + 1,
+            "fixture owns exactly 5000 bulk entities and one urgent handoff before AutoSync");
         fx.A.Seed("fresh.txt", "after");
         var writes = fx.B.WriteCalls;
         var run = fx.Run();

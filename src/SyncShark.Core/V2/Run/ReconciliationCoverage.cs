@@ -10,14 +10,17 @@ internal sealed class ReconciliationCoverage
     private readonly IReadOnlySet<Side> _sides;
     private readonly SyncRun.BothScan _scan;
     private readonly Func<string, bool>? _unobservedAlias;
+    private readonly Func<string, bool>? _observedMovingUnit;
     private readonly Dictionary<Side, HashSet<string>> _changed;
     private readonly Dictionary<(Side Side, string Path), bool> _loaded = new();
 
     internal ReconciliationCoverage(StateMonitorDecision decision, bool selecting, string session,
-        SqliteStateStore store, IReadOnlySet<Side> sides, SyncRun.BothScan scan, Func<string, bool>? unobservedAlias = null)
+        SqliteStateStore store, IReadOnlySet<Side> sides, SyncRun.BothScan scan, Func<string, bool>? unobservedAlias = null,
+        Func<string, bool>? observedMovingUnit = null)
     {
         _decision = decision; _selecting = selecting; _session = session; _store = store; _sides = sides; _scan = scan;
         _unobservedAlias = unobservedAlias;
+        _observedMovingUnit = observedMovingUnit;
         _changed = new()
         {
             [Side.A] = scan.A.ChangePaths.ToHashSet(StringComparer.OrdinalIgnoreCase),
@@ -67,7 +70,7 @@ internal sealed class ReconciliationCoverage
             scan.Full && scan.Complete && PairPath.Observed(path, scan.IncompleteSubtrees);
     }
 
-    private bool FolderDependency(string path) => _sides.Any(side => _selecting
+    private bool FolderDependency(string path) => _observedMovingUnit?.Invoke(path) != true && _sides.Any(side => _selecting
         ? (_decision.UnknownScope ?? ReconciliationScope.Root).Touches(path, folder: true)
         : Unknown(side, path) || _store.StagedUnder(_session + ":work", side, path) ||
             _store.StagedUnder(_session + ":deferred", side, path));
