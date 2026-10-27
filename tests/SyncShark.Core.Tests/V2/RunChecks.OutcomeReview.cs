@@ -112,7 +112,7 @@ internal static partial class RunChecks
         PairAutoState? published = null;
         var loop = new PairLoop(fx.Pair.PairId, new AutoSyncInputs(store, run, new FakeChangeWatchSource(), Settings,
             _ => false, () => TimeSpan.FromMinutes(1), TimeProvider.System, state => published = state));
-        typeof(PairLoop).GetMethod("AfterReport", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(loop, [report]);
+        typeof(PairLoop).GetMethod("AfterReport", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(loop, [report, 0L]);
         loop.Kick();
         Require(probe.AccessAfterDamage == 0 && published is { Status: AutoStatus.Held } &&
             published.Reason?.Key == RunOutcomes.StateDamaged,
