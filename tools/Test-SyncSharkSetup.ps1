@@ -67,6 +67,8 @@ if ($reply.Root -cne 'C:\Default' -or $reply.Store -cne 'valid') { throw 'The pr
 [IO.File]::WriteAllText($fake, "@echo off`r`nexit /b 1`r`n")
 try { Get-SetupDataState $fake 'C:\Requested'; throw 'A failed product validation was accepted.' }
 catch { if ($_.Exception.Message -notlike 'Product setup validation failed*') { throw } }
+# The refused probe exits 1 on purpose; stock PowerShell returns that as the script's exit code, so clear it.
+$LASTEXITCODE = 0
 $exe = Join-Path $root 'SyncShark.exe'
 [IO.File]::WriteAllText($exe, 'fixture')
 if ((Get-SetupStartupPrevious "`"$exe`" --core v2 --engine-supervisor") -cne $exe) { throw 'Stopped startup predecessor lost.' }
