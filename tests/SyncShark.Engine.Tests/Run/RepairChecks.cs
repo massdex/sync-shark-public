@@ -742,7 +742,6 @@ public static class RepairChecks
                 var roots = 0;
                 var continuations = 0;
                 var store = rig.Store;
-                long? noticeId = null;
                 using var log = rig.Log(folder, "retry");
                 rig.Transport.Respond = async (request, token) =>
                     {
@@ -761,12 +760,9 @@ public static class RepairChecks
                             Check.Require(rig.Store.ReadPrerequisiteRetry(rig.Pair.PairId) is null,
                                 "a failed page never advances the durable pair retry episode");
                             if (continuations > 1)
-                            {
-                                var notice = rig.Store.Issues(rig.Pair.PairId).Single(issue => issue.Cause == TextKey.RequiredRepairRetry);
-                                noticeId ??= notice.Id;
-                                Check.Require(noticeId == notice.Id && store.DiscoveryStarts.Count == 1 && roots == 1,
-                                    "persistent same-page failure retains one notice, initial scan and input cursor");
-                            }
+                                Check.Require(store.DiscoveryStarts.Count == 1 && roots == 1 &&
+                                    rig.Store.Issues(rig.Pair.PairId).All(issue => issue.Cause != TextKey.RequiredRepairRetry),
+                                    "a repeated page wait keeps one initial scan and root acquisition and never raises a notice");
                             if (continuations <= failedResponses)
                             {
                                 var response = JsonResponse(new { error_summary = "too_many_requests/.." });

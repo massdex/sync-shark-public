@@ -74,15 +74,21 @@ internal sealed class AutoSync
                     nowIdle = starts.Count == 0 && _active.Count == 0;
                 }
                 foreach (var start in starts) _ = ObserveAsync(start.PairId, start.ReceiptsOnly, start.Completion, ct);
-                if (nowIdle != idle)
-                {
-                    idle = nowIdle;
-                }
+                idle = nowIdle;
+                RecordIdle(idle, starts.Count == 0 ? string.Empty : starts[0].PairId);
                 await changed.WaitAsync(ct).ConfigureAwait(false);
             }
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        // A clean stop ends the idle stage normally instead of leaving disposal to report it as interrupted.
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { if (idle) RecordIdle(false); }
     }
+
+    // One start line on entering idle and one end line naming the pair that woke the loop and the idle duration.
+    private void RecordIdle(bool idle, string wake = "") =>
+        _host.HostLog?.Event(idle
+            ? RunEvent.Stage(TextKey.StageAutoSyncIdle)
+            : RunEvent.Stage(TextKey.StageAutoSyncIdle, ended: true, count: RunLog.CompletedOperation,
+                path: wake));
 
     private async Task ObserveAsync(string pairId, bool receiptsOnly, TaskCompletionSource completion, CancellationToken ct)
     {

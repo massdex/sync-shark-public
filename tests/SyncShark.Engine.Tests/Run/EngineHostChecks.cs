@@ -61,15 +61,15 @@ public static class EngineHostChecks
         await BackgroundFailureLeavesSupervisionAsync(root).ConfigureAwait(false);
         await AcceptedStopSignalsSupervisionBeforeDrainAsync(root).ConfigureAwait(false);
         await RejectedStopDoesNotSignalSupervisionAsync(root).ConfigureAwait(false);
-        await PageWaitFirstFailureRaisesOneNoticeWithoutPairAccountingAsync(root).ConfigureAwait(false);
-        await PageWaitRepeatedFailuresKeepOneNoticeAsync(root).ConfigureAwait(false);
-        await PageWaitSuccessClosesOnlyPageWaitNoticeAsync(root).ConfigureAwait(false);
+        await PageWaitShowsWaitWithoutNoticeAsync(root).ConfigureAwait(false);
+        await PageWaitRepeatedFailuresKeepOneWaitAsync(root).ConfigureAwait(false);
+        await PageWaitSuccessClosesOnlyTheWaitAsync(root).ConfigureAwait(false);
         await PageWaitCancelClosesContributionAsync(root).ConfigureAwait(false);
         await FeedWaitStatusAndLogAsync(root).ConfigureAwait(false);
+        await HostRepeatedStartKeepsItsLogAsync(root).ConfigureAwait(false);
         await AutoSyncIdleLineAsync(root).ConfigureAwait(false);
         await PageWaitStaleIdentityRefusesAsync(root).ConfigureAwait(false);
         await PageWaitPreservesIndependentFailedRepairDebtAsync(root).ConfigureAwait(false);
-        await PageWaitStoreFailureSurfacesErrorAsync(root).ConfigureAwait(false);
         await FailedRepairRecordsOnePrerequisiteFailureAsync(root).ConfigureAwait(false);
         await ImportedLegacyPausedPairNotDispatchedUntilEnabledAsync(root).ConfigureAwait(false);
         await ItemAttemptAuthorityAsync(root).ConfigureAwait(false);
@@ -347,30 +347,58 @@ public static class EngineHostChecks
         await host.DisposeAsync().ConfigureAwait(false);
     }
 
-    // V16-Q5: the first transient prerequisite-page failure raises one notice without pair accounting.
-    private static async Task PageWaitFirstFailureRaisesOneNoticeWithoutPairAccountingAsync(string root)
+    // #141: a transient listing page wait shows in status and the run log, never as a failure notice.
+    private static async Task PageWaitShowsWaitWithoutNoticeAsync(string root)
     {
         using var instance = Lock(root, "page-first");
         const string PairId = "page-first";
         var store = new InMemoryStateStore();
         store.SavePair(Pair(PairId));
-        await using var host = Compose(instance.StateAuthority, store);
-        var notices = await WithPrerequisiteListingAsync(host, PairId, async (listing, ct) =>
+        var logs = new List<RunLog>();
+        await using var host = EngineHost.Compose(instance.StateAuthority.ProductRoot, _ => { },
+            instance.StateAuthority, Settings, Http, TimeProvider.System,
+            pairId =>
+            {
+                var opened = RunLog.Open(Path.Combine(instance.StateAuthority.StateRoot, "logs"), pairId,
+                    Guid.NewGuid().ToString("N"), _ => { }, Settings.LogBufferCharacters);
+                lock (logs) logs.Add(opened);
+                return opened;
+            }, _ => store, EngineHost.Mode.Persistent);
+        var observed = await WithPrerequisiteListingAsync(host, PairId, async (listing, ct) =>
         {
             var attempt = listing.BeginAttempt();
             Check.Require(attempt.TryComplete(RequestResult.TransientFailure, null, TimeSpan.Zero, false),
                 "the page attempt publishes its transient disposition");
             Check.Require(await listing.CompleteAttemptAsync(attempt, ct).ConfigureAwait(false),
                 "a transient page failure asks the same page to retry");
-            return RetryNotices(store, PairId);
+            var waiting = host.Status();
+            var during = (waiting.Status, waiting.Detail, Notices: RetryNotices(store, PairId));
+            var success = listing.BeginAttempt();
+            Check.Require(success.TryComplete(RequestResult.Success, null, null, false),
+                "the same page completes successfully");
+            var retried = await listing.CompleteAttemptAsync(success, ct).ConfigureAwait(false);
+            return (During: during, Retried: retried, After: host.Status().Status, Notices: RetryNotices(store, PairId));
         }).ConfigureAwait(false);
-        Check.Require(notices == 1, "the first transient page failure raises exactly one RequiredRepairRetry notice");
+        Check.Require(observed.During.Status == AutoStatus.Waiting &&
+            observed.During.Detail == Text.Get(TextKey.StatusWaitingDropbox) && observed.During.Notices == 0,
+            "a transient page wait shows the Dropbox wait and raises no notice");
+        Check.Require(!observed.Retried && observed.After != AutoStatus.Waiting && observed.Notices == 0,
+            "a completed page ends the wait without raising a notice");
+        var log = logs.Single();
+        var lines = File.ReadAllLines(log.Path)
+            .Select(line => line.Split(RunLog.FieldSeparator))
+            .Where(fields => fields.Length == RunLog.RecordFieldCount &&
+                fields[RunLog.FieldKind] == nameof(RunEventKind.Stage) &&
+                fields[RunLog.FieldWhat] == nameof(TextKey.StageListingWait)).ToArray();
+        Check.Require(lines.Count(fields => fields[RunLog.FieldOutcome].Length == 0) == 1 &&
+            lines.Count(fields => fields[RunLog.FieldOutcome] == nameof(RunEvent.Ended)) == 1,
+            "one page wait writes exactly one start line and one closing line with its duration");
         Check.Require(store.ReadPrerequisiteRetry(PairId) is null,
             "a page retry records no pair Attempts or retry deadline");
     }
 
-    // V16-Q5: repeated transient page failures keep exactly one notice.
-    private static async Task PageWaitRepeatedFailuresKeepOneNoticeAsync(string root)
+    // #141: repeated transient page failures keep one wait contribution and never raise a notice.
+    private static async Task PageWaitRepeatedFailuresKeepOneWaitAsync(string root)
     {
         using var instance = Lock(root, "page-repeat");
         const string PairId = "page-repeat";
@@ -386,8 +414,8 @@ public static class EngineHostChecks
                     "each page attempt publishes its transient disposition");
                 Check.Require(await listing.CompleteAttemptAsync(attempt, ct).ConfigureAwait(false),
                     "each transient failure retries the same page");
-                Check.Require(RetryNotices(store, PairId) == 1,
-                    "repeated transient page failures keep exactly one notice");
+                Check.Require(host.Status().Status == AutoStatus.Waiting && RetryNotices(store, PairId) == 0,
+                    "repeated transient page failures keep the one wait and raise no notice");
             }
             return true;
         }).ConfigureAwait(false);
@@ -395,8 +423,8 @@ public static class EngineHostChecks
             "repeated page retries never advance pair Attempts or a deadline");
     }
 
-    // V16-Q5: a completed same-page response closes only the page-wait notice.
-    private static async Task PageWaitSuccessClosesOnlyPageWaitNoticeAsync(string root)
+    // #141: a completed same-page response ends the wait, not a notice.
+    private static async Task PageWaitSuccessClosesOnlyTheWaitAsync(string root)
     {
         using var instance = Lock(root, "page-success");
         const string PairId = "page-success";
@@ -409,18 +437,20 @@ public static class EngineHostChecks
             transient.TryComplete(RequestResult.TransientFailure, null, TimeSpan.Zero, false);
             Check.Require(await listing.CompleteAttemptAsync(transient, ct).ConfigureAwait(false),
                 "the transient failure asks for the same-page retry");
-            var raised = RetryNotices(store, PairId);
+            var raised = host.Status().Status;
             var success = listing.BeginAttempt();
             Check.Require(success.TryComplete(RequestResult.Success, null, null, false),
                 "the same page completes successfully");
             var retried = await listing.CompleteAttemptAsync(success, ct).ConfigureAwait(false);
-            return (Raised: raised, Retried: retried, Closed: RetryNotices(store, PairId));
+            return (Raised: raised, Retried: retried,
+                Closed: host.Status().Status, Notices: RetryNotices(store, PairId));
         }).ConfigureAwait(false);
-        Check.Require(observed.Raised == 1 && !observed.Retried && observed.Closed == 0,
-            "a completed same-page response closes only the page-wait notice and asks for no retry");
+        Check.Require(observed.Raised == AutoStatus.Waiting && !observed.Retried &&
+            observed.Closed != AutoStatus.Waiting && observed.Notices == 0,
+            "a completed same-page response ends the wait and asks for no retry");
     }
 
-    // V16-Q5: cancelling the page wait closes only its own contribution.
+    // #141: cancelling the operation ends its own wait contribution without a notice.
     private static async Task PageWaitCancelClosesContributionAsync(string root)
     {
         using var instance = Lock(root, "page-cancel");
@@ -428,16 +458,18 @@ public static class EngineHostChecks
         var store = new InMemoryStateStore();
         store.SavePair(Pair(PairId));
         await using var host = Compose(instance.StateAuthority, store);
-        var remaining = await WithPrerequisiteListingAsync(host, PairId, async (listing, ct) =>
+        var observed = await WithPrerequisiteListingAsync(host, PairId, async (listing, ct) =>
         {
             var attempt = listing.BeginAttempt();
             attempt.TryComplete(RequestResult.TransientFailure, null, TimeSpan.Zero, false);
             await listing.CompleteAttemptAsync(attempt, ct).ConfigureAwait(false);
-            Check.Require(RetryNotices(store, PairId) == 1, "the retry wait is visible before cancellation");
+            var during = host.Status().Status;
             await listing.EndAsync().ConfigureAwait(false);
-            return RetryNotices(store, PairId);
+            return (During: during, After: host.Status().Status, Notices: RetryNotices(store, PairId));
         }).ConfigureAwait(false);
-        Check.Require(remaining == 0, "cancelling the operation closes only its own page-wait notice");
+        Check.Require(observed.During == AutoStatus.Waiting && observed.After != AutoStatus.Waiting &&
+            observed.Notices == 0,
+            "cancelling the operation ends only its own wait and raises no notice");
     }
 
     // #127: the host reports the Dropbox feed wait in its status and logs one start and one end line per episode.
@@ -482,7 +514,7 @@ public static class EngineHostChecks
             "one feed outage writes exactly one start line and one closing line with its duration");
     }
 
-    // #127: AutoSync writes one line when it becomes idle, never one per empty pass.
+    // #127: one idle line per transition, the waking pair on the end line, and a clean end on stop.
     private static async Task AutoSyncIdleLineAsync(string root)
     {
         using var instance = Lock(root, "autosync-idle");
@@ -496,11 +528,52 @@ public static class EngineHostChecks
         var log = host.HostLog;
         Check.Require(ReferenceEquals(log, startup),
             "a started persistent host keeps its session log open for host-level state notes");
-        var bound = Environment.TickCount64 + 30_000;
-        while (Environment.TickCount64 < bound && !IdleLines(log!.Path).Any())
-            await Task.Delay(1).ConfigureAwait(false);
-        Check.Require(IdleLines(log!.Path).Count() == 1,
+        await IdleLinesUntilAsync(log!.Path, 1).ConfigureAwait(false);
+        // A wake that starts nothing is still a pass: a paused contribution must not write another idle line.
+        await host.PauseAsync(null, CancellationToken.None).ConfigureAwait(false);
+        host.WakeAfterOperation("idle-empty-pass");
+        await Task.Delay(500).ConfigureAwait(false);
+        Check.Require(IdleLines(log.Path).Count() == 1,
             "AutoSync writes one idle line per transition, not one per empty pass");
+        // Leaving idle is a real wake: the end line names the first pair that started.
+        await host.ResumeAsync(null, CancellationToken.None).ConfigureAwait(false);
+        host.WakeAfterOperation("idle-wake");
+        await IdleLinesUntilAsync(log.Path, 3).ConfigureAwait(false);
+        var ended = IdleLines(log.Path).Single(fields => fields[RunLog.FieldOutcome] == nameof(RunEvent.Ended));
+        Check.Require(ended[RunLog.FieldPath] == "idle-wake",
+            "the end-of-idle line names the pair that woke the loop");
+        await host.DisposeAsync().ConfigureAwait(false);
+        Check.Require(IdleLines(log.Path).All(fields => fields[RunLog.FieldOutcome] != nameof(RunEventKind.Failed)),
+            "a clean stop ends the idle stage normally instead of reporting it interrupted");
+    }
+
+    // #127: a repeated start is idempotent and keeps the session log the first start took ownership of.
+    private static async Task HostRepeatedStartKeepsItsLogAsync(string root)
+    {
+        using var instance = Lock(root, "host-repeated-start");
+        var store = new InMemoryStateStore();
+        var startup = RunLog.Open(Path.Combine(instance.StateAuthority.StateRoot, "logs"), nameof(EngineHost),
+            Guid.NewGuid().ToString("N"), _ => { }, Settings.LogBufferCharacters);
+        await using var host = EngineHost.Compose(instance.StateAuthority.ProductRoot, _ => { },
+            instance.StateAuthority, Settings, Http, TimeProvider.System, _ => null, _ => store,
+            EngineHost.Mode.Persistent, startupLog: startup);
+        await host.StartAsync(CancellationToken.None).ConfigureAwait(false);
+        await host.StartAsync(CancellationToken.None).ConfigureAwait(false);
+        Check.Require(ReferenceEquals(host.HostLog, startup),
+            "a second host start keeps the session log the first start opened");
+        await host.DisposeAsync().ConfigureAwait(false);
+        var released = true;
+        try { using var probe = File.Open(startup.Path, FileMode.Open, FileAccess.ReadWrite, FileShare.None); }
+        catch (IOException) { released = false; }
+        Check.Require(released, "disposal releases the session log after a repeated start");
+    }
+
+    private static async Task IdleLinesUntilAsync(string path, int count)
+    {
+        var bound = Environment.TickCount64 + 30_000;
+        while (Environment.TickCount64 < bound && IdleLines(path).Count() < count)
+            await Task.Delay(1).ConfigureAwait(false);
+        Check.Require(IdleLines(path).Count() >= count, "AutoSync reaches the expected idle transitions");
     }
 
     // The host's session log stays open for writing, so read it through a handle that shares write access.
@@ -567,32 +640,6 @@ public static class EngineHostChecks
         }).ConfigureAwait(false);
         Check.Require(survived.Notices == 1 && survived.Retry is { Attempts: 1 },
             "the independently protected failed-Repair debt and notice survive a same-page success");
-    }
-
-    // V16-Q5: a Store failure while writing the notice surfaces an error instead of a healthy retry.
-    private static async Task PageWaitStoreFailureSurfacesErrorAsync(string root)
-    {
-        using var instance = Lock(root, "page-store-failure");
-        const string PairId = "page-store-failure";
-        var store = new InMemoryStateStore();
-        store.SavePair(Pair(PairId));
-        await using var host = Compose(instance.StateAuthority, store);
-        var refused = false;
-        try
-        {
-            await WithPrerequisiteListingAsync(host, PairId, async (listing, ct) =>
-            {
-                store.RemovePair(PairId);
-                var attempt = listing.BeginAttempt();
-                attempt.TryComplete(RequestResult.TransientFailure, null, TimeSpan.Zero, false);
-                await listing.CompleteAttemptAsync(attempt, ct).ConfigureAwait(false);
-                return true;
-            }).ConfigureAwait(false);
-        }
-        catch (LiveAdmissionStaleException) { refused = true; }
-        Check.Require(refused,
-            "a Store failure while writing the page-wait notice surfaces an error instead of a healthy retry");
-        Check.Require(RetryNotices(store, PairId) == 0, "the failed notice write raised nothing");
     }
 
     // V16-Q5: an actual unsuccessful enclosing Repair keeps the ordinary once-only durable accounting.

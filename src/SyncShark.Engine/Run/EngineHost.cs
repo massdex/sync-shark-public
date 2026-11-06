@@ -139,8 +139,7 @@ internal sealed class EngineHost : IAsyncDisposable
     private RunLog? _hostStartupLog;
     // The session log the host keeps open for host-level state notes (AutoSync's idle transitions).
     private RunLog? _hostLog;
-    private readonly HashSet<object> _listingWaits = new(ReferenceEqualityComparer.Instance);
-    private int _feedWaits;
+    private int _waits;
 
     private EngineHost(PilotStateAuthority authority, EngineSettings settings, HttpClient http,
         TimeProvider time, Func<string, RunLog?> openLog, Action<string> progress, Mode mode,
@@ -1162,7 +1161,7 @@ internal sealed class EngineHost : IAsyncDisposable
                 throw Stale();
         }
         var identity = new object();
-        Issue? notice = null;
+        Action? closeWait = null;
         var episode = new FailureRetryOwner.Episode(providerWaitCounts: false);
         var ended = false;
         return new ListingReadContext(() =>
@@ -1178,13 +1177,12 @@ internal sealed class EngineHost : IAsyncDisposable
             if (result.Result == RequestResult.Success)
             {
                 episode.Succeeded();
-                CloseNotice();
+                CloseWait();
                 return false;
             }
             if (result.Result != RequestResult.TransientFailure) return false;
             RequireGeneration(registration, operation.PairId, operation.Generation);
-            notice ??= Store.RecordPrerequisitePageWait(operation.PairId, operation.Generation, identity, RetryNotice());
-            lock (_gate) _listingWaits.Add(identity);
+            closeWait ??= OpenWait(operation.PairId, TextKey.StageListingWait);
             var delay = episode.Failed(result.ProviderWait, attempt.ProviderWaitStartedTimestamp, _time,
                 _settings.Backoff, Random.Shared.NextDouble);
             await Task.Delay(delay, _time, ct).ConfigureAwait(false);
@@ -1192,15 +1190,14 @@ internal sealed class EngineHost : IAsyncDisposable
             return true;
         }, () =>
         {
-            if (!ended) { CloseNotice(); ended = true; }
+            if (!ended) { CloseWait(); ended = true; }
             return ValueTask.CompletedTask;
         });
-        void CloseNotice()
+        void CloseWait()
         {
-            if (notice is null) return;
-            Store.CompletePrerequisitePageWait(operation.PairId, operation.Generation, identity, notice);
-            notice = null;
-            lock (_gate) _listingWaits.Remove(identity);
+            var close = closeWait;
+            closeWait = null;
+            close?.Invoke();
         }
     }
 
@@ -1433,8 +1430,9 @@ internal sealed class EngineHost : IAsyncDisposable
     {
         var log = Interlocked.Exchange(ref _hostStartupLog, null);
         TrackStartupLog(log, active: true);
-        // The host keeps this log open for host-level waits; DisposeCoreAsync closes it.
-        _hostLog = log;
+        // The host keeps this log open for host-level waits; DisposeCoreAsync closes it. A second start is
+        // idempotent, so it must not drop the log the first start took ownership of.
+        if (log is not null) _hostLog = log;
         log?.Event(RunEvent.Stage(TextKey.StageConfiguration));
         try
         {
@@ -1631,26 +1629,25 @@ internal sealed class EngineHost : IAsyncDisposable
     }
 
     /// <summary>The single waiting reason for both status and quiet reports; callers hold _gate.</summary>
-    private string? WaitReason() =>
-        _listingWaits.Count != 0 ? nameof(AttemptOwner.Prerequisite)
-        : _feedWaits != 0 ? Text.Get(TextKey.StatusWaitingDropbox)
-        : null;
+    private string? WaitReason() => _waits != 0 ? Text.Get(TextKey.StatusWaitingDropbox) : null;
 
-    /// <summary>Opens the host's one feed-wait contribution: a log line now and its closing line with the duration.</summary>
-    internal Action OpenFeedWait(string pairId)
+    /// <summary>Opens the host's one wait contribution: a log line now and its closing line with the duration.</summary>
+    private Action OpenWait(string pairId, TextKey stage)
     {
         var log = _openLog(pairId);
-        log?.Event(RunEvent.Stage(TextKey.StageFeedWait));
-        lock (_gate) _feedWaits++;
+        log?.Event(RunEvent.Stage(stage));
+        lock (_gate) _waits++;
         PublishStatus();
         return () =>
         {
-            log?.Event(RunEvent.Stage(TextKey.StageFeedWait, ended: true, count: RunLog.CompletedOperation));
+            log?.Event(RunEvent.Stage(stage, ended: true, count: RunLog.CompletedOperation));
             log?.Dispose();
-            lock (_gate) _feedWaits--;
+            lock (_gate) _waits--;
             PublishStatus();
         };
     }
+
+    internal Action OpenFeedWait(string pairId) => OpenWait(pairId, TextKey.StageFeedWait);
 
     internal Task StopAsync(CancellationToken ct)
     {

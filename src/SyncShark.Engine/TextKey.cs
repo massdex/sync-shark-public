@@ -99,6 +99,7 @@ public enum TextKey
     StageDropboxListing,
     StageListingLocal,
     StageListingDropbox,
+    StageListingWait,
     ListingCount,
     ListingEstimate,
     ListingNumberFormat,
