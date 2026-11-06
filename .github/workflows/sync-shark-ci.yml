@@ -39,6 +39,7 @@ env:
     --v2-provider-followups-checks --v2-dropbox-ignore-checks
     --v2-delete-review-notice-checks --v2-indexing-signal-checks
     --v2-gap-promotion-bound-checks
+    --admission-control-checks --bootstrap-move-review-checks --conditional-directory-delete-checks --cloud-pair-host-binding-checks --cloud-public-pair-authoring-checks --cloud-recovery-consumer-checks --cloud-recovery-restore-checks --cloud-runner-integration-checks
   SUITE_EXTRA_ARGS: '{"--v2-slowdelete-checks":["all"]}'
 
 jobs:
