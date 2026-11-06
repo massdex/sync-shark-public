@@ -157,11 +157,7 @@ internal sealed class SelectionPass
             // A walked child or old path refuses from its notice alone, before any provider call; the enumerator
             // already refused the selection's own primary branch.
             if (walkFailure is null && key != selection.Key) RefuseBeforeProvider(notice, work.Before);
-            // A notice already outside this pair's scope settles from the notice alone, before any provider read.
-            // A saved identity at another path is a rename, and its saved item's destination can leave scope, so it
-            // keeps its observation and handling.
-            var settled = walkFailure is null ? OutOfScopeRow(selection, notice, key, work.Before) : null;
-            var row = settled ?? await ObserveProjectedAsync(walkFailure, (raw, otherKey) =>
+            var row = await ObserveProjectedAsync(walkFailure, (raw, otherKey) =>
             {
                 if (throughPeer is { } through)
                 {
@@ -173,7 +169,7 @@ internal sealed class SelectionPass
             });
             if (row is null) continue;
             var observed = row.EntryOn(notice.Side);
-            var candidate = settled is not null ? null : Renames.Candidate(notice.Side, observed,
+            var candidate = Renames.Candidate(notice.Side, observed,
                 observed is null ? null : _context.Store.SyncedById(selection.PairId, notice.Side, observed.Id));
             if (candidate is not null)
             {
@@ -472,21 +468,6 @@ internal sealed class SelectionPass
 
     private static ChangeNotice ChildNotice(Side side, string path, Entry? entry) =>
         new(side, ChangeKind.Changed, path, null, entry?.Id, entry, false, false);
-
-    // A notice whose own path and saved path are already outside this pair's scope needs no observation: the planner
-    // settles None(OutOfScope) from the row's context alone. Scope is asked of its one owner, exactly as every observed
-    // row asks it. A rename (a saved identity at another path) is never settled here: its new destination can leave
-    // scope, which RenameRunner decides from the observation.
-    private Row? OutOfScopeRow(WorkSelection selection, ChangeNotice notice, string key, SyncedEntry? before)
-    {
-        var row = Row.ForOneSide(notice.Side, key, notice.Observed, before, [], null, RowContext.Neutral);
-        var context = RowContext.ForRow(row, _context.Scope, RowContext.Neutral, false, null, null, false,
-            IssueSubject.FirstRunDeletionKind.None);
-        if (!context.OutOfScope) return null;
-        var saved = notice.Observed is { } observed
-            ? _context.Store.SyncedById(selection.PairId, notice.Side, observed.Id) : null;
-        return Renames.Candidate(notice.Side, notice.Observed, saved) is null ? row with { Context = context } : null;
-    }
 
     // A held branch never reaches the fence: it attaches to its holder, so refusing it early would replace that.
     // The notice's own side and path are the evidence here: an unobserved notice still names the path it is about.
