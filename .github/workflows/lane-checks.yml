@@ -1,0 +1,81 @@
+name: Lane checks
+
+# Lane-local dispatch for one lane's engine groups on a public runner. It exists only on this lane's ci/
+# branch and is never merged; fixtures under ci/** are not reachable from a product branch.
+on:
+  push:
+    branches:
+      - 'ci/126-tests*'
+  workflow_dispatch:
+    inputs:
+      groups:
+        description: Space-separated engine check groups
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CONFIGURATION: Debug
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+
+jobs:
+  select:
+    runs-on: ubuntu-latest
+    outputs:
+      groups: ${{ steps.list.outputs.groups }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: List groups
+        id: list
+        shell: pwsh
+        run: |
+          $groups = $env:INPUT_GROUPS
+          if (-not $groups) { $groups = (Get-Content -LiteralPath 'ci-lane-groups.txt' -Raw).Trim() }
+          if ($groups -cnotmatch '^[a-z0-9 -]+$') { throw "Refusing group list '$groups'." }
+          $json = '[' + ((@($groups -split '\s+' | Where-Object { $_ }) | ForEach-Object { '"' + $_ + '"' }) -join ',') + ']'
+          "groups=$json" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+        env:
+          INPUT_GROUPS: ${{ inputs.groups }}
+
+  engine:
+    name: engine (${{ matrix.group }})
+    needs: select
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        group: ${{ fromJSON(needs.select.outputs.groups) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-engine-${{ hashFiles('**/*.csproj', 'Directory.Build.props', 'global.json') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      - name: Build engine tests
+        shell: pwsh
+        run: |
+          dotnet build 'tests/SyncShark.Engine.Tests/SyncShark.Engine.Tests.csproj' -c $env:CONFIGURATION --nologo -p:SyncSharkNoUacSigner=
+          exit $LASTEXITCODE
+
+      - name: Run engine group
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:GITHUB_WORKSPACE "tests\SyncShark.Engine.Tests\bin\$env:CONFIGURATION\net8.0-windows\SyncShark.Engine.Tests.exe"
+          if (-not (Test-Path -LiteralPath $exe)) { throw "Engine test executable not found: $exe" }
+          & $exe --engine-checks '${{ matrix.group }}'
+          exit $LASTEXITCODE
