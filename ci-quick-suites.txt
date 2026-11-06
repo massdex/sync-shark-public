@@ -1,0 +1,3 @@
+--cloud-recovery-consumer-checks
+--cloud-recovery-restore-checks
+--cloud-runner-integration-checks
