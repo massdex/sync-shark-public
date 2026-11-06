@@ -1,0 +1,25 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "repair-held",
+    "safety",
+    "repair",
+    "repair-claims",
+    "live-wake",
+    "live-admission",
+    "stale-freshness",
+    "syncer",
+    "store",
+    "dependencies",
+    "work-lifecycle",
+    "containment",
+    "peer",
+    "scan-owner",
+    "released-history",
+    "mapped-holds"
+  ],
+  "core": [],
+  "ui": []
+}
