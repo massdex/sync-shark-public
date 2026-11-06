@@ -1,0 +1,133 @@
+name: Lane engine checks
+
+# Lane test-harness only: this file lives on a throwaway public snapshot branch and is
+# deleted with it. It runs the Engine check groups with the caller's normal TEMP and
+# with one long enough that the scan database path passes the SQLite path limit, so the
+# harness temp-root fix is proven in both directions on a public runner. The Core local
+# suite runs on the C: and the D: fixture roots to cover the placeholder-replacement
+# skip (B-8).
+
+on:
+  push:
+    branches:
+      - 'lane/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CONFIGURATION: Debug
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+
+jobs:
+  engine:
+    name: engine (${{ matrix.group }}, caller TEMP)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [repair, local, budget, scan-pass]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build the engine checks
+        shell: pwsh
+        run: |
+          dotnet build 'tests/SyncShark.Engine.Tests/SyncShark.Engine.Tests.csproj' -c $env:CONFIGURATION --nologo -p:NoWarn=CA1416
+          exit $LASTEXITCODE
+
+      - name: Run ${{ matrix.group }} with the caller's TEMP
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:GITHUB_WORKSPACE "tests\SyncShark.Engine.Tests\bin\$env:CONFIGURATION\net8.0\SyncShark.Engine.Tests.exe"
+          Write-Host "caller TEMP=$env:TEMP"
+          & $exe --engine-checks ${{ matrix.group }}
+          exit $LASTEXITCODE
+
+  engine-long-temp:
+    name: engine (${{ matrix.group }}, long TEMP)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [repair, local, budget, scan-pass]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build the engine checks
+        shell: pwsh
+        run: |
+          dotnet build 'tests/SyncShark.Engine.Tests/SyncShark.Engine.Tests.csproj' -c $env:CONFIGURATION --nologo -p:NoWarn=CA1416
+          exit $LASTEXITCODE
+
+      # Long enough that <fixture root>\engine\state.db plus the 71-character scan suffix
+      # passes the 253-character path where SQLite refuses the WAL switch.
+      - name: Use a long caller TEMP
+        shell: pwsh
+        run: |
+          $long = Join-Path $env:RUNNER_TEMP ('L' + ('x' * 130))
+          New-Item -ItemType Directory -Force -Path $long | Out-Null
+          "TEMP=$long" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TMP=$long" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "long TEMP ($($long.Length) characters): $long"
+
+      - name: Run ${{ matrix.group }} with a long TEMP
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:GITHUB_WORKSPACE "tests\SyncShark.Engine.Tests\bin\$env:CONFIGURATION\net8.0\SyncShark.Engine.Tests.exe"
+          Write-Host "caller TEMP=$env:TEMP"
+          & $exe --engine-checks ${{ matrix.group }}
+          exit $LASTEXITCODE
+
+  core-local:
+    name: core local (${{ matrix.root }} root)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        root: [localappdata, runner-temp]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build the Core checks
+        shell: pwsh
+        run: |
+          dotnet build 'tests/SyncShark.Core.Tests/SyncShark.Core.Tests.csproj' -c $env:CONFIGURATION --nologo -p:NoWarn=CA1416
+          exit $LASTEXITCODE
+
+      - name: Run the local suite
+        shell: pwsh
+        env:
+          ROOT_KIND: ${{ matrix.root }}
+        run: |
+          $base = if ($env:ROOT_KIND -eq 'localappdata') { $env:LOCALAPPDATA } else { $env:RUNNER_TEMP }
+          $scratch = Join-Path $base "syncshark-ci\local-scratch"
+          New-Item -ItemType Directory -Force -Path $scratch | Out-Null
+          $env:TEMP = $scratch
+          $env:TMP = $scratch
+          $env:SYNCSHARK_TEST_ROOT = $scratch
+          $root = Join-Path $base "syncshark-ci\local-root"
+          $exe = Join-Path $env:GITHUB_WORKSPACE "tests\SyncShark.Core.Tests\bin\$env:CONFIGURATION\net8.0\SyncShark.Core.Tests.exe"
+          Write-Host "root=$root scratch=$scratch"
+          & $exe --v2-local-checks $root
+          exit $LASTEXITCODE
