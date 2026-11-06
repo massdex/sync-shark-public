@@ -196,6 +196,7 @@ internal sealed class DropboxFeed(
         store.AdvanceSource(pair.PairId, Side.Dropbox, pairGeneration, epoch, revision,
             source?.Provenance, source?.Cursor, nextEpoch, nextRevision, provenance, cursor,
             source?.Obligation ?? store.LostIntervalObligation(pair.PairId));
+        _terminal = null;
         Accepted();
         WorkCommitted?.Invoke();
     }
