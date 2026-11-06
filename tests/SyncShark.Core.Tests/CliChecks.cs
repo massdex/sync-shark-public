@@ -331,13 +331,20 @@ internal static partial class CliChecks
         Require(AutoSyncEngineRoute.Map(["--cli", "autosync", "now", "--pair", "p1"]) is
                 ["--cli", "engine", "host", "wake", "--pair", "p1", "--yes"],
             "autosync now --pair runs the Engine host's one pair wake");
-        Require(AutoSyncEngineRoute.Map(["--cli", "autosync", "enable", "--all"]) is null &&
-            AutoSyncEngineRoute.Map(["--cli", "autosync", "enable", "--pair", "p1", "--all"]) is null &&
-            AutoSyncEngineRoute.Map(["--cli", "autosync", "interval", "--minutes", "5"]) is null &&
-            AutoSyncEngineRoute.Map(["--cli", "autosync", "status"]) is null &&
+        Require(AutoSyncEngineRoute.Map(["--cli", "autosync", "enable", "--all"]) is
+                ["--cli", "engine", "pairs", "enable", "--all", "--yes"] &&
+            AutoSyncEngineRoute.Map(["--cli", "autosync", "disable", "--all"]) is
+                ["--cli", "engine", "pairs", "disable", "--all", "--yes"],
+            "autosync enable/disable --all loop the same per-pair Engine command over every stored pair");
+        Require(AutoSyncEngineRoute.Map(["--cli", "autosync", "status"]) is null &&
             AutoSyncEngineRoute.Map(["--cli", "autosync", "start"]) is null &&
             AutoSyncEngineRoute.Map(["--cli", "status"]) is null,
-            "rows without an Engine owner, and non-AutoSync rows, keep their existing route");
+            "rows still without an Engine owner, and non-AutoSync rows, keep their existing route");
+        var retiredInterval = await RunCliAsync(["--cli", "autosync", "interval", "--minutes", "5"], NeverOpensState);
+        Expect("the retired autosync interval is refused", retiredInterval, 2);
+        Require(retiredInterval.StandardError.Contains("autosync interval is retired", StringComparison.Ordinal) &&
+                retiredInterval.StandardError.Contains("no safety-poll interval", StringComparison.Ordinal),
+            "the refusal names its reason: the engine is event-driven and has no safety-poll interval");
         Require(SyncCliRegistry.Rows.Single(row => row.Command == "autosync install-startup").Effect.Contains("Start With Windows", StringComparison.Ordinal),
             "GUI and CLI document the same supervisor startup owner");
         Require(SyncCliRegistry.Rows.Single(row => row.Command == "autosync install-startup").Effect.Contains("stable installed", StringComparison.Ordinal),

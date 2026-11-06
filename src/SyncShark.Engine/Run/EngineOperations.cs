@@ -104,6 +104,15 @@ public sealed class EngineOperations(string productRoot, Action<string> progress
 
     public Task<PairConfig> SetEnabledAsync(string pairId, bool enabled, CancellationToken ct) =>
         UpdatePairAsync(pairId, pair => pair with { Enabled = enabled }, null, ct);
+    /// <summary>Applies one enablement to every stored pair through the same per-pair owner; ownership and
+    /// admission are never bypassed, and a later-added pair follows only the deferred global-switch option.</summary>
+    public async Task SetEnabledForAllAsync(bool enabled, CancellationToken ct)
+    {
+        var host = _host ?? throw new InvalidOperationException();
+        foreach (var pair in host.Store.Pairs())
+            await SetEnabledAsync(pair.PairId, enabled, ct).ConfigureAwait(false);
+    }
+
     public Task<PairConfig> ExcludeAsync(string pairId, Exclusion exclusion, CancellationToken ct) =>
         UpdatePairAsync(pairId, pair =>
         {

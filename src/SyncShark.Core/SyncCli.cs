@@ -513,16 +513,29 @@ public static class SyncCli
     internal static bool ResponseFits(object? data, string command, int reserveCharacters = 0)
     {
         var json = JsonSerializer.Serialize(new SyncCliEnvelope(SchemaVersion, command, true, data, null),
-            JsonOptions) + Environment.NewLine;
+            MeasuredJsonOptions) + Environment.NewLine;
         return TextFits(json) && TextFits(RenderHuman(data).TrimEnd('\r', '\n') + Environment.NewLine);
 
         bool TextFits(string text)
         {
-            var payload = EncodeReplyEnvelope(text);
+            var payload = MeasuredReplyEnvelope(text);
             return payload.Length + reserveCharacters < MaximumReplyPayloadCharacters &&
                    Encoding.Unicode.GetByteCount(payload + "\0") <= MaximumReplyPayloadCharacters * 2;
         }
     }
+
+    // The retained presentation bound was always measured on the transport's own escaping form, where a
+    // non-ASCII character costs six characters. The measure keeps that form so this bound stays the same
+    // decision it was before the route retired; the actual reply wire (WireJson) is unchanged.
+    private static readonly JsonSerializerOptions MeasuredJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = false
+    };
+
+    private static string MeasuredReplyEnvelope(string text) =>
+        JsonSerializer.Serialize(new SyncCliReplyEnvelope("result", new string('0', 32), true, 0, text, null),
+            MeasuredJsonOptions);
 
     // The retained reply envelope a paged or sampled result must fit. Its bound is unchanged from
     // the retired running-application route: one 64 KiB payload, counted in characters and in its

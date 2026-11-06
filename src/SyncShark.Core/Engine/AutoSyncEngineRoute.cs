@@ -1,11 +1,13 @@
 namespace Massdex.SyncShark;
 
 /// <summary>The AutoSync controls the Engine already owns, mapped onto their Engine commands (retirement map step 3).
-/// Per-pair enablement and the pair wake move here, because the Engine host is their single owner.
-/// Deliberately not mapped, each with its own reason: the persisted global switch behind <c>--all</c> and
-/// <c>interval</c> have no Engine equivalent; <c>start</c>/<c>stop</c> must keep addressing the one legacy host
-/// together, and <c>stop</c> also releases an owned supervisor when no host answers; <c>status</c> is already
-/// answered from the Engine host by the existing read route.</summary>
+/// Enablement and the pair wake move here, because the Engine host is their single owner: <c>--pair</c> edits that
+/// pair and <c>--all</c> loops every pair through the same per-pair owner.
+/// <c>interval</c> is retired rather than mapped (no Engine owner); <c>start</c>/<c>stop</c> must keep addressing
+/// the one legacy host together, and <c>stop</c> also releases an owned supervisor when no host answers;
+/// <c>status</c> is already answered from the Engine host by the existing read route.
+/// Engine code holds no command text: the AutoSync names live in the registry and the Engine words, flags and
+/// ownership come from the catalog, so this file is one mapping and nothing else.</summary>
 public static class AutoSyncEngineRoute
 {
     /// <summary>Returns the Engine argument list for an owned AutoSync row, or null when the row keeps its legacy
@@ -17,17 +19,17 @@ public static class AutoSyncEngineRoute
         SyncCliInvocation invocation;
         try { invocation = SyncCliRegistry.Parse(args); }
         catch (SyncCliException) { return null; } // the caller's own parse reports the exact usage error
-        if (!invocation.Command.StartsWith("autosync ", StringComparison.Ordinal)) return null;
-        var command = invocation.Command["autosync ".Length..];
-        var pair = invocation.PairId;
-        string[] engineArgs;
-        if (command is "enable" or "disable" && pair is not null && !invocation.Flag("--all"))
-            engineArgs = ["engine", "pairs", command, "--pair", pair, "--yes"];
-        else if (command == "now" && pair is not null)
-            engineArgs = ["engine", "host", "wake", "--pair", pair, "--yes"];
-        else return null;
-        var result = new List<string>(args.Length + 2) { args[0] };
-        result.AddRange(engineArgs);
+        if (SyncCliRegistry.EngineEquivalent(invocation.Command) is not { } key) return null;
+        var row = EngineCliCatalog.Rows.Single(candidate => EngineCliCatalog.CommandKey(candidate.Command) == key);
+        var result = new List<string>(args.Length) { args[0] };
+        result.AddRange(row.Command.Split());
+        if (invocation.PairId is { } pair)
+        {
+            result.Add(EngineCliCatalog.Flag(EngineOptionKey.Pair));
+            result.Add(pair);
+        }
+        else result.Add(EngineCliCatalog.Flag(EngineOptionKey.All));
+        result.Add(EngineCliCatalog.Flag(EngineOptionKey.Yes));
         if (invocation.Json) result.Add(SyncCli.JsonSwitch);
         return [.. result];
     }

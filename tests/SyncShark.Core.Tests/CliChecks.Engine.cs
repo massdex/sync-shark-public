@@ -38,6 +38,8 @@ internal static partial class CliChecks
             ["engine", "host", "resume", "--yes"],
             ["engine", "host", "resume", "--pair", "p", "--yes"],
             ["engine", "host", "wake", "--pair", "p", "--yes"],
+            ["engine", "pairs", "enable", "--all", "--yes"],
+            ["engine", "pairs", "disable", "--all", "--yes"],
             ["engine", "host", "stop", "--yes"],
             ["engine", "recovery", "--pair", "p"],
             ["engine", "recovery", "--pair", "p", "--after-operation", "op"],
@@ -210,6 +212,9 @@ internal static partial class CliChecks
         RejectsAtParse("global engine host pause without --yes is a usage error", "engine", "host", "pause");
         RejectsAtParse("engine host resume without --yes is a usage error", "engine", "host", "resume", "--pair", "p");
         RejectsAtParse("engine host wake without --yes is a usage error", "engine", "host", "wake", "--pair", "p");
+        RejectsAtParse("engine pairs enable with both targets is a usage error", "engine", "pairs", "enable",
+            "--pair", "p", "--all", "--yes");
+        RejectsAtParse("engine pairs disable with no target is a usage error", "engine", "pairs", "disable", "--yes");
         RejectsAtParse("engine host wake without --pair is a usage error", "engine", "host", "wake", "--yes");
         RejectsAtParse("engine host stop without --yes is a usage error", "engine", "host", "stop");
         RejectsAtParse("engine recovery-resolve without --yes is a usage error", "engine", "recovery-resolve",

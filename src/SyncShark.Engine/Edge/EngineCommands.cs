@@ -71,11 +71,23 @@ public sealed class EngineCommands(EngineOperations operations)
         return new(Text.Get(TextKey.ResultPairRemoved, (TextArg.Pair, pairId)));
     }
 
-    private async Task<PairResult> PairsEnableAsync(SyncCliInvocation invocation, CancellationToken ct) =>
-        new(View(await _operations.SetEnabledAsync(Value(invocation, EngineOptionKey.Pair), true, ct)));
+    private async Task<object> PairsEnableAsync(SyncCliInvocation invocation, CancellationToken ct) =>
+        await SetEnabledAsync(invocation, true, ct);
 
-    private async Task<PairResult> PairsDisableAsync(SyncCliInvocation invocation, CancellationToken ct) =>
-        new(View(await _operations.SetEnabledAsync(Value(invocation, EngineOptionKey.Pair), false, ct)));
+    private async Task<object> PairsDisableAsync(SyncCliInvocation invocation, CancellationToken ct) =>
+        await SetEnabledAsync(invocation, false, ct);
+
+    // One owner for both forms: --pair edits that pair, --all loops every stored pair through the same per-pair rule.
+    private async Task<object> SetEnabledAsync(SyncCliInvocation invocation, bool enabled, CancellationToken ct)
+    {
+        var pair = invocation.Value(EngineCliCatalog.Flag(EngineOptionKey.Pair));
+        var all = invocation.Flag(EngineCliCatalog.Flag(EngineOptionKey.All));
+        if ((pair is null) == !all)
+            throw new SyncCliUsageException(SyncCliRegistry.PairOrAllRefusal);
+        if (pair is not null) return new PairResult(View(await _operations.SetEnabledAsync(pair, enabled, ct)));
+        await _operations.SetEnabledForAllAsync(enabled, ct).ConfigureAwait(false);
+        return PairsList();
+    }
 
     private async Task<ExcludeResult> PairsExcludeAsync(SyncCliInvocation invocation, CancellationToken ct)
     {

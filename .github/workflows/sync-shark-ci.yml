@@ -286,6 +286,17 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      # OwnershipChecks resolves engine types with the project's generated global
+      # usings; a lane checkout has no obj\ tree, so the generated file travels.
+      - name: Upload engine global usings
+        if: ${{ contains(fromJson(needs.select.outputs.build), 'engine-tests') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-shark-engine-usings
+          path: src/SyncShark.Engine/obj/${{ env.CONFIGURATION }}/net8.0-windows/SyncShark.Engine.GlobalUsings.g.cs
+          if-no-files-found: error
+          retention-days: 7
+
       # The ui jobs need the app plus the fixture and its copied helpers.
       # With these two paths the artifact root is build/ci/bin, so downloading it
       # there restores the layout the fixture resolves its sibling outputs from.
@@ -689,6 +700,14 @@ jobs:
         with:
           name: sync-shark-engine-tests
           path: tests/SyncShark.Engine.Tests/bin/${{ env.CONFIGURATION }}/net8.0-windows
+
+      # OwnershipChecks reads src/SyncShark.Engine/obj/**/*GlobalUsings.g.cs, which
+      # only a build produces; without it the literals group fails on every lane.
+      - name: Download engine global usings
+        uses: actions/download-artifact@v4
+        with:
+          name: sync-shark-engine-usings
+          path: src/SyncShark.Engine/obj/${{ env.CONFIGURATION }}/net8.0-windows
 
       - name: Run engine group
         shell: pwsh

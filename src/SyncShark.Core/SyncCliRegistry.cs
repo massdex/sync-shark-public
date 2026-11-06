@@ -58,9 +58,8 @@ public static class SyncCliRegistry
         new("autosync uninstall-startup", "autosync uninstall-startup --yes", SyncCliRequestKind.State, "yes", "disable Start With Windows by removing the current user's owned Engine-supervisor and legacy startup entries; preserve foreign entries and the running host", "installed executable", "background-host", "--yes", Mutating: true, RequiresYes: true),
         new("autosync stop", "autosync stop", SyncCliRequestKind.State, "explicit", "send stop to host first; host cancels supervision before draining to a durable safe point; CLI stops relaunch backoff only without a host, never on failed or uncertain sends", "host or supervisor", "background-host", None, Mutating: true),
         new("autosync status", "autosync status", SyncCliRequestKind.State, "none", "host identity, pair scheduler state, live progress (kind/stage/done/total/item/ETA/updatedAt), intake retirement counts, urgentPending, planningBacklog and nullable open-conflict count; store fields marked stale when slow; never launches", "nothing", "background-host", None, HostRead: EngineHostReadKind.AutoSyncStatus),
-        new("autosync enable", "autosync enable --pair <id>|--all", SyncCliRequestKind.State, "explicit", "--pair enables that pair through the Engine host, which also re-evaluates it; --all's persisted global switch keeps its legacy route until it is decided", "running host", "engine|background-host", "--pair,--all", Mutating: true),
-        new("autosync disable", "autosync disable --pair <id>|--all", SyncCliRequestKind.State, "explicit", "--pair disables that pair through the Engine host; no content changes; --all's persisted global switch keeps its legacy route until it is decided", "running host", "engine|background-host", "--pair,--all", Mutating: true),
-        new("autosync interval", "autosync interval --minutes <1..1440>", SyncCliRequestKind.State, "explicit", "set the safety interval", "running host", "background-host", "--minutes", Mutating: true),
+        new("autosync enable", "autosync enable --pair <id>|--all", SyncCliRequestKind.State, "explicit", "--pair enables that pair through the Engine host, which also re-evaluates it; --all loops every stored pair through the same per-pair rule; a persisted global switch that later pairs follow is deferred", "running host", "engine", "--pair,--all", Mutating: true),
+        new("autosync disable", "autosync disable --pair <id>|--all", SyncCliRequestKind.State, "explicit", "--pair disables that pair through the Engine host; --all loops every stored pair through the same per-pair rule; no content changes; a persisted global switch that later pairs follow is deferred", "running host", "engine", "--pair,--all", Mutating: true),
         new("autosync history", "autosync history --pair <id> [--limit <1..200>] [--after <cursor>]", SyncCliRequestKind.State, "none", "bounded persisted run summaries; the Engine host keeps one Repair summary per pair and has no history cursor, so it returns the latest retained summary with an explicit warning when --after is given", "running host", "background-host", "--pair,--limit,--after", RequiresPair: true, HostRead: EngineHostReadKind.AutoSyncHistory),
         new("autosync now", "autosync now --pair <id>", SyncCliRequestKind.State, "explicit", "ask the Engine host to re-evaluate one exact pair: clears holds, retries and backoff, rebuilds the watches and gives one run; signal one pair for fresh deltas, urgent user-change handoffs and retry follow-ups; bulk deferred backlog belongs to reconciliation, including bulk settlement; moved folders use atomic metadata units in Repair; urgent progress requeues immediately; active work is not replayed; disabled, paused or unprepared pairs stay held", "Engine host", "engine", "--pair", Mutating: true, RequiresPair: true),
         new("autosync logs", "autosync logs [--follow] [--limit <1..200>]", SyncCliRequestKind.State, "none", "bounded run summary log; follow polls without launching", "running host", "background-host", "--follow,--limit"),
@@ -693,6 +692,24 @@ public static class SyncCliRegistry
         return text.ToString();
     }
 
+    /// <summary>The one target rule shared by the AutoSync rows and the Engine pair commands they run.</summary>
+    public const string PairOrAllRefusal = "Choose --pair <exact-id> or --all, not both.";
+
+    /// <summary>Why <c>autosync interval</c> is retired (owner ruling): the Engine has no safety-poll interval
+    /// to hold, so the command has no owner and is refused instead of being routed anywhere.</summary>
+    public const string IntervalRetiredReason =
+        "The engine is event-driven and has no safety-poll interval, so there is nothing to set.";
+
+    /// <summary>The AutoSync commands the Engine already owns, by their registry name; null keeps the row on its
+    /// existing route. The names live here with the other command text, so Engine code holds none of them.</summary>
+    internal static EngineCommandKey? EngineEquivalent(string command) => command switch
+    {
+        "autosync enable" => EngineCommandKey.PairsEnable,
+        "autosync disable" => EngineCommandKey.PairsDisable,
+        "autosync now" => EngineCommandKey.HostWake,
+        _ => null,
+    };
+
     /// <summary>
     /// DIAG354-4: the refusal every command this one registry marks as needing the running application
     /// uses when no trusted same-product application owns the product runtime. It is offered instead of
@@ -835,14 +852,16 @@ public static class SyncCliRegistry
             options[option] = null;
         }
 
+        // One exact target: the per-pair form or the whole set, never both and never neither.
+        if (command is "engine pairs enable" or "engine pairs disable" &&
+            options.ContainsKey("--pair") == options.ContainsKey("--all"))
+            throw new SyncCliUsageException(PairOrAllRefusal);
+
         if (command.StartsWith("autosync ", StringComparison.Ordinal))
         {
             if (command is "autosync enable" or "autosync disable" &&
                 options.ContainsKey("--pair") == options.ContainsKey("--all"))
-                throw new SyncCliUsageException("Choose --pair <exact-id> or --all, not both.");
-            if (command == "autosync interval" && (!options.TryGetValue("--minutes", out var intervalText) ||
-                !int.TryParse(intervalText, out var interval) || interval is < 1 or > 1440))
-                throw new SyncCliUsageException("AutoSync interval requires --minutes 1..1440.");
+                throw new SyncCliUsageException(PairOrAllRefusal);
             if (options.TryGetValue("--after", out var cursorText) &&
                 (!long.TryParse(cursorText, out var cursor) || cursor < 0))
                 throw new SyncCliUsageException("History requires a nonnegative sequence cursor.");

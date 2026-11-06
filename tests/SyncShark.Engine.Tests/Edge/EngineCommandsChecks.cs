@@ -239,8 +239,8 @@ public static class EngineCommandsChecks
             (EngineCommandKey.PairsAdd, true, true, false),
             (EngineCommandKey.PairsImport, true, true, true),
             (EngineCommandKey.PairsRemove, true, true, true),
-            (EngineCommandKey.PairsEnable, true, true, true),
-            (EngineCommandKey.PairsDisable, true, true, true),
+            (EngineCommandKey.PairsEnable, true, true, false),
+            (EngineCommandKey.PairsDisable, true, true, false),
             (EngineCommandKey.PairsExclude, true, false, true),
             (EngineCommandKey.PairsInclude, true, true, true),
             (EngineCommandKey.PairsBind, true, true, true),
@@ -261,6 +261,7 @@ public static class EngineCommandsChecks
             (EngineCommandKey.HostStatus, false, false, false),
             (EngineCommandKey.HostPause, true, true, false),
             (EngineCommandKey.HostResume, true, true, false),
+            (EngineCommandKey.HostWake, true, true, true),
             (EngineCommandKey.HostStop, true, true, false),
         ];
         Check.Require(EngineCliCatalog.Rows.Count == Enum.GetValues<EngineCommandKey>().Length,
