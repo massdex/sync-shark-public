@@ -681,6 +681,9 @@ jobs:
       matrix:
         group: ${{ fromJson(needs.select.outputs.engine) }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download engine test binaries
         uses: actions/download-artifact@v4
         with:

@@ -457,6 +457,17 @@ public sealed class EngineOperations(string productRoot, Action<string> progress
     { var host = _host ?? throw new InvalidOperationException(); await host.PauseAsync(pairId, ct); return host.Status(); }
     public async Task<(AutoStatus? Status, string? Detail)> HostResumeAsync(string? pairId, CancellationToken ct)
     { var host = _host ?? throw new InvalidOperationException(); await host.ResumeAsync(pairId, ct); return host.Status(); }
+    /// <summary>Re-evaluates one exact pair through the host's one wake, refusing a pair the host does not hold.</summary>
+    public Task<(AutoStatus? Status, string? Detail)> HostWakeAsync(string pairId, CancellationToken ct)
+    {
+        var host = _host ?? throw new InvalidOperationException();
+        ct.ThrowIfCancellationRequested();
+        if (host.Store.ReadPairExecution(pairId) is null)
+            throw new EngineRequestException(TextKey.PairUnknown, (TextArg.Pair, pairId));
+        host.WakeAfterOperation(pairId);
+        return Task.FromResult(host.Status());
+    }
+
     public async Task<(AutoStatus? Status, string? Detail)> HostStopAsync(CancellationToken ct)
     { var host = _host ?? throw new InvalidOperationException(); await host.StopAsync(ct); return host.Status(); }
 

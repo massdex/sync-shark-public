@@ -114,81 +114,60 @@ public partial class App : System.Windows.Application
             RunExplorerPackageOperation(args[0]);
             return;
         }
-        if (useCoreV2 && args.Length == 0)
-        {
-            base.OnStartup(e);
-            ShutdownMode = ShutdownMode.OnExplicitShutdown;
-            _engineStartup = StartEngineGuiAsync(_engineStartupCancellation.Token);
-            try { await _engineStartup; }
-            catch (OperationCanceledException) when (_engineStartupCancellation.IsCancellationRequested) { }
-            catch (Exception error)
-            {
-                WriteStartupProgress(nameof(StartEngineGuiAsync), SyncCli.DescribeException(error));
-                _themeManager?.Dispose();
-                if (!_appClosing && !Dispatcher.HasShutdownStarted)
-                {
-                    ShowEngineStartupFailure((int)SyncCliExitCode.Failed, SyncCli.DescribeException(error));
-                    Shutdown((int)SyncCliExitCode.Failed);
-                }
-            }
-            return;
-        }
         ExplorerRequest? explorerRequest;
         try { explorerRequest = ExplorerRequest.Parse(args); }
         catch (Exception error) { AppDialogWindow.Inform(null, "Explorer Action Not Available", "Select one item in a Sync Shark folder pair.", error.Message); Shutdown(); return; }
-        WriteStartupProgress("product-lock", "Acquiring the existing product owner lock; no fresh sync is being started.");
-        try { _singleInstance = PilotInstanceLock.Acquire(SyncSharkRuntimePaths.InstanceLockFile); }
-        catch (PilotReleaseRecoveryRequiredException exception)
+        // The engine window is the one product window. A request that reaches an already-open window is handed to
+        // it exactly as before; otherwise it opens the window with the request queued.
+        if (explorerRequest is not null)
         {
-            WriteStartupProgress("release-recovery-required", exception.Message);
-            ShowEngineStartupFailure(EngineHostEntry.StartupReleaseRecoveryRequired, SyncCli.DescribeException(exception));
-            Shutdown((int)SyncCliExitCode.NeedsReview);
-            return;
-        }
-        catch (InvalidDataException exception)
-        {
-            ShowEngineStartupFailure(EngineHostEntry.StartupInvalidDataLocation, exception.Message);
-            Shutdown((int)SyncCliExitCode.Failed); return;
-        }
-        catch (IOException exception)
-        {
-            if (!ExistingWindowActivation.TryRaise(explorerRequest))
+            if (ExistingWindowActivation.TryRaise(explorerRequest))
             {
-                try
-                {
-                    using var engine = await EngineHostEntry.ObserveReadyHostAsync(_engineStartupCancellation.Token);
-                    if (_appClosing || Dispatcher.HasShutdownStarted) return;
-                    if (engine is not null)
-                        AppDialogWindow.Inform(null, EngineText.Get(EngineTextKey.EngineBusyTitle),
-                            EngineText.Get(EngineTextKey.EngineLegacyOwnerGuidance), SyncCli.DescribeException(exception));
-                    else ShowEngineStartupFailure((int)SyncCliExitCode.Busy, SyncCli.DescribeException(exception));
-                }
-                catch (OperationCanceledException) when (_engineStartupCancellation.IsCancellationRequested) { return; }
+                base.OnStartup(e);
+                ShutdownMode = ShutdownMode.OnExplicitShutdown;
+                Shutdown((int)SyncCliExitCode.Success);
+                return;
             }
-            Shutdown((int)SyncCliExitCode.Busy);
+            // A window that exists but refused the handoff must not become a second product window; this is the
+            // retired route's Busy answer, kept so one Explorer click never opens two windows.
+            if (ExistingWindowActivation.IsProductWindowPresent())
+            {
+                base.OnStartup(e);
+                ShutdownMode = ShutdownMode.OnExplicitShutdown;
+                WriteStartupProgress("explorer-undelivered", "A product window is already open but did not accept the request.");
+                Shutdown((int)SyncCliExitCode.Busy);
+                return;
+            }
+        }
+        if (explorerRequest is null && args.Length != 0)
+        {
+            // The legacy window, its hidden --background start and the retired core switch have no route left.
+            base.OnStartup(e);
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            WriteStartupProgress("retired-route", "No product window handles these arguments: " + string.Join(' ', args));
+            Shutdown((int)SyncCliExitCode.Usage);
             return;
         }
+        if (!useCoreV2)
+            WriteStartupProgress("legacy-core", CoreSwitch.LegacyNotice + " The product window runs the engine.");
         base.OnStartup(e);
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
-        WriteStartupProgress("theme", "Loading the retained theme and display preferences.");
-        _themeManager = new ThemeManager(new UiPreferencesStore(_singleInstance.StateAuthority));
-        _themeManager.Initialize();
-        WriteStartupProgress("window-construction", "Constructing the application controls and the existing authority host.");
-        _mainWindow = new MainWindow(_singleInstance.StateAuthority, _themeManager, useCoreV2);
-        if (!useCoreV2)
-            _mainWindow.Title = CoreSwitch.LegacyNotice;
-        if (explorerRequest is not null) _mainWindow.QueueExplorerRequest(explorerRequest);
-        _mainWindow.CompactViewRequested += (_, _) => ShowTrayFlyout();
-        WriteStartupProgress("tray", "Preparing the tray icon before local-state loading and startup recovery.");
-        CreateTrayIcon();
-        WriteStartupProgress("initial-window-load", "Starting the initial window load; full readiness follows completed initialization and recovery.");
-        if (args.Any(value => string.Equals(value, "--background", StringComparison.OrdinalIgnoreCase)))
-            _mainWindow.StartHidden();
-        else
-            _mainWindow.Show();
+        _engineStartup = StartEngineGuiAsync(_engineStartupCancellation.Token, explorerRequest);
+        try { await _engineStartup; }
+        catch (OperationCanceledException) when (_engineStartupCancellation.IsCancellationRequested) { }
+        catch (Exception error)
+        {
+            WriteStartupProgress(nameof(StartEngineGuiAsync), SyncCli.DescribeException(error));
+            _themeManager?.Dispose();
+            if (!_appClosing && !Dispatcher.HasShutdownStarted)
+            {
+                ShowEngineStartupFailure((int)SyncCliExitCode.Failed, SyncCli.DescribeException(error));
+                Shutdown((int)SyncCliExitCode.Failed);
+            }
+        }
     }
 
-    private async Task StartEngineGuiAsync(CancellationToken ct)
+    private async Task StartEngineGuiAsync(CancellationToken ct, ExplorerRequest? explorerRequest)
     {
         var exit = await EngineHostEntry.StartAsync(ct);
         RequireEngineStartup(ct);
@@ -227,6 +206,7 @@ public partial class App : System.Windows.Application
             ShutdownMode = ShutdownMode.OnMainWindowClose;
             window.Show();
             window.BindEngineStatusSubscription(EngineHostEntry.SubscribeStatusAsync);
+            if (explorerRequest is not null) window.QueueExplorerRequest(explorerRequest);
         }
         catch
         {

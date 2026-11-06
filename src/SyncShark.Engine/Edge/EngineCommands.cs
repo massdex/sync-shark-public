@@ -44,6 +44,8 @@ public sealed class EngineCommands(EngineOperations operations)
                 invocation.Value(EngineCliCatalog.Flag(EngineOptionKey.Pair)), ct)),
             EngineCommandKey.HostResume => HostResultOf(await _operations.HostResumeAsync(
                 invocation.Value(EngineCliCatalog.Flag(EngineOptionKey.Pair)), ct)),
+            EngineCommandKey.HostWake => HostResultOf(await _operations.HostWakeAsync(
+                Value(invocation, EngineOptionKey.Pair), ct)),
             EngineCommandKey.HostStop => HostResultOf(await _operations.HostStopAsync(ct)),
             _ => throw new System.Diagnostics.UnreachableException(),
         };

@@ -49,16 +49,7 @@ internal static class CliEntry
             // Engine commands have their own runtime and state: they never reach the core switch or the app bridge.
             if (args.Skip(1).FirstOrDefault(arg => !arg.StartsWith("--", StringComparison.Ordinal)) ==
                 EngineCliCatalog.Group)
-            {
-                // A verified running Engine host answers first; when none does, the four-argument entry leaves a
-                // pre-existing command to the existing standalone runtime, which also refuses a host-only command
-                // rather than acquiring the product lock locally.
-                var hosted = Task.Run(() => EngineHostEntry.TryCliAsync(args, standardOutput, standardError,
-                    cancellation.Token)).GetAwaiter().GetResult();
-                if (hosted is { } hostExitCode) return hostExitCode;
-                return Task.Run(() => SyncCli.ExecuteAsync(args, standardOutput, standardError,
-                    () => new Massdex.SyncShark.Engine.Edge.EngineCliRuntime(width), cancellation.Token)).GetAwaiter().GetResult();
-            }
+                return RunEngineAsync(args, standardOutput, standardError, width, cancellation.Token);
             // The --core switch (or the SYNCSHARK_CORE setting) selects the core before anything else; a
             // usage error is reported without opening state. v2 skips the running-application bridge because
             // the running application owns the v1 core, not the fresh v2 store.
@@ -86,6 +77,11 @@ internal static class CliEntry
             }
             if (selection.UseV2)
             {
+                // The AutoSync controls the Engine already owns go to their Engine command through the same
+                // verified-host-then-standalone route; the rows with no Engine owner (interval, the global
+                // --all switch) keep the legacy route below unchanged.
+                if (AutoSyncEngineRoute.Map(args) is { } engineArgs)
+                    return RunEngineAsync(engineArgs, standardOutput, standardError, width, cancellation.Token);
                 // An isolated preview is never sent to the live background host.
                 if (!args.Contains("--plan-only", StringComparer.Ordinal) && !args.Contains("--rehearse", StringComparer.Ordinal))
                 {
@@ -132,6 +128,20 @@ internal static class CliEntry
             TryFlush(standardError);
             RestoreConsoleMode();
         }
+    }
+
+    // One engine dispatch, shared by the engine group and the AutoSync rows mapped onto their Engine commands.
+    private static int RunEngineAsync(string[] args, TextWriter stdout, TextWriter stderr, int width,
+        CancellationToken cancellationToken)
+    {
+        // A verified running Engine host answers first; when none does, the four-argument entry leaves a
+        // pre-existing command to the existing standalone runtime, which also refuses a host-only command
+        // rather than acquiring the product lock locally.
+        var hosted = Task.Run(() => EngineHostEntry.TryCliAsync(args, stdout, stderr, cancellationToken))
+            .GetAwaiter().GetResult();
+        if (hosted is { } exitCode) return exitCode;
+        return Task.Run(() => SyncCli.ExecuteAsync(args, stdout, stderr,
+            () => new Massdex.SyncShark.Engine.Edge.EngineCliRuntime(width), cancellationToken)).GetAwaiter().GetResult();
     }
 
     // The human line budget follows the actual terminal, never wider than the shared maximum.

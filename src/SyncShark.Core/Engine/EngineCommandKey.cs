@@ -6,6 +6,6 @@ public enum EngineCommandKey
     PairsList, PairsAdd, PairsImport, PairsRemove, PairsEnable, PairsDisable, PairsExclude, PairsInclude, Repair,
     Logs,
     Status, Issues, Resolve, SettingsList, SettingsSet, PreferencesShow, PreferencesSet,
-    PairsBind, HostStart, HostStatus, HostPause, HostResume, HostStop, Recovery, RecoveryResolve,
+    PairsBind, HostStart, HostStatus, HostPause, HostResume, HostWake, HostStop, Recovery, RecoveryResolve,
     IgnoresList, IgnoresSet
 }

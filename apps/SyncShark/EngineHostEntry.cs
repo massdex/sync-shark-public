@@ -64,8 +64,12 @@ internal static class EngineHostEntry
         {
             try
             {
-                await BackgroundHostEntry.Client().StopAsync(HostConnectionDeadline,
-                    () => AutoSyncProcess.StopSupervisor(), ct).ConfigureAwait(false);
+                // The one remaining edge to the retired AutoSync pipe: the owned legacy host must drain its store
+                // before this host takes the lock. It is the pipe's own client, not the legacy host entry, so the
+                // entry can go without taking the cutover with it.
+                await new AutoSyncHostClient(AutoSyncHostProtocol.PipeName(SyncSharkRuntimePaths.InstanceLockFile))
+                    .StopAsync(HostConnectionDeadline, () => AutoSyncProcess.StopSupervisor(), ct)
+                    .ConfigureAwait(false);
             }
             catch (AutoSyncHostUncertainException)
             {
@@ -400,7 +404,8 @@ internal static class EngineHostEntry
 
     private static bool IsHostOnly(EngineCommandKey key) => key is
         EngineCommandKey.PreferencesShow or EngineCommandKey.PreferencesSet or
-        EngineCommandKey.HostPause or EngineCommandKey.HostResume or EngineCommandKey.HostStop;
+        EngineCommandKey.HostPause or EngineCommandKey.HostResume or EngineCommandKey.HostWake or
+        EngineCommandKey.HostStop;
 
     private static async Task<UiPreferencesResult> RunPreferenceAsync(string[] arguments, EngineCommandKey key,
         CancellationToken ct)

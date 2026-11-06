@@ -322,6 +322,22 @@ internal static partial class CliChecks
             SyncCliRegistry.Rows.Single(row => row.Command == "autosync stop").Effect.Contains("send stop to host first", StringComparison.Ordinal) &&
             SyncCliRegistry.Rows.Single(row => row.Command == "autosync stop").Effect.Contains("only without a host, never on failed or uncertain sends", StringComparison.Ordinal),
             "help and capabilities describe supervised start and deliberate stop including backoff");
+        // The Engine owns per-pair enablement and the pair wake, so exactly those AutoSync rows run its command.
+        Require(AutoSyncEngineRoute.Map(["--cli", "autosync", "enable", "--pair", "p1"]) is
+                ["--cli", "engine", "pairs", "enable", "--pair", "p1", "--yes"] &&
+            AutoSyncEngineRoute.Map(["--cli", "autosync", "disable", "--pair", "p1", "--json"]) is
+                ["--cli", "engine", "pairs", "disable", "--pair", "p1", "--yes", "--json"],
+            "autosync enable/disable --pair run the Engine's per-pair command with its own confirmation");
+        Require(AutoSyncEngineRoute.Map(["--cli", "autosync", "now", "--pair", "p1"]) is
+                ["--cli", "engine", "host", "wake", "--pair", "p1", "--yes"],
+            "autosync now --pair runs the Engine host's one pair wake");
+        Require(AutoSyncEngineRoute.Map(["--cli", "autosync", "enable", "--all"]) is null &&
+            AutoSyncEngineRoute.Map(["--cli", "autosync", "enable", "--pair", "p1", "--all"]) is null &&
+            AutoSyncEngineRoute.Map(["--cli", "autosync", "interval", "--minutes", "5"]) is null &&
+            AutoSyncEngineRoute.Map(["--cli", "autosync", "status"]) is null &&
+            AutoSyncEngineRoute.Map(["--cli", "autosync", "start"]) is null &&
+            AutoSyncEngineRoute.Map(["--cli", "status"]) is null,
+            "rows without an Engine owner, and non-AutoSync rows, keep their existing route");
         Require(SyncCliRegistry.Rows.Single(row => row.Command == "autosync install-startup").Effect.Contains("Start With Windows", StringComparison.Ordinal),
             "GUI and CLI document the same supervisor startup owner");
         Require(SyncCliRegistry.Rows.Single(row => row.Command == "autosync install-startup").Effect.Contains("stable installed", StringComparison.Ordinal),
@@ -1495,7 +1511,7 @@ internal static partial class CliChecks
         Require(SyncCli.IsCliInvocation(["--cli", "status"]), "--cli selects the CLI startup route");
         Require(SyncCli.IsCliInvocation(["--CLI", "status"]), "the --cli route is matched case-insensitively");
         Require(!SyncCli.IsCliInvocation([]), "no arguments keep the ordinary product startup");
-        Require(!SyncCli.IsCliInvocation(["--background"]), "--background keeps the ordinary hidden startup");
+        Require(!SyncCli.IsCliInvocation(["--background"]), "--background stays a window-route argument, never a CLI invocation");
         Require(!SyncCli.IsCliInvocation(["--check-rollback-ready"]), "maintenance startup is unchanged");
         Require(!SyncCli.IsCliInvocation(["/select,C:\\folder"]), "Explorer activation is unchanged");
         Require(SyncCliRuntime.ProductionLockPath == SyncSharkRuntimePaths.InstanceLockFile,

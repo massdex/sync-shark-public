@@ -835,13 +835,6 @@ public partial class MainWindow : Window
         base.OnClosing(e);
     }
 
-    public void StartHidden()
-    {
-        Show();
-        ShowInTaskbar = false;
-        Hide();
-    }
-
     private void AuthorizationReturnRequested()
     {
         if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) return;

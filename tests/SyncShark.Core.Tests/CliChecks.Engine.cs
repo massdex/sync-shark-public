@@ -37,6 +37,7 @@ internal static partial class CliChecks
             ["engine", "host", "pause", "--pair", "p", "--yes"],
             ["engine", "host", "resume", "--yes"],
             ["engine", "host", "resume", "--pair", "p", "--yes"],
+            ["engine", "host", "wake", "--pair", "p", "--yes"],
             ["engine", "host", "stop", "--yes"],
             ["engine", "recovery", "--pair", "p"],
             ["engine", "recovery", "--pair", "p", "--after-operation", "op"],
@@ -101,6 +102,7 @@ internal static partial class CliChecks
             ("engine host status", EngineCommandKey.HostStatus, "direct", "none", false, false, false),
             ("engine host pause", EngineCommandKey.HostPause, "direct", "yes", true, true, false),
             ("engine host resume", EngineCommandKey.HostResume, "direct", "yes", true, true, false),
+            ("engine host wake", EngineCommandKey.HostWake, "direct", "yes", true, true, true),
             ("engine host stop", EngineCommandKey.HostStop, "direct", "yes", true, true, false),
             ("engine recovery", EngineCommandKey.Recovery, "direct", "none", false, false, true),
             ("engine recovery-resolve", EngineCommandKey.RecoveryResolve, "direct", "yes", true, true, true),
@@ -207,6 +209,8 @@ internal static partial class CliChecks
         RejectsAtParse("engine host pause without --yes is a usage error", "engine", "host", "pause", "--pair", "p");
         RejectsAtParse("global engine host pause without --yes is a usage error", "engine", "host", "pause");
         RejectsAtParse("engine host resume without --yes is a usage error", "engine", "host", "resume", "--pair", "p");
+        RejectsAtParse("engine host wake without --yes is a usage error", "engine", "host", "wake", "--pair", "p");
+        RejectsAtParse("engine host wake without --pair is a usage error", "engine", "host", "wake", "--yes");
         RejectsAtParse("engine host stop without --yes is a usage error", "engine", "host", "stop");
         RejectsAtParse("engine recovery-resolve without --yes is a usage error", "engine", "recovery-resolve",
             "--pair", "p", "--operation", "op", "--generation", "0", "--choice", "check");
