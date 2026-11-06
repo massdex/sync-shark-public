@@ -6,6 +6,10 @@ name: Lane Engine Checks
 run-name: Lane Engine Checks ${{ inputs.groups }}
 
 on:
+  # A push is what registers the workflow on the repository; it also runs the default groups.
+  push:
+    branches:
+      - 'ci/plan-files'
   workflow_dispatch:
     inputs:
       groups:
@@ -33,7 +37,7 @@ jobs:
         id: select
         shell: pwsh
         env:
-          GROUPS: ${{ inputs.groups }}
+          GROUPS: ${{ inputs.groups || 'store repair scan-owner scan-writer folder-deletes dependencies' }}
         run: |
           $checks = @(
             foreach ($group in ($env:GROUPS -split '\s+' | Where-Object { $_ } | Select-Object -Unique)) {
