@@ -1,0 +1,133 @@
+using Massdex.SyncShark.Engine;
+using Massdex.SyncShark.V2;
+
+namespace Massdex.SyncShark.Engine.Tests.TestDoubles;
+
+/// <summary>Delegates a store, counting scanned rows and offering narrow hooks to one scan-pass case.</summary>
+internal sealed class HookStore(IStateStore inner) : ForwardingStateStore(inner)
+{
+    public Action? BeforeMarkRepairLogFailed { get; init; }
+    public override void MarkRepairLogFailed(string pairId, string runId)
+    {
+        BeforeMarkRepairLogFailed?.Invoke();
+        base.MarkRepairLogFailed(pairId, runId);
+    }
+
+    public Action? BeforeFinishRepair { get; init; }
+    public override void FinishRepair(string pairId, RepairSummary summary, long expectedGeneration, Guid scanToken,
+        LocalCatchUp local, DropboxCatchUp dropbox)
+    {
+        BeforeFinishRepair?.Invoke();
+        base.FinishRepair(pairId, summary, expectedGeneration, scanToken, local, dropbox);
+    }
+
+    public Action<string, long, DriveEvidence>? OnMergeDrive { get; init; }
+    public override void MergeDriveEvidence(string pairId, long expectedGeneration, DriveEvidence acquired)
+    {
+        OnMergeDrive?.Invoke(pairId, expectedGeneration, acquired);
+        base.MergeDriveEvidence(pairId, expectedGeneration, acquired);
+    }
+
+    public bool DisposeInner { get; init; } = true;
+    public override void Dispose() { if (DisposeInner) Inner.Dispose(); }
+
+    public int Rows { get; private set; }
+    public Action? OnScanRows { get; init; }
+    public Func<Side, IScanSink, IScanSink>? WrapSink { get; init; }
+    public Action<Side>? BeforeOpenScan { get; init; }
+    public Action<PairConfig>? OnSavePair { get; init; }
+    public Action<int>? OnRow { get; init; }
+    public Func<string, StateChange, Task>? Record { get; init; }
+    public int GateReads { get; private set; }
+    public List<IReadOnlySet<long>?> HoldSnapshots { get; } = [];
+    public List<IReadOnlyList<IssueKind>?> IssueFilters { get; } = [];
+    public Dictionary<string, int> PendingReads { get; } = new(StringComparer.Ordinal);
+
+    public override void SavePair(PairConfig pair)
+    {
+        OnSavePair?.Invoke(pair);
+        base.SavePair(pair);
+    }
+
+    public override Task CommitRecordAsync(string pairId, StateChange change, Action<Issue>? committedIssue) =>
+        Record?.Invoke(pairId, change) ?? base.CommitRecordAsync(pairId, change, committedIssue);
+
+    public Action<StateChange>? BeforeCommitAsync { get; init; }
+    public override Task CommitAsync(string pairId, StateChange change)
+    {
+        BeforeCommitAsync?.Invoke(change);
+        return base.CommitAsync(pairId, change);
+    }
+
+    public Action<StateChange>? OnCommit { get; init; }
+    public override void Commit(string pairId, StateChange change, Action<Issue>? committedIssue = null)
+    {
+        OnCommit?.Invoke(change);
+        base.Commit(pairId, change, committedIssue);
+    }
+
+    public override PendingRead Pending(string pairId)
+    {
+        PendingReads[pairId] = PendingReads.GetValueOrDefault(pairId) + 1;
+        return base.Pending(pairId);
+    }
+
+    public override IReadOnlyList<Issue> Issues(string pairId, IReadOnlyList<IssueKind>? kinds = null)
+    {
+        if (kinds is { Count: 1 } && kinds[0] == IssueKind.DriveChange) GateReads++;
+        else IssueFilters.Add(kinds);
+        return base.Issues(pairId, kinds);
+    }
+
+    public override IssueKind? HeldKind(string pairId, Row row, IReadOnlySet<long>? exceptIssues)
+    {
+        HoldSnapshots.Add(exceptIssues);
+        return base.HeldKind(pairId, row, exceptIssues);
+    }
+
+    public override bool HeldCovers(string pairId, string key, IReadOnlySet<long>? exceptIssues)
+    {
+        HoldSnapshots.Add(exceptIssues);
+        return base.HeldCovers(pairId, key, exceptIssues);
+    }
+
+    public override IReadOnlyDictionary<IssueKind, int> IssueCounts(string pairId)
+    {
+        GateReads++;
+        return base.IssueCounts(pairId);
+    }
+
+    public List<bool> DiscoveryStarts { get; } = [];
+    public int ScanPasses { get; private set; }
+    public override Guid BeginScan(string pairId, long expectedGeneration, bool includeDeleted)
+    {
+        DiscoveryStarts.Add(includeDeleted);
+        return base.BeginScan(pairId, expectedGeneration, includeDeleted);
+    }
+
+    public override IScanSink OpenScan(string pairId, Side side, int batchRows)
+    {
+        BeforeOpenScan?.Invoke(side);
+        var sink = base.OpenScan(pairId, side, batchRows);
+        return WrapSink is { } wrap ? wrap(side, sink) : sink;
+    }
+
+    public override IEnumerable<Row> ScanRows(string pairId, Func<Row, RowContext> context)
+    {
+        ScanPasses++;
+        OnScanRows?.Invoke();
+        foreach (var row in base.ScanRows(pairId, context))
+        {
+            Rows++;
+            OnRow?.Invoke(Rows);
+            yield return row;
+        }
+    }
+
+    public int DiscoveryExistenceReads { get; private set; }
+    public override bool HasDeletedNames(string pairId)
+    {
+        DiscoveryExistenceReads++;
+        return base.HasDeletedNames(pairId);
+    }
+}
