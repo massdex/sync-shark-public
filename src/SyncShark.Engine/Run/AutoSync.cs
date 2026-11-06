@@ -77,16 +77,19 @@ internal sealed class AutoSync
                 if (nowIdle != idle)
                 {
                     idle = nowIdle;
-                    // One start line on entering idle and one end line with the idle duration on leaving it.
-                    _host.HostLog?.Event(idle
-                        ? RunEvent.Stage(TextKey.StageAutoSyncIdle)
-                        : RunEvent.Stage(TextKey.StageAutoSyncIdle, ended: true, count: RunLog.CompletedOperation));
+                    RecordIdle(idle);
                 }
                 await changed.WaitAsync(ct).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
     }
+
+    // One start line on entering idle and one end line with the idle duration on leaving it.
+    private void RecordIdle(bool idle) =>
+        _host.HostLog?.Event(idle
+            ? RunEvent.Stage(TextKey.StageAutoSyncIdle)
+            : RunEvent.Stage(TextKey.StageAutoSyncIdle, ended: true, count: RunLog.CompletedOperation));
 
     private async Task ObserveAsync(string pairId, bool receiptsOnly, TaskCompletionSource completion, CancellationToken ct)
     {
