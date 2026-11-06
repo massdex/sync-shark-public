@@ -4,6 +4,7 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace Massdex.SyncShark.Engine.Tests.Layout;
 
+// Proof mutant for the one-commit publication path: this line is the only difference.
 /// <summary>The literals rule of design section 10 (`--engine-checks literals`): no text or number in engine code
 /// outside its owner, and no default value in the settings record or parser.</summary>
 public static class LiteralsChecks
