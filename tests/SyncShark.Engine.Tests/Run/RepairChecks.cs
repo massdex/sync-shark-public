@@ -2789,10 +2789,14 @@ public static class RepairChecks
         Check.Require(detected && storage.DeletedHistoryOwed(pairId) && rig.Store.Obligated(pairId) &&
             after.Revision == local.Revision + 1 && after.Obligation == SourceObligation.NormalRepair,
             "corruption advances the obligation revision and an already-running Repair cannot erase it");
-        Check.Require(summary is null && File.Exists(Path.Combine(rig.Pair.LocalRoot, "A")) &&
-            rig.Wire.LastUploadCommitPaths.Count == 0 &&
-            rig.Store.Issues(pairId).Any(issue => issue.Path == "A" && issue.Kind == IssueKind.Failure) && log.HasFailed,
-            "Repair row-pass corruption after history publication fails visibly without upload or deletion");
+        Check.Require(summary is null, "Repair row-pass corruption returns no completed summary");
+        Check.Require(File.Exists(Path.Combine(rig.Pair.LocalRoot, "A")),
+            "Repair row-pass corruption preserves the local file");
+        Check.Require(rig.Wire.LastUploadCommitPaths.Count == 0,
+            "Repair row-pass corruption performs no upload");
+        Check.Require(rig.Store.Issues(pairId).Any(issue => issue.Path == "A" && issue.Kind == IssueKind.Failure),
+            "Repair row-pass corruption preserves the retained issue");
+        RequireFailed(log.Path, nameof(InvalidDataException));
     });
 
     private static Task CorruptHistoryWakesRepairAsync() => WithFolder("corrupt-history-wake", async folder =>
