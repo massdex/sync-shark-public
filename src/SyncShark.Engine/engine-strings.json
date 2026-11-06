@@ -112,6 +112,7 @@
   "StageDropboxListing": "Dropbox listing",
   "StageListingLocal": "Local: {Count} folders walked, {Message} {Path}",
   "StageListingDropbox": "Dropbox: page {Count}, {Message} {Path}",
+  "StageListingWait": "Waiting for a Dropbox listing page",
   "ListingCount": "{Count} entry observations (not unique paths)",
   "ListingEstimate": "{Count} entry observations (not unique paths); {Value} of historical baseline ~{SourceCount}",
   "ListingNumberFormat": "N0",

@@ -325,8 +325,7 @@ internal sealed class DropboxFeed(
         ct.ThrowIfCancellationRequested();
         if (attempt.Completion is not { } settled || settled.Result != RequestResult.TransientFailure) throw error;
         if (!attempt.TryClaimCompletion()) return;
-        _ = openOutage;
-        lock (_turnGate) _outage ??= () => { };
+        lock (_turnGate) _outage ??= openOutage();
         var providerWait = FailureRetryOwner.RemainingProviderObservation(
             settled.ProviderWait, attempt.ProviderWaitStartedTimestamp, time);
         var wait = FailureRetryOwner.AdoptedListenerWait(_session, providerWait, backoff, Random.Shared.NextDouble);
