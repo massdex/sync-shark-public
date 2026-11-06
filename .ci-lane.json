@@ -1,0 +1,20 @@
+{
+  "build": [
+    "engine-tests",
+    "core-tests",
+    "core-tests",
+    "app",
+    "ui-fixture"
+  ],
+  "engine": [
+    "dependencies",
+    "literals",
+    "strings"
+  ],
+  "core": [
+    "--cli-checks"
+  ],
+  "ui": [
+    "startup-loading-ui-checks"
+  ]
+}
