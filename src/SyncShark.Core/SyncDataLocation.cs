@@ -20,8 +20,7 @@ public static class SyncDataLocation
     internal static string? DefaultRootForTest { get; set; }
     private static string DefaultRoot => DefaultRootForTest ?? SyncSharkRuntimePaths.InstallationUserRoot;
     public static string PointerPath => Path.Combine(DefaultRoot, "product-root.txt");
-    // A test run's installed override always wins; only the real product root reads the registry/pointer.
-    public static string ProductRoot => SyncSharkRuntimePaths.TestProductRoot ?? EffectiveRoot.Value;
+    public static string ProductRoot => EffectiveRoot.Value;
 
     internal static string ReadProductRoot()
     {
