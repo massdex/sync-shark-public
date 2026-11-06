@@ -1,0 +1,13 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "storage-history",
+    "syncer",
+    "repair",
+    "decide"
+  ],
+  "core": [],
+  "ui": []
+}
