@@ -5,6 +5,7 @@ on:
     branches:
       - 'ci/140-lane'
       - 'ci/140-mutant'
+      - 'ci/140-mutant-b'
 
 env:
   CONFIGURATION: Debug

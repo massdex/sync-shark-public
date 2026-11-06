@@ -483,9 +483,7 @@ internal sealed class SelectionPass
         var context = RowContext.ForRow(row, _context.Scope, RowContext.Neutral, false, null, null, false,
             IssueSubject.FirstRunDeletionKind.None);
         if (!context.OutOfScope) return null;
-        var saved = notice.Observed is { } observed
-            ? _context.Store.SyncedById(selection.PairId, notice.Side, observed.Id) : null;
-        return Renames.Candidate(notice.Side, notice.Observed, saved) is null ? row with { Context = context } : null;
+        return row with { Context = context };
     }
 
     // A held branch never reaches the fence: it attaches to its holder, so refusing it early would replace that.
