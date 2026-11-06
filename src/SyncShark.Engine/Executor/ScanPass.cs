@@ -1,0 +1,430 @@
+using System.Runtime.ExceptionServices;
+using Massdex.SyncShark.Engine.Planner;
+
+namespace Massdex.SyncShark.Engine.Executor;
+
+/// <summary>One completed scan's ordered sync stages share row outcomes, holds and folder barriers.</summary>
+internal sealed class ScanPass(ExecutorContext context, ItemSync items, FolderSync folders,
+    FirstRunFolders firstRunFolders, ExclusionRunner exclusions, AncestorFence ancestors, SyncPorts ports)
+{
+    private readonly ExecutorContext _context = context;
+    private readonly ItemSync _items = items;
+    private readonly FolderSync _folders = folders;
+    private readonly FirstRunFolders _firstRunFolders = firstRunFolders;
+    private readonly ExclusionRunner _exclusions = exclusions;
+    private readonly AncestorFence _ancestors = ancestors;
+    private readonly SyncPorts _ports = ports;
+    private long _completedFolders;
+
+    // The producer's ordinary allowance: the account's current level plus the Local hash gate (8.3).
+    private int RowCapacity => Math.Min(_context.Admission.Level, _context.Admission.WorkCapacity) +
+        _ports.LocalHashSlots;
+    // The row pass's live-row ceiling, including uploads that released their ordinary share.
+    private int TotalCapacity => checked(_context.Admission.WorkCapacity + _context.Admission.WorkCapacity +
+        _ports.LocalHashSlots);
+
+    internal async Task<ScanOutcome> RunAsync(Guid scanToken, ListedSkips listed,
+        IReadOnlySet<long>? retryIssues, CancellationToken ct)
+    {
+        var scan = _context.Store.ReadScan(_context.Pair.PairId, scanToken);
+        _ancestors.CoverListedWork(scan.ThroughWorkId);
+        Func<string, bool>? deletedName = scan.Discovery && _context.Store.HasDeletedNames(_context.Pair.PairId)
+            ? key => _context.Store.DeletedNameExact(_context.Pair.PairId, key) : null;
+        using var cancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var tasks = new TaskSet(cancel);
+        Exception? failure = null;
+        try
+        {
+            await RunRowsAsync(listed, scanToken, scan.FirstRun, deletedName, retryIssues, tasks, cancel.Token, ct);
+        }
+        catch (Exception error) { failure = error; }
+        try
+        {
+            if (failure is not null) await tasks.CancelAndJoinAsync();
+            else await tasks.WhenAllAsync();
+        }
+        catch (Exception joined)
+        {
+            if (failure is null or OperationCanceledException) failure = joined;
+            else if (!ReferenceEquals(failure, joined))
+                _context.Events(RunEvent.Failed(joined));
+        }
+        if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();
+        return new ScanOutcome(_ancestors.AncestorRefused);
+    }
+
+    private async Task RunRowsAsync(ListedSkips scan, Guid scanToken, bool firstRun,
+        Func<string, bool>? deletedName, IReadOnlySet<long>? retryIssues, TaskSet tasks,
+        CancellationToken runToken, CancellationToken callerToken)
+    {
+        var pair = _context.Pair;
+        var store = _context.Store;
+        var scope = _context.Scope;
+        var earlier = store.ActiveFolderRemovals(pair.PairId, runToken).Select(operation => operation.OperationId)
+            .ToHashSet(StringComparer.Ordinal);
+        Stage(TextKey.StageAfterListing);
+        store.ReplaceSkipped(pair.PairId, scanToken, scan.Local.Concat(scan.Dropbox));
+        var localUntrusted = new PrefixSet();
+        long skipped = 0;
+        foreach (var item in scan.Local)
+        {
+            localUntrusted.Add(PathNames.Key(item.Path));
+            _context.Events(RunEvent.Stage(TextKey.StageAfterListing, count: ++skipped,
+                inProgress: true, path: item.Path));
+        }
+        var allPairs = store.Pairs();
+        var stages = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var storedPair in allPairs)
+        {
+            _context.Events(RunEvent.Stage(TextKey.StageAfterListing, inProgress: true));
+            var path = store.Pending(storedPair.PairId) switch
+            {
+                CurrentPending current => current.Value.Stage?.Path,
+                LegacyPending legacy => legacy.StagePath,
+                NoPending => null,
+                _ => throw new InvalidDataException()
+            };
+            if (path is not null) stages.Add(Path.GetFileName(path));
+        }
+        foreach (var (path, error) in _context.Recovery.RemoveStaleStages(stages))
+            _context.Events(RunEvent.Failed(error, TextKey.StageCleanupFailed, path));
+        var applied = new PrefixSet();
+        var pending = new PrefixSet();
+        if (pair.Exclusions.Count != 0)
+        {
+            foreach (var exclusion in pair.Exclusions)
+            {
+                _context.Events(RunEvent.Stage(TextKey.StageAfterListing, inProgress: true, path: exclusion.Path));
+                (await _exclusions.ApplyAsync(exclusion, retryIssues, runToken) ? applied : pending)
+                    .Add(PathNames.KeyFor(exclusion.Side, exclusion.Path));
+            }
+        }
+        var proofs = ReconcileIssues(localUntrusted, scan.Dropbox, applied, pending);
+        var contexts = _items.ScanContexts(firstRun, retryIssues, proofs, deletedName);
+        // The eligible in-use issues' own paths, from the state Repair already reads; one read per run, not per row.
+        var itemRetries = new PrefixSet();
+        if (retryIssues is { Count: > 0 })
+            foreach (var candidate in store.ReadItemRetryState(pair.PairId, retryIssues.ToArray()).Values)
+                if (candidate is { } value)
+                    foreach (var item in value.Token.Subject.Items)
+                        itemRetries.Add(PathNames.KeyFor(item.Side, item.Path));
+        _context.Events(RunEvent.Stage(TextKey.StageAfterListing, ended: true, count: scan.Local.Count + scan.Dropbox.Count));
+        Stage(TextKey.StageRenames);
+        long renames = 0;
+        var renameGroups = store.ScanRenames(pair.PairId).ToLookup(candidate => candidate.Synced);
+        var renameOrder = new PathLocks();
+        var renamer = _items.Renamer();
+        async Task Rename(IReadOnlyList<RenameCandidate> candidates, Entry? localById, IAsyncDisposable order)
+        {
+            await using (order)
+            {
+                if (!contexts.HoldsRename(candidates))
+                    await _items.RenameAsync(candidates, localById, runToken, completedScan: true);
+                _context.Events(RunEvent.Stage(TextKey.StageRenames, count: Interlocked.Increment(ref renames),
+                    total: renameGroups.Count, inProgress: true, path: candidates[0].Synced.LocalKey));
+            }
+        }
+        foreach (var group in renameGroups)
+        {
+            runToken.ThrowIfCancellationRequested();
+            var candidates = group.ToArray();
+            // Folder rebasing changes later groups' mapped footprints; finish it before scheduling those groups.
+            if (group.Key.IsFolder) await tasks.WhenAllAsync();
+            var localById = Renames.FirstOn(group, Side.Local)?.Moved;
+            if (localById is null && store.ScanEntry(pair.PairId, Side.Local, group.Key.LocalKey) is { } local &&
+                local.Id == group.Key.LocalId) localById = local;
+            var scopes = LockKeys.ForPaths(pair, renamer.Footprint(candidates, localById))
+                .Select(key => new PathLockScope(key, true)).ToArray();
+            // The producer acquires in scan order, before launching, so overlapping groups cannot overtake.
+            var order = await renameOrder.EnterAsync(scopes, runToken);
+            if (group.Key.IsFolder) await Rename(candidates, localById, order);
+            else
+            {
+                tasks.Add(Rename(candidates, localById, order));
+                await tasks.WaitForCapacityAsync(() => _context.Admission.WorkCapacity,
+                    callerToken, _context.Admission.WorkCapacity);
+            }
+        }
+        await tasks.WhenAllAsync();
+        runToken.ThrowIfCancellationRequested();
+        _context.Events(RunEvent.Stage(TextKey.StageRenames, ended: true, count: renames));
+        foreach (var (side, key) in scan.LocalFolders.Concat(scan.DropboxFolders))
+            contexts.Skipped(side).Add(key);
+        EnrollUnreadable(scan, contexts, firstRun);
+        var folderPlans = new List<(Row Folder, Side Side, int Depth)>();
+        var firstFolders = new List<(Row Folder, int Depth)>();
+        var restored = new HashSet<string>(PathNames.Comparer);
+        var unresolved = new HashSet<string>(PathNames.Comparer);
+        var resultGate = new object();
+        void Completed(Row row, SyncOutcome outcome)
+        {
+            lock (resultGate)
+            {
+                if (row.Context.UnderFolderDelete is not null && outcome.Effect is not null) restored.Add(row.Key);
+                // An ignored completion gives no answer; only a real one may add or clear this row's keys.
+                if (outcome.OwesWork(row, store, pair.PairId) is not { } owes) return;
+                if (!owes && unresolved.Count == 0) return;
+                foreach (var key in RowKeys(row))
+                {
+                    if (owes) unresolved.Add(key);
+                    else unresolved.Remove(key);
+                }
+            }
+        }
+        void Note(Row original, SyncOutcome outcome)
+        {
+            if (outcome.Deferred)
+            {
+                if (original.Local is { IsFolder: true } &&
+                    (original.Context.DeletionEligible || original.Context.FirstRunDeletion ==
+                        IssueSubject.FirstRunDeletionKind.PreserveWithHistoryNotice))
+                    firstFolders.Add((original, PathNames.Depth(original.Key)));
+                else
+                {
+                    var side = FolderDeletes.DeletingSide(original);
+                    contexts.Deleting(side).Add(original.Key);
+                    folderPlans.Add((original, side, PathNames.Depth(original.Key)));
+                }
+            }
+            else if (original.Local is { IsFolder: true } && original.Context.FirstRunDeletion !=
+                IssueSubject.FirstRunDeletionKind.None && outcome.Succeeded())
+                firstFolders.Add((original, PathNames.Depth(original.Key)));
+        }
+        long completedRows = 0;
+        async Task RunRow(Row original, Action? release)
+        {
+            _context.Events(RunEvent.Stage(TextKey.StageRows, count: Interlocked.Read(ref completedRows),
+                inProgress: true, path: original.Key));
+            var outcome = await _items.RunRowAttemptAsync(contexts.WithProof(original),
+                runToken, release, Completed, itemRetries);
+            if (FolderRow(original)) Note(original, outcome);
+            _context.Events(RunEvent.Stage(TextKey.StageRows, count: Interlocked.Increment(ref completedRows),
+                inProgress: true, path: original.Key));
+        }
+        Stage(TextKey.StageRows);
+        long rows = 0;
+        foreach (var row in store.ScanRows(pair.PairId, contexts.For))
+        {
+            if (runToken.IsCancellationRequested) break;
+            rows++;
+            if (FolderRow(row)) await RunRow(row, null);
+            else
+            {
+                tasks.Add(release => RunRow(row, release));
+                await tasks.WaitForCapacityAsync(() => RowCapacity, callerToken, TotalCapacity);
+            }
+        }
+        _context.Events(RunEvent.Stage(TextKey.StageRows, count: Interlocked.Read(ref completedRows),
+            inProgress: true, total: rows));
+        await tasks.WhenAllAsync();
+        runToken.ThrowIfCancellationRequested();
+        _context.Events(RunEvent.Stage(TextKey.StageRows, ended: true, count: rows));
+        _completedFolders = 0;
+        Stage(TextKey.StageFolderPlans);
+        var continued = await ContinueFolderFollowUpsAsync(earlier, Completed, unresolved, runToken);
+        _context.Events(RunEvent.Stage(TextKey.StageFolderPlans, count: _completedFolders,
+            inProgress: true, total: folderPlans.Count + firstFolders.Count + continued.Count));
+        var restoredAncestors = new HashSet<string>(restored.SelectMany(PathNames.Ancestors), PathNames.Comparer);
+        await RunFolderPlansAsync(folderPlans, continued, restored, restoredAncestors, Completed, unresolved, runToken);
+        await FinalizeFoldersAsync(firstFolders, pending, unresolved, tasks, Completed, runToken, callerToken);
+        runToken.ThrowIfCancellationRequested();
+        _context.Events(RunEvent.Stage(TextKey.StageFolderPlans, ended: true,
+            count: folderPlans.Count + firstFolders.Count + continued.Count));
+    }
+
+    private void EnrollUnreadable(ListedSkips scan, RowContexts contexts, bool firstRun)
+    {
+        var retained = _context.Store.RetainedFirstRun(_context.Pair.PairId);
+        foreach (var (_, key) in scan.LocalFolders)
+        {
+            var entry = _context.Store.ScanEntry(_context.Pair.PairId, Side.Local, key);
+            if (entry is not { IsFolder: true } || !IssuePolicy.ProtectsSubtree(entry.Skip)) continue;
+            var row = Row.ForOneSide(Side.Local, key, entry, null, [], null, RowContext.Neutral);
+            var kind = IssuePolicy.FirstRunKind(row, retained, false);
+            var under = contexts.UnderRetainedSubtree(retained, key);
+            if (!firstRun && kind == IssueSubject.FirstRunDeletionKind.None && !under) continue;
+            if (kind != IssueSubject.FirstRunDeletionKind.PreserveWithHistoryNotice)
+                kind = IssueSubject.FirstRunDeletionKind.UnscannedSubtree;
+            var cause = Enum.Parse<TextKey>(entry.Skip!);
+            _context.Store.Commit(_context.Pair.PairId, StateChange.Empty with
+            {
+                Raise = [(IssueKind.Failure, cause, entry.Path,
+                    new IssueSubject([new IssueItem(Side.Local, entry.Path, entry.Id)], null, FirstRunDeletion: kind))]
+            });
+        }
+    }
+
+    // A survivor an earlier run left waiting is reached again here: each Repair, until its hold clears (3.8). The
+    // pass's own operations finished where they started. Returns the operations this stage already finished.
+    private async Task<HashSet<string>> ContinueFolderFollowUpsAsync(IReadOnlySet<string> earlier,
+        Action<Row, SyncOutcome> completed, HashSet<string> unresolved, CancellationToken ct)
+    {
+        var continued = new HashSet<string>(StringComparer.Ordinal);
+        var active = _context.Store.ActiveFolderRemovals(_context.Pair.PairId, ct)
+            .Where(operation => earlier.Contains(operation.OperationId)).ToArray();
+        foreach (var operation in active)
+        {
+            FolderProgress(operation.RootEntry.Path);
+            var result = await _folders.FinishFolderRemovalAsync(operation.OperationId, null, ct, completed);
+            FolderProgress(operation.RootEntry.Path, completed: true);
+            continued.Add(operation.OperationId);
+            if (result.Status != FolderRemovalStatus.Complete)
+                unresolved.Add(PathNames.KeyFor(operation.DeletingSide, result.RootPath));
+        }
+        return continued;
+    }
+
+    private async Task RunFolderPlansAsync(List<(Row Folder, Side Side, int Depth)> plans,
+        IReadOnlySet<string> continued, IReadOnlySet<string> restored, IReadOnlySet<string> restoredAncestors, Action<Row, SyncOutcome> completed,
+        HashSet<string> unresolved, CancellationToken ct)
+    {
+        foreach (var level in plans.GroupBy(plan => plan.Depth).OrderByDescending(level => level.Key))
+        {
+            var operations = new List<(Row Folder, string Id)>();
+            foreach (var (folder, side, _) in level)
+            {
+                FolderProgress(folder.Key);
+                var id = await _folders.PrepareFolderRemovalAsync(folder, side, restored, restoredAncestors,
+                    ct, completed);
+                // The folder owner answers with an unfinished operation over this root; the stage above already ran it.
+                if (id is not null && !continued.Contains(id)) operations.Add((folder, id));
+                else FolderProgress(folder.Key, completed: true);
+            }
+            await _folders.RunPreparedFolderRemovalsAsync(operations.Select(operation => operation.Id), ct);
+            foreach (var (folder, id) in operations)
+            {
+                FolderProgress(folder.Key);
+                var result = await _folders.FinishFolderRemovalAsync(id, null, ct, completed);
+                FolderProgress(folder.Key, completed: true);
+                foreach (var key in RowKeys(folder))
+                {
+                    if (result.Status == FolderRemovalStatus.Complete) unresolved.Remove(key);
+                    else unresolved.Add(key);
+                }
+            }
+        }
+    }
+
+    private async Task FinalizeFoldersAsync(List<(Row Folder, int Depth)> folders,
+        PrefixSet pendingExclusions, HashSet<string> unresolved, TaskSet tasks,
+        Action<Row, SyncOutcome> completed, CancellationToken ct, CancellationToken callerToken)
+    {
+        if (folders.Count == 0) return;
+        var queued = new HashSet<string>(folders.SelectMany(folder => RowKeys(folder.Folder)), PathNames.Comparer);
+        var unfinished = new HashSet<string>(PathNames.Comparer);
+        void Seed(string key)
+        {
+            if (queued.Contains(key)) return;
+            foreach (var ancestor in PathNames.Ancestors(key)) unfinished.Add(ancestor);
+        }
+        foreach (var key in unresolved) Seed(key);
+        foreach (var key in pendingExclusions.Keys) Seed(key);
+        foreach (var issue in _context.Store.Issues(_context.Pair.PairId, IssueClosure.AfterHeldInSync))
+        {
+            if (issue.Subject.Items.Count == 0) Seed(PathNames.Key(issue.Path));
+            else foreach (var item in issue.Subject.Items)
+            {
+                if (item.Side != Side.Local) continue;
+                if (!_context.Scope.Excludes(item.Path, null, false) ||
+                    !_context.Scope.Excludes(item.Path, null, true)) Seed(PathNames.Key(item.Path));
+            }
+        }
+        foreach (var level in folders.GroupBy(folder => folder.Depth).OrderByDescending(level => level.Key))
+        {
+            var failed = new HashSet<string>(PathNames.Comparer);
+            async Task Finalize(Row folder, bool blocked)
+            {
+                FolderProgress(folder.Key);
+                var outcome = await _firstRunFolders.FinalizeFirstRunFolderAsync(folder, blocked, ct, completed);
+                FolderProgress(folder.Key, completed: true);
+                if (outcome.Succeeded()) return;
+                lock (failed)
+                    foreach (var key in RowKeys(folder)) failed.Add(key);
+            }
+            foreach (var (folder, _) in level)
+            {
+                var blocked = RowKeys(folder).Any(unfinished.Contains) || pendingExclusions.Overlaps(folder.Key);
+                tasks.Add(Finalize(folder, blocked));
+                await tasks.WaitForCapacityAsync(() => RowCapacity, callerToken,
+                    _context.Admission.WorkCapacity);
+            }
+            await tasks.WhenAllAsync();
+            ct.ThrowIfCancellationRequested();
+            foreach (var key in failed)
+                foreach (var ancestor in PathNames.Ancestors(key)) unfinished.Add(ancestor);
+        }
+    }
+
+    private IReadOnlyDictionary<string, IssueSubject>? ReconcileIssues(PrefixSet localUntrusted,
+        IReadOnlyList<(string Path, TextKey Cause, IssueSubject Subject)> dropboxSkipped,
+        PrefixSet appliedExclusions, PrefixSet pendingExclusions)
+    {
+        var store = _context.Store;
+        var pair = _context.Pair;
+        var remoteUntrusted = new PrefixSet();
+        foreach (var item in dropboxSkipped) remoteUntrusted.Add(PathNames.Key(item.Path));
+        var pendingPath = store.Pending(pair.PairId) switch
+        {
+            CurrentPending current => current.Value.Path,
+            LegacyPending legacy => legacy.Path,
+            NoPending => null,
+            _ => throw new InvalidDataException()
+        };
+        var entries = new Dictionary<(Side Side, string Path), Entry?>();
+        Dictionary<string, IssueSubject>? proofs = null;
+        Entry? Scanned(Side side, string path)
+        {
+            if (!entries.TryGetValue((side, path), out var entry))
+                entries.Add((side, path), entry = store.ScanEntry(pair.PairId, side, PathNames.KeyFor(side, path)));
+            return entry;
+        }
+        foreach (var issue in store.Issues(pair.PairId, IssueClosure.AfterHeldInSync))
+        {
+            _context.Events(RunEvent.Stage(TextKey.StageAfterListing, inProgress: true, path: issue.Path));
+            var protectedByOwner = store.RetryNoticeProtected(pair.PairId, issue.Id);
+            if (issue.Kind == IssueKind.Failure && pendingPath is not null && PathNames.Same(issue.Path, pendingPath))
+                protectedByOwner = true;
+            if (IssuePolicy.Obsolete(issue, Scanned, localUntrusted, remoteUntrusted, appliedExclusions,
+                pendingExclusions, _context.Scope, protectedByOwner))
+            {
+                store.Commit(pair.PairId, StateChange.Empty with
+                {
+                    FirstRunAcknowledged = issue.Subject.FirstRunDeletion == IssueSubject.FirstRunDeletionKind.None
+                        ? [] : issue.Subject.Items.Where(item => item.Side == Side.Local).ToArray(),
+                    Close = [(issue.Path, new[] { issue.Kind })]
+                });
+                continue;
+            }
+            if (issue.Kind is not (IssueKind.Tie or IssueKind.NameClash) || issue.Subject.LocalHash is null) continue;
+            foreach (var item in issue.Subject.Items)
+                if (item.Side == Side.Local && issue.Subject.ReusableLocalHash(Scanned(item.Side, item.Path)) is not null)
+                {
+                    proofs ??= new Dictionary<string, IssueSubject>(PathNames.Comparer);
+                    proofs.TryAdd(PathNames.Key(item.Path), issue.Subject);
+                }
+        }
+        return proofs;
+    }
+
+    private void FolderProgress(string path, bool completed = false) =>
+        _context.Events(RunEvent.Stage(TextKey.StageFolderPlans,
+            count: completed ? Interlocked.Increment(ref _completedFolders) : Interlocked.Read(ref _completedFolders),
+            inProgress: true, path: path));
+
+    private static IEnumerable<string> RowKeys(Row row)
+    {
+        yield return row.Key;
+        if (row.Local is { } local) yield return PathNames.KeyFor(Side.Local, local.Path);
+        if (row.Dropbox is { } remote) yield return PathNames.KeyFor(Side.Dropbox, remote.Path);
+        if (row.Synced is { } saved)
+        {
+            yield return saved.LocalKey;
+            yield return saved.DropboxKey;
+        }
+    }
+
+    private static bool FolderRow(Row row) =>
+        row.Local?.IsFolder == true || row.Dropbox?.IsFolder == true || row.Synced?.IsFolder == true;
+    private void Stage(TextKey key) =>
+        _context.Events(RunEvent.Stage(key));
+}
