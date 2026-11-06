@@ -211,25 +211,21 @@ public sealed class StateStore : IStateStore
     public static string DatabasePath(string productRoot) =>
         Path.Combine(productRoot, ResourceNames.EngineFolder, ResourceNames.DatabaseFile);
 
-    private static readonly HashSet<string> LivePlans = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly object LivePlansLock = new();
-
     private static StateStore? OpenStore(string path, bool writable, IProgress<RunEvent>? progress = null)
     {
         var full = Path.GetFullPath(path);
         if (writable)
         {
             Directory.CreateDirectory(Path.GetDirectoryName(full)!);
-            // Every writable open holds the product lock, so plan scratch found here has no owner and was left by
-            // a crash or a refused delete; a live plan in this process is registered and never swept.
-            lock (LivePlansLock)
-                foreach (var leftover in Directory.EnumerateFiles(Path.GetDirectoryName(full)!,
-                    Path.GetFileName(full) + StateSchema.PlanFileSuffix + "*" + StateSchema.DatabaseExtension))
-                    if (!LivePlans.Contains(leftover))
-                    {
-                        try { File.Delete(leftover); }
-                        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
-                    }
+            // Every writable open holds the exclusive product lock and no plan survives its process, so any plan
+            // scratch found here was left by a crash or a refused delete; a live plan's file is held open by its
+            // connection, so its delete fails and the file stays.
+            foreach (var leftover in Directory.EnumerateFiles(Path.GetDirectoryName(full)!,
+                Path.GetFileName(full) + StateSchema.PlanFileSuffix + "*" + StateSchema.DatabaseExtension))
+            {
+                try { File.Delete(leftover); }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+            }
         }
         else if (!new FileInfo(full).Exists) return null;
         var connection = Connect(full, writable ? SqliteOpenMode.ReadWriteCreate : SqliteOpenMode.ReadOnly);
@@ -989,13 +985,11 @@ public sealed class StateStore : IStateStore
         lock (_lock)
         {
             var path = _path + StateSchema.PlanFileSuffix + ResourceNames.NewId() + StateSchema.DatabaseExtension;
-            // Registered before the file exists so a concurrent startup sweep cannot take it for a leftover.
-            lock (LivePlansLock) LivePlans.Add(path);
+            using (Stream scratch = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None)) { }
+            _plans.Add(path);
             SqliteConnection? connection = null;
             try
             {
-                using (Stream scratch = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None)) { }
-                _plans.Add(path);
                 connection = Connect(StateSchema.ReadRoot, SqliteOpenMode.ReadWriteCreate);
                 Execute(connection, null, StateSchema.AttachState, (StateSchema.ParamPath, _path));
                 Execute(connection, null, StateSchema.AttachScan, (StateSchema.ParamPath, path));
@@ -1017,10 +1011,6 @@ public sealed class StateStore : IStateStore
                 {
                     throw new AggregateException(setup, cleanup);
                 }
-                finally
-                {
-                    lock (LivePlansLock) LivePlans.Remove(path);
-                }
                 throw;
             }
         }
@@ -1029,11 +1019,7 @@ public sealed class StateStore : IStateStore
     /// <summary>Ends this store's registration of one plan scratch path.</summary>
     internal void ReleasePlan(string path)
     {
-        lock (_lock)
-        {
-            _plans.Remove(path);
-            lock (LivePlansLock) LivePlans.Remove(path);
-        }
+        lock (_lock) _plans.Remove(path);
     }
 
     /// <inheritdoc />

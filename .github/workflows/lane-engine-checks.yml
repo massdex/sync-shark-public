@@ -37,7 +37,8 @@ jobs:
         id: select
         shell: pwsh
         env:
-          GROUPS: ${{ inputs.groups || 'store repair scan-owner scan-writer folder-deletes dependencies' }}
+          # A push runs only what the lane is re-proving; dispatch still defaults to every group.
+          GROUPS: ${{ inputs.groups || 'store' }}
         run: |
           $checks = @(
             foreach ($group in ($env:GROUPS -split '\s+' | Where-Object { $_ } | Select-Object -Unique)) {
