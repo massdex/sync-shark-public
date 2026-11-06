@@ -65,7 +65,7 @@ public sealed partial class V2SyncHost
                     RunReport? report = null;
                     SyncAuthorityBatchItemResult? unfinished = null;
                     // The app's runs open a run log too (RQ-130), under the same RunLog owner as the CLI.
-                    using var log = RunLog.Open(SyncSharkRuntimePaths.ProductRoot, pair.Name, "sync", verbose: false);
+                    using var log = RunLog.Open(SyncDataLocation.ProductRoot, pair.Name, "sync", verbose: false);
                     using var observation = _observed.Begin();
                     using var pause = PairPause.Begin(_store, pair.Id, PauseRequested(pair));
                     try
