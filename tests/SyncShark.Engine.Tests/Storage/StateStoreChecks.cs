@@ -2839,11 +2839,6 @@ public static class StateStoreChecks
             (StateSchema.ParamCause, nameof(TextKey.FailChanged)),
             (StateSchema.ParamSubject, JsonSerializer.Serialize(new IssueSubject([], null))),
             (StateSchema.ParamAt, DateTimeOffset.UnixEpoch.UtcTicks));
-        // The saved-row shape this legacy version wrote, without later columns.
-        const string LegacyInsertSynced = "INSERT INTO synced_entry(pair_id, local_path, dropbox_key_delta, " +
-            "dropbox_path_delta, is_folder, local_id, local_size, local_mtime, dropbox_id, dropbox_hash) " +
-            "VALUES((SELECT id FROM pair WHERE pair_id = $p), $localPath, nullif($dropboxKey, $localKey), " +
-            "nullif($dropboxPath, $localPath), $isFolder, $localId, $localSize, $localMtime, $dropboxId, $dropboxHash);";
         foreach (var row in rows)
             Execute(connection, LegacyInsertSynced,
                 (StateSchema.ParamPair, PairId), (StateSchema.ParamLocalPath, row.LocalPath),
@@ -2853,6 +2848,12 @@ public static class StateStoreChecks
                 (StateSchema.ParamLocalMtime, row.LocalModifiedTicks), (StateSchema.ParamDropboxId, row.DropboxId),
                 (StateSchema.ParamDropboxHash, row.DropboxContentHash));
     }
+
+    // The saved-row shape versions before 11 wrote, without the publication boundary columns.
+    internal const string LegacyInsertSynced = "INSERT INTO synced_entry(pair_id, local_path, dropbox_key_delta, " +
+        "dropbox_path_delta, is_folder, local_id, local_size, local_mtime, dropbox_id, dropbox_hash) " +
+        "VALUES((SELECT id FROM pair WHERE pair_id = $p), $localPath, nullif($dropboxKey, $localKey), " +
+        "nullif($dropboxPath, $localPath), $isFolder, $localId, $localSize, $localMtime, $dropboxId, $dropboxHash);";
 
     private static async Task UpgradeCases(string path)
     {

@@ -1004,7 +1004,7 @@ public static class RepairChecks
                         StateSchema.UpgradeFromVersion.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal));
                     Execute(StateSchema.UpsertPair, (StateSchema.ParamPair, pair.PairId),
                         (StateSchema.ParamDef, JsonSerializer.Serialize(pair)));
-                    Execute(StateSchema.InsertSynced, (StateSchema.ParamPair, pair.PairId),
+                    Execute(Storage.StateStoreChecks.LegacyInsertSynced, (StateSchema.ParamPair, pair.PairId),
                         (StateSchema.ParamLocalPath, saved.LocalPath), (StateSchema.ParamLocalKey, saved.LocalKey),
                         (StateSchema.ParamDropboxKey, saved.DropboxKey), (StateSchema.ParamDropboxPath, saved.DropboxPath),
                         (StateSchema.ParamIsFolder, saved.IsFolder), (StateSchema.ParamLocalId, saved.LocalId),

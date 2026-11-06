@@ -478,7 +478,7 @@ public static class ScanReaderChecks
             (StateSchema.ParamDropboxPath, entry.DropboxPath), (StateSchema.ParamIsFolder, entry.IsFolder),
             (StateSchema.ParamLocalId, entry.LocalId), (StateSchema.ParamLocalSize, entry.LocalSize),
             (StateSchema.ParamLocalMtime, entry.LocalModifiedTicks), (StateSchema.ParamDropboxId, entry.DropboxId),
-            (StateSchema.ParamDropboxHash, entry.DropboxContentHash));
+            (StateSchema.ParamDropboxHash, entry.DropboxContentHash), (StateSchema.ParamPublishedJournal, null), (StateSchema.ParamPublishedUsn, null));
 
     private static void AddScan(SqliteConnection connection, string pairId, Side side, string key,
         string path, bool isFolder = false, long size = 1, long mtime = 100, string id = "id", string rev = "",

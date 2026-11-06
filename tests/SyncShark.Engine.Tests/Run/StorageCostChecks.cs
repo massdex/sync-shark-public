@@ -472,6 +472,7 @@ internal static class StorageCostChecks
             (StateSchema.ParamIsFolder, false), (StateSchema.ParamLocalId, "L" + Index),
             (StateSchema.ParamLocalSize, 1L), (StateSchema.ParamLocalMtime, Ticks),
             (StateSchema.ParamDropboxId, "D" + Index), (StateSchema.ParamDropboxHash, Array.Empty<byte>()),
+            (StateSchema.ParamPublishedJournal, null), (StateSchema.ParamPublishedUsn, null),
         ];
     }
 
@@ -606,7 +607,8 @@ internal static class StorageCostChecks
                 (StateSchema.ParamDropboxPath, rawPath),
                 (StateSchema.ParamIsFolder, false), (StateSchema.ParamLocalId, "Lmapped"),
                 (StateSchema.ParamLocalSize, 1L), (StateSchema.ParamLocalMtime, 1L),
-                (StateSchema.ParamDropboxId, "Dmapped"), (StateSchema.ParamDropboxHash, Array.Empty<byte>()));
+                (StateSchema.ParamDropboxId, "Dmapped"), (StateSchema.ParamDropboxHash, Array.Empty<byte>()),
+                (StateSchema.ParamPublishedJournal, null), (StateSchema.ParamPublishedUsn, null));
             for (var index = 0; index < count; index++)
                 probe.Execute(StateSchema.InsertSynced, InsertArguments(index));
             probe.Commit();

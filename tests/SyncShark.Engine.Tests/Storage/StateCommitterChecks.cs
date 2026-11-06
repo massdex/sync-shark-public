@@ -1166,7 +1166,7 @@ public static class StateCommitterChecks
             (StateSchema.ParamLocalSize, entry.LocalSize),
             (StateSchema.ParamLocalMtime, entry.LocalModifiedTicks),
             (StateSchema.ParamDropboxId, entry.DropboxId),
-            (StateSchema.ParamDropboxHash, entry.DropboxContentHash));
+            (StateSchema.ParamDropboxHash, entry.DropboxContentHash), (StateSchema.ParamPublishedJournal, null), (StateSchema.ParamPublishedUsn, null));
 
     private static void Scan(SqliteConnection connection, string pairId, Side side, string path,
         bool isFolder) =>
