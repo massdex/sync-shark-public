@@ -3,8 +3,11 @@
     "engine-tests"
   ],
   "engine": [
-    "live-wake",
-    "live-admission",
+    "syncer",
+    "folder-deletes",
+    "decide",
+    "exclusions",
+    "scope",
     "stale-freshness"
   ],
   "core": [],

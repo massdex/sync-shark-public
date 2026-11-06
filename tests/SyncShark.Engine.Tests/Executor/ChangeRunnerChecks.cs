@@ -1668,6 +1668,9 @@ public static class ChangeRunnerChecks
         await OwnSelectionFenceAsync();
         await CounterpartAncestorFirstAsync();
         await RefusalMakesNoProviderCallsAsync();
+        await IgnoredNoticeSettlesBeforeReadAsync();
+        await IgnoredFolderNoticeSkipsBatchAsync();
+        await LeavingScopeRenameObservesAsync();
         await FailedAncestorNoticeAsync();
         await FolderDeletionCoversItsChildrenAsync();
         var moveOutFailures = new List<Exception>();
@@ -2026,6 +2029,75 @@ public static class ChangeRunnerChecks
             local.Work + remote.Work == 0,
             "A108b: a refused branch makes no provider call");
     }
+
+    // #140: a notice already outside the pair's scope proves it from its own paths, so it settles None(OutOfScope)
+    // without asking the provider. A saved item whose new path left scope is a rename, and still observes.
+    private static async Task IgnoredNoticeSettlesBeforeReadAsync()
+    {
+        using var fixture = new Fixture(realStore: true);
+        ClearObligations(fixture);
+        var local = LocalEntry("Ignored/Child", LocalId);
+        fixture.Local.Seed(local, [1]);
+        var remote = new CountingSide(fixture.Dropbox);
+        fixture.DropboxView = remote;
+        var selection = Selected(fixture, local.Path, local);
+        var batches = 0;
+        var context = fixture.Context(selection) with { Scope = Ignoring(fixture.Pair) };
+        Check.Require(await Counted(fixture, selection, () => batches++, context: context).RunAsync(selection, default),
+            "#140: the ignored notice's selection completes");
+        Check.Require(remote.Reads == 0,
+            "#140: an ignored local notice makes no Dropbox metadata call; reads=" + remote.Reads);
+        Check.Require(batches == 0 && remote.Work == 0, "#140: an ignored notice settles with no effect");
+    }
+
+    // #140: an out-of-scope folder is skipped as a whole. Its batch (a Dropbox root check plus a scoped scan) is a
+    // provider read caused by the same notice and every row in it would settle out of scope.
+    private static async Task IgnoredFolderNoticeSkipsBatchAsync()
+    {
+        using var fixture = new Fixture(realStore: true);
+        ClearObligations(fixture);
+        var folder = FolderEntry("Ignored/Child", LocalId);
+        fixture.Local.Seed(folder, null);
+        var remote = new CountingSide(fixture.Dropbox);
+        fixture.DropboxView = remote;
+        var selection = Selected(fixture, folder.Path, folder);
+        var batches = 0;
+        var context = fixture.Context(selection) with { Scope = Ignoring(fixture.Pair) };
+        Check.Require(await Counted(fixture, selection, () => batches++, context: context).RunAsync(selection, default),
+            "#140: the ignored folder notice's selection completes");
+        Check.Require(remote.Reads == 0 && batches == 0,
+            "#140: an ignored folder notice reads no Dropbox metadata and runs no batch; reads=" + remote.Reads +
+            " batches=" + batches);
+    }
+
+    private static async Task LeavingScopeRenameObservesAsync()
+    {
+        using var fixture = new Fixture(realStore: true);
+        ClearObligations(fixture);
+        var savedLocal = LocalEntry("Plain", LocalId);
+        var savedRemote = RemoteEntry("Plain", DropboxId);
+        fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [SyncedEntries.From(savedLocal, savedRemote)] });
+        var moved = LocalEntry("Ignored/Child", LocalId);
+        fixture.Local.Seed(moved, [1]);
+        fixture.Dropbox.Seed(savedRemote, [1]);
+        var remote = new CountingSide(fixture.Dropbox);
+        fixture.DropboxView = remote;
+        // A path-only notice whose observed entry carries the saved identity: an identity selection would also
+        // yield an old-path branch (SelectionPass.cs:376-386), which observes anyway and would mask the guard.
+        var selection = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed,
+            moved.Path, null, null, moved, false, false));
+        var context = fixture.Context(selection) with { Scope = Ignoring(fixture.Pair) };
+        Check.Require(await Counted(fixture, selection, () => { }, context: context).RunAsync(selection, default),
+            "#140: the leaving rename's selection completes");
+        Check.Require(remote.Reads > 0,
+            "#140: a saved item that left scope still observes instead of settling from the notice; reads=" + remote.Reads);
+        Check.Require(await fixture.Dropbox.ReadOneAsync(moved.Path, default) is null &&
+            fixture.Inner.SyncedById(PairId, Side.Dropbox, DropboxId)?.PathOn(Side.Dropbox) != moved.Path,
+            "#140: the leaving rename creates no copy at, and rebases no binding onto, the ignored destination");
+    }
+
+    private static PathScope Ignoring(PairConfig pair) =>
+        new(pair with { IgnoreRules = ["FolderName:Ignored"] }, [pair]);
 
     // An ancestor that fails leaves the user one deduplicated notice; the child is neither lost nor silently stuck.
     private static async Task FailedAncestorNoticeAsync()
