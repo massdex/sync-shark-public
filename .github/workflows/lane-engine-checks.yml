@@ -1,0 +1,84 @@
+# Lane-scoped Engine check runner for public snapshots (no secrets, read-only contents).
+# The product CI matrix builds Core.Tests only; this runs the requested Engine groups so a
+# lane can prove Engine suites on public Actions. Dispatch with:
+#   gh workflow run lane-engine-checks.yml -R massdex/sync-shark-public --ref <branch> -f "groups=store repair"
+name: Lane Engine Checks
+run-name: Lane Engine Checks ${{ inputs.groups }}
+
+on:
+  # A push is what registers the workflow on the repository; it also runs the default groups.
+  push:
+    branches:
+      - 'ci/plan-files'
+      - 'ci/plan-files-mutant'
+  workflow_dispatch:
+    inputs:
+      groups:
+        description: Space-separated Engine check groups
+        required: true
+        default: store repair scan-owner scan-writer folder-deletes dependencies
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CONFIGURATION: Debug
+  DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false'
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+
+jobs:
+  select:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - name: Select groups
+        id: select
+        shell: pwsh
+        env:
+          GROUPS: ${{ inputs.groups || 'store repair scan-owner scan-writer folder-deletes dependencies' }}
+        run: |
+          $checks = @(
+            foreach ($group in ($env:GROUPS -split '\s+' | Where-Object { $_ } | Select-Object -Unique)) {
+              if ($group -cnotmatch '^[a-z0-9]+(?:-[a-z0-9]+)*$') { throw 'Invalid Engine group.' }
+              @{ check = $group }
+            }
+          )
+          if ($checks.Count -eq 0) { throw 'Select at least one Engine group.' }
+          "matrix=$(@{ include = $checks } | ConvertTo-Json -Compress)" >> $env:GITHUB_OUTPUT
+
+  checks:
+    name: engine (${{ matrix.check }})
+    needs: select
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.select.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # Engine fixtures write deep SQLite paths; a short root keeps them under MAX_PATH.
+      - name: Build Engine tests
+        shell: pwsh
+        run: |
+          dotnet build 'tests/SyncShark.Engine.Tests/SyncShark.Engine.Tests.csproj' -c $env:CONFIGURATION --nologo -p:NoWarn=CA1416
+          exit $LASTEXITCODE
+
+      - name: Run group
+        shell: pwsh
+        run: |
+          $root = 'C:\ss'
+          if (-not (Test-Path -LiteralPath $root)) { New-Item -ItemType Directory -Path $root | Out-Null }
+          $env:TEMP = $root
+          $env:TMP = $root
+          & "tests/SyncShark.Engine.Tests/bin/$env:CONFIGURATION/net8.0-windows/SyncShark.Engine.Tests.exe" --engine-checks '${{ matrix.check }}'
+          exit $LASTEXITCODE
