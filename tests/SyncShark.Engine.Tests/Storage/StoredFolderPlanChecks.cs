@@ -918,12 +918,12 @@ public static class StoredFolderPlanChecks
         try
         {
             await live.CaptureAsync(Source([Present(Item("root/live"))]), CancellationToken.None);
-            Complete(live);
             var livePath = Directory.EnumerateFiles(directory, prefix + "*.db").Single();
             using (StateStore.Open(database))
                 Check.Require(File.Exists(livePath), "a writable open keeps a live plan's scratch");
             Check.Require(live.Entries(CancellationToken.None).Single().Path == "root/live",
                 "a kept plan still reads its captured inventory");
+            Complete(live);
         }
         finally
         {
