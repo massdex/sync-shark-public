@@ -1,0 +1,10 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "persistent-failure"
+  ],
+  "core": [],
+  "ui": []
+}
