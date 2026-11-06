@@ -1,0 +1,315 @@
+# SyncSharkUpdateContract: __SIGNED_UPDATE_CONTRACT__
+param(
+    [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$ExpectedManifestSha256,
+    [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$ExpectedModuleSha256,
+    [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$ExpectedSignedCoreSha256,
+    [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$ExpectedSignedUiSha256,
+    [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$ExpectedSignedExeSha256,
+    [ValidatePattern('^$|^[0-9a-f]{64}$')][string]$ExpectedSignedExplorerSha256 = '',
+    [ValidatePattern('^$|^[0-9a-f]{64}$')][string]$ExpectedSignedDiscoverySha256 = '',
+    [ValidatePattern('^$|^[0-9a-f]{64}$')][string]$ExpectedSignedIdentityPackageSha256 = '',
+    [string]$TestProductRoot,
+    [string]$VerificationObservationPath,
+    [string]$CrashAfter = ''
+)
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+$installerIdentityPath = $PSCommandPath
+$modulePath = Join-Path $PSScriptRoot 'SyncShark.Release.psm1'
+if ((Get-FileHash -LiteralPath $modulePath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $ExpectedModuleSha256) {
+    throw 'Release transaction module hash mismatch.'
+}
+Import-Module $modulePath -Force
+
+$version = '__RELEASE_VERSION__'
+$commit = '__COMMIT_FULL__'
+$shortCommit = '__COMMIT_SHORT__'
+$expectedVersion = "__RELEASE_VERSION__+$commit"
+$expectedPreviousVersion = '__PREVIOUS_PRODUCT_VERSION__'
+$expectedPreviousTreeIdentity = '__PREVIOUS_TREE_SHA256__'
+$expectedSignerIdentity = (Get-SyncSharkSignerIdentity).roles.publisher
+$expectedThumbprint = @($expectedSignerIdentity.thumbprints)
+$expectedSubject = $expectedSignerIdentity.subject
+$expectedIssuer = $expectedSubject
+$expectedSpkiSha256 = @($expectedSignerIdentity.spki)
+$productRoot = Resolve-SyncSharkProductRoot $TestProductRoot
+$testMode = -not [string]::IsNullOrWhiteSpace($TestProductRoot)
+$releaseRoot = Split-Path -Parent $PSScriptRoot
+$signedRoot = Join-Path $releaseRoot 'package\signed-candidate'
+$manifestPath = Join-Path $releaseRoot 'package\unsigned-candidate-framework-manifest.json'
+$previousTarget = Resolve-SyncSharkRuntimeRoot '__PREVIOUS_RELEASE_VERSION__' $TestProductRoot
+$sourceTarget = Join-Path $productRoot 'versions\__RELEASE_VERSION__'
+$target = Resolve-SyncSharkRuntimeRoot $version $TestProductRoot
+$active = Join-Path $productRoot 'active'
+$transactionRoot = Join-Path $productRoot "replacement-staging\transactions\__RELEASE_VERSION__-$shortCommit"
+$journalPath = Join-Path $transactionRoot 'install-journal.json'
+$staging = Join-Path $transactionRoot 'runtime.installing'
+$nextLink = Join-Path $transactionRoot 'active.next'
+$rollbackLink = Join-Path $transactionRoot 'predecessor.rollback'
+$stateBackup = Join-Path $transactionRoot 'state.predecessor'
+$stateBackupPreparing = Join-Path $transactionRoot 'state.predecessor.preparing'
+$steps = @('stage-package', 'publish-runtime', 'backup-state', 'create-next-link',
+    'retain-predecessor', 'publish-successor', 'register-explorer-package', 'verify-complete')
+$allowedCrashPoints = @('journal-created', 'journal-created-mid-write', 'journal-created-after-temp-write',
+    'stage-package-mid-copy', 'publish-runtime-after-move', 'backup-state-mid-copy', 'backup-vnext-state-mid-copy')
+foreach ($step in $steps) {
+    $allowedCrashPoints += @("$step-after-pending", "$step-after-effect", "$step-after-journal",
+        "$step-pending-journal-mid-write", "$step-pending-journal-after-temp-write",
+        "$step-complete-journal-mid-write", "$step-complete-journal-after-temp-write")
+}
+
+foreach ($path in @($sourceTarget, $active, $transactionRoot, $journalPath, $staging,
+        $nextLink, $rollbackLink, $stateBackup, $stateBackupPreparing)) { Assert-SyncSharkWithin $productRoot $path }
+Assert-SyncSharkOrdinaryTree $productRoot -RootOnly
+Assert-SyncSharkOrdinaryTree (Join-Path $productRoot 'versions')
+Assert-SyncSharkTransactionTree $transactionRoot @($nextLink, $rollbackLink)
+if ($testMode) { Assert-SyncSharkWithin $productRoot $previousTarget }
+else { Assert-SyncSharkProtectedRuntime $previousTarget }
+if (-not $testMode -and @(Get-Process -Name 'SyncShark' -ErrorAction SilentlyContinue).Count -ne 0) {
+    throw 'Sync Shark is running; complete its safe Exit checkpoint before installation.'
+}
+if ($CrashAfter -and (-not $testMode -or $CrashAfter -notin $allowedCrashPoints)) {
+    throw 'Crash injection is limited to a known isolated release-test boundary.'
+}
+if (-not (Test-Path -LiteralPath $previousTarget -PathType Container) -or
+    [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $previousTarget 'SyncShark.exe')).ProductVersion -cne
+        $expectedPreviousVersion -or
+    (Get-SyncSharkTreeIdentity $previousTarget) -cne $expectedPreviousTreeIdentity) {
+    throw 'Previous 0.3.43 target identity mismatch.'
+}
+
+$signedHashes = @{
+    'SyncShark.Core.dll' = $ExpectedSignedCoreSha256
+    'SyncShark.dll' = $ExpectedSignedUiSha256
+    'SyncShark.exe' = $ExpectedSignedExeSha256
+}
+if ($ExpectedSignedExplorerSha256) { $signedHashes['SyncShark.Explorer.dll'] = $ExpectedSignedExplorerSha256 }
+if ($ExpectedSignedDiscoverySha256) { $signedHashes['SyncSharkDiscovery.exe'] = $ExpectedSignedDiscoverySha256 }
+if ($ExpectedSignedIdentityPackageSha256) { $signedHashes['SyncShark.msix'] = $ExpectedSignedIdentityPackageSha256 }
+# Signature and package identity are checked before the first product-root mutation.
+Assert-SyncSharkExactPackage $signedRoot $manifestPath $ExpectedManifestSha256 $expectedVersion $signedHashes `
+    $expectedThumbprint $expectedSubject $expectedIssuer $expectedSpkiSha256 `
+    $VerificationObservationPath $testMode
+
+# Every release-state mutation and the emitted successful receipt stay inside one
+# instance-maintenance lease. The lease is the installed application's own state
+# lock, so a live application instance is excluded natively rather than inferred
+# from process enumeration. The isolated release-test root provides the same lock
+# file, so the test path exercises this shipped wrapper instead of a bypass.
+$transactionBody = {
+$journal = Read-SyncSharkJournal $journalPath 'install' $version $commit $productRoot $steps
+if ($null -ne $journal) {
+    if (-not $journal.PSObject.Properties['artifacts'] -or
+        -not $journal.artifacts.PSObject.Properties['state_predecessor_sha256']) {
+        throw 'The install journal is missing its state artifact identity contract.'
+    }
+    $stateIdentity = [string]$journal.artifacts.state_predecessor_sha256
+    if ($stateIdentity -and $stateIdentity -notmatch '^[0-9a-f]{64}$') { throw 'The install journal state identity is malformed.' }
+    if (@($journal.completed) -contains 'backup-state') {
+        if (-not $stateIdentity) { throw 'The completed state backup has no durable identity.' }
+        if (-not (Test-Path -LiteralPath $stateBackup -PathType Container) -or
+            (Get-SyncSharkTreeIdentity $stateBackup) -cne $stateIdentity) {
+            throw 'The predecessor state backup identity does not match the durable journal.'
+        }
+    }
+}
+if ($null -eq $journal) {
+    foreach ($path in @($target, $sourceTarget, $staging, $nextLink, $rollbackLink, $stateBackup, $stateBackupPreparing)) {
+        if (Test-Path -LiteralPath $path) { throw "Unexpected pre-transaction artifact: $path" }
+    }
+    Assert-SyncSharkJunction $active $previousTarget
+    $journal = [pscustomobject]@{
+        schema = 1; operation = 'install'; version = $version; commit = $commit
+        product_root = $productRoot; status = 'active'; pending = $null
+        completed = @(); allowed_steps = $steps
+        artifacts = [pscustomobject]@{ state_predecessor_sha256 = $null }
+    }
+    Write-SyncSharkJournal $journalPath $journal $CrashAfter 'journal-created'
+    Invoke-SyncSharkCrashPoint 'journal-created' $CrashAfter
+}
+
+$assertPackage = {
+    param([string]$root)
+    Assert-SyncSharkExactPackage $root $manifestPath $ExpectedManifestSha256 $expectedVersion $signedHashes `
+        $expectedThumbprint $expectedSubject $expectedIssuer $expectedSpkiSha256 `
+        $VerificationObservationPath $testMode
+}
+
+Invoke-SyncSharkJournalStep $journal $journalPath 'stage-package' $CrashAfter {
+    if (Test-Path -LiteralPath $staging) {
+        try { & $assertPackage $staging; return }
+        catch {
+            Assert-SyncSharkOrdinaryTree $staging
+            Remove-Item -LiteralPath $staging -Recurse -Force
+        }
+    }
+    Copy-SyncSharkTreeToStaging $signedRoot $staging $CrashAfter 'stage-package-mid-copy'
+    & $assertPackage $staging
+} {
+    if (@($journal.completed) -contains 'publish-runtime') { & $assertPackage $target }
+    else { & $assertPackage $staging }
+}
+
+Invoke-SyncSharkJournalStep $journal $journalPath 'publish-runtime' $CrashAfter {
+    if (Test-Path -LiteralPath $sourceTarget) {
+        if (Test-Path -LiteralPath $staging) { throw 'Both staged and published runtimes exist.' }
+        & $assertPackage $sourceTarget
+    } else {
+        if (-not (Test-Path -LiteralPath $staging -PathType Container)) { throw 'The staged runtime is missing.' }
+        Move-Item -LiteralPath $staging -Destination $sourceTarget
+        Invoke-SyncSharkCrashPoint 'publish-runtime-after-move' $CrashAfter
+    }
+    if($testMode){Set-SyncSharkRuntimeSystemReadAccess $target;return}
+    Assert-SyncSharkSignatureObservation (Get-SyncSharkSignatureObservation $installerIdentityPath) `
+        $expectedThumbprint $expectedSubject $expectedIssuer $expectedSpkiSha256
+    $retainedContract=Join-Path $transactionRoot 'Install-SyncShark.ps1'
+    if(Test-Path -LiteralPath $retainedContract) {
+        if((Get-SyncSharkSha256 $retainedContract) -cne (Get-SyncSharkSha256 $installerIdentityPath)){throw 'The retained signed runtime contract changed.'}
+    } else {Copy-Item -LiteralPath $installerIdentityPath -Destination $retainedContract}
+    $updaterRelease=Read-SyncSharkUpdaterRelease $retainedContract $expectedVersion
+    if($null -ne $updaterRelease) {
+        $updaterSource=Join-Path $PSScriptRoot 'SyncSharkUpdater.exe'
+        $updaterRetained=Join-Path $transactionRoot 'SyncSharkUpdater.exe'
+        $updaterHeld=[IO.File]::Open($updaterSource,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+        try {
+            if($updaterHeld.Length -ne $updaterRelease.protectedUpdater.workerBytes -or
+                (Get-SyncSharkSha256 $updaterSource) -cne $updaterRelease.protectedUpdater.workerSha256){throw 'Updater source differs from signed installer.'}
+            Assert-SyncSharkSignatureObservation (Get-SyncSharkSignatureObservation $updaterSource) `
+                $expectedThumbprint $expectedSubject $expectedIssuer $expectedSpkiSha256
+            if(Test-Path -LiteralPath $updaterRetained) {
+                if((Get-SyncSharkSha256 $updaterRetained) -cne $updaterRelease.protectedUpdater.workerSha256){throw 'Retained updater differs from signed installer.'}
+            } else {Copy-Item -LiteralPath $updaterSource -Destination $updaterRetained}
+        } finally {$updaterHeld.Dispose()}
+    }
+    # Read saved roots in the existing UNELEVATED app, before entering the existing setup boundary.
+    # Best effort only: absent state on a fresh install has no volumes to configure yet.
+    try {
+        $pairsText=& (Join-Path $previousTarget 'SyncShark.exe') --cli pairs list --json
+        if($LASTEXITCODE -eq 0) {
+            $pairsEnvelope=($pairsText -join "`n")|ConvertFrom-Json
+            $roots=@(foreach($pair in $pairsEnvelope.data.pairs) {
+                if($null -ne $pair.endpointDocument) {
+                    foreach($endpoint in @($pair.endpointDocument.left,$pair.endpointDocument.right)) {
+                        if($endpoint.localPath){[string]$endpoint.localPath}
+                    }
+                } elseif($pair.localRoot) {[string]$pair.localRoot}
+            }) | Where-Object {$_ -cmatch '^[A-Za-z]:\\[^\r\n]*$'} | Sort-Object -Unique
+            $rootText=$roots -join "`n"
+            if([Text.Encoding]::UTF8.GetByteCount($rootText) -le 65535) {
+                [IO.File]::WriteAllText((Join-Path $transactionRoot 'journal-roots.txt'),($rootText+"`n"),[Text.UTF8Encoding]::new($false))
+            }
+        }
+    } catch { Write-Warning 'Journal setup will be offered by Sync Shark when its configured volumes are available.' }
+    Invoke-SyncSharkProtectedRuntime $sourceTarget RuntimeInstall
+} {
+    & $assertPackage $target
+    if($testMode){Assert-SyncSharkRuntimeSystemReadAccess $target}else{Assert-SyncSharkProtectedRuntime $target}
+    if (Test-Path -LiteralPath $staging) { throw 'Staging remained after runtime publication.' }
+}
+
+Invoke-SyncSharkJournalStep $journal $journalPath 'backup-state' $CrashAfter {
+    if (Test-Path -LiteralPath $stateBackup) {
+        foreach ($relative in @('state', 'vNext\state')) {
+            $source = Join-Path $productRoot $relative; $copy = Join-Path $stateBackup $relative
+            if (Test-Path -LiteralPath $source) { Assert-SyncSharkTreeMatch $source $copy }
+            elseif (Test-Path -LiteralPath $copy) { throw "Unexpected backup subtree: $relative" }
+        }
+        $journal.artifacts.state_predecessor_sha256 = Get-SyncSharkTreeIdentity $stateBackup
+        return
+    }
+    if (Test-Path -LiteralPath $stateBackupPreparing) {
+        Assert-SyncSharkOrdinaryTree $stateBackupPreparing
+        Remove-Item -LiteralPath $stateBackupPreparing -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $stateBackupPreparing | Out-Null
+    foreach ($relative in @('state', 'vNext\state')) {
+        $source = Join-Path $productRoot $relative
+        if (Test-Path -LiteralPath $source -PathType Container) {
+            $destination = Join-Path $stateBackupPreparing $relative
+            New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($destination)) -Force | Out-Null
+            $copyCrashPoint = if ($relative -ceq 'state') { 'backup-state-mid-copy' } else { 'backup-vnext-state-mid-copy' }
+            Copy-SyncSharkTreeToStaging $source $destination $CrashAfter $copyCrashPoint
+        }
+    }
+    Move-Item -LiteralPath $stateBackupPreparing -Destination $stateBackup
+    $journal.artifacts.state_predecessor_sha256 = Get-SyncSharkTreeIdentity $stateBackup
+} {
+    Assert-SyncSharkOrdinaryTree $stateBackup
+    if (Test-Path -LiteralPath $stateBackupPreparing) { throw 'The predecessor state preparation tree remained.' }
+    foreach ($relative in @('state', 'vNext\state')) {
+        $source = Join-Path $productRoot $relative; $copy = Join-Path $stateBackup $relative
+        if (Test-Path -LiteralPath $source) { Assert-SyncSharkTreeMatch $source $copy }
+    }
+    $stateIdentity = [string]$journal.artifacts.state_predecessor_sha256
+    if (-not $stateIdentity -or (Get-SyncSharkTreeIdentity $stateBackup) -cne $stateIdentity) {
+        throw 'The predecessor state backup does not match its durable identity.'
+    }
+}
+
+Invoke-SyncSharkJournalStep $journal $journalPath 'create-next-link' $CrashAfter {
+    if (Test-Path -LiteralPath $nextLink) { Assert-SyncSharkJunction $nextLink $target; return }
+    New-Item -ItemType Junction -Path $nextLink -Target $target | Out-Null
+} {
+    if (@($journal.completed) -contains 'publish-successor') { Assert-SyncSharkJunction $active $target }
+    else { Assert-SyncSharkJunction $nextLink $target }
+}
+
+Invoke-SyncSharkJournalStep $journal $journalPath 'retain-predecessor' $CrashAfter {
+    if (Test-Path -LiteralPath $rollbackLink) {
+        Assert-SyncSharkJunction $rollbackLink $previousTarget
+        if (Test-Path -LiteralPath $active) { throw 'Both active and retained predecessor pointers exist.' }
+        return
+    }
+    Assert-SyncSharkJunction $active $previousTarget
+    Move-Item -LiteralPath $active -Destination $rollbackLink
+} {
+    Assert-SyncSharkJunction $rollbackLink $previousTarget
+    if (@($journal.completed) -contains 'publish-successor') { Assert-SyncSharkJunction $active $target }
+    elseif (Test-Path -LiteralPath $active) { throw 'Old active pointer remained.' }
+}
+
+Invoke-SyncSharkJournalStep $journal $journalPath 'publish-successor' $CrashAfter {
+    if (Test-Path -LiteralPath $active) {
+        Assert-SyncSharkJunction $active $target
+        if (Test-Path -LiteralPath $nextLink) { throw 'Both active and next successor pointers exist.' }
+        return
+    }
+    Assert-SyncSharkJunction $nextLink $target
+    Move-Item -LiteralPath $nextLink -Destination $active
+} { Assert-SyncSharkJunction $active $target; Assert-SyncSharkJunction $rollbackLink $previousTarget }
+
+Invoke-SyncSharkJournalStep $journal $journalPath 'register-explorer-package' $CrashAfter {
+    if($ExpectedSignedIdentityPackageSha256 -and -not $testMode){Invoke-SyncSharkExplorerPackage $target Register -ExpectedPreviousRuntime $previousTarget}
+} {
+    if($ExpectedSignedIdentityPackageSha256 -and -not $testMode){Invoke-SyncSharkExplorerPackage $target Verify}
+}
+
+Invoke-SyncSharkJournalStep $journal $journalPath 'verify-complete' $CrashAfter {
+    & $assertPackage $target
+    Assert-SyncSharkJunction $active $target
+    Assert-SyncSharkJunction $rollbackLink $previousTarget
+    foreach ($relative in @('state', 'vNext\state')) {
+        $source = Join-Path $productRoot $relative; $copy = Join-Path $stateBackup $relative
+        if (Test-Path -LiteralPath $source) { Assert-SyncSharkTreeMatch $source $copy }
+        elseif (Test-Path -LiteralPath $copy) { throw "Unexpected backup subtree: $relative" }
+    }
+} {
+    & $assertPackage $target
+    if($testMode){Assert-SyncSharkRuntimeSystemReadAccess $target}else{Assert-SyncSharkProtectedRuntime $target}
+    Assert-SyncSharkJunction $active $target
+    Assert-SyncSharkJunction $rollbackLink $previousTarget
+    foreach ($relative in @('state', 'vNext\state')) {
+        $source = Join-Path $productRoot $relative; $copy = Join-Path $stateBackup $relative
+        if (Test-Path -LiteralPath $source) { Assert-SyncSharkTreeMatch $source $copy }
+        elseif (Test-Path -LiteralPath $copy) { throw "Unexpected backup subtree: $relative" }
+    }
+}
+
+[pscustomobject]@{
+    ok = $true; operation = 'install'; product_version = $expectedVersion
+    active_target = Get-SyncSharkJunctionTarget $active
+    rollback_runtime = $rollbackLink; rollback_state = $stateBackup; journal = $journalPath
+} | ConvertTo-Json -Depth 6
+}
+Invoke-SyncSharkWithInstanceMaintenanceLease $productRoot $transactionBody
