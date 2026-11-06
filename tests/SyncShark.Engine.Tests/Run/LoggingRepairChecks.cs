@@ -504,10 +504,17 @@ internal static class LoggingRepairChecks
         }
         var failures = Lines(log.Path).Where(fields => fields[1] == nameof(RunEventKind.Failed)).ToArray();
         Check.Require(failures.Length == 1, "configuration cancellation has exactly one diagnosis in its early log");
-        using (File.Open(log.Path, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
+        if (persistent)
+        {
+            var closed = true;
+            try { using var probe = File.Open(log.Path, FileMode.Open, FileAccess.ReadWrite, FileShare.None); }
+            catch (IOException) { closed = false; }
+            Check.Require(!closed, "the persistent host keeps its startup log open for host-level waits");
+        }
         store.Block = null;
         await host.DisposeAsync();
         await host.DisposeAsync();
+        using (File.Open(log.Path, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
         Check.Require(store.Disposals == 1 && !clock.HasArmedTimer,
             "startup log ownership and host resources tolerate repeated disposal without a remaining scheduler");
     }
