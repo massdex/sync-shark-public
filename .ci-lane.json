@@ -1,0 +1,18 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "local",
+    "store",
+    "live-wake",
+    "live-admission",
+    "stale-freshness",
+    "safety",
+    "syncer",
+    "dependencies",
+    "repair"
+  ],
+  "core": [],
+  "ui": []
+}
