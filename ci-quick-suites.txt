@@ -1,0 +1,2 @@
+--cloud-pair-host-binding-checks
+--cloud-public-pair-authoring-checks
